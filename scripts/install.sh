@@ -253,17 +253,15 @@ elif [ -f "$HOME/.bash_profile" ]; then
 fi
 
 # Add wavecode alias/PATH
-  if [ -n "$SHELL_RC" ]; then
-  if ! grep -q "WAVECODE_HOME" "$SHELL_RC" 2>/dev/null; then
-    echo "" >> "$SHELL_RC"
-    echo "# WaveCode" >> "$SHELL_RC"
-    echo "export WAVECODE_HOME=\"$WAVECODE_HOME\"" >> "$SHELL_RC"
-    echo "alias wavecode='node \$WAVECODE_HOME/dist/cli/index.js'" >> "$SHELL_RC"
-    echo "alias wc-start='wavecode server start --foreground'" >> "$SHELL_RC"
-    ok "Added shell aliases to $(basename "$SHELL_RC")"
-  else
-    ok "Shell aliases already configured"
-  fi
+if [ -n "$SHELL_RC" ]; then
+  # Remove any previous WaveCode block (handles upgrades and broken aliases)
+  sed -i '/# WaveCode/d; /WAVECODE_HOME/d; /alias wavecode=/d; /alias wc-start=/d' "$SHELL_RC"
+  echo "" >> "$SHELL_RC"
+  echo "# WaveCode" >> "$SHELL_RC"
+  echo "export WAVECODE_HOME=\"$WAVECODE_HOME\"" >> "$SHELL_RC"
+  echo "alias wavecode='node \$WAVECODE_HOME/dist/cli/index.js'" >> "$SHELL_RC"
+  echo "alias wc-start='wavecode server start --foreground'" >> "$SHELL_RC"
+  ok "Added shell aliases to $(basename "$SHELL_RC")"
 fi
 
 # ─── Systemd (Linux only) ────────────────────────────────────────────────
