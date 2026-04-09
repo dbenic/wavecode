@@ -43,11 +43,11 @@ WaveCode orchestrates multiple CLI coding agents (Claude Code, Codex CLI, Aider,
 ### Published GitHub Repo
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/wavecode/main/scripts/install.sh \
-  | WAVECODE_REPO=https://github.com/<owner>/wavecode.git bash
+curl -fsSL https://raw.githubusercontent.com/dbenic/wavecode/main/scripts/install.sh \
+  | WAVECODE_REPO=https://github.com/dbenic/wavecode.git bash
 ```
 
-Replace `<owner>` with the GitHub owner or organization that hosts your public fork. The installer clones WaveCode into `~/.wavecode`, builds the server and UI, creates a default config, generates an access token, and adds shell aliases.
+Replace `dbenic` with the GitHub owner or organization that hosts your public fork. The installer clones WaveCode into `~/.wavecode`, builds the server and UI, creates a default config, generates an access token, and adds shell aliases.
 
 **Requirements:** Node.js 22+, tmux, git. The installer checks for these and tells you how to get them.
 
@@ -157,6 +157,14 @@ server:
   port: 3777
   host: 0.0.0.0
 
+paths:
+  projects_root: ~/projects        # spawned no-repo agents use <projects_root>/<agent-name>
+  worktrees_root: .wavecode-data/worktrees
+  transcripts_root: .wavecode-data/transcripts
+  teams_root: teams
+  guides_root: guides
+  templates_root: templates
+
 autonomy:
   auto_dispatch: true
   auto_restart: true
@@ -192,6 +200,8 @@ llm:
 ```
 
 See [config.example.yaml](config.example.yaml) for all options, including local LLM setup examples.
+
+Spawned agents need a real workspace. If you plan to create agents from chat or the dashboard without attaching a repo/template, set `paths.projects_root` to a writable directory first. WaveCode will create `projects_root/<agent-name>` automatically.
 
 WaveCode does not manage your network exposure. The application enforces access tokens, but transport-level security and network reachability are still your responsibility.
 

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import yaml from 'js-yaml';
 
@@ -71,73 +72,25 @@ export interface WaveConfig {
   };
 }
 
-const DEFAULT_DATA_ROOT = path.join(process.cwd(), '.wavecode-data');
-
-const DEFAULTS: WaveConfig = {
-  server: { port: 3777, host: '0.0.0.0' },
-  paths: {
-    projects_root: '',
-    worktrees_root: path.join(DEFAULT_DATA_ROOT, 'worktrees'),
-    transcripts_root: path.join(DEFAULT_DATA_ROOT, 'transcripts'),
-    teams_root: path.join(process.cwd(), 'teams'),
-    guides_root: path.join(process.cwd(), 'guides'),
-    templates_root: path.join(process.cwd(), 'templates'),
-  },
-  autonomy: {
-    auto_dispatch: true,
-    auto_restart: true,
-    hang_timeout_min: 10,
-    max_task_retries: 2,
-    verify_completion: false,
-  },
-  sandbox: { disable_git_push: true, restrict_network: true },
-  runtimes: {
-    'claude-code': {
-      command: 'claude --permission-mode bypassPermissions',
-      idle_pattern: '\\$\\s*$',
-    },
-    codex: {
-      command: 'codex --full-auto',
-      idle_pattern: '^>\\s*$',
-    },
-    aider: {
-      command: 'aider --yes',
-      idle_pattern: '^>\\s*$',
-    },
-  },
-  auth: { method: 'tailscale', fallback_token: null, trusted_proxies: [] },
-  notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
-  artifacts: { storage: path.join(DEFAULT_DATA_ROOT, 'artifacts'), retention_days: 30 },
-  review: { auto_review: false, default_reviewer: 'aider-deepseek', self_review: true, max_fix_loops: 2 },
-  llm: {
-    provider: 'anthropic',
-    api_key: null,
-    anthropic_api_key: null,
-    openai_api_key: null,
-    gemini_api_key: null,
-    perplexity_api_key: null,
-    xai_api_key: null,
-    base_url: null,
-    model: 'claude-sonnet-4-20250514',
-  },
-};
-
 let config: WaveConfig | null = null;
 let configPath: string | null = null;
 
 export function loadConfig(cfgPath?: string): WaveConfig {
-  const resolvedPath = cfgPath ?? path.join(process.cwd(), 'config.yaml');
+  const resolvedPath = path.resolve(cfgPath ?? path.join(process.cwd(), 'config.yaml'));
   configPath = resolvedPath;
+  const configDir = path.dirname(resolvedPath);
+  const defaults = buildDefaults(configDir);
 
   if (!fs.existsSync(resolvedPath)) {
-    config = structuredClone(DEFAULTS);
+    config = defaults;
     return config;
   }
 
   const raw = fs.readFileSync(resolvedPath, 'utf-8');
   const parsed = yaml.load(raw) as Partial<WaveConfig> | null;
 
-  config = deepMerge(structuredClone(DEFAULTS) as unknown as Obj, (parsed ?? {}) as Obj) as unknown as WaveConfig;
+  const merged = deepMerge(structuredClone(defaults) as unknown as Obj, (parsed ?? {}) as Obj) as unknown as WaveConfig;
+  config = normalizeConfigPaths(merged, configDir);
   return config;
 }
 
@@ -228,6 +181,86 @@ export function updateConfig(updates: Partial<WaveConfig>): WaveConfig {
 }
 
 type Obj = Record<string, unknown>;
+
+function buildDefaults(baseDir: string): WaveConfig {
+  const dataRoot = path.join(baseDir, '.wavecode-data');
+
+  return {
+    server: { port: 3777, host: '0.0.0.0' },
+    paths: {
+      projects_root: '',
+      worktrees_root: path.join(dataRoot, 'worktrees'),
+      transcripts_root: path.join(dataRoot, 'transcripts'),
+      teams_root: path.join(baseDir, 'teams'),
+      guides_root: path.join(baseDir, 'guides'),
+      templates_root: path.join(baseDir, 'templates'),
+    },
+    autonomy: {
+      auto_dispatch: true,
+      auto_restart: true,
+      hang_timeout_min: 10,
+      max_task_retries: 2,
+      verify_completion: false,
+    },
+    sandbox: { disable_git_push: true, restrict_network: true },
+    runtimes: {
+      'claude-code': {
+        command: 'claude --permission-mode bypassPermissions',
+        idle_pattern: '\\$\\s*$',
+      },
+      codex: {
+        command: 'codex --full-auto',
+        idle_pattern: '^>\\s*$',
+      },
+      aider: {
+        command: 'aider --yes',
+        idle_pattern: '^>\\s*$',
+      },
+    },
+    auth: { method: 'token', fallback_token: null, trusted_proxies: [] },
+    notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
+    artifacts: { storage: path.join(dataRoot, 'artifacts'), retention_days: 30 },
+    review: { auto_review: false, default_reviewer: 'aider-deepseek', self_review: true, max_fix_loops: 2 },
+    llm: {
+      provider: 'anthropic',
+      api_key: null,
+      anthropic_api_key: null,
+      openai_api_key: null,
+      gemini_api_key: null,
+      perplexity_api_key: null,
+      xai_api_key: null,
+      base_url: null,
+      model: 'claude-sonnet-4-20250514',
+    },
+  };
+}
+
+function normalizeConfigPaths(cfg: WaveConfig, baseDir: string): WaveConfig {
+  const normalized = structuredClone(cfg);
+
+  normalized.paths.projects_root = normalizePathSetting(normalized.paths.projects_root, baseDir, { allowEmpty: true });
+  normalized.paths.worktrees_root = normalizePathSetting(normalized.paths.worktrees_root, baseDir);
+  normalized.paths.transcripts_root = normalizePathSetting(normalized.paths.transcripts_root, baseDir);
+  normalized.paths.teams_root = normalizePathSetting(normalized.paths.teams_root, baseDir);
+  normalized.paths.guides_root = normalizePathSetting(normalized.paths.guides_root, baseDir);
+  normalized.paths.templates_root = normalizePathSetting(normalized.paths.templates_root, baseDir);
+  normalized.artifacts.storage = normalizePathSetting(normalized.artifacts.storage, baseDir);
+
+  return normalized;
+}
+
+function normalizePathSetting(value: string, baseDir: string, opts: { allowEmpty?: boolean } = {}): string {
+  if (!value) return opts.allowEmpty ? '' : baseDir;
+
+  const expanded = expandHomeDir(value);
+  return path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
+}
+
+function expandHomeDir(value: string): string {
+  if (value === '~') return os.homedir();
+  if (value.startsWith('~/')) return path.join(os.homedir(), value.slice(2));
+  return value;
+}
 
 function deepMerge(target: Obj, source: Obj): Obj {
   for (const key of Object.keys(source)) {

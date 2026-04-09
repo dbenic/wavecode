@@ -7,6 +7,10 @@ export interface ServerEntry {
   execArgv: string[];
 }
 
+export function resolveAppRoot(baseDir: string): string {
+  return path.resolve(baseDir, '..', '..');
+}
+
 export function resolveServerEntry(baseDir: string): ServerEntry {
   const candidates: ServerEntry[] = [
     {

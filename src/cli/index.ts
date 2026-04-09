@@ -8,9 +8,13 @@ import * as taskDispatcher from '../server/task-dispatcher.js';
 import { fork, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getServerEntryUrl, resolveServerEntry } from './server-entry.js';
+import { getServerEntryUrl, resolveAppRoot, resolveServerEntry } from './server-entry.js';
 
-const PID_FILE = path.join(process.cwd(), '.wavecode.pid');
+const APP_ROOT = resolveAppRoot(import.meta.dirname);
+process.chdir(APP_ROOT);
+
+const PID_FILE = path.join(APP_ROOT, '.wavecode.pid');
+const CONFIG_FILE = path.join(APP_ROOT, 'config.yaml');
 
 const program = new Command();
 program
@@ -18,13 +22,17 @@ program
   .description('Autonomous multi-agent CLI orchestration platform')
   .version('0.1.0');
 
+function loadInstalledConfig(): void {
+  loadConfig(CONFIG_FILE);
+}
+
 // --- scan ---
 program
   .command('scan')
   .description('List all tmux sessions on this server')
   .action(() => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
     const result = sessionManager.scan();
     if (!result.ok) {
       console.error('Error:', result.error);
@@ -55,7 +63,7 @@ program
   .option('--name <name>', 'Custom agent name')
   .action((session, opts) => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
     const result = sessionManager.adopt(session, opts.runtime, opts.name);
     if (!result.ok) {
       console.error('Error:', result.error);
@@ -70,7 +78,7 @@ program
   .description('Show all agents summary')
   .action(() => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
     const agents = listAgents();
 
     if (agents.length === 0) {
@@ -93,7 +101,7 @@ program
   .description('List agents with details')
   .action(() => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
     const agents = listAgents();
 
     if (agents.length === 0) {
@@ -120,7 +128,7 @@ program
   .description('Send a prompt to an agent via tmux send-keys')
   .action((agent, prompt) => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
 
     const agentResult = sessionManager.get(agent);
     if (!agentResult.ok) {
@@ -143,7 +151,7 @@ program
   .option('-n, --lines <n>', 'Number of lines', '50')
   .action((agent, opts) => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
 
     const agentResult = sessionManager.get(agent);
     if (!agentResult.ok) {
@@ -169,7 +177,7 @@ program
   .option('--branch <name>', 'Branch name for worktree')
   .action((opts) => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
 
     const result = sessionManager.spawnAgent({
       name: opts.name,
@@ -184,7 +192,7 @@ program
     }
 
     const agent = result.data;
-    console.log(`✓ Created worktree at ${agent.workspace ?? 'N/A'}`);
+    console.log(`✓ Using workspace: ${agent.workspace ?? 'N/A'}`);
     console.log(`✓ Started tmux session: ${agent.tmux_session}`);
     console.log(`✓ Runner wrapper active. Emitting events.`);
   });
@@ -198,7 +206,7 @@ program
   .option('--depends-on <ids>', 'Comma-separated task IDs this depends on')
   .action((prompt, opts) => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
 
     let agentId: string | undefined;
     if (opts.agent) {
@@ -242,7 +250,7 @@ program
   .option('--status <status>', 'Filter by status')
   .action((opts) => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
 
     let agentId: string | undefined;
     if (opts.agent) {
@@ -286,7 +294,7 @@ program
   .option('--repo <path>', 'Repository path for worktree')
   .action((agent, opts) => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
 
     const agentResult = sessionManager.get(agent);
     if (!agentResult.ok) {
@@ -302,7 +310,7 @@ program
 
     const upgraded = result.data;
     console.log(`✓ Detached from tmux session ${agentResult.data.tmux_session}`);
-    if (upgraded.workspace) console.log(`✓ Created worktree at ${upgraded.workspace}`);
+    if (upgraded.workspace) console.log(`✓ Using workspace: ${upgraded.workspace}`);
     console.log(`✓ Started new session ${upgraded.tmux_session} with runner wrapper`);
     console.log(`✓ Mode changed: adopted → spawned`);
   });
@@ -313,7 +321,7 @@ program
   .description('Show pending review queue')
   .action(() => {
     initDb();
-    loadConfig();
+    loadInstalledConfig();
 
     const runs = listReviewableRuns();
 

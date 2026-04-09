@@ -66,9 +66,35 @@ describe('config.ts — security', () => {
     } as unknown as Parameters<typeof updateConfig>[0]);
 
     expect(getConfig().auth).toEqual({
-      method: 'tailscale',
+      method: 'token',
       fallback_token: null,
       trusted_proxies: [],
     });
+  });
+
+  it('expands home-relative paths and resolves relative paths from the config directory', async () => {
+    fs.writeFileSync(configPath, `
+paths:
+  projects_root: ~/WaveProjects
+  guides_root: guides
+artifacts:
+  storage: .wavecode-artifacts
+`, 'utf8');
+
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig(configPath);
+
+    expect(cfg.paths.projects_root).toBe(path.join(os.homedir(), 'WaveProjects'));
+    expect(cfg.paths.guides_root).toBe(path.join(tmpDir, 'guides'));
+    expect(cfg.artifacts.storage).toBe(path.join(tmpDir, '.wavecode-artifacts'));
+  });
+
+  it('builds default filesystem paths relative to the config location', async () => {
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig(configPath);
+
+    expect(cfg.paths.worktrees_root).toBe(path.join(tmpDir, '.wavecode-data', 'worktrees'));
+    expect(cfg.paths.transcripts_root).toBe(path.join(tmpDir, '.wavecode-data', 'transcripts'));
+    expect(cfg.paths.teams_root).toBe(path.join(tmpDir, 'teams'));
   });
 });

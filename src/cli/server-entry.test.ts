@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolveServerEntry } from './server-entry.js';
+import { resolveAppRoot, resolveServerEntry } from './server-entry.js';
 
 describe('resolveServerEntry', () => {
   const tmpDirs: string[] = [];
@@ -54,5 +54,10 @@ describe('resolveServerEntry', () => {
     fs.mkdirSync(cliDir, { recursive: true });
 
     expect(() => resolveServerEntry(cliDir)).toThrow('Unable to locate WaveCode server entry');
+  });
+
+  it('resolves the install root for source and packaged layouts', () => {
+    expect(resolveAppRoot('/tmp/wavecode/src/cli')).toBe('/tmp/wavecode');
+    expect(resolveAppRoot('/tmp/wavecode/dist/cli')).toBe('/tmp/wavecode');
   });
 });
