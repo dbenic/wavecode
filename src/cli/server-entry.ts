@@ -14,12 +14,12 @@ export function resolveAppRoot(baseDir: string): string {
 export function resolveServerEntry(baseDir: string): ServerEntry {
   const candidates: ServerEntry[] = [
     {
-      path: path.join(baseDir, '..', 'server', 'index.ts'),
-      execArgv: ['--import', 'tsx'],
-    },
-    {
       path: path.join(baseDir, '..', 'server', 'index.js'),
       execArgv: [],
+    },
+    {
+      path: path.join(baseDir, '..', 'server', 'index.ts'),
+      execArgv: ['--import', 'tsx'],
     },
   ];
 
