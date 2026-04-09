@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.wavecode-data/
+.wavecode.pid
+teams/
+coverage/
+*.db
+*.db-wal
+*.db-shm
+.env
+config.yaml
+WaveCode_Specification_v0.4.docx
+docs/release-hardening-spec.md
+wavecode-*.tgz
+.DS_Store
+src/ui/dist/
+.claude/settings.local.json

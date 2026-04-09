@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# Auto-accept Claude Code's --dangerously-skip-permissions dialog
+# Usage: start-claude-bypass.exp [working-directory]
+
+set timeout 30
+set workdir [lindex $argv 0]
+
+if {$workdir ne ""} {
+    cd $workdir
+}
+
+spawn claude --dangerously-skip-permissions
+
+# Wait for the bypass confirmation dialog
+expect {
+    "Yes, I accept" {
+        # Send Down arrow to select option 2, then Enter
+        sleep 1
+        send "\033\[B"
+        sleep 0.5
+        send "\r"
+    }
+    timeout {
+        puts "Timeout waiting for bypass dialog"
+        exit 1
+    }
+}
+
+# Hand control to the user / tmux
+interact

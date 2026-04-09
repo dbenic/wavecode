@@ -1,0 +1,85 @@
+server:
+  port: 3777
+  host: 0.0.0.0
+
+paths:
+  projects_root: ~/Dev/Projects    # spawned agents use <projects_root>/<agent-name>
+  worktrees_root: .wavecode-data/worktrees
+  transcripts_root: .wavecode-data/transcripts
+  teams_root: teams
+  guides_root: guides       # cloned guide sources (e.g., awesome-design-md)
+  templates_root: templates # cloned template repos (workspace starters)
+
+autonomy:
+  auto_dispatch: true
+  auto_restart: true
+  hang_timeout_min: 10
+  max_task_retries: 2
+
+sandbox:
+  disable_git_push: true
+  restrict_network: true
+
+runtimes:
+  claude-code:
+    command: claude --permission-mode bypassPermissions
+    idle_pattern: '\$\s*$'
+  codex:
+    command: codex --full-auto
+    idle_pattern: '^>\s*$'
+  aider:
+    command: aider --yes
+    idle_pattern: '^>\s*$'
+
+auth:
+  method: token                  # default portable mode; set a token before exposing the port
+  fallback_token: null           # installer generates one; set manually if you install without it
+  trusted_proxies: []
+
+notifications:
+  web_push: false
+  ntfy_topic: null
+  telegram_bot_token: null
+  telegram_chat_id: null
+
+artifacts:
+  storage: .wavecode-data/artifacts
+  retention_days: 30
+
+review:
+  auto_review: false
+  default_reviewer: aider
+  self_review: true
+  max_fix_loops: 2
+
+llm:
+  provider: anthropic              # 'anthropic' or 'openai-compatible'
+  api_key: null                    # primary key (used for command chat)
+  anthropic_api_key: null          # or set ANTHROPIC_API_KEY env var
+  openai_api_key: null             # or set OPENAI_API_KEY env var
+  gemini_api_key: null             # or set GEMINI_API_KEY env var
+  perplexity_api_key: null         # or set PERPLEXITY_API_KEY env var
+  xai_api_key: null                # or set XAI_API_KEY env var
+  base_url: null                   # custom OpenAI-compatible endpoint (see below)
+  model: claude-sonnet-4-20250514
+
+# ── Local / self-hosted LLMs ──
+# Set provider to 'openai-compatible' and point base_url at your local server.
+# Any tool with an OpenAI-compatible API works:
+#
+#   Ollama:              http://localhost:11434/v1
+#   LM Studio:           http://localhost:1234/v1
+#   vLLM:                http://localhost:8000/v1
+#   llama.cpp / server:  http://localhost:8080/v1
+#   LocalAI:             http://localhost:8080/v1
+#   Jan:                 http://localhost:1337/v1
+#   GPT4All:             http://localhost:4891/v1
+#   text-gen-webui:      http://localhost:5000/v1
+#   KoboldCpp:           http://localhost:5001/v1
+#
+# Example (Ollama with Llama 3.3):
+#   llm:
+#     provider: openai-compatible
+#     base_url: http://localhost:11434/v1
+#     model: llama3.3
+#     api_key: null

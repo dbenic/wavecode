@@ -1,0 +1,15 @@
+<svg width="200" height="32" viewBox="0 0 200 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- WaveCode Logo — matches Wavenetic brand family -->
+  <!-- Icon: W letterform in emerald on dark rounded rect -->
+  <rect width="32" height="32" rx="7" fill="#09090b"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="6.5" stroke="#34d399" stroke-opacity="0.3"/>
+  <!-- W mark — simplified from Wavenetic favicon -->
+  <path d="M7.5 21.5H5L8.5 8.5H11L13.8 18.5L16.5 8.5H19L21.8 18.5L23.5 13H26.5L23.5 23.5H20.8L18 15.5L15.2 23.5H12.5L9.7 15.5L7.5 21.5Z" fill="#34d399"/>
+  <!-- Terminal cursor accent -->
+  <rect x="27" y="22" width="2" height="3" rx="0.5" fill="#34d399" opacity="0.6"/>
+
+  <!-- "WAVECODE" text -->
+  <text x="40" y="15" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" letter-spacing="2.5" fill="#e4e4e7">WAVECODE</text>
+  <!-- Subtle tagline -->
+  <text x="40" y="26" font-family="system-ui, -apple-system, sans-serif" font-size="7.5" font-weight="500" letter-spacing="3" fill="#71717a">AGENT ORCHESTRATOR</text>
+</svg>

@@ -1,0 +1,49 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- WaveCode App Icon — 512x512 for PWA -->
+  <!-- Background: dark with emerald border glow -->
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#064e3b" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#09090b" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="borderGrad" x1="0" y1="0" x2="512" y2="512">
+      <stop offset="0%" stop-color="#34d399" stop-opacity="0.5"/>
+      <stop offset="50%" stop-color="#34d399" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#34d399" stop-opacity="0.4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base -->
+  <rect width="512" height="512" rx="96" fill="#09090b"/>
+  <rect x="2" y="2" width="508" height="508" rx="94" fill="url(#bgGlow)"/>
+  <rect x="3" y="3" width="506" height="506" rx="93" stroke="url(#borderGrad)" stroke-width="2"/>
+
+  <!-- Concentric rings (subtle, like the Wavenetic hero viz) -->
+  <circle cx="256" cy="240" r="160" stroke="#34d399" stroke-opacity="0.06" stroke-width="1"/>
+  <circle cx="256" cy="240" r="120" stroke="#34d399" stroke-opacity="0.08" stroke-width="1"/>
+  <circle cx="256" cy="240" r="80" stroke="#34d399" stroke-opacity="0.1" stroke-width="1"/>
+
+  <!-- W letterform — large, centered -->
+  <path d="M120 340H88L148 140H188L228 300L270 140H310L350 300L380 200H420L362 380H316L278 240L238 380H196L158 240L120 340Z" fill="#34d399"/>
+
+  <!-- Terminal cursor blinking accent -->
+  <rect x="420" y="350" width="16" height="30" rx="3" fill="#34d399" opacity="0.5"/>
+
+  <!-- Dot grid (subtle, like control-room aesthetic) -->
+  <g opacity="0.04">
+    <circle cx="80" cy="80" r="2" fill="#34d399"/>
+    <circle cx="130" cy="80" r="2" fill="#34d399"/>
+    <circle cx="180" cy="80" r="2" fill="#34d399"/>
+    <circle cx="80" cy="130" r="2" fill="#34d399"/>
+    <circle cx="432" cy="80" r="2" fill="#34d399"/>
+    <circle cx="432" cy="130" r="2" fill="#34d399"/>
+    <circle cx="382" cy="80" r="2" fill="#34d399"/>
+    <circle cx="80" cy="432" r="2" fill="#34d399"/>
+    <circle cx="130" cy="432" r="2" fill="#34d399"/>
+    <circle cx="432" cy="432" r="2" fill="#34d399"/>
+    <circle cx="382" cy="432" r="2" fill="#34d399"/>
+  </g>
+
+  <!-- "WC" monogram hint at bottom -->
+  <text x="256" y="460" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" font-weight="700" letter-spacing="8" fill="#34d399" opacity="0.15">WAVECODE</text>
+</svg>

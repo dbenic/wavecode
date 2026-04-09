@@ -1,0 +1,31 @@
+[Unit]
+Description=WaveCode Orchestrator Daemon
+After=network.target
+
+[Service]
+Type=simple
+# The installer generates a user-specific version of this file.
+# If installing manually, replace these placeholders:
+User=%u
+WorkingDirectory=%h/.wavecode
+ExecStart=/usr/bin/env node dist/cli/index.js server start --foreground
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wavecode
+
+# Baseline hardening
+NoNewPrivileges=true
+
+# Optional stronger hardening:
+# If your config writes outside %h/.wavecode (for example projects_root under
+# %h/Dev/Projects), add every writable path here before enabling ProtectSystem.
+# ProtectSystem=strict
+# ReadWritePaths=%h/.wavecode %h/Dev/Projects
+
+[Install]
+WantedBy=multi-user.target
