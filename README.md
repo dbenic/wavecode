@@ -306,7 +306,26 @@ Compatible with [awesome-claude-skills](https://github.com/travisvn/awesome-clau
 
 ## Supported Agents
 
-WaveCode works with any CLI agent that runs in a terminal:
+WaveCode works with any CLI agent that runs in a terminal. **You need to install the agents yourself** — WaveCode orchestrates them but does not bundle them.
+
+### Installing Agents
+
+```bash
+# Claude Code (requires ANTHROPIC_API_KEY)
+npm install -g @anthropic-ai/claude-code
+export ANTHROPIC_API_KEY="sk-ant-..."   # add to ~/.bashrc for tmux sessions
+
+# Codex CLI (requires OPENAI_API_KEY)
+npm install -g @openai/codex
+export OPENAI_API_KEY="sk-..."          # add to ~/.bashrc for tmux sessions
+
+# Aider (Python — works with any LLM backend)
+pip install aider-chat
+```
+
+> **Important:** Add your API keys to `~/.bashrc` (or `~/.zshrc`) so they are available in tmux sessions spawned by WaveCode. WaveCode starts agents inside tmux, which inherits the shell environment.
+
+### Agent Compatibility
 
 | Agent | Command | Notes |
 |-------|---------|-------|
