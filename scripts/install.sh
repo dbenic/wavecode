@@ -258,7 +258,7 @@ fi
     echo "" >> "$SHELL_RC"
     echo "# WaveCode" >> "$SHELL_RC"
     echo "export WAVECODE_HOME=\"$WAVECODE_HOME\"" >> "$SHELL_RC"
-    echo "alias wavecode='node --import tsx \$WAVECODE_HOME/src/cli/index.ts'" >> "$SHELL_RC"
+    echo "alias wavecode='node \$WAVECODE_HOME/dist/cli/index.js'" >> "$SHELL_RC"
     echo "alias wc-start='wavecode server start --foreground'" >> "$SHELL_RC"
     ok "Added shell aliases to $(basename "$SHELL_RC")"
   else
