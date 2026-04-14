@@ -7,9 +7,15 @@ import {
   insertArtifact,
   getArtifact,
   listArtifacts,
+  listArtifactsForAgent,
   findArtifactByHash,
   insertArtifactTarget,
   insertRunArtifact,
+  deleteArtifactTargets,
+  deleteArtifactTarget,
+  deleteRunArtifacts,
+  deleteArtifact as dbDeleteArtifact,
+  countArtifactRefsForHash,
   type Artifact,
   type Result,
 } from './db.js';
@@ -358,6 +364,75 @@ export function readArtifactContent(artifactId: string): Result<string> {
 
   const content = fs.readFileSync(artifact.storage_path, 'utf-8');
   return { ok: true, data: content };
+}
+
+/**
+ * Get all artifacts associated with an agent (created by OR shared to).
+ */
+export function getAgentArtifacts(agentId: string): Artifact[] {
+  return listArtifactsForAgent(agentId);
+}
+
+/**
+ * Detach an artifact from an agent without deleting the artifact.
+ * Removes the artifact_target link and clears source_agent_id if it matches.
+ */
+export function detachArtifactFromAgent(
+  artifactId: string,
+  agentId: string,
+): Result<void> {
+  const artifactResult = getArtifact(artifactId);
+  if (!artifactResult.ok) return { ok: false, error: artifactResult.error };
+
+  // Remove the artifact_target link
+  deleteArtifactTarget(artifactId, 'agent', agentId);
+
+  // If this agent was the source, clear source_agent_id
+  const artifact = artifactResult.data;
+  if (artifact.source_agent_id === agentId) {
+    getDb().prepare('UPDATE artifacts SET source_agent_id = NULL WHERE id = ?').run(artifactId);
+  }
+
+  emit('artifact.detached', 'artifact', artifactId, {
+    agent_id: agentId,
+    filename: artifact.filename,
+  });
+
+  return { ok: true, data: undefined };
+}
+
+/**
+ * Delete an artifact entirely — removes DB records and file from disk.
+ */
+export function removeArtifact(artifactId: string): Result<void> {
+  const artifactResult = getArtifact(artifactId);
+  if (!artifactResult.ok) return { ok: false, error: artifactResult.error };
+
+  const artifact = artifactResult.data;
+
+  // Remove all DB references
+  deleteRunArtifacts(artifactId);
+  deleteArtifactTargets(artifactId);
+  dbDeleteArtifact(artifactId);
+
+  // Only delete file if no other artifact references the same hash
+  const otherRefs = countArtifactRefsForHash(artifact.sha256, artifactId);
+  if (otherRefs === 0 && fs.existsSync(artifact.storage_path)) {
+    fs.unlinkSync(artifact.storage_path);
+    // Clean up empty directory
+    const dir = path.dirname(artifact.storage_path);
+    try {
+      const files = fs.readdirSync(dir);
+      if (files.length === 0) fs.rmdirSync(dir);
+    } catch { /* ignore */ }
+  }
+
+  emit('artifact.deleted', 'artifact', artifactId, {
+    filename: artifact.filename,
+    sha256: artifact.sha256,
+  });
+
+  return { ok: true, data: undefined };
 }
 
 /**

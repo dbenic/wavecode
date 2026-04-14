@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { apiPost } from '../hooks/useApi';
+import { apiPost, apiDelete } from '../hooks/useApi';
 import type { Artifact, Agent } from '../types';
 
 const MIME_GLYPHS: Record<string, string> = {
@@ -45,17 +45,38 @@ export default function ArtifactThumbnail({
   agentName,
   agents,
   index,
+  onDelete,
 }: {
   artifact: Artifact;
   agentName?: string;
   agents: Agent[];
   index: number;
+  onDelete?: (id: string) => void;
 }) {
   const [showShare, setShowShare] = useState(false);
   const [shareAgent, setShareAgent] = useState('');
   const [sharing, setSharing] = useState(false);
   const [lightbox, setLightbox] = useState(false);
   const [imgError, setImgError] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const handleDelete = async () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await apiDelete(`/artifacts/${artifact.id}`);
+      onDelete?.(artifact.id);
+    } catch {
+      // delete failed
+    } finally {
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  };
 
   const glyph = MIME_GLYPHS[artifact.mime_type] ?? '???';
   const glyphColor = getGlyphColor(artifact.mime_type);
@@ -151,6 +172,18 @@ export default function ArtifactThumbnail({
                 className="text-[9px] font-semibold tracking-wider text-cyan-500 hover:text-cyan-400 transition-colors"
               >
                 SHARE
+              </button>
+              <button
+                onClick={handleDelete}
+                onBlur={() => setConfirmDelete(false)}
+                disabled={deleting}
+                className={`text-[9px] font-semibold tracking-wider transition-colors ${
+                  confirmDelete
+                    ? 'text-red-400 hover:text-red-300'
+                    : 'text-slate-600 hover:text-red-400'
+                } disabled:opacity-40`}
+              >
+                {deleting ? '...' : confirmDelete ? 'CONFIRM?' : 'DEL'}
               </button>
             </div>
           </div>

@@ -33,6 +33,9 @@ export default function Artifacts() {
     if (event.type === 'artifact.created' || event.type === 'artifact.shared') {
       fetchData();
     }
+    if (event.type === 'artifact.deleted') {
+      setArtifacts((prev) => prev.filter((a) => a.id !== event.entity_id));
+    }
   }, [fetchData]);
 
   useSSE(handleSSE);
@@ -188,6 +191,7 @@ export default function Artifacts() {
                 agentName={artifact.source_agent_id ? agentMap.get(artifact.source_agent_id)?.name : undefined}
                 agents={agents}
                 index={i}
+                onDelete={(id) => setArtifacts((prev) => prev.filter((a) => a.id !== id))}
               />
             ))}
           </div>

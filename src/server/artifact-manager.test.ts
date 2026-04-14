@@ -8,9 +8,15 @@ const dbMocks = vi.hoisted(() => ({
   insertArtifact: vi.fn(),
   getArtifact: vi.fn(),
   listArtifacts: vi.fn(),
+  listArtifactsForAgent: vi.fn(),
   findArtifactByHash: vi.fn(),
   insertArtifactTarget: vi.fn(),
   insertRunArtifact: vi.fn(),
+  deleteArtifactTargets: vi.fn(),
+  deleteArtifactTarget: vi.fn(),
+  deleteRunArtifacts: vi.fn(),
+  deleteArtifact: vi.fn(),
+  countArtifactRefsForHash: vi.fn(),
   getAgent: vi.fn(),
 }));
 
@@ -31,9 +37,15 @@ vi.mock('./db.js', () => ({
   insertArtifact: dbMocks.insertArtifact,
   getArtifact: dbMocks.getArtifact,
   listArtifacts: dbMocks.listArtifacts,
+  listArtifactsForAgent: dbMocks.listArtifactsForAgent,
   findArtifactByHash: dbMocks.findArtifactByHash,
   insertArtifactTarget: dbMocks.insertArtifactTarget,
   insertRunArtifact: dbMocks.insertRunArtifact,
+  deleteArtifactTargets: dbMocks.deleteArtifactTargets,
+  deleteArtifactTarget: dbMocks.deleteArtifactTarget,
+  deleteRunArtifacts: dbMocks.deleteRunArtifacts,
+  deleteArtifact: dbMocks.deleteArtifact,
+  countArtifactRefsForHash: dbMocks.countArtifactRefsForHash,
   getAgent: dbMocks.getAgent,
 }));
 
@@ -115,6 +127,146 @@ describe('artifact-manager.ts', () => {
         attached_path: attachedPath,
       }),
     );
+  });
+
+  it('detaches an artifact from an agent without deleting the file', async () => {
+    const artifactManager = await import('./artifact-manager.js');
+    const storagePath = path.join(tempDir, 'storage', 'detach-test.md');
+    fs.mkdirSync(path.dirname(storagePath), { recursive: true });
+    fs.writeFileSync(storagePath, '# Test\n');
+
+    dbMocks.getArtifact.mockReturnValue({
+      ok: true,
+      data: makeArtifact({
+        id: 'artifact-d1',
+        filename: 'detach-test.md',
+        storage_path: storagePath,
+        source_agent_id: 'agent-1',
+      }),
+    });
+
+    const mockPrepare = vi.fn().mockReturnValue({ run: vi.fn() });
+    dbMocks.getDb.mockReturnValue({ prepare: mockPrepare });
+
+    const result = artifactManager.detachArtifactFromAgent('artifact-d1', 'agent-1');
+
+    expect(result.ok).toBe(true);
+    expect(dbMocks.deleteArtifactTarget).toHaveBeenCalledWith('artifact-d1', 'agent', 'agent-1');
+    // source_agent_id matches, so it should be cleared
+    expect(mockPrepare).toHaveBeenCalledWith('UPDATE artifacts SET source_agent_id = NULL WHERE id = ?');
+    // File should still exist
+    expect(fs.existsSync(storagePath)).toBe(true);
+    expect(eventBusMocks.emit).toHaveBeenCalledWith(
+      'artifact.detached',
+      'artifact',
+      'artifact-d1',
+      expect.objectContaining({ agent_id: 'agent-1' }),
+    );
+  });
+
+  it('detaches an artifact from a non-source agent without clearing source_agent_id', async () => {
+    const artifactManager = await import('./artifact-manager.js');
+
+    dbMocks.getArtifact.mockReturnValue({
+      ok: true,
+      data: makeArtifact({
+        id: 'artifact-d2',
+        filename: 'shared.md',
+        source_agent_id: 'agent-original',
+      }),
+    });
+
+    const mockPrepare = vi.fn().mockReturnValue({ run: vi.fn() });
+    dbMocks.getDb.mockReturnValue({ prepare: mockPrepare });
+
+    const result = artifactManager.detachArtifactFromAgent('artifact-d2', 'agent-other');
+
+    expect(result.ok).toBe(true);
+    expect(dbMocks.deleteArtifactTarget).toHaveBeenCalledWith('artifact-d2', 'agent', 'agent-other');
+    // source_agent_id doesn't match, so UPDATE should NOT be called
+    expect(mockPrepare).not.toHaveBeenCalled();
+  });
+
+  it('deletes an artifact and removes the file when no other refs exist', async () => {
+    const artifactManager = await import('./artifact-manager.js');
+    const storagePath = path.join(tempDir, 'storage', 'delete-me.md');
+    fs.mkdirSync(path.dirname(storagePath), { recursive: true });
+    fs.writeFileSync(storagePath, '# Delete me\n');
+
+    dbMocks.getArtifact.mockReturnValue({
+      ok: true,
+      data: makeArtifact({
+        id: 'artifact-del1',
+        filename: 'delete-me.md',
+        sha256: 'hash-unique',
+        storage_path: storagePath,
+      }),
+    });
+    dbMocks.countArtifactRefsForHash.mockReturnValue(0);
+
+    const result = artifactManager.removeArtifact('artifact-del1');
+
+    expect(result.ok).toBe(true);
+    expect(dbMocks.deleteRunArtifacts).toHaveBeenCalledWith('artifact-del1');
+    expect(dbMocks.deleteArtifactTargets).toHaveBeenCalledWith('artifact-del1');
+    expect(dbMocks.deleteArtifact).toHaveBeenCalledWith('artifact-del1');
+    expect(fs.existsSync(storagePath)).toBe(false);
+    expect(eventBusMocks.emit).toHaveBeenCalledWith(
+      'artifact.deleted',
+      'artifact',
+      'artifact-del1',
+      expect.objectContaining({ filename: 'delete-me.md', sha256: 'hash-unique' }),
+    );
+  });
+
+  it('deletes an artifact but preserves the file when other refs exist', async () => {
+    const artifactManager = await import('./artifact-manager.js');
+    const storagePath = path.join(tempDir, 'storage', 'shared-file.md');
+    fs.mkdirSync(path.dirname(storagePath), { recursive: true });
+    fs.writeFileSync(storagePath, '# Shared content\n');
+
+    dbMocks.getArtifact.mockReturnValue({
+      ok: true,
+      data: makeArtifact({
+        id: 'artifact-del2',
+        filename: 'shared-file.md',
+        sha256: 'hash-shared',
+        storage_path: storagePath,
+      }),
+    });
+    dbMocks.countArtifactRefsForHash.mockReturnValue(2);
+
+    const result = artifactManager.removeArtifact('artifact-del2');
+
+    expect(result.ok).toBe(true);
+    expect(dbMocks.deleteArtifact).toHaveBeenCalledWith('artifact-del2');
+    // File should still exist since other artifacts reference the same hash
+    expect(fs.existsSync(storagePath)).toBe(true);
+  });
+
+  it('returns error when deleting non-existent artifact', async () => {
+    const artifactManager = await import('./artifact-manager.js');
+
+    dbMocks.getArtifact.mockReturnValue({
+      ok: false,
+      error: 'Artifact not-exists not found',
+    });
+
+    const result = artifactManager.removeArtifact('not-exists');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('not found');
+  });
+
+  it('getAgentArtifacts delegates to listArtifactsForAgent', async () => {
+    const artifactManager = await import('./artifact-manager.js');
+    const mockArtifacts = [makeArtifact({ id: 'a1' }), makeArtifact({ id: 'a2' })];
+    dbMocks.listArtifactsForAgent.mockReturnValue(mockArtifacts);
+
+    const result = artifactManager.getAgentArtifacts('agent-1');
+
+    expect(dbMocks.listArtifactsForAgent).toHaveBeenCalledWith('agent-1');
+    expect(result).toEqual(mockArtifacts);
   });
 
   it('shares an artifact into an adopted agent pane directory and notifies with the copied path', async () => {

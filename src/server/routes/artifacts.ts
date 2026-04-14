@@ -7,8 +7,13 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/artifacts', (c) => {
     const agentId = c.req.query('agent_id');
     const runId = c.req.query('run_id');
+
+    // If filtering by agent, use the combined query (created by + shared to)
+    if (agentId) {
+      return c.json(artifactManager.getAgentArtifacts(agentId));
+    }
+
     return c.json(listArtifacts({
-      source_agent_id: agentId || undefined,
       source_run_id: runId || undefined,
     }));
   });
@@ -80,6 +85,23 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{ targetAgentId: string }>();
     const result = artifactManager.shareArtifact(c.req.param('id'), body.targetAgentId);
     if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json({ ok: true });
+  });
+
+  // Delete an artifact entirely
+  app.delete('/api/artifacts/:id', (c) => {
+    const result = artifactManager.removeArtifact(c.req.param('id'));
+    if (!result.ok) return c.json({ error: result.error }, 404);
+    return c.json({ ok: true });
+  });
+
+  // Detach an artifact from an agent (keeps the artifact, removes the link)
+  app.delete('/api/artifacts/:id/agent/:agentId', (c) => {
+    const result = artifactManager.detachArtifactFromAgent(
+      c.req.param('id'),
+      c.req.param('agentId'),
+    );
+    if (!result.ok) return c.json({ error: result.error }, 404);
     return c.json({ ok: true });
   });
 }

@@ -814,6 +814,40 @@ export function getRunArtifacts(runId: string): Artifact[] {
   `).all(runId) as Artifact[];
 }
 
+export function deleteArtifactTargets(artifactId: string): void {
+  getDb().prepare('DELETE FROM artifact_targets WHERE artifact_id = ?').run(artifactId);
+}
+
+export function deleteArtifactTarget(artifactId: string, targetType: string, targetId: string): void {
+  getDb().prepare(
+    'DELETE FROM artifact_targets WHERE artifact_id = ? AND target_type = ? AND target_id = ?'
+  ).run(artifactId, targetType, targetId);
+}
+
+export function deleteRunArtifacts(artifactId: string): void {
+  getDb().prepare('DELETE FROM run_artifacts WHERE artifact_id = ?').run(artifactId);
+}
+
+export function deleteArtifact(artifactId: string): void {
+  getDb().prepare('DELETE FROM artifacts WHERE id = ?').run(artifactId);
+}
+
+export function listArtifactsForAgent(agentId: string): Artifact[] {
+  return getDb().prepare(`
+    SELECT DISTINCT a.* FROM artifacts a
+    LEFT JOIN artifact_targets at ON at.artifact_id = a.id AND at.target_type = 'agent' AND at.target_id = ?
+    WHERE a.source_agent_id = ? OR at.target_id = ?
+    ORDER BY a.created_at DESC
+  `).all(agentId, agentId, agentId) as Artifact[];
+}
+
+export function countArtifactRefsForHash(sha256: string, excludeId: string): number {
+  const row = getDb().prepare(
+    'SELECT COUNT(*) as cnt FROM artifacts WHERE sha256 = ? AND id != ?'
+  ).get(sha256, excludeId) as { cnt: number };
+  return row.cnt;
+}
+
 // --- Push Subscription helpers ---
 
 export function insertPushSubscription(sub: {

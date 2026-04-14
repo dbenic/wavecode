@@ -550,28 +550,42 @@ export default function AgentView() {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[9px] text-violet-500/70 font-bold tracking-wider">ARTIFACTS</span>
               <span className="text-[9px] text-slate-600">{agentArtifacts.length}</span>
-              {agentArtifacts.slice(0, 10).map((a) => {
+              {agentArtifacts.map((a) => {
                 const isImage = a.mime_type.startsWith('image/');
                 const sizeLabel = a.size_bytes < 1024 ? `${a.size_bytes}B`
                   : a.size_bytes < 1048576 ? `${(a.size_bytes / 1024).toFixed(1)}KB`
                   : `${(a.size_bytes / 1048576).toFixed(1)}MB`;
                 return (
-                  <a
+                  <span
                     key={a.id}
-                    href={`/api/artifacts/${a.id}/download`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-950/50 border border-violet-500/30 text-[9px] text-violet-300 font-mono hover:border-violet-400/60 hover:text-violet-200 transition-colors"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-violet-950/50 border border-violet-500/30 text-[9px] text-violet-300 font-mono group"
                     title={a.note ?? a.filename}
                   >
-                    {isImage ? '🖼' : '📎'} {a.filename.length > 25 ? a.filename.substring(0, 22) + '...' : a.filename}
-                    <span className="text-[8px] text-slate-500">{sizeLabel}</span>
-                  </a>
+                    <a
+                      href={`/api/artifacts/${a.id}/download`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 hover:text-violet-200 transition-colors"
+                    >
+                      {isImage ? '🖼' : '📎'} {a.filename.length > 25 ? a.filename.substring(0, 22) + '...' : a.filename}
+                      <span className="text-[8px] text-slate-500">{sizeLabel}</span>
+                    </a>
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        try {
+                          await apiDelete(`/artifacts/${a.id}/agent/${id}`);
+                          setAgentArtifacts((prev) => prev.filter((x) => x.id !== a.id));
+                        } catch { /* detach failed */ }
+                      }}
+                      className="ml-0.5 text-slate-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
+                      title="Remove from agent"
+                    >
+                      &times;
+                    </button>
+                  </span>
                 );
               })}
-              {agentArtifacts.length > 10 && (
-                <span className="text-[9px] text-slate-500">+{agentArtifacts.length - 10} more</span>
-              )}
             </div>
           </div>
         </div>

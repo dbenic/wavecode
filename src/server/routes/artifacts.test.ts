@@ -10,6 +10,9 @@ vi.mock('../artifact-manager.js', () => ({
   storeArtifactFromBuffer: vi.fn(),
   attachArtifactToAgent: vi.fn(),
   shareArtifact: vi.fn(),
+  getAgentArtifacts: vi.fn(),
+  removeArtifact: vi.fn(),
+  detachArtifactFromAgent: vi.fn(),
 }));
 
 describe('artifact routes', () => {
@@ -55,6 +58,69 @@ describe('artifact routes', () => {
       filename: 'brief.md',
       attached_path: '/workspace/agent-1/.wavecode/artifacts/brief.md',
     }));
+  });
+
+  it('GET /api/artifacts?agent_id uses getAgentArtifacts for combined query', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    vi.mocked(artifacts.getAgentArtifacts).mockReturnValue([
+      { id: 'a1', filename: 'test.md' },
+      { id: 'a2', filename: 'shared.png' },
+    ] as never);
+
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts?agent_id=agent-1'));
+
+    expect(response.status).toBe(200);
+    expect(artifacts.getAgentArtifacts).toHaveBeenCalledWith('agent-1');
+    const data = await response.json();
+    expect(data).toHaveLength(2);
+  });
+
+  it('DELETE /api/artifacts/:id deletes an artifact', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    vi.mocked(artifacts.removeArtifact).mockReturnValue({
+      ok: true,
+      data: undefined,
+    } as never);
+
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts/artifact-1', {
+      method: 'DELETE',
+    }));
+
+    expect(response.status).toBe(200);
+    expect(artifacts.removeArtifact).toHaveBeenCalledWith('artifact-1');
+  });
+
+  it('DELETE /api/artifacts/:id returns 404 for non-existent artifact', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    vi.mocked(artifacts.removeArtifact).mockReturnValue({
+      ok: false,
+      error: 'Artifact not-exists not found',
+    } as never);
+
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts/not-exists', {
+      method: 'DELETE',
+    }));
+
+    expect(response.status).toBe(404);
+  });
+
+  it('DELETE /api/artifacts/:id/agent/:agentId detaches artifact from agent', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    vi.mocked(artifacts.detachArtifactFromAgent).mockReturnValue({
+      ok: true,
+      data: undefined,
+    } as never);
+
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts/artifact-1/agent/agent-1', {
+      method: 'DELETE',
+    }));
+
+    expect(response.status).toBe(200);
+    expect(artifacts.detachArtifactFromAgent).toHaveBeenCalledWith('artifact-1', 'agent-1');
   });
 
   it('returns an error when upload succeeds but workspace attachment fails', async () => {
