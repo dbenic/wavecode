@@ -29,7 +29,16 @@ export function createApp(): Hono<NodeAppEnv> {
     if (err.message?.includes('Unexpected') || err.message?.includes('JSON')) {
       return c.json({ error: 'Malformed request body' }, 400);
     }
-    logger.error({ error: err.message, path: c.req.path }, 'Unhandled error');
+    logger.error(
+      {
+        error: err.message,
+        code: (err as NodeJS.ErrnoException).code,
+        stack: err.stack,
+        path: c.req.path,
+        method: c.req.method,
+      },
+      'Unhandled error',
+    );
     return c.json({ error: 'Internal server error' }, 500);
   });
 

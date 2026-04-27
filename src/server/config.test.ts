@@ -97,4 +97,56 @@ artifacts:
     expect(cfg.paths.transcripts_root).toBe(path.join(tmpDir, '.wavecode-data', 'transcripts'));
     expect(cfg.paths.teams_root).toBe(path.join(tmpDir, 'teams'));
   });
+
+  it('creates the artifact storage directory at startup if it does not exist', async () => {
+    const storageDir = path.join(tmpDir, 'fresh-storage');
+    fs.writeFileSync(configPath, `
+artifacts:
+  storage: ${storageDir}
+`, 'utf8');
+
+    const { loadConfig } = await import('./config.js');
+    expect(() => loadConfig(configPath)).not.toThrow();
+    expect(fs.existsSync(storageDir)).toBe(true);
+  });
+
+  it('throws a clear error when artifact storage cannot be created (unwritable parent)', async () => {
+    if (process.platform === 'win32') return; // permissions semantics differ on Windows
+
+    // Build a path under an unwritable parent so mkdir fails
+    const lockedParent = path.join(tmpDir, 'locked');
+    fs.mkdirSync(lockedParent);
+    fs.chmodSync(lockedParent, 0o555); // read+execute, no write
+
+    const storageDir = path.join(lockedParent, 'storage');
+    fs.writeFileSync(configPath, `
+artifacts:
+  storage: ${storageDir}
+`, 'utf8');
+
+    const { loadConfig } = await import('./config.js');
+    expect(() => loadConfig(configPath)).toThrow(/Cannot create artifact storage directory/);
+
+    // Restore so afterEach cleanup can rm -rf
+    fs.chmodSync(lockedParent, 0o755);
+  });
+
+  it('throws a clear error when artifact storage exists but is not writable', async () => {
+    if (process.platform === 'win32') return;
+    if (process.getuid && process.getuid() === 0) return; // root bypasses permissions
+
+    const storageDir = path.join(tmpDir, 'readonly-storage');
+    fs.mkdirSync(storageDir);
+    fs.chmodSync(storageDir, 0o555);
+
+    fs.writeFileSync(configPath, `
+artifacts:
+  storage: ${storageDir}
+`, 'utf8');
+
+    const { loadConfig } = await import('./config.js');
+    expect(() => loadConfig(configPath)).toThrow(/not writable/);
+
+    fs.chmodSync(storageDir, 0o755);
+  });
 });

@@ -91,7 +91,37 @@ export function loadConfig(cfgPath?: string): WaveConfig {
 
   const merged = deepMerge(structuredClone(defaults) as unknown as Obj, (parsed ?? {}) as Obj) as unknown as WaveConfig;
   config = normalizeConfigPaths(merged, configDir);
+  validateConfig(config);
   return config;
+}
+
+/**
+ * Validate critical filesystem paths at startup. Fails fast with a clear,
+ * actionable error rather than letting the daemon boot and crash on first
+ * request. Currently checks that artifacts.storage is creatable and writable.
+ */
+export function validateConfig(cfg: WaveConfig): void {
+  const storageDir = cfg.artifacts.storage;
+
+  try {
+    fs.mkdirSync(storageDir, { recursive: true });
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    throw new Error(
+      `Cannot create artifact storage directory '${storageDir}' (${err.code ?? 'unknown'}): ${err.message}. ` +
+      `Update artifacts.storage in config.yaml to a writable path under your home directory.`,
+    );
+  }
+
+  try {
+    fs.accessSync(storageDir, fs.constants.W_OK);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    throw new Error(
+      `Artifact storage directory '${storageDir}' exists but is not writable (${err.code ?? 'unknown'}): ${err.message}. ` +
+      `Fix permissions or update artifacts.storage in config.yaml.`,
+    );
+  }
 }
 
 export function getConfig(): WaveConfig {
