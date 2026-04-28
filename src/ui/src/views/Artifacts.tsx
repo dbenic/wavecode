@@ -34,7 +34,7 @@ export default function Artifacts() {
       fetchData();
     }
     if (event.type === 'artifact.deleted') {
-      setArtifacts((prev) => prev.filter((a) => a.id !== event.entity_id));
+      setArtifacts((prev) => prev.filter((a) => a.id !== event.entityId));
     }
   }, [fetchData]);
 
