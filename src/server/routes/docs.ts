@@ -11,9 +11,23 @@ interface DocEntry {
   title: string;
   path: string;
   size: number;
-  modified: string;
+  modified: string;       // alias of updatedAt, kept for backward compat with older clients
+  createdAt: string;
+  updatedAt: string;
   agentId?: string;
   agentName?: string;
+}
+
+/**
+ * Best-effort "creation time" for a file. Some filesystems (ext4 without
+ * inode_birthtime, or files created before the FS supported it) report
+ * birthtime as the Unix epoch; in that case fall back to mtime so the
+ * UI never shows a 1970 date.
+ */
+function getCreatedAt(stat: fs.Stats): string {
+  const birth = stat.birthtimeMs;
+  if (!birth || birth <= 0) return stat.mtime.toISOString();
+  return stat.birthtime.toISOString();
 }
 
 function titleFromFilename(filename: string): string {
@@ -54,12 +68,15 @@ function listDocs(): DocEntry[] {
   const claudeMd = path.join(process.cwd(), 'CLAUDE.md');
   if (fs.existsSync(claudeMd)) {
     const stat = fs.statSync(claudeMd);
+    const updated = stat.mtime.toISOString();
     entries.push({
       slug: 'claude-md',
       title: 'Project Architecture (CLAUDE.md)',
       path: 'CLAUDE.md',
       size: stat.size,
-      modified: stat.mtime.toISOString(),
+      modified: updated,
+      createdAt: getCreatedAt(stat),
+      updatedAt: updated,
     });
   }
 
@@ -70,12 +87,15 @@ function listDocs(): DocEntry[] {
     for (const file of files) {
       const filePath = path.join(docsDir, file);
       const stat = fs.statSync(filePath);
+      const updated = stat.mtime.toISOString();
       entries.push({
         slug: createRootDocSlug(file),
         title: titleFromFilename(file),
         path: `docs/${file}`,
         size: stat.size,
-        modified: stat.mtime.toISOString(),
+        modified: updated,
+        createdAt: getCreatedAt(stat),
+        updatedAt: updated,
       });
     }
   }
@@ -88,12 +108,15 @@ function listDocs(): DocEntry[] {
     for (const { relPath, fullPath } of mdFiles) {
       try {
         const stat = fs.statSync(fullPath);
+        const updated = stat.mtime.toISOString();
         entries.push({
           slug: createAgentDocSlug(agent.id, relPath),
           title: titleFromFilename(relPath.split('/').pop() ?? relPath),
           path: relPath,
           size: stat.size,
-          modified: stat.mtime.toISOString(),
+          modified: updated,
+          createdAt: getCreatedAt(stat),
+          updatedAt: updated,
           agentId: agent.id,
           agentName: agent.name,
         });
