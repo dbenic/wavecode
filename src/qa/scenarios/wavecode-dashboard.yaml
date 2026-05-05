@@ -1,0 +1,27 @@
+id: wavecode-dashboard
+title: First visit to the WaveCode dashboard
+starting_url: http://wave:3777/
+max_steps: 25
+goal: |
+  You are visiting WaveCode for the first time. You have heard it described as
+  "an open-source orchestrator that runs multiple CLI coding agents in parallel
+  on a server you control." You want to understand what it does and try one
+  of its core features.
+
+  Specifically:
+    1. Land on the dashboard.
+    2. Figure out what is currently happening — what agents are running, what
+       tasks exist, what the dashboard is telling you.
+    3. Try to do one meaningful action: open an agent, view its output, view
+       a task, or browse artifacts.
+    4. Form an opinion about whether you understand what this product does
+       within the first 60 seconds.
+
+  Report any moment where you were confused, where labels didn't match your
+  mental model, where empty states were unhelpful, or where you'd ask a
+  designer "why is this here?". Report bugs separately.
+acceptance_criteria:
+  - Dashboard renders without console errors
+  - Agent cards (or empty state) are visible and meaningful
+  - Navigation between primary views (agents, tasks, artifacts) works
+  - At least one core action can be completed end-to-end

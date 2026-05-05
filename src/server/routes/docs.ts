@@ -208,4 +208,50 @@ export function registerDocsRoutes(app: Hono<NodeAppEnv>): void {
     if (!doc) return c.json({ error: 'File not found' }, 404);
     return c.json(doc);
   });
+
+  /**
+   * Write a markdown doc into an agent's workspace. Used by external
+   * tools (e.g. the QA agent) to attach reports to a specific agent so
+   * they appear under that agent's docs in the UI.
+   */
+  app.post('/api/agents/:id/docs', async (c) => {
+    const agentId = c.req.param('id');
+    const result = getAgent(agentId);
+    if (!result.ok) return c.json({ error: 'Agent not found' }, 404);
+    const workspace = result.data.workspace;
+    if (!workspace) {
+      return c.json({ error: 'Agent has no workspace; cannot write doc' }, 400);
+    }
+
+    const body = await c.req.json<{ filename: string; content: string; subdir?: string }>();
+    if (!body || typeof body.filename !== 'string' || typeof body.content !== 'string') {
+      return c.json({ error: 'filename (string) and content (string) required' }, 400);
+    }
+
+    const safeFilename = path.basename(body.filename).replace(/[^a-zA-Z0-9._-]/g, '_');
+    if (!safeFilename.endsWith('.md')) {
+      return c.json({ error: 'Filename must end in .md' }, 400);
+    }
+
+    const subdir = body.subdir ?? '';
+    if (subdir.includes('..') || path.isAbsolute(subdir)) {
+      return c.json({ error: 'subdir must be a simple relative path' }, 400);
+    }
+
+    const targetDir = path.resolve(workspace, subdir);
+    if (!targetDir.startsWith(path.resolve(workspace))) {
+      return c.json({ error: 'Path traversal detected' }, 400);
+    }
+
+    fs.mkdirSync(targetDir, { recursive: true });
+    const fullPath = path.join(targetDir, safeFilename);
+    fs.writeFileSync(fullPath, body.content, 'utf-8');
+
+    const relPath = path.relative(workspace, fullPath).split(path.sep).join('/');
+    const slug = createAgentDocSlug(agentId, relPath);
+    return c.json(
+      { ok: true, path: relPath, slug, url: `/docs/${slug}` },
+      201,
+    );
+  });
 }

@@ -1,0 +1,28 @@
+id: explore
+title: First-time exploration of an unknown app
+starting_url: http://localhost:3000/
+max_steps: 25
+goal: |
+  You have just been pointed at a web app you have never seen before. You
+  know nothing about what it does — only what is on the screen.
+
+  Your job:
+    1. Land on the page and figure out what this app is supposed to do.
+    2. Try to do whatever the app's primary action seems to be — sign up,
+       log in, create something, search, configure something. Pick whatever
+       the most prominent CTA seems to invite.
+    3. If you hit auth and the persona has credentials, use them. If not,
+       record that as a finding and move on.
+    4. Spend the rest of your steps poking at the product the way a curious
+       new user would: try the navigation, look at empty states, click
+       things that look interactive, scroll the main view.
+    5. Form an honest opinion about what works, what is broken, what is
+       confusing, and what would make a new user bounce in 30 seconds.
+
+  Be specific in findings. Quote on-screen text. Compare to products you
+  know. Don't be polite — be useful.
+acceptance_criteria:
+  - Page renders without console errors
+  - Primary CTA is identifiable from the landing view alone
+  - Primary action can be either completed or fails with clear feedback
+  - Navigation between primary views works without dead ends

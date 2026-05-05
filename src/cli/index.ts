@@ -9,6 +9,7 @@ import { fork, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getServerEntryUrl, resolveAppRoot, resolveServerEntry } from './server-entry.js';
+import { registerQaCommands } from '../qa/cli.js';
 
 const APP_ROOT = resolveAppRoot(import.meta.dirname);
 process.chdir(APP_ROOT);
@@ -412,6 +413,8 @@ serverCmd
       console.log('WaveCode was not running (stale PID file removed).');
     }
   });
+
+registerQaCommands(program);
 
 program.parse();
 
