@@ -15,4 +15,5 @@ wavecode-*.tgz
 .DS_Store
 src/ui/dist/
 .claude/settings.local.json
+.claude/launch.json
 .wavecode-qa/
