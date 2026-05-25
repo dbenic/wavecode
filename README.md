@@ -24,6 +24,18 @@
 
 WaveCode orchestrates multiple CLI coding agents (Claude Code, Codex CLI, Aider, and others) running in tmux sessions. It provides a mobile-first PWA dashboard for monitoring, task dispatch, artifact sharing, code review, and research — accessible from phone or desktop.
 
+## Clients
+
+WaveCode is a server with a documented [HTTP/SSE API](docs/api.md). Multiple clients can connect to it:
+
+| Client | Where | Best for |
+|---|---|---|
+| **Web PWA** | Bundled in this repo (`src/ui/`) | Phone, casual monitoring, dispatch from anywhere |
+| **[WaveCode Desktop](https://github.com/dbenic/wavecode-desktop)** | Separate repo | Deep desk work — SSH-first, tmux-native, drag-drop, native notifications |
+| **CLI** | Bundled in this repo (`src/cli/`) | Scripting, CI integration, headless ops |
+
+Want to build another client? The API contract is in [`docs/api.md`](docs/api.md). Every client is a peer; none are privileged.
+
 ## Features
 
 - **Agent management** — Adopt existing tmux sessions or spawn new ones

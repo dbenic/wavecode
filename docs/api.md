@@ -348,3 +348,42 @@ Common event families:
 - `review.*`
 - `heartbeat`
 - `queue.empty`
+
+### Event payloads
+
+Each SSE message carries `{ id, type, entity_type, entity_id, payload, created_at }`.
+The most important events for client UIs (sidebar live indicators, dashboards):
+
+#### `agent.spawned`
+A new agent has been registered.
+Payload: full `Agent` object (`{ id, name, runtime, tmux_session, workspace, mode, status, created_at }`).
+
+#### `agent.killed`
+An agent has been removed.
+Payload: `{ id: string }`.
+
+#### `agent.status_changed`
+The agent's status transitioned (`idle` ↔ `working` ↔ `error`).
+Payload: `{ status, lastOutputLine, permissionMode, outputVersion, outputUpdatedAt, autoCorrect? }`.
+
+#### `agent.output_updated`
+The agent's tmux pane produced new output without a status change. Fired at the polling
+cadence of the output watcher; use it to flash a "this agent just spoke" indicator without
+needing to poll `/api/agents`.
+Payload: `{ lastOutputLine, permissionMode, outputVersion, outputUpdatedAt }`.
+
+#### `run.started` / `run.finished` / `run.failed`
+A run lifecycle event.
+`run.finished` payload: `{ run_id, exit_code, duration_s?, changed_files? }`.
+
+#### `task.created` / `task.completed`
+Task lifecycle. `task.completed` payload: `{ task_id, success: boolean }`.
+
+#### `artifact.created` / `artifact.deleted` / `artifact.detached`
+Artifact lifecycle. `artifact.created` payload is the full `Artifact` object.
+`artifact.deleted` payload: `{ id, filename, sha256 }`.
+`artifact.detached` payload: `{ agent_id, filename }`.
+
+#### `heartbeat`
+A periodic keep-alive (every ~15 s). Empty payload. Clients can use it to detect a
+dropped connection that wasn't otherwise signalled.
