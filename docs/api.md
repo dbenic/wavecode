@@ -54,7 +54,9 @@ record. Returns 400 for adopted agents (detach those instead). Emits
 `agent.killed`.
 
 ### `POST /api/agents/:id/send`
-Send text or a raw tmux key sequence to an agent.
+Send text or a raw tmux key sequence to an agent. This is prompt-only —
+it does **not** create a task or run. CLI `wavecode send` instead POSTs
+`/api/tasks` with `agent_id` so the daemon records and dispatches a run.
 
 Body:
 `{ text: string, raw?: boolean }`
@@ -154,7 +156,9 @@ Query:
 Get one task with dependency and run context.
 
 ### `POST /api/tasks`
-Create a task.
+Create a task. When `autonomy.auto_dispatch` is on, the daemon dispatches
+the next run. CLI `wavecode queue` / `wavecode send` and MCP `create_task`
+all use this endpoint so the daemon owns the runner lifecycle.
 
 Body:
 `{ prompt: string, agent_id?: string, priority?: number, depends_on?: string[] }`

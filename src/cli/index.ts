@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { initDb, listAgents, insertTask, listTasks, listReviewableRuns, getTask as getTaskDb, getAgent as getAgentDb, type Task } from '../server/db.js';
+import { initDb, listAgents, listTasks, listReviewableRuns, getTask as getTaskDb, getAgent as getAgentDb } from '../server/db.js';
 import { loadConfig } from '../server/config.js';
 import * as sessionManager from '../server/session-manager.js';
-import * as outputWatcher from '../server/output-watcher.js';
-import * as taskDispatcher from '../server/task-dispatcher.js';
 import { fork, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getServerEntryUrl, resolveAppRoot, resolveServerEntry } from './server-entry.js';
+import { queueTask, type QueueTaskResult } from './queue-task.js';
 import { registerQaCommands } from '../qa/cli.js';
 
 const APP_ROOT = resolveAppRoot(import.meta.dirname);
@@ -126,8 +125,8 @@ program
 // --- send ---
 program
   .command('send <agent> <prompt>')
-  .description('Send a prompt to an agent via tmux send-keys')
-  .action((agent, prompt) => {
+  .description('Assign a task to an agent (same as queue --agent); the daemon creates the run')
+  .action(async (agent, prompt) => {
     initDb();
     loadInstalledConfig();
 
@@ -137,12 +136,8 @@ program
       process.exit(1);
     }
 
-    const result = sessionManager.sendKeys(agentResult.data.id, prompt);
-    if (!result.ok) {
-      console.error('Error:', result.error);
-      process.exit(1);
-    }
-    console.log(`✓ Sent to '${agentResult.data.name}'.`);
+    const result = await queueTask({ prompt, agentId: agentResult.data.id });
+    printQueueResult(result, { assignedTo: agentResult.data.name });
   });
 
 // --- logs ---
@@ -201,15 +196,16 @@ program
 // --- queue ---
 program
   .command('queue <prompt>')
-  .description('Add a task to the queue')
+  .description('Create a task via the daemon (same as POST /api/tasks); the daemon dispatches the run')
   .option('--agent <name>', 'Assign to specific agent')
   .option('--priority <n>', 'Priority (higher = first)', '0')
   .option('--depends-on <ids>', 'Comma-separated task IDs this depends on')
-  .action((prompt, opts) => {
+  .action(async (prompt, opts) => {
     initDb();
     loadInstalledConfig();
 
     let agentId: string | undefined;
+    let agentName: string | undefined;
     if (opts.agent) {
       const agentResult = sessionManager.get(opts.agent);
       if (!agentResult.ok) {
@@ -217,30 +213,20 @@ program
         process.exit(1);
       }
       agentId = agentResult.data.id;
+      agentName = agentResult.data.name;
     }
 
-    const result = insertTask({
+    const dependsOn = opts.dependsOn
+      ? opts.dependsOn.split(',').map((s: string) => s.trim()).filter(Boolean)
+      : undefined;
+
+    const result = await queueTask({
       prompt,
-      agent_id: agentId,
+      agentId,
       priority: parseInt(opts.priority, 10),
+      dependsOn,
     });
-
-    if (!result.ok) {
-      console.error('Error:', result.error);
-      process.exit(1);
-    }
-
-    // Add dependencies
-    if (opts.dependsOn) {
-      const depIds = opts.dependsOn.split(',').map((s: string) => s.trim());
-      for (const depId of depIds) {
-        taskDispatcher.addDependency(result.data.id, depId);
-      }
-    }
-
-    console.log(`✓ Task queued: ${result.data.id}`);
-    if (agentId) console.log(`  Assigned to: ${opts.agent}`);
-    if (opts.dependsOn) console.log(`  Depends on: ${opts.dependsOn}`);
+    printQueueResult(result, { assignedTo: agentName, dependsOn: opts.dependsOn });
   });
 
 // --- tasks ---
@@ -495,6 +481,26 @@ program
   });
 
 program.parse();
+
+function printQueueResult(
+  result: QueueTaskResult,
+  extras: { assignedTo?: string; dependsOn?: string } = {},
+): void {
+  if (!result.ok) {
+    console.error('Error:', result.error);
+    process.exit(1);
+  }
+
+  if (result.data.via === 'http') {
+    console.log(`✓ Task queued: ${result.data.id}`);
+    console.log('  Daemon will create and dispatch the run.');
+  } else {
+    console.log(`✓ Task saved: ${result.data.id}`);
+    if (result.hint) console.log(`  ${result.hint}`);
+  }
+  if (extras.assignedTo) console.log(`  Assigned to: ${extras.assignedTo}`);
+  if (extras.dependsOn) console.log(`  Depends on: ${extras.dependsOn}`);
+}
 
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.floor(seconds)}s`;

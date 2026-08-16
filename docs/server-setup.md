@@ -215,7 +215,7 @@ ssh wavecode@YOUR_SERVER_IP
 
 # Start a coding agent in tmux
 tmux new -s cl-backend
-claude   # or: codex --full-auto / aider --yes
+claude --dangerously-skip-permissions   # or: grok --always-approve / aider --yes
 
 # Detach (Ctrl+B, D), then adopt in WaveCode
 wavecode scan

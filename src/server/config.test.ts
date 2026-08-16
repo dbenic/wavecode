@@ -42,14 +42,18 @@ describe('config.ts — security', () => {
     }
   });
 
-  it('uses the documented safer default Claude runtime command', async () => {
+  it('uses the live no-click bypass runtime commands', async () => {
     const { loadConfig, updateConfig, getConfig } = await import('./config.js');
 
     loadConfig(configPath);
     updateConfig({ server: { port: 4000, host: '0.0.0.0' } });
 
     const cfg = getConfig();
-    expect(cfg.runtimes['claude-code']?.command).toBe('claude --permission-mode bypassPermissions');
+    expect(cfg.runtimes['claude-code']?.command).toBe('claude --dangerously-skip-permissions');
+    expect(cfg.runtimes.grok?.command).toBe('grok --always-approve');
+    expect(cfg.runtimes.codex?.command).toBe(
+      'codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust',
+    );
   });
 
   it('ignores disallowed top-level updates such as auth overrides', async () => {

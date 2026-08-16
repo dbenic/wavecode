@@ -24,13 +24,19 @@ sandbox:
 # to inject an agent's pinned model/effort into the command at spawn time
 # (e.g. `claude ... --model claude-opus-5`). Without the flag the pin is still
 # recorded on the agent and checked against delivery reports at review time.
+# Live no-click bypass flags. Claude may still show a first-run
+# "Bypass Permissions / Yes, I accept" dialog; the output watcher dismisses it.
 runtimes:
   claude-code:
-    command: claude --permission-mode bypassPermissions
+    command: claude --dangerously-skip-permissions
     idle_pattern: '\$\s*$'
     model_flag: --model
+  grok:
+    command: grok --always-approve
+    idle_pattern: '^>\s*$'
+    model_flag: --model
   codex:
-    command: codex --full-auto
+    command: codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust
     idle_pattern: '^>\s*$'
     model_flag: -m
   aider:

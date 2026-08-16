@@ -2,8 +2,22 @@
  * Phase 3 Tests — output-watcher.ts (status detection, tick guard)
  */
 
-import { describe, it, expect } from 'vitest';
-import { detectPermissionMode, detectStatus } from './output-watcher.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('./session-manager.js', () => ({
+  sendRawKeys: vi.fn(() => ({ ok: true, data: undefined })),
+  capturePane: vi.fn(),
+}));
+
+import {
+  CLAUDE_BYPASS_DIALOG_COOLDOWN_MS,
+  detectPermissionMode,
+  detectStatus,
+  isClaudeBypassAcceptDialog,
+  maybeDismissFirstRunDialog,
+  resetFirstRunDialogStateForTest,
+} from './output-watcher.js';
+import { sendRawKeys } from './session-manager.js';
 
 describe('output-watcher — status detection', () => {
   describe('Claude Code', () => {
@@ -85,5 +99,49 @@ gpt-5.4 xhigh · 47% left · ~/project
     it('detects ask permission mode', () => {
       expect(detectPermissionMode('Do you want to proceed? Enter to confirm')).toBe('ask');
     });
+  });
+});
+
+describe('output-watcher — Claude first-run dialog', () => {
+  const dialog = `
+Bypass Permissions
+
+Claude Code can now bypass permissions for this session.
+
+Do you want to proceed?
+
+   1. No
+❯  2. Yes, I accept
+`.trim();
+
+  beforeEach(() => {
+    resetFirstRunDialogStateForTest();
+    vi.mocked(sendRawKeys).mockClear();
+    vi.mocked(sendRawKeys).mockReturnValue({ ok: true, data: undefined });
+  });
+
+  it('detects the Bypass Permissions accept dialog', () => {
+    expect(isClaudeBypassAcceptDialog(dialog)).toBe(true);
+    expect(isClaudeBypassAcceptDialog('Yes, I accept')).toBe(false);
+    expect(isClaudeBypassAcceptDialog('Bypass Permissions only')).toBe(false);
+    expect(isClaudeBypassAcceptDialog('Do you want to proceed?\nbypass mode\nYes, I accept')).toBe(true);
+  });
+
+  it('sends Down then Enter and honors the cooldown', () => {
+    const t0 = 1_000_000;
+    expect(maybeDismissFirstRunDialog('agent-1', dialog, t0)).toBe(true);
+    expect(sendRawKeys).toHaveBeenNthCalledWith(1, 'agent-1', 'Down');
+    expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'agent-1', 'Enter');
+
+    expect(maybeDismissFirstRunDialog('agent-1', dialog, t0 + CLAUDE_BYPASS_DIALOG_COOLDOWN_MS - 1)).toBe(false);
+    expect(sendRawKeys).toHaveBeenCalledTimes(2);
+
+    expect(maybeDismissFirstRunDialog('agent-1', dialog, t0 + CLAUDE_BYPASS_DIALOG_COOLDOWN_MS)).toBe(true);
+    expect(sendRawKeys).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not send keys for unrelated pane text', () => {
+    expect(maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.')).toBe(false);
+    expect(sendRawKeys).not.toHaveBeenCalled();
   });
 });

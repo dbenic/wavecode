@@ -2,6 +2,15 @@
 
 All notable changes to WaveCode are documented here.
 
+## Unreleased
+
+### Fixed
+- `wavecode queue` and `wavecode send` POST `/api/tasks` so the daemon creates and dispatches a run (same as MCP `create_task`). If the daemon is down, the task is saved locally as pending with a clear message.
+- Auto-review after `run.finished` always leaves a completed `code_reviews` row with a parsed verdict, including empty diffs and LLM/poll failures. `/api/reviews` `latestReview` is no longer null after a successful run.
+- Output watcher dismisses Claude Code's first-run "Bypass Permissions / Yes, I accept" dialog (Down+Enter, 8s cooldown).
+- Default runtime flags match current no-click bypass commands: `claude --dangerously-skip-permissions`, `grok --always-approve`, `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`.
+- Daemon polls `dispatchNext` so out-of-band pending inserts are not stuck.
+
 ## [0.1.0] — 2026-04-07
 
 ### Added

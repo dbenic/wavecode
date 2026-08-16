@@ -116,7 +116,7 @@ const tmuxHarness = vi.hoisted(() => {
       return sessions.get(name)?.workDir ?? null;
     },
     isAllowedRawKey(key: string): boolean {
-      return ['Enter', 'Escape', 'C-c', 'y', 'n'].includes(key);
+      return ['Enter', 'Escape', 'C-c', 'y', 'n', 'Down'].includes(key);
     },
     isValidSessionName(name: string): boolean {
       return /^[a-zA-Z0-9._-]+$/.test(name);
