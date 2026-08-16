@@ -111,6 +111,7 @@ export function previewBriefing(agentId: string, taskPrompt: string): string | n
     status: 'pending',
     priority: 0,
     created_at: new Date().toISOString(),
+    goal_id: null,
   };
 
   return buildBriefing(agent, fakeTask);
