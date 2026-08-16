@@ -9,7 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as child_process from 'node:child_process';
-import { isAllowedRawKey, isValidSessionName } from './tmux.js';
+import { isAllowedRawKey, isValidSessionName, sendLiteralText } from './tmux.js';
 
 // Mock execFileSync to inspect calls without needing real tmux
 vi.mock('node:child_process', () => ({
@@ -109,5 +109,21 @@ describe('tmux.ts — shell injection prevention', () => {
       expect(sessionArg).toBe("test'; rm -rf /; echo '");
       // The key point: it's a single argument, not parsed as shell code
     });
+  });
+});
+
+describe('sendLiteralText', () => {
+  it('passes -- before a chunk that starts with - so tmux does not treat it as a flag', () => {
+    const session = 'wc-grok';
+    const chunk = '-01M0ABCDEFGH.sock';
+    sendLiteralText(session, chunk);
+
+    // tmuxExec is mocked via execFileSync; assert the exact send-keys argv
+    const calls = vi.mocked(child_process.execFileSync).mock.calls;
+    const literalCall = calls.find(
+      (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('-l'),
+    );
+    expect(literalCall).toBeDefined();
+    expect(literalCall![1]).toEqual(['send-keys', '-t', session, '-l', '--', chunk]);
   });
 });

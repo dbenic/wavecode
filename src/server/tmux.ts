@@ -127,7 +127,8 @@ export function sendLiteralText(sessionName: string, text: string): void {
   const CHUNK_SIZE = 150;
   for (let i = 0; i < text.length; i += CHUNK_SIZE) {
     const chunk = text.substring(i, i + CHUNK_SIZE);
-    tmuxExec(['send-keys', '-t', sessionName, '-l', chunk]);
+    // `--` so a chunk that starts with `-` is never parsed as a tmux flag
+    tmuxExec(['send-keys', '-t', sessionName, '-l', '--', chunk]);
   }
 }
 
