@@ -4,17 +4,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../db.js', () => ({
   listArtifacts: vi.fn(),
   getArtifact: vi.fn(),
+  getAgent: vi.fn(() => ({ ok: false, error: 'not found' })),
+  getAgentByName: vi.fn(() => ({ ok: false, error: 'not found' })),
   getRun: vi.fn(),
   insertRunArtifact: vi.fn(),
 }));
 
-vi.mock('../session-manager.js', () => ({
-  get: vi.fn(() => ({ ok: false, error: 'not found' })),
-}));
-
 vi.mock('../artifact-manager.js', () => ({
   storeArtifactFromBuffer: vi.fn(),
-  storeArtifact: vi.fn(),
   attachArtifactToAgent: vi.fn(),
   shareArtifact: vi.fn(),
   getAgentArtifacts: vi.fn(),
@@ -105,6 +102,25 @@ describe('artifact routes', () => {
     await expect(listed.json()).resolves.toEqual([
       { id: 'artifact-json', filename: 'dropped.txt' },
     ]);
+  });
+
+  it('rejects JSON upload path so the daemon cannot read arbitrary VPS files', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: '/etc/passwd',
+        filename: 'passwd',
+      }),
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'JSON upload does not accept path. Send content_base64 + filename (MCP reads local paths and posts base64).',
+    });
+    expect(artifacts.storeArtifactFromBuffer).not.toHaveBeenCalled();
   });
 
   it('attaches an uploaded artifact to an agent via /attach', async () => {

@@ -319,10 +319,12 @@ set, a `run_artifacts` row is recorded.
 Body (either):
 - `multipart/form-data` with `file`, optional `note`, `agent_id`, `run_id`
 - `application/json`:
-  `{ filename?: string, content_base64?: string, path?: string, note?: string, agent_id?: string, run_id?: string }`
+  `{ filename: string, content_base64: string, note?: string, agent_id?: string, run_id?: string }`
 
-JSON callers must send `content_base64` + `filename`, or a `path` the
-daemon can read.
+JSON callers must send `content_base64` + `filename`. `path` is rejected
+(a token must not be able to read arbitrary VPS files). MCP
+`upload_artifact` still accepts a local `path` — the MCP process reads
+it and posts base64.
 
 ### `POST /api/artifacts/:id/attach`
 Attach an existing artifact to an agent (workspace copy +

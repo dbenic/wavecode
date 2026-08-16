@@ -1,9 +1,15 @@
 import type { Hono } from 'hono';
-import { getRun, insertRunArtifact, listArtifacts, getArtifact } from '../db.js';
+import { getAgent, getAgentByName, getRun, insertRunArtifact, listArtifacts, getArtifact } from '../db.js';
 import * as artifactManager from '../artifact-manager.js';
-import { get as getAgentByIdOrName } from '../session-manager.js';
 import type { NodeAppEnv } from '../auth.js';
 import type { Artifact, Result } from '../db.js';
+
+function resolveAgentId(idOrName: string): string {
+  const byId = getAgent(idOrName);
+  if (byId.ok) return byId.data.id;
+  const byName = getAgentByName(idOrName);
+  return byName.ok ? byName.data.id : idOrName;
+}
 
 function attachUploadedArtifact(
   artifact: Artifact,
@@ -30,8 +36,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
 
     // If filtering by agent, use the combined query (created by + shared to)
     if (agentId) {
-      const resolved = getAgentByIdOrName(agentId);
-      return c.json(artifactManager.getAgentArtifacts(resolved.ok ? resolved.data.id : agentId));
+      return c.json(artifactManager.getAgentArtifacts(resolveAgentId(agentId)));
     }
 
     return c.json(listArtifacts({
@@ -84,39 +89,35 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
         run_id?: string;
       }>();
 
+      if (typeof body.path === 'string' && body.path.trim()) {
+        return c.json({
+          error: 'JSON upload does not accept path. Send content_base64 + filename (MCP reads local paths and posts base64).',
+        }, 400);
+      }
+
       const agentId = body.agent_id?.trim() || undefined;
       const runId = body.run_id?.trim() || undefined;
       const note = body.note?.trim() || undefined;
-      let result: Result<Artifact>;
-
-      if (body.content_base64) {
-        const filename = body.filename?.trim();
-        if (!filename) return c.json({ error: 'filename is required with content_base64' }, 400);
-        let buffer: Buffer;
-        try {
-          buffer = Buffer.from(body.content_base64, 'base64');
-        } catch {
-          return c.json({ error: 'content_base64 is not valid base64' }, 400);
-        }
-        if (buffer.length === 0) return c.json({ error: 'content_base64 decoded to an empty file' }, 400);
-        result = artifactManager.storeArtifactFromBuffer({
-          buffer,
-          filename,
-          sourceAgentId: agentId,
-          sourceRunId: runId,
-          note,
-        });
-      } else if (body.path?.trim()) {
-        result = artifactManager.storeArtifact({
-          sourcePath: body.path.trim(),
-          filename: body.filename?.trim() || undefined,
-          sourceAgentId: agentId,
-          sourceRunId: runId,
-          note,
-        });
-      } else {
-        return c.json({ error: 'Provide content_base64 + filename, or path' }, 400);
+      const filename = body.filename?.trim();
+      if (!body.content_base64 || !filename) {
+        return c.json({ error: 'Provide content_base64 + filename' }, 400);
       }
+
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.from(body.content_base64, 'base64');
+      } catch {
+        return c.json({ error: 'content_base64 is not valid base64' }, 400);
+      }
+      if (buffer.length === 0) return c.json({ error: 'content_base64 decoded to an empty file' }, 400);
+
+      const result = artifactManager.storeArtifactFromBuffer({
+        buffer,
+        filename,
+        sourceAgentId: agentId,
+        sourceRunId: runId,
+        note,
+      });
 
       if (!result.ok) return c.json({ error: result.error }, 400);
 

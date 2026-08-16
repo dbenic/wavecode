@@ -86,8 +86,9 @@ implementer. The file does **not** stay in Grok Bot chat. CountixDev
 pushes it into WaveCode, then assigns.
 
 ```
-1. upload_artifact     path or content_base64 + filename
-                       (optional agent_id copies immediately)
+1. upload_artifact     MCP `path` (read locally) or content_base64 + filename
+                       (optional agent_id copies immediately).
+                       The daemon JSON API does not accept `path`.
 2. share_artifact      artifact_id + agent_id
                        → file lands at attached_path in the
                          agent's .wavecode/artifacts workspace
