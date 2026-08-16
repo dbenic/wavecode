@@ -121,7 +121,7 @@ In a separate tmux session, start any supported CLI agent:
 
 ```bash
 tmux new -s my-agent
-claude                  # or: codex --full-auto, aider --yes
+claude --dangerously-skip-permissions   # or: grok --always-approve, aider --yes
 ```
 
 ### 3. Adopt the agent
@@ -135,6 +135,8 @@ That's it. WaveCode monitors the session, detects idle/working status, and lets 
 Go to **Tasks** → **New Task** → write your prompt → assign to an agent → **Create**.
 
 WaveCode sends the prompt to the agent's tmux session and tracks the run to completion.
+
+From the CLI, `wavecode queue` and `wavecode send <agent>` POST `/api/tasks` so the running daemon creates the task and dispatches a run. If the daemon is down, the task is saved as pending and a run starts only after the daemon is up. `POST /api/agents/:id/send` remains send-keys only (no task/run).
 
 ## Architecture
 
@@ -185,10 +187,13 @@ autonomy:
 
 runtimes:
   claude-code:
-    command: claude --permission-mode bypassPermissions
+    command: claude --dangerously-skip-permissions
     idle_pattern: '\$\s*$'
+  grok:
+    command: grok --always-approve
+    idle_pattern: '^>\s*$'
   codex:
-    command: codex --full-auto
+    command: codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust
     idle_pattern: '^>\s*$'
   aider:
     command: aider --yes
@@ -341,8 +346,9 @@ pip install aider-chat
 
 | Agent | Command | Notes |
 |-------|---------|-------|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | Full support with bypass mode |
-| [Codex CLI](https://github.com/openai/codex) | `codex --full-auto` | OpenAI's coding agent |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude --dangerously-skip-permissions` | First-run accept dialog is dismissed by the output watcher |
+| [Grok CLI](https://docs.x.ai) | `grok --always-approve` | xAI coding agent |
+| [Codex CLI](https://github.com/openai/codex) | `codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust` | OpenAI's coding agent (`--full-auto` is not valid on current Codex) |
 | [Aider](https://aider.chat) | `aider --yes` | Works with any LLM backend |
 | Custom | Any command | Configure idle pattern in config.yaml |
 

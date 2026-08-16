@@ -91,7 +91,7 @@ export function countIssues(feedback: string): number {
 
 export function getReviewsForRun(runId: string): CodeReview[] {
   return getDb().prepare(
-    'SELECT * FROM code_reviews WHERE run_id = ? ORDER BY created_at DESC'
+    'SELECT * FROM code_reviews WHERE run_id = ? ORDER BY created_at DESC, id DESC'
   ).all(runId) as CodeReview[];
 }
 
@@ -114,29 +114,57 @@ export function getReview(reviewId: string): CodeReview | null {
 
 // --- Diff capture ---
 
-function captureGitDiff(tmuxSession: string): string | null {
+function gitOutput(dir: string, args: string[]): string | null {
   try {
-    const paneDir = tmux.getPaneDir(tmuxSession);
-    if (!paneDir) return null;
-
-    // Try staged + unstaged diff first, fall back to unstaged only
-    let diff: string;
-    try {
-      diff = execFileSync('git', ['-C', paneDir, 'diff', 'HEAD'], {
-        encoding: 'utf-8',
-        timeout: 10000,
-      }).trim();
-    } catch {
-      diff = execFileSync('git', ['-C', paneDir, 'diff'], {
-        encoding: 'utf-8',
-        timeout: 10000,
-      }).trim();
-    }
-
-    return diff || null;
+    const output = execFileSync('git', ['-C', dir, ...args], {
+      encoding: 'utf-8',
+      timeout: 10000,
+    }).trim();
+    return output || null;
   } catch {
     return null;
   }
+}
+
+function formatChangedFiles(changedFiles: string | null | undefined): string | null {
+  if (!changedFiles) return null;
+  try {
+    const files = JSON.parse(changedFiles) as unknown;
+    if (!Array.isArray(files) || files.length === 0) return null;
+    const names = files.filter((f): f is string => typeof f === 'string' && f.trim().length > 0);
+    if (names.length === 0) return null;
+    return `Changed files (no unified diff available):\n${names.map((f) => `- ${f}`).join('\n')}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Capture a reviewable diff. Prefer the tmux pane cwd, then the agent's
+ * workspace; if the working tree is clean, fall back to `git show HEAD`
+ * (the agent may have committed) and finally `run.changed_files`.
+ */
+export function captureGitDiff(opts: {
+  tmuxSession: string;
+  workspace?: string | null;
+  changedFiles?: string | null;
+}): string | null {
+  const dirs = [...new Set(
+    [tmux.getPaneDir(opts.tmuxSession), opts.workspace]
+      .filter((dir): dir is string => typeof dir === 'string' && dir.trim().length > 0),
+  )];
+
+  for (const dir of dirs) {
+    const working = gitOutput(dir, ['diff', 'HEAD']) ?? gitOutput(dir, ['diff']);
+    if (working) return working;
+  }
+
+  for (const dir of dirs) {
+    const committed = gitOutput(dir, ['show', 'HEAD', '--format=', '--']);
+    if (committed) return committed;
+  }
+
+  return formatChangedFiles(opts.changedFiles);
 }
 
 // --- Self-Review ---
@@ -152,7 +180,11 @@ export async function requestSelfReview(runId: string): Promise<Result<CodeRevie
   const agent = agentResult.data;
 
   // Capture diff
-  const diff = captureGitDiff(agent.tmux_session);
+  const diff = captureGitDiff({
+    tmuxSession: agent.tmux_session,
+    workspace: agent.workspace,
+    changedFiles: run.changed_files,
+  });
 
   // Create review record
   const reviewId = generateId();
@@ -174,7 +206,9 @@ Start your review with "REVIEW:" so I can capture the results.`;
 
   const sendResult = sessionManager.sendKeys(agent.id, reviewPrompt);
   if (!sendResult.ok) {
-    getDb().prepare('UPDATE code_reviews SET status = ? WHERE id = ?').run('failed', reviewId);
+    finalizeReview(reviewId, systemReviewFeedback(`failed to send review prompt: ${sendResult.error}`), {
+      allowFixLoop: false,
+    });
     return { ok: false, error: sendResult.error };
   }
 
@@ -211,17 +245,7 @@ export async function requestCrossModelReview(
   const agent = agentResult.data;
   const config = getConfig();
 
-  // Capture diff from the original agent
-  const diff = captureGitDiff(agent.tmux_session);
-  if (!diff) {
-    return { ok: false, error: 'No git diff found — agent may not have made changes' };
-  }
-
-  // Also capture the agent's recent output for context
-  const outputResult = sessionManager.capturePane(agent.tmux_session, 30);
-  const agentOutput = outputResult.ok ? outputResult.data : '';
-
-  // Find or use the reviewer agent
+  // Find or use the reviewer agent before INSERT so the row records it
   let reviewerAgent: typeof agent | null = null;
 
   if (reviewerAgentId) {
@@ -229,17 +253,30 @@ export async function requestCrossModelReview(
     if (result.ok) reviewerAgent = result.data;
   }
 
-  // Determine the runtime to use
   const runtime = reviewerRuntime ?? config.review.default_reviewer;
+  const diff = captureGitDiff({
+    tmuxSession: agent.tmux_session,
+    workspace: agent.workspace,
+    changedFiles: run.changed_files,
+  });
 
-  // Create review record
   const reviewId = generateId();
   getDb().prepare(`
     INSERT INTO code_reviews (id, run_id, reviewer_type, reviewer_agent_id, reviewer_runtime, status, diff, fix_round)
     VALUES (?, ?, 'cross-model', ?, ?, 'reviewing', ?, ?)
   `).run(reviewId, runId, reviewerAgent?.id ?? null, runtime, diff, fixRound);
 
-  // Build the review prompt with the diff
+  if (!diff) {
+    finalizeReview(reviewId, systemReviewFeedback('no diff available to review'), { allowFixLoop: false });
+    const review = getReview(reviewId);
+    return review
+      ? { ok: true, data: review }
+      : { ok: false, error: 'Review row missing after empty-diff finalize' };
+  }
+
+  const outputResult = sessionManager.capturePane(agent.tmux_session, 30);
+  const agentOutput = outputResult.ok ? outputResult.data : '';
+
   const taskResult = getTask(run.task_id);
   const taskPrompt = taskResult.ok ? taskResult.data.prompt : 'unknown task';
 
@@ -269,34 +306,42 @@ ISSUES:
 - ...
 VERDICT: [PASS / NEEDS FIXES / REJECT]`;
 
-  if (reviewerAgent) {
-    // Send to existing agent
-    const sendResult = sessionManager.sendKeys(reviewerAgent.id, reviewPrompt);
-    if (!sendResult.ok) {
-      getDb().prepare('UPDATE code_reviews SET status = ? WHERE id = ?').run('failed', reviewId);
-      return { ok: false, error: `Failed to send to reviewer: ${sendResult.error}` };
-    }
-
-    pollForReviewCompletion(reviewId, reviewerAgent.tmux_session);
-  } else {
-    // No reviewer agent specified — use the WaveCode LLM (Claude API) directly
-    reviewWithLLM(reviewId, reviewPrompt, runtime);
-  }
-
   emit('review.ai_started', 'run', runId, {
     review_id: reviewId,
     type: 'cross-model',
     runtime,
     reviewer_agent: reviewerAgent?.name ?? 'llm-direct',
   });
-
   logger.info({ reviewId, runId, runtime, reviewer: reviewerAgent?.name ?? 'llm' }, 'Cross-model review started');
+
+  if (reviewerAgent) {
+    const sendResult = sessionManager.sendKeys(reviewerAgent.id, reviewPrompt);
+    if (!sendResult.ok) {
+      finalizeReview(reviewId, systemReviewFeedback(`failed to send review prompt: ${sendResult.error}`), {
+        allowFixLoop: false,
+      });
+      return { ok: false, error: `Failed to send to reviewer: ${sendResult.error}` };
+    }
+
+    pollForReviewCompletion(reviewId, reviewerAgent.tmux_session);
+  } else {
+    await reviewWithLLM(reviewId, reviewPrompt, runtime);
+  }
 
   const review = getDb().prepare('SELECT * FROM code_reviews WHERE id = ?').get(reviewId) as CodeReview;
   return { ok: true, data: review };
 }
 
 // --- LLM-direct review (no agent needed) ---
+
+function systemReviewFeedback(reason: string): string {
+  return [
+    `REVIEW SUMMARY: ${reason}`,
+    'ISSUES:',
+    `- [severity: MED] ${reason}`,
+    'VERDICT: NEEDS FIXES',
+  ].join('\n');
+}
 
 async function reviewWithLLM(reviewId: string, prompt: string, _runtime: string): Promise<void> {
   try {
@@ -306,15 +351,17 @@ async function reviewWithLLM(reviewId: string, prompt: string, _runtime: string)
     });
 
     if (!result.ok) {
-      getDb().prepare('UPDATE code_reviews SET status = ?, feedback = ? WHERE id = ?')
-        .run('failed', result.error, reviewId);
+      finalizeReview(reviewId, systemReviewFeedback(`LLM review failed: ${result.error}`), {
+        allowFixLoop: false,
+      });
       return;
     }
 
     finalizeReview(reviewId, result.data);
   } catch (e) {
-    getDb().prepare('UPDATE code_reviews SET status = ?, feedback = ? WHERE id = ?')
-      .run('failed', (e as Error).message, reviewId);
+    finalizeReview(reviewId, systemReviewFeedback(`LLM review failed: ${(e as Error).message}`), {
+      allowFixLoop: false,
+    });
   }
 }
 
@@ -323,7 +370,11 @@ async function reviewWithLLM(reviewId: string, prompt: string, _runtime: string)
  * completion event, and continue the automatic fix loop when configured.
  * Shared by the LLM-direct path and the tmux polling path.
  */
-export function finalizeReview(reviewId: string, feedback: string): void {
+export function finalizeReview(
+  reviewId: string,
+  feedback: string,
+  opts: { allowFixLoop?: boolean } = {},
+): void {
   const verdict = parseVerdict(feedback);
   const issuesFound = countIssues(feedback);
 
@@ -345,7 +396,9 @@ export function finalizeReview(reviewId: string, feedback: string): void {
     'Code review completed',
   );
 
-  maybeContinueFixLoop(review, verdict);
+  if (opts.allowFixLoop !== false) {
+    maybeContinueFixLoop(review, verdict);
+  }
 }
 
 // --- Automatic review loop ---
@@ -470,7 +523,9 @@ function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
     attempts++;
     if (attempts > maxAttempts) {
       clearInterval(timer);
-      getDb().prepare('UPDATE code_reviews SET status = ? WHERE id = ?').run('failed', reviewId);
+      finalizeReview(reviewId, systemReviewFeedback('reviewer poll timed out after 2 minutes'), {
+        allowFixLoop: false,
+      });
       return;
     }
 

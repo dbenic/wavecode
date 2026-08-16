@@ -1,10 +1,56 @@
 import { getAgent, updateAgentStatus, listRuns, listTasks, finishRun, updateTaskStatus, type Agent } from './db.js';
-import { capturePane } from './session-manager.js';
+import { capturePane, sendRawKeys } from './session-manager.js';
 import { emit } from './event-bus.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
 import { onAuthorAgentIdle } from './code-review.js';
 import logger from './logger.js';
+
+/** Cooldown between unattended Claude first-run dialog dismissals. */
+export const CLAUDE_BYPASS_DIALOG_COOLDOWN_MS = 8000;
+const lastDialogDismissAt = new Map<string, number>();
+
+export function resetFirstRunDialogStateForTest(): void {
+  lastDialogDismissAt.clear();
+}
+
+/**
+ * Claude Code's first-run "Bypass Permissions" confirmation.
+ * The accept action is the second radio row ("Yes, I accept").
+ */
+export function isClaudeBypassAcceptDialog(output: string): boolean {
+  if (!/Yes,\s*I accept/i.test(output)) return false;
+  if (/Bypass Permissions/i.test(output)) return true;
+  return /Do you want to proceed/i.test(output) && /bypass/i.test(output);
+}
+
+/**
+ * Dismiss the Claude first-run accept dialog with Down then Enter.
+ * Returns true when keys were sent (or attempted). Cooldown is ~8s.
+ */
+export function maybeDismissFirstRunDialog(
+  agentId: string,
+  output: string,
+  now = Date.now(),
+): boolean {
+  if (!isClaudeBypassAcceptDialog(output)) return false;
+
+  const last = lastDialogDismissAt.get(agentId) ?? 0;
+  if (now - last < CLAUDE_BYPASS_DIALOG_COOLDOWN_MS) return false;
+
+  lastDialogDismissAt.set(agentId, now);
+
+  const down = sendRawKeys(agentId, 'Down');
+  const enter = sendRawKeys(agentId, 'Enter');
+  if (!down.ok) {
+    logger.warn({ agentId, error: down.error }, 'Failed to dismiss Claude first-run dialog');
+  } else if (!enter.ok) {
+    logger.warn({ agentId, error: enter.error }, 'Failed to dismiss Claude first-run dialog');
+  } else {
+    logger.info({ agentId }, 'Dismissed Claude Bypass Permissions dialog');
+  }
+  return true;
+}
 
 /** Fire-and-forget: continue any pending fix-review loop for this agent. */
 function notifyReviewLoopAgentIdle(agentId: string): void {
@@ -103,6 +149,7 @@ function tickInner(agentId: string, state: WatcherState): void {
   if (!captureResult.ok) return;
 
   const output = captureResult.data;
+  maybeDismissFirstRunDialog(agentId, output);
   const outputChanged = output !== state.previousOutput;
   state.previousOutput = output;
 

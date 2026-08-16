@@ -243,12 +243,17 @@ function buildDefaults(baseDir: string): WaveConfig {
     sandbox: { disable_git_push: true, restrict_network: true },
     runtimes: {
       'claude-code': {
-        command: 'claude --permission-mode bypassPermissions',
+        command: 'claude --dangerously-skip-permissions',
         idle_pattern: '\\$\\s*$',
         model_flag: '--model',
       },
+      grok: {
+        command: 'grok --always-approve',
+        idle_pattern: '^>\\s*$',
+        model_flag: '--model',
+      },
       codex: {
-        command: 'codex --full-auto',
+        command: 'codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust',
         idle_pattern: '^>\\s*$',
         model_flag: '-m',
       },

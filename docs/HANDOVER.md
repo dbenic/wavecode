@@ -123,7 +123,8 @@ Test-suite gotchas that will bite you:
    deploy keys. Today isolation is behavioral (workspaces + review gate +
    GitHub branch rulesets).
 6. **Runtime tuning** — `grok` idle_pattern is a placeholder; verify against
-   the real TUI. First-run trust prompts (claude) could be pre-seeded.
+   the real TUI. Claude first-run "Yes, I accept" is dismissed by the
+   output watcher; saved accept flags remain a nice-to-have.
 
 ## Non-negotiables (do not "fix" these)
 

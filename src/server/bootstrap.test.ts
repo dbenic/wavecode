@@ -39,9 +39,20 @@ vi.mock('./startup-reconcile.js', () => ({
   reconcileStartupState: vi.fn(),
 }));
 
+vi.mock('./config.js', () => ({
+  getConfig: vi.fn(() => ({
+    autonomy: { auto_dispatch: true },
+  })),
+}));
+
+vi.mock('./task-dispatcher.js', () => ({
+  dispatchNext: vi.fn(),
+}));
+
 describe('bootstrap.ts', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -98,6 +109,8 @@ describe('bootstrap.ts', () => {
     expect(healthMonitor.startHealthMonitor).toHaveBeenCalledTimes(1);
     expect(result.agentCount).toBe(1);
     expect(result.startupReconciliation.agentsChecked).toBe(1);
+
+    bootstrap.shutdownApplication();
   });
 
   it('schedules artifact pruning and clears services on shutdown', async () => {
@@ -131,8 +144,38 @@ describe('bootstrap.ts', () => {
 
     bootstrap.shutdownApplication();
 
-    expect(healthMonitor.stopHealthMonitor).toHaveBeenCalledTimes(1);
-    expect(outputWatcher.stopAll).toHaveBeenCalledTimes(1);
-    expect(teamManager.stopAllCommsWatchers).toHaveBeenCalledTimes(1);
+    expect(healthMonitor.stopHealthMonitor).toHaveBeenCalled();
+    expect(outputWatcher.stopAll).toHaveBeenCalled();
+    expect(teamManager.stopAllCommsWatchers).toHaveBeenCalled();
+  });
+
+  it('polls dispatchNext so out-of-band pending tasks are not stuck', async () => {
+    const dispatcher = await import('./task-dispatcher.js');
+    const reconcile = await import('./startup-reconcile.js');
+    const db = await import('./db.js');
+    const { DISPATCH_POLL_MS } = await import('./bootstrap.js');
+
+    vi.spyOn(db, 'listAgents').mockReturnValue([]);
+    vi.mocked(reconcile.reconcileStartupState).mockResolvedValue({
+      agentsChecked: 0,
+      sessionsRecreated: 0,
+      sessionsInterrupted: 0,
+      adoptedMissingSessions: 0,
+      runsRecovered: 0,
+      tasksRequeued: 0,
+      tasksFailed: 0,
+      orphanRunningTasksRequeued: 0,
+      orphanRunningTasksFailed: 0,
+      agentResumeFailures: 0,
+    });
+
+    const bootstrap = await import('./bootstrap.js');
+    await bootstrap.bootstrapApplication();
+
+    vi.mocked(dispatcher.dispatchNext).mockClear();
+    vi.advanceTimersByTime(DISPATCH_POLL_MS);
+    expect(dispatcher.dispatchNext).toHaveBeenCalledTimes(1);
+
+    bootstrap.shutdownApplication();
   });
 });

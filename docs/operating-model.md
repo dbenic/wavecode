@@ -67,7 +67,11 @@ The review pipeline, in order:
    author; with no other agent available, the WaveCode LLM reviews directly.
    The reviewer answers in a fixed format; the parsed **verdict** and issue
    count are stored on the review row (an unparseable review is treated as
-   `needs-fixes`, never as a pass).
+   `needs-fixes`, never as a pass). An empty or uncapturable diff still
+   inserts a completed `code_reviews` row with `needs-fixes` so
+   `/api/reviews` `latestReview` is never null after auto-review. LLM
+   failures and reviewer poll timeouts finalize the same way — they do
+   not leave `status='failed'` with a null verdict.
 2. **Bounded fix loop**: a non-pass verdict pushes the feedback back into
    the author's terminal ("fix these, run the tests"). When the author goes
    idle again, the next review round starts automatically — up to

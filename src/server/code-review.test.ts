@@ -288,12 +288,92 @@ describe('code-review.ts', () => {
         fixesSentAt: '2026-08-16 10:00:00',
       });
 
-      // Diff capture fails (getPaneDir mocked to null) → the re-review
-      // attempt is made but cannot start; verify it TRIED by checking the
-      // failure path was hit rather than silently skipping.
-      const result = await codeReview.onAuthorAgentIdle(author.id);
-      expect(result).toBeUndefined();
+      await codeReview.onAuthorAgentIdle(author.id);
       expect(vi.mocked(tmux.getPaneDir)).toHaveBeenCalled();
+
+      const reviews = codeReview.getReviewsForRun(runId);
+      expect(reviews).toHaveLength(2);
+      const latest = reviews[0];
+      expect(latest.status).toBe('done');
+      expect(latest.verdict).toBe('needs-fixes');
+      expect(latest.fix_round).toBe(1);
+    });
+  });
+
+  describe('empty-diff and LLM-fail finalization', () => {
+    it('inserts a completed review with a verdict when there is no diff', async () => {
+      const codeReview = await import('./code-review.js');
+      const { runId } = await seedRunFixture();
+
+      await codeReview.maybeAutoReview(runId);
+
+      const reviews = codeReview.getReviewsForRun(runId);
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0].status).toBe('done');
+      expect(reviews[0].verdict).toBe('needs-fixes');
+      expect(reviews[0].feedback).toMatch(/no diff/i);
+      expect(codeReview.getLatestCompletedReview(runId)?.verdict).toBe('needs-fixes');
+    });
+
+    it('finalizes with a parsed verdict when the LLM review fails', async () => {
+      const db = await import('./db.js');
+      const codeReview = await import('./code-review.js');
+      const llm = await import('./llm-provider.js');
+      const { runId } = await seedRunFixture();
+
+      db.updateRunChangedFiles(runId, ['src/auth.ts']);
+      vi.mocked(llm.completeText).mockResolvedValue({ ok: false, error: 'provider timeout' });
+
+      const result = await codeReview.requestCrossModelReview(runId);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+
+      expect(result.data.status).toBe('done');
+      expect(result.data.verdict).toBe('needs-fixes');
+      expect(result.data.feedback).toMatch(/LLM review failed/i);
+      expect(codeReview.getLatestCompletedReview(runId)?.verdict).toBe('needs-fixes');
+    });
+  });
+
+  describe('captureGitDiff fallbacks', () => {
+    it('falls back to agent.workspace, then git show HEAD, then changed_files', async () => {
+      const { execFileSync } = await import('node:child_process');
+      const codeReview = await import('./code-review.js');
+      const tmux = await import('./tmux.js');
+
+      const repo = path.join(tmpDir, 'workspace-repo');
+      fs.mkdirSync(repo);
+      execFileSync('git', ['-C', repo, 'init']);
+      execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+      execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+      fs.writeFileSync(path.join(repo, 'app.ts'), 'const a = 1;\n');
+      execFileSync('git', ['-C', repo, 'add', 'app.ts']);
+      execFileSync('git', ['-C', repo, 'commit', '-m', 'init']);
+      fs.writeFileSync(path.join(repo, 'app.ts'), 'const a = 2;\n');
+
+      vi.mocked(tmux.getPaneDir).mockReturnValue(null);
+      const dirty = codeReview.captureGitDiff({
+        tmuxSession: 'wc-missing',
+        workspace: repo,
+      });
+      expect(dirty).toMatch(/const a = 2/);
+
+      execFileSync('git', ['-C', repo, 'add', 'app.ts']);
+      execFileSync('git', ['-C', repo, 'commit', '-m', 'update']);
+      const committed = codeReview.captureGitDiff({
+        tmuxSession: 'wc-missing',
+        workspace: repo,
+      });
+      expect(committed).toMatch(/const a = 2/);
+
+      const listed = codeReview.captureGitDiff({
+        tmuxSession: 'wc-missing',
+        workspace: null,
+        changedFiles: JSON.stringify(['src/auth.ts', 'src/db.ts']),
+      });
+      expect(listed).toBe(
+        'Changed files (no unified diff available):\n- src/auth.ts\n- src/db.ts',
+      );
     });
   });
 });
