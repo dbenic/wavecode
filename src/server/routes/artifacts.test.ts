@@ -8,6 +8,10 @@ vi.mock('../db.js', () => ({
   insertRunArtifact: vi.fn(),
 }));
 
+vi.mock('../session-manager.js', () => ({
+  get: vi.fn(() => ({ ok: false, error: 'not found' })),
+}));
+
 vi.mock('../artifact-manager.js', () => ({
   storeArtifactFromBuffer: vi.fn(),
   storeArtifact: vi.fn(),
@@ -127,6 +131,32 @@ describe('artifact routes', () => {
     await expect(response.json()).resolves.toEqual({
       ok: true,
       attached_path: '/workspace/agent-1/.wavecode/artifacts/brief.md',
+    });
+  });
+
+  it('shares an artifact and returns attached_path', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    vi.mocked(artifacts.shareArtifact).mockReturnValue({
+      ok: true,
+      data: {
+        attachedPath: '/workspace/countixdev/.wavecode/artifacts/spec.pdf',
+        notified: false,
+      },
+    } as never);
+
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts/artifact-1/share', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: 'countixdev' }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(artifacts.shareArtifact).toHaveBeenCalledWith('artifact-1', 'countixdev');
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      attached_path: '/workspace/countixdev/.wavecode/artifacts/spec.pdf',
+      notified: false,
     });
   });
 

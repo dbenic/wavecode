@@ -60,6 +60,7 @@ vi.mock('./config.js', () => ({
 
 vi.mock('./session-manager.js', () => ({
   sendKeys: sessionManagerMocks.sendKeys,
+  get: (idOrName: string) => dbMocks.getAgent(idOrName),
 }));
 
 vi.mock('./tmux.js', () => ({
@@ -303,7 +304,10 @@ describe('artifact-manager.ts', () => {
     const result = artifactManager.shareArtifact('artifact-2', 'agent-2');
 
     expect(result.ok).toBe(true);
+    if (!result.ok) return;
     const attachedPath = path.join(paneDir, '.wavecode', 'artifacts', 'review-notes.md');
+    expect(result.data.attachedPath).toBe(attachedPath);
+    expect(result.data.notified).toBe(true);
     expect(fs.readFileSync(attachedPath, 'utf-8')).toBe('Looks good.\n');
     expect(sessionManagerMocks.sendKeys).toHaveBeenCalledWith(
       'agent-2',
@@ -322,6 +326,40 @@ describe('artifact-manager.ts', () => {
         attached_path: attachedPath,
       }),
     );
+  });
+
+  it('still lands the file when send-keys notify fails', async () => {
+    const artifactManager = await import('./artifact-manager.js');
+    const storagePath = path.join(tempDir, 'storage', 'spec.pdf');
+    const workspace = path.join(tempDir, 'workspace-notify-fail');
+
+    fs.mkdirSync(path.dirname(storagePath), { recursive: true });
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(storagePath, '%PDF-fake');
+
+    dbMocks.getArtifact.mockReturnValue({
+      ok: true,
+      data: makeArtifact({
+        id: 'artifact-3',
+        filename: 'spec.pdf',
+        storage_path: storagePath,
+      }),
+    });
+    dbMocks.getAgent.mockReturnValue({
+      ok: true,
+      data: makeAgent({ id: 'agent-3', name: 'countixdev', workspace }),
+    });
+    sessionManagerMocks.sendKeys.mockReturnValue({
+      ok: false,
+      error: 'tmux session is not running',
+    });
+
+    const result = artifactManager.shareArtifact('artifact-3', 'agent-3');
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.notified).toBe(false);
+    expect(fs.readFileSync(result.data.attachedPath)).toEqual(Buffer.from('%PDF-fake'));
   });
 });
 

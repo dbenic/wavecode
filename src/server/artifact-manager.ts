@@ -3,7 +3,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   getDb,
-  getAgent,
   insertArtifact,
   getArtifact,
   listArtifacts,
@@ -21,9 +20,10 @@ import {
 } from './db.js';
 import { getConfig } from './config.js';
 import { emit } from './event-bus.js';
-import { sendKeys } from './session-manager.js';
+import { get as getAgentByIdOrName, sendKeys } from './session-manager.js';
 import * as tmux from './tmux.js';
 import { resolvePathWithinRoot } from './path-utils.js';
+import logger from './logger.js';
 
 const MIME_MAP: Record<string, string> = {
   '.ts': 'text/typescript',
@@ -101,8 +101,8 @@ function ensureWavecodeGitignore(workspace: string): void {
   }
 }
 
-function resolveAgentWorkspace(targetAgentId: string): Result<string> {
-  const agentResult = getAgent(targetAgentId);
+function resolveAgentWorkspace(targetAgentId: string): Result<{ workspace: string; agentId: string }> {
+  const agentResult = getAgentByIdOrName(targetAgentId);
   if (!agentResult.ok) return { ok: false, error: agentResult.error };
 
   const agent = agentResult.data;
@@ -111,7 +111,7 @@ function resolveAgentWorkspace(targetAgentId: string): Result<string> {
     return { ok: false, error: `Agent '${agent.name}' has no workspace directory` };
   }
 
-  return { ok: true, data: workspace };
+  return { ok: true, data: { workspace: workspace, agentId: agent.id } };
 }
 
 function ensureAgentArtifactsDir(workspace: string): Result<string> {
@@ -155,7 +155,7 @@ function copyArtifactToAgentWorkspace(
   const workspaceResult = resolveAgentWorkspace(targetAgentId);
   if (!workspaceResult.ok) return workspaceResult;
 
-  const dirResult = ensureAgentArtifactsDir(workspaceResult.data);
+  const dirResult = ensureAgentArtifactsDir(workspaceResult.data.workspace);
   if (!dirResult.ok) return dirResult;
 
   const targetFilename = sanitizeAttachmentFilename(artifact.filename);
@@ -167,7 +167,7 @@ function copyArtifactToAgentWorkspace(
     return { ok: false, error: `Failed to copy artifact into agent workspace: ${(e as Error).message}` };
   }
 
-  insertArtifactTarget(artifact.id, 'agent', targetAgentId);
+  insertArtifactTarget(artifact.id, 'agent', workspaceResult.data.agentId);
 
   return { ok: true, data: { attachedPath } };
 }
@@ -315,13 +315,15 @@ export function attachArtifactToAgent(
 }
 
 /**
- * Share an artifact with a target agent by copying to their worktree
- * and injecting a prompt.
+ * Share an artifact with a target agent: copy into their workspace
+ * (same as attachArtifactToAgent) and try to notify via send-keys.
+ * The file landing is the success condition — notify failure is non-fatal
+ * so orchestrators can still put attached_path in a create_task prompt.
  */
 export function shareArtifact(
   artifactId: string,
   targetAgentId: string,
-): Result<void> {
+): Result<{ attachedPath: string; notified: boolean }> {
   const artifactResult = getArtifact(artifactId);
   if (!artifactResult.ok) return { ok: false, error: artifactResult.error };
 
@@ -329,21 +331,26 @@ export function shareArtifact(
   const attachResult = copyArtifactToAgentWorkspace(artifact, targetAgentId);
   if (!attachResult.ok) return attachResult;
 
-  // Inject prompt to target agent
-  const promptText = `I've shared a file with you: "${artifact.filename}" (${formatBytes(artifact.size_bytes)}). It's copied into your workspace at: ${attachResult.data.attachedPath}. Please review it.`;
-
-  const sendResult = sendKeys(targetAgentId, promptText);
-  if (!sendResult.ok) {
-    return { ok: false, error: `Failed to notify agent: ${sendResult.error}` };
-  }
-
+  const attachedPath = attachResult.data.attachedPath;
   emit('artifact.shared', 'artifact', artifactId, {
     target_agent_id: targetAgentId,
     filename: artifact.filename,
-    attached_path: attachResult.data.attachedPath,
+    attached_path: attachedPath,
   });
 
-  return { ok: true, data: undefined };
+  const promptText = `I've shared a file with you: "${artifact.filename}" (${formatBytes(artifact.size_bytes)}). It's copied into your workspace at: ${attachedPath}. Please review it.`;
+  const resolved = resolveAgentWorkspace(targetAgentId);
+  const notifyId = resolved.ok ? resolved.data.agentId : targetAgentId;
+  const sendResult = sendKeys(notifyId, promptText);
+  if (!sendResult.ok) {
+    logger.warn(
+      { artifactId, targetAgentId, error: sendResult.error, attachedPath },
+      'Artifact copied into workspace but agent notify failed',
+    );
+    return { ok: true, data: { attachedPath, notified: false } };
+  }
+
+  return { ok: true, data: { attachedPath, notified: true } };
 }
 
 /**

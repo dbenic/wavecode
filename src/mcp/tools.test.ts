@@ -41,7 +41,7 @@ describe('mcp tools', () => {
       'promote_run', 'retry_run', 'handoff_run', 'reject_run',
       'send_message', 'list_messages',
       'list_goals', 'get_goal', 'create_goal',
-      'list_artifacts', 'upload_artifact', 'attach_artifact',
+      'list_artifacts', 'upload_artifact', 'attach_artifact', 'share_artifact',
       'list_decisions', 'record_decision',
     ]) {
       expect(names).toContain(required);
@@ -188,6 +188,14 @@ describe('mcp tools', () => {
     const attached = lastCall(fetchMock);
     expect(attached.url).toBe('http://wavecode.test:3777/api/artifacts/art-1/attach');
     expect(attached.body).toEqual({ agent_id: 'agent-1' });
+
+    await tool('share_artifact').handler(client, {
+      artifact_id: 'art-1',
+      agent_id: 'agent-1',
+    });
+    const shared = lastCall(fetchMock);
+    expect(shared.url).toBe('http://wavecode.test:3777/api/artifacts/art-1/share');
+    expect(shared.body).toEqual({ agent_id: 'agent-1', targetAgentId: 'agent-1' });
   });
 
   it('upload_artifact reads a local path and posts base64', async () => {

@@ -97,7 +97,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'create_task',
     description:
-      'Queue a task. Unassigned tasks go to any idle agent when auto_dispatch is on — pass agent_id to pin the assignee. depends_on builds a DAG. Optional goal_id (ULID or external_id like W0/G1) links a child to a seeded goal. Persist-only goals create no tasks; you add children yourself. hold:true skips auto-dispatch.',
+      'Queue a task. Unassigned tasks go to any idle agent when auto_dispatch is on — pass agent_id to pin the assignee. depends_on builds a DAG. Optional goal_id (ULID or external_id like W0/G1) links a child to a seeded goal. Persist-only goals create no tasks; you add children yourself. hold:true skips auto-dispatch. After upload_artifact / share_artifact, put the artifact id and attached_path in the prompt so the implementer can open the file in their workspace — do not leave the file only in chat.',
     schema: {
       prompt: z.string().describe('The task prompt'),
       agent_id: z.string().optional().describe('Assign to a specific agent (omit for any idle agent)'),
@@ -150,13 +150,13 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     handler: (client, args) => client.post('/goals', args),
   },
 
-  // --- Artifacts (immutable store; attach copies into the agent workspace) ---
+  // --- Artifacts (the share path: upload → attach → agent workspace) ---
   {
     name: 'list_artifacts',
     description:
-      'List artifacts in the WaveCode store. Filter by agent_id (created by or attached to) or run_id.',
+      'List artifacts in the WaveCode store. Filter by agent_id to confirm the implementer has the file (created by or attached/shared to that agent). This is how CountixDev verifies a spec/PDF/screenshot landed after upload_artifact + share_artifact.',
     schema: {
-      agent_id: z.string().optional().describe('Agent ID — created by or shared/attached to'),
+      agent_id: z.string().optional().describe('Agent ID or name — created by or shared/attached to'),
       run_id: z.string().optional().describe('Source run ID'),
     },
     handler: (client, args) => {
@@ -170,7 +170,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'upload_artifact',
     description:
-      'Upload a file into the existing WaveCode artifact store (sha256, no second store). Provide a local path (read by this MCP process) or content_base64 + filename. Optional agent_id copies the file into that agent\'s .wavecode/artifacts workspace and records artifact_targets. Optional run_id links run_artifacts.',
+      'THE share path step 1: push a file from the orchestrator into WaveCode (not Grok Bot chat). Path (read by this MCP process) or content_base64 + filename. Pass agent_id to copy into that agent\'s .wavecode/artifacts workspace immediately (returns attached_path the CLI agent can open). Otherwise call share_artifact / attach_artifact next. Same hashed store as the PWA — no second store.',
     schema: {
       path: z.string().optional().describe('Local file path readable by the MCP process'),
       content_base64: z.string().optional().describe('File bytes as base64 (use when the daemon cannot see path)'),
@@ -211,7 +211,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'attach_artifact',
     description:
-      'Attach an existing artifact to an agent (copy into .wavecode/artifacts + artifact_targets) and/or a run (run_artifacts). Does not create a second file store.',
+      'Quiet copy of an existing artifact into an agent workspace (.wavecode/artifacts + artifact_targets) and/or a run. Returns attached_path. Prefer share_artifact when handing a spec/PDF/screenshot to an implementer; use this when you only need the file on disk.',
     schema: {
       artifact_id: z.string().describe('Artifact ID'),
       agent_id: z.string().optional().describe('Copy into this agent\'s workspace'),
@@ -223,6 +223,20 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
         agent_id: args.agent_id,
         run_id: args.run_id,
         role: args.role,
+      }),
+  },
+  {
+    name: 'share_artifact',
+    description:
+      'THE share path step 2: hand an uploaded artifact to a target agent. Copies the file into that agent\'s .wavecode/artifacts workspace (CLI agent can open attached_path), records artifact_targets, and tries to notify the pane. File-on-disk is success even if notify fails. Then create_task with the id/path in the prompt, and list_artifacts(agent_id) to confirm.',
+    schema: {
+      artifact_id: z.string().describe('Artifact ID from upload_artifact'),
+      agent_id: z.string().describe('Target agent ID or name (the implementer)'),
+    },
+    handler: (client, args) =>
+      client.post(`/artifacts/${args.artifact_id}/share`, {
+        agent_id: args.agent_id,
+        targetAgentId: args.agent_id,
       }),
   },
 

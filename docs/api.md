@@ -332,10 +332,12 @@ Body:
 `{ agent_id?: string, run_id?: string, role?: string }`
 
 ### `POST /api/artifacts/:id/share`
-Share an artifact with an agent (workspace copy + a prompt in the pane).
+Share an artifact with an agent: copy into `.wavecode/artifacts` and try
+to notify the pane. File-on-disk is success; notify failure is non-fatal.
+Returns `attached_path` (the path the CLI agent can open).
 
 Body:
-`{ targetAgentId: string }`
+`{ targetAgentId?: string, agent_id?: string }`
 
 ### `GET /api/runs/:id/artifacts`
 List artifacts attached to a run.

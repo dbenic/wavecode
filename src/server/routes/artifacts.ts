@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import { getRun, insertRunArtifact, listArtifacts, getArtifact } from '../db.js';
 import * as artifactManager from '../artifact-manager.js';
+import { get as getAgentByIdOrName } from '../session-manager.js';
 import type { NodeAppEnv } from '../auth.js';
 import type { Artifact, Result } from '../db.js';
 
@@ -29,7 +30,8 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
 
     // If filtering by agent, use the combined query (created by + shared to)
     if (agentId) {
-      return c.json(artifactManager.getAgentArtifacts(agentId));
+      const resolved = getAgentByIdOrName(agentId);
+      return c.json(artifactManager.getAgentArtifacts(resolved.ok ? resolved.data.id : agentId));
     }
 
     return c.json(listArtifacts({
@@ -185,10 +187,17 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   app.post('/api/artifacts/:id/share', async (c) => {
-    const body = await c.req.json<{ targetAgentId: string }>();
-    const result = artifactManager.shareArtifact(c.req.param('id'), body.targetAgentId);
+    const body = await c.req.json<{ targetAgentId?: string; agent_id?: string }>();
+    const target = body.targetAgentId?.trim() || body.agent_id?.trim();
+    if (!target) return c.json({ error: 'targetAgentId or agent_id is required' }, 400);
+
+    const result = artifactManager.shareArtifact(c.req.param('id'), target);
     if (!result.ok) return c.json({ error: result.error }, 400);
-    return c.json({ ok: true });
+    return c.json({
+      ok: true,
+      attached_path: result.data.attachedPath,
+      notified: result.data.notified,
+    });
   });
 
   // Delete an artifact entirely
