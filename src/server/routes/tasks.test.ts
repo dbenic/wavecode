@@ -6,6 +6,7 @@ vi.mock('../db.js', () => ({
   getAgent: vi.fn(),
   getTask: vi.fn(),
   insertTask: vi.fn(),
+  findGoal: vi.fn(),
   listRuns: vi.fn(() => []),
   listTasks: vi.fn(() => []),
   updateTaskStatus: vi.fn(),
@@ -72,6 +73,98 @@ describe('task routes', () => {
     expect(response.status).toBe(400);
     expect(response.json).toEqual({ error: 'Dependency task not found: missing-task' });
     expect(db.insertTask).not.toHaveBeenCalled();
+  });
+
+  it('links a created task to a goal by ULID or external_id', async () => {
+    const db = await import('../db.js');
+    vi.mocked(db.findGoal).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'goal-1',
+        title: 'W0',
+        status: 'active',
+        workspace: null,
+        external_id: 'W0',
+        created_at: '2026-08-16T00:00:00Z',
+      },
+    } as never);
+    vi.mocked(db.insertTask).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'task-1',
+        agent_id: null,
+        prompt: 'Add /incoming route',
+        status: 'pending',
+        priority: 0,
+        created_at: '2026-08-16T00:00:00Z',
+        goal_id: 'goal-1',
+      },
+    } as never);
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks', 'POST', {
+      prompt: 'Add /incoming route',
+      goal_id: 'W0',
+      hold: true,
+    });
+
+    expect(response.status).toBe(201);
+    expect(db.findGoal).toHaveBeenCalledWith('W0');
+    expect(db.insertTask).toHaveBeenCalledWith({
+      prompt: 'Add /incoming route',
+      agent_id: undefined,
+      priority: undefined,
+      goal_id: 'goal-1',
+    });
+    expect(response.json).toMatchObject({ id: 'task-1', goal_id: 'goal-1' });
+  });
+
+  it('rejects create when goal_id does not resolve', async () => {
+    const db = await import('../db.js');
+    vi.mocked(db.findGoal).mockReturnValue({
+      ok: false,
+      error: "Goal 'missing' not found",
+    });
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks', 'POST', {
+      prompt: 'Orphan child',
+      goal_id: 'missing',
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.json).toEqual({ error: 'Goal not found: missing' });
+    expect(db.insertTask).not.toHaveBeenCalled();
+  });
+
+  it('skips auto-dispatch when hold is true', async () => {
+    const db = await import('../db.js');
+    const config = await import('../config.js');
+    const dispatcher = await import('../task-dispatcher.js');
+    vi.mocked(config.getConfig).mockReturnValue({
+      autonomy: { auto_dispatch: true, auto_restart: true, hang_timeout_min: 10, max_task_retries: 2 },
+    } as never);
+    vi.mocked(db.insertTask).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'task-hold',
+        agent_id: null,
+        prompt: 'Held work',
+        status: 'pending',
+        priority: 0,
+        created_at: '2026-08-16T00:00:00Z',
+        goal_id: null,
+      },
+    } as never);
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks', 'POST', {
+      prompt: 'Held work',
+      hold: true,
+    });
+
+    expect(response.status).toBe(201);
+    expect(dispatcher.dispatchNext).not.toHaveBeenCalled();
   });
 
   it('rejects retry for running tasks', async () => {

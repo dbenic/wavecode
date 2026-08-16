@@ -187,6 +187,62 @@ describe('goal-orchestrator.ts', () => {
     });
   });
 
+  it('isPersistOnlyGoal treats decompose:false and persist_only:true as persist-only', async () => {
+    const orchestrator = await import('./goal-orchestrator.js');
+    expect(orchestrator.isPersistOnlyGoal({})).toBe(false);
+    expect(orchestrator.isPersistOnlyGoal({ decompose: true })).toBe(false);
+    expect(orchestrator.isPersistOnlyGoal({ decompose: false })).toBe(true);
+    expect(orchestrator.isPersistOnlyGoal({ persist_only: true })).toBe(true);
+    expect(orchestrator.isPersistOnlyGoal({ persist_only: false })).toBe(false);
+  });
+
+  it('persistGoal inserts the row, emits goal.created, and does not decompose or dispatch', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+    const events = await import('./event-bus.js');
+    const llm = await import('./llm-provider.js');
+
+    vi.mocked(db.insertGoal).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'goal-w0',
+        title: 'W0 seed',
+        status: 'active',
+        workspace: '/ws/countix',
+        external_id: 'W0',
+        created_at: '2026-08-16T00:00:00Z',
+      },
+    } as never);
+
+    const orchestrator = await import('./goal-orchestrator.js');
+    const result = orchestrator.persistGoal({
+      title: 'W0 seed',
+      workspace: '/ws/countix',
+      external_id: 'W0',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(db.insertGoal).toHaveBeenCalledWith({
+      title: 'W0 seed',
+      workspace: '/ws/countix',
+      external_id: 'W0',
+    });
+    expect(events.emit).toHaveBeenCalledWith(
+      'goal.created',
+      'goal',
+      'goal-w0',
+      expect.objectContaining({
+        title: 'W0 seed',
+        external_id: 'W0',
+        task_count: 0,
+        persist_only: true,
+      }),
+    );
+    expect(db.insertTask).not.toHaveBeenCalled();
+    expect(dispatcher.dispatchNext).not.toHaveBeenCalled();
+    expect(llm.completeText).not.toHaveBeenCalled();
+  });
+
   it('rejects plans that depend on the current or a later task', async () => {
     const llm = await import('./llm-provider.js');
     const db = await import('./db.js');

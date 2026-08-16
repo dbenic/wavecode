@@ -4,10 +4,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../db.js', () => ({
   listArtifacts: vi.fn(),
   getArtifact: vi.fn(),
+  getRun: vi.fn(),
+  insertRunArtifact: vi.fn(),
 }));
 
 vi.mock('../artifact-manager.js', () => ({
   storeArtifactFromBuffer: vi.fn(),
+  storeArtifact: vi.fn(),
   attachArtifactToAgent: vi.fn(),
   shareArtifact: vi.fn(),
   getAgentArtifacts: vi.fn(),
@@ -58,6 +61,73 @@ describe('artifact routes', () => {
       filename: 'brief.md',
       attached_path: '/workspace/agent-1/.wavecode/artifacts/brief.md',
     }));
+  });
+
+  it('uploads a JSON base64 artifact and lists it', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    const db = await import('../db.js');
+    vi.mocked(artifacts.storeArtifactFromBuffer).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'artifact-json',
+        filename: 'dropped.txt',
+        storage_path: '/artifact-store/dropped.txt',
+      },
+    } as never);
+    vi.mocked(db.listArtifacts).mockReturnValue([
+      { id: 'artifact-json', filename: 'dropped.txt' },
+    ] as never);
+
+    const app = await createArtifactsApp();
+    const upload = await app.fetch(new Request('http://localhost/api/artifacts/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: 'dropped.txt',
+        content_base64: Buffer.from('hello from countix').toString('base64'),
+        note: 'chat drop',
+      }),
+    }));
+
+    expect(upload.status).toBe(201);
+    expect(artifacts.storeArtifactFromBuffer).toHaveBeenCalledWith(expect.objectContaining({
+      filename: 'dropped.txt',
+      note: 'chat drop',
+    }));
+    expect(artifacts.attachArtifactToAgent).not.toHaveBeenCalled();
+
+    const listed = await app.fetch(new Request('http://localhost/api/artifacts'));
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual([
+      { id: 'artifact-json', filename: 'dropped.txt' },
+    ]);
+  });
+
+  it('attaches an uploaded artifact to an agent via /attach', async () => {
+    const artifacts = await import('../artifact-manager.js');
+    const db = await import('../db.js');
+    vi.mocked(db.getArtifact).mockReturnValue({
+      ok: true,
+      data: { id: 'artifact-1', filename: 'brief.md' },
+    } as never);
+    vi.mocked(artifacts.attachArtifactToAgent).mockReturnValue({
+      ok: true,
+      data: { attachedPath: '/workspace/agent-1/.wavecode/artifacts/brief.md' },
+    } as never);
+
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts/artifact-1/attach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: 'agent-1' }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(artifacts.attachArtifactToAgent).toHaveBeenCalledWith('artifact-1', 'agent-1');
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      attached_path: '/workspace/agent-1/.wavecode/artifacts/brief.md',
+    });
   });
 
   it('GET /api/artifacts?agent_id uses getAgentArtifacts for combined query', async () => {

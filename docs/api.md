@@ -157,11 +157,17 @@ Get one task with dependency and run context.
 
 ### `POST /api/tasks`
 Create a task. When `autonomy.auto_dispatch` is on, the daemon dispatches
-the next run. CLI `wavecode queue` / `wavecode send` and MCP `create_task`
-all use this endpoint so the daemon owns the runner lifecycle.
+the next run unless `hold` is true. CLI `wavecode queue` / `wavecode send`
+and MCP `create_task` all use this endpoint so the daemon owns the runner
+lifecycle.
 
 Body:
-`{ prompt: string, agent_id?: string, priority?: number, depends_on?: string[] }`
+`{ prompt: string, agent_id?: string, priority?: number, depends_on?: string[], goal_id?: string, hold?: boolean }`
+
+`goal_id` is a parent goal ULID or `external_id` (e.g. `W0`, `G1`).
+Persist-only goals create no tasks — attach children yourself with this
+field. If `auto_dispatch` is on and you omit both `hold` and `agent_id`,
+an idle agent may pick up the unassigned pending task.
 
 ### `POST /api/tasks/:id/retry`
 Reset a failed or done task to `pending`.
@@ -186,12 +192,19 @@ Get one goal by ULID or `external_id` (e.g. `F-16`), plus child tasks
 and the same rollup.
 
 ### `POST /api/goals`
-Persist a goal, decompose it into tasks with `depends_on`, and attach
-those tasks to the goal. Emits `goal.created`.
+Persist a goal and emit `goal.created`.
+
+Default: LLM-decompose into child tasks with `depends_on`, then
+`dispatchNext`.
+
+`decompose: false` or `persist_only: true`: insert the goal row only
+(title, workspace, `external_id`). No LLM call, no child tasks, no
+dispatch. Use this to seed a board (`W0`, `G1`) before assigning work.
 
 Body:
-`{ goal: string, title?: string, workspace?: string, external_id?: string }`
+`{ goal?: string, title?: string, workspace?: string, external_id?: string, decompose?: boolean, persist_only?: boolean }`
 
+`goal` is required unless persist-only (then `title` or `goal` is required).
 `external_id` is an optional outside label (`F-16`, `G1`) — not an import
 from another tracker.
 
@@ -298,13 +311,28 @@ Get artifact metadata.
 Download artifact contents.
 
 ### `POST /api/artifacts/upload`
-Upload an artifact.
+Upload an artifact into the existing hashed store (not a second store).
+When `agent_id` is set, the file is copied into that agent's
+`.wavecode/artifacts` workspace (`artifact_targets`). When `run_id` is
+set, a `run_artifacts` row is recorded.
+
+Body (either):
+- `multipart/form-data` with `file`, optional `note`, `agent_id`, `run_id`
+- `application/json`:
+  `{ filename?: string, content_base64?: string, path?: string, note?: string, agent_id?: string, run_id?: string }`
+
+JSON callers must send `content_base64` + `filename`, or a `path` the
+daemon can read.
+
+### `POST /api/artifacts/:id/attach`
+Attach an existing artifact to an agent (workspace copy +
+`artifact_targets`) and/or a run (`run_artifacts`). Does not send-keys.
 
 Body:
-`multipart/form-data` with `file`, optional `note`, optional `agent_id`
+`{ agent_id?: string, run_id?: string, role?: string }`
 
 ### `POST /api/artifacts/:id/share`
-Share an artifact with an agent.
+Share an artifact with an agent (workspace copy + a prompt in the pane).
 
 Body:
 `{ targetAgentId: string }`

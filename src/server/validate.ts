@@ -118,6 +118,8 @@ export function validateTaskBody(body: {
   agent_id?: string;
   priority?: number;
   depends_on?: string[];
+  goal_id?: string;
+  hold?: boolean;
 }): string | null {
   if (!body.prompt || typeof body.prompt !== 'string') {
     return 'prompt is required';
@@ -135,6 +137,12 @@ export function validateTaskBody(body: {
     if (body.depends_on.some((dep) => typeof dep !== 'string' || !dep.trim())) {
       return 'depends_on must contain non-empty task IDs';
     }
+  }
+  if (body.goal_id !== undefined && (typeof body.goal_id !== 'string' || !body.goal_id.trim())) {
+    return 'goal_id must be a non-empty goal ULID or external_id';
+  }
+  if (body.hold !== undefined && typeof body.hold !== 'boolean') {
+    return 'hold must be a boolean';
   }
   return null;
 }

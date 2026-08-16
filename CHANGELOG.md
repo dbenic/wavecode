@@ -5,6 +5,9 @@ All notable changes to WaveCode are documented here.
 ## Unreleased
 
 ### Added
+- Persist-only goals: `POST /api/goals` and MCP `create_goal` accept `decompose: false` (or `persist_only`) to insert the goal row and emit `goal.created` without LLM decomposition or `dispatchNext`. Default still decomposes.
+- MCP artifact tools `list_artifacts`, `upload_artifact` (path or base64), `attach_artifact` wrap the existing hashed store. JSON `POST /api/artifacts/upload` and `POST /api/artifacts/:id/attach` so orchestrators can push a dropped file to an agent's `.wavecode/artifacts` workspace.
+- `create_task` / MCP accept optional `goal_id` (ULID or `external_id`) and `hold: true` to skip auto-dispatch.
 - Persisted goals (`goals` table, schema v10). `POST /api/goals` writes a parent row; decomposed tasks store `goal_id`. `GET /api/goals` and `GET /api/goals/:id` return child-task rollup counts. Optional `external_id` (e.g. `F-16`) is a label only.
 - MCP tools `list_goals`, `get_goal`, `create_goal`, `list_decisions`, `record_decision` so orchestrators can track epics and binding decisions without the UI.
 - Task Board goal rollup (title + n/m tasks done).

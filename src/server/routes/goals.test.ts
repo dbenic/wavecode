@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../goal-orchestrator.js', () => ({
   previewGoalPlan: vi.fn(),
   decomposeGoal: vi.fn(),
+  persistGoal: vi.fn(),
+  isPersistOnlyGoal: (body: { decompose?: unknown; persist_only?: unknown }) =>
+    body.decompose === false || body.persist_only === true,
 }));
 
 vi.mock('../db.js', () => ({
@@ -124,6 +127,92 @@ describe('goal routes', () => {
       workspace: undefined,
       external_id: 'F-16',
     });
+  });
+
+  it('persists a goal without decomposing when decompose is false', async () => {
+    const orchestrator = await import('../goal-orchestrator.js');
+    vi.mocked(orchestrator.persistGoal).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'goal-w0',
+        title: 'W0 seed',
+        status: 'active',
+        workspace: '/ws/countix',
+        external_id: 'W0',
+        created_at: '2026-08-16T00:00:00Z',
+      },
+    } as never);
+
+    const app = await createGoalApp();
+    const response = await requestJson(app, '/api/goals', 'POST', {
+      title: 'W0 seed',
+      workspace: '/ws/countix',
+      external_id: 'W0',
+      decompose: false,
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.json).toEqual({
+      goal: {
+        id: 'goal-w0',
+        title: 'W0 seed',
+        status: 'active',
+        workspace: '/ws/countix',
+        external_id: 'W0',
+        created_at: '2026-08-16T00:00:00Z',
+      },
+      tasks: [],
+      created_task_ids: [],
+      persist_only: true,
+    });
+    expect(orchestrator.persistGoal).toHaveBeenCalledWith({
+      title: 'W0 seed',
+      goal: undefined,
+      workspace: '/ws/countix',
+      external_id: 'W0',
+    });
+    expect(orchestrator.decomposeGoal).not.toHaveBeenCalled();
+  });
+
+  it('rejects persist-only goals with no title or goal', async () => {
+    const orchestrator = await import('../goal-orchestrator.js');
+    vi.mocked(orchestrator.persistGoal).mockReturnValue({
+      ok: false,
+      error: 'title or goal is required',
+    });
+
+    const app = await createGoalApp();
+    const response = await requestJson(app, '/api/goals', 'POST', { decompose: false });
+
+    expect(response.status).toBe(400);
+    expect(response.json).toEqual({ error: 'title or goal is required' });
+    expect(orchestrator.decomposeGoal).not.toHaveBeenCalled();
+  });
+
+  it('treats persist_only as persist-only', async () => {
+    const orchestrator = await import('../goal-orchestrator.js');
+    vi.mocked(orchestrator.persistGoal).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'goal-g1',
+        title: 'G1',
+        status: 'active',
+        workspace: null,
+        external_id: 'G1',
+        created_at: '2026-08-16T00:00:00Z',
+      },
+    } as never);
+
+    const app = await createGoalApp();
+    const response = await requestJson(app, '/api/goals', 'POST', {
+      goal: 'G1 board seed',
+      persist_only: true,
+    });
+
+    expect(response.status).toBe(201);
+    expect(orchestrator.persistGoal).toHaveBeenCalled();
+    expect(orchestrator.decomposeGoal).not.toHaveBeenCalled();
+    expect(response.json).toMatchObject({ persist_only: true, created_task_ids: [] });
   });
 
   it('lists goals with rollup counts', async () => {

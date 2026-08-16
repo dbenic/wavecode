@@ -68,7 +68,7 @@ via any stdio-to-HTTP MCP bridge, or connect through SSH:
 
 | Tool | What it does |
 |---|---|
-| `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee |
+| `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee; optional `goal_id` (ULID or `external_id`) links a child; `hold:true` skips auto-dispatch |
 | `list_tasks` | Tasks by status |
 
 ### Goals
@@ -77,7 +77,19 @@ via any stdio-to-HTTP MCP bridge, or connect through SSH:
 |---|---|
 | `list_goals` | Persisted goals with child-task rollup counts |
 | `get_goal` | One goal by id or `external_id`, plus child tasks |
-| `create_goal` | Persist a goal and decompose it into a DAG of child tasks |
+| `create_goal` | Persist a goal. Default decomposes + dispatches. `decompose:false` / `persist_only:true` records the row only (no children, no dispatch) |
+
+### Artifacts
+
+Same immutable store as the PWA (`POST /api/artifacts/upload`). A file
+dropped in Grok Bot / CountixDev chat can be pushed here and attached to
+a VPS agent — it lands in `.wavecode/artifacts` via `artifact_targets`.
+
+| Tool | What it does |
+|---|---|
+| `list_artifacts` | Artifacts, optionally filtered by `agent_id` or `run_id` |
+| `upload_artifact` | `path` (read by this MCP process) or `content_base64` + `filename`; optional `agent_id` / `run_id` |
+| `attach_artifact` | Attach an existing artifact to an agent and/or run |
 
 ### Decisions
 
