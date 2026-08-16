@@ -416,6 +416,84 @@ serverCmd
 
 registerQaCommands(program);
 
+// --- msg ---
+program
+  .command('msg <to> <message...>')
+  .description('Post a message on the agent wire (to: agent name/id, or "all" to broadcast)')
+  .option('--type <type>', 'info | request | handoff | result | error', 'info')
+  .option('--from <agent>', 'Sending agent name/id (omit for system/human)')
+  .option('--task <taskId>', 'Reference a task')
+  .option('--run <runId>', 'Reference a run')
+  .action(async (to: string, messageWords: string[], opts: { type: string; from?: string; task?: string; run?: string }) => {
+    initDb();
+    const { insertAgentMessage, getAgentByName, getAgent } = await import('../server/db.js');
+    const { emit } = await import('../server/event-bus.js');
+
+    const resolve = (idOrName: string): string | null => {
+      const byId = getAgent(idOrName);
+      if (byId.ok) return byId.data.id;
+      const byName = getAgentByName(idOrName);
+      return byName.ok ? byName.data.id : null;
+    };
+
+    let toAgentId: string | null = null;
+    if (to !== 'all') {
+      toAgentId = resolve(to);
+      if (!toAgentId) {
+        console.error(`Unknown agent '${to}' (use an agent name/id, or 'all' to broadcast)`);
+        process.exit(1);
+      }
+    }
+
+    const fromAgentId = opts.from ? resolve(opts.from) : null;
+    if (opts.from && !fromAgentId) {
+      console.error(`Unknown sender agent '${opts.from}'`);
+      process.exit(1);
+    }
+
+    const validTypes = ['info', 'request', 'handoff', 'result', 'error'];
+    if (!validTypes.includes(opts.type)) {
+      console.error(`Invalid --type '${opts.type}' (one of: ${validTypes.join(', ')})`);
+      process.exit(1);
+    }
+
+    const result = insertAgentMessage({
+      from_agent_id: fromAgentId ?? undefined,
+      to_agent_id: toAgentId ?? undefined,
+      message: messageWords.join(' '),
+      message_type: opts.type as 'info' | 'request' | 'handoff' | 'result' | 'error',
+      ref_task_id: opts.task,
+      ref_run_id: opts.run,
+    });
+
+    if (!result.ok) {
+      console.error(`Failed to send: ${result.error}`);
+      process.exit(1);
+    }
+
+    emit('message.created', 'agent_message', result.data.id, {
+      from_agent_id: fromAgentId,
+      to_agent_id: toAgentId,
+      message_type: opts.type,
+      ref_task_id: opts.task ?? null,
+      ref_run_id: opts.run ?? null,
+    });
+
+    console.log(`Message ${result.data.id} sent to ${to === 'all' ? 'all (broadcast)' : to}`);
+  });
+
+// --- mcp ---
+program
+  .command('mcp')
+  .description('Run the WaveCode MCP server on stdio (connect Grok, Claude, or any MCP client)')
+  .option('--url <url>', 'WaveCode daemon URL (default: $WAVECODE_URL or http://localhost:3777)')
+  .option('--token <token>', 'Bearer token for the daemon (default: $WAVECODE_TOKEN)')
+  .action(async (opts: { url?: string; token?: string }) => {
+    const { runStdioMcpServer } = await import('../mcp/index.js');
+    await runStdioMcpServer(opts);
+    // Keep the process alive; the transport closes it when the client disconnects
+  });
+
 program.parse();
 
 function formatDuration(seconds: number): string {

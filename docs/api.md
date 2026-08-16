@@ -34,10 +34,24 @@ Body:
 `{ sessionName: string, runtime: "claude-code" | "codex" | "aider", name?: string }`
 
 ### `POST /api/agents/spawn`
-Spawn a managed agent and optional git worktree.
+Spawn a managed agent and optional git worktree. `model`/`effort` pin the
+agent's LLM: recorded on the agent, injected into the runtime command via the
+runtime's `model_flag`/`effort_flag`. Effort is one of `low|medium|high|xhigh`.
 
 Body:
-`{ name: string, runtime: string, repo?: string, branch?: string }`
+`{ name: string, runtime: string, repo?: string, branch?: string, model?: string, effort?: string }`
+
+### `PATCH /api/agents/:id`
+Update an agent's model/effort pin. `null` clears a pin; omitted fields are
+unchanged. Applies on the agent's next (re)launch. Emits `agent.updated`.
+
+Body:
+`{ model?: string | null, effort?: string | null }`
+
+### `POST /api/agents/:id/kill`
+Kill a spawned agent: stop its runner, terminate the tmux session, remove the
+record. Returns 400 for adopted agents (detach those instead). Emits
+`agent.killed`.
 
 ### `POST /api/agents/:id/send`
 Send text or a raw tmux key sequence to an agent.
@@ -58,7 +72,16 @@ Query:
 `start`, `end`
 
 ### `DELETE /api/agents/:id`
-Detach or remove an agent.
+Detach an agent: stop its runner and remove the record, leaving the tmux
+session running.
+
+## System
+
+### `POST /api/system/stop-all`
+Emergency stop: kill every spawned agent, send Ctrl+C to adopted ones, and
+disable `autonomy.auto_dispatch`. Returns
+`{ ok, killed: string[], interrupted: string[], errors, auto_dispatch_disabled: true }`.
+Emits `system.stop_all`.
 
 ## Prompt enhancement
 
@@ -174,7 +197,14 @@ List review queue items.
 Get one review queue item.
 
 ### `POST /api/reviews/:runId/promote`
-Approve a run.
+Approve a run. When promote-gating is active (`review.require_pass_to_promote`
+or `review.auto_review`), the latest completed AI review must have verdict
+`pass`; otherwise the call fails with 400 unless `overrideReason` is supplied
+(stored in the `review.promoted` audit event). With
+`review.gate_dependents_on_approval`, approval also unblocks dependent tasks.
+
+Body (optional):
+`{ overrideReason?: string }`
 
 ### `POST /api/reviews/:runId/retry`
 Retry the task behind a run.
