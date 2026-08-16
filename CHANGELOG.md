@@ -12,6 +12,7 @@ All notable changes to WaveCode are documented here.
 - Codex runtime default `effort_flag: -c model_reasoning_effort=` so a pin of `high`/`xhigh` is actually injected.
 
 ### Fixed
+- `wavecode mcp` uses the same daemon connection resolution as `wavecode queue` (`auth.fallback_token`, then `WAVECODE_TOKEN`, then `--token`), so a token-auth daemon works without injecting the token into the MCP client environment.
 - `wavecode queue` and `wavecode send` POST `/api/tasks` so the daemon creates and dispatches a run (same as MCP `create_task`). If the daemon is down, the task is saved locally as pending with a clear message.
 - Auto-review after `run.finished` always leaves a completed `code_reviews` row with a parsed verdict, including empty diffs and LLM/poll failures. `/api/reviews` `latestReview` is no longer null after a successful run.
 - Output watcher dismisses Claude Code's first-run "Bypass Permissions / Yes, I accept" dialog (Down+Enter, 8s cooldown).
