@@ -4,6 +4,9 @@ export const SSE_EVENT_TYPES = [
   'agent.adopted',
   'agent.spawned',
   'agent.detached',
+  'agent.killed',
+  'agent.updated',
+  'system.stop_all',
   'agent.prompt_sent',
   'agent.crashed',
   'agent.restarted',
@@ -57,7 +60,13 @@ export function isReviewEventType(type: string): boolean {
 }
 
 export function shouldReloadAgentList(type: string): boolean {
-  return type === 'agent.adopted' || type === 'agent.spawned' || type === 'agent.restarted';
+  return (
+    type === 'agent.adopted' ||
+    type === 'agent.spawned' ||
+    type === 'agent.restarted' ||
+    type === 'agent.updated' ||
+    type === 'system.stop_all'
+  );
 }
 
 export function shouldRefreshAgentOutput(type: string): boolean {

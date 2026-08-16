@@ -1,10 +1,13 @@
 import type { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { getConfig, updateConfig, getProviderStatus, type WaveConfig } from '../config.js';
-import { subscribe, unsubscribe } from '../event-bus.js';
+import { listEvents } from '../db.js';
+import * as validate from '../validate.js';
+import { emit, subscribe, unsubscribe } from '../event-bus.js';
 import { getResolvedLlmConfig, isLlmConfigured, maskLlmApiKey } from '../llm-provider.js';
 import * as promptEnhancer from '../prompt-enhancer.js';
 import * as sessionManager from '../session-manager.js';
+import * as outputWatcher from '../output-watcher.js';
 import logger from '../logger.js';
 import { getPublicAuthStatus, type NodeAppEnv } from '../auth.js';
 
@@ -122,6 +125,87 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
     } as Partial<typeof cfg>);
     logger.info('LLM API key updated');
     return c.json({ ok: true });
+  });
+
+  /**
+   * Emergency stop-all: kill every spawned agent, interrupt every adopted
+   * one, and disable auto-dispatch so nothing new starts until the human
+   * re-enables it.
+   */
+  app.post('/api/system/stop-all', (c) => {
+    const summary = sessionManager.stopAll();
+
+    for (const agentId of summary.killed) {
+      outputWatcher.stopWatching(agentId);
+    }
+
+    const cfg = getConfig();
+    updateConfig({ autonomy: { ...cfg.autonomy, auto_dispatch: false } });
+
+    emit('system.stop_all', 'system', 'stop-all', {
+      killed: summary.killed.length,
+      interrupted: summary.interrupted.length,
+      errors: summary.errors,
+    });
+
+    logger.warn(
+      { killed: summary.killed.length, interrupted: summary.interrupted.length, errors: summary.errors },
+      'Emergency stop-all executed',
+    );
+
+    return c.json({ ok: true, ...summary, auto_dispatch_disabled: true });
+  });
+
+  /**
+   * JSON event log with optional long-polling — the request/response
+   * counterpart to the SSE stream, built for MCP orchestrators: pass the
+   * last seen id as `since` and a `wait_ms` and the call blocks until
+   * something happens (or the wait expires). `types` filters by exact type
+   * or prefix wildcard (e.g. `run.*,review.*`).
+   */
+  app.get('/api/events/log', async (c) => {
+    const since = validate.validateIntParam(c.req.query('since'), { min: 0, default: 0 });
+    const limit = validate.validateIntParam(c.req.query('limit'), { min: 1, max: 500, default: 100 });
+    const waitMs = validate.validateIntParam(c.req.query('wait_ms'), { min: 0, max: 60_000, default: 0 });
+    const typesParam = c.req.query('types');
+    const types = typesParam
+      ? typesParam.split(',').map((t) => t.trim()).filter(Boolean)
+      : null;
+
+    const matchesType = (type: string): boolean =>
+      !types || types.some((t) => (t.endsWith('*') ? type.startsWith(t.slice(0, -1)) : type === t));
+
+    const deadline = Date.now() + waitMs;
+    let cursor = since;
+    for (;;) {
+      const raw = listEvents({ since_id: cursor || undefined, limit });
+      const matched = raw.filter((e) => matchesType(e.type));
+
+      // A full page of non-matching events: advance the cursor so a burst of
+      // unrelated events can never stall the poll window.
+      if (matched.length === 0 && raw.length === limit) {
+        cursor = raw[raw.length - 1].id;
+        continue;
+      }
+
+      if (matched.length > 0 || Date.now() >= deadline) {
+        // last_id advances past filtered-out events too, so pollers never re-read them
+        const lastId = raw.length > 0 ? raw[raw.length - 1].id : cursor;
+        return c.json({
+          events: matched.map((e) => ({
+            id: e.id,
+            type: e.type,
+            entity_type: e.entity_type,
+            entity_id: e.entity_id,
+            payload: e.payload_json ? JSON.parse(e.payload_json) : null,
+            created_at: e.created_at,
+          })),
+          last_id: lastId,
+        });
+      }
+
+      await new Promise((r) => setTimeout(r, 500));
+    }
   });
 
   app.get('/api/events', (c) => {

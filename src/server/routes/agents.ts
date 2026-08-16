@@ -2,8 +2,9 @@ import type { Hono } from 'hono';
 import {
   listAgents,
   getAgent,
-  deleteAgent,
+  updateAgentPin,
   type Agent,
+  type EffortLevel,
 } from '../db.js';
 import { emit } from '../event-bus.js';
 import * as sessionManager from '../session-manager.js';
@@ -138,12 +139,62 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
 
     outputWatcher.stopWatching(agentId);
-    deleteAgent(agentId);
+    sessionManager.detach(agentId);
 
     emit('agent.detached', 'agent', agentId, { name: agentResult.data.name });
     logger.info({ agentId }, 'Agent detached');
 
     return c.json({ ok: true });
+  });
+
+  app.post('/api/agents/:id/kill', (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+
+    const agent = agentResult.data;
+    outputWatcher.stopWatching(agent.id);
+
+    const result = sessionManager.kill(agent.id);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+
+    emit('agent.killed', 'agent', agent.id, {
+      name: agent.name,
+      tmuxSession: agent.tmux_session,
+    });
+
+    logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent killed');
+    return c.json({ ok: true });
+  });
+
+  app.patch('/api/agents/:id', async (c) => {
+    const body = await c.req.json<{
+      model?: string | null;
+      effort?: EffortLevel | null;
+    }>();
+
+    const validationError = validate.validateAgentPinBody(body);
+    if (validationError) return c.json({ error: validationError }, 400);
+
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+
+    const result = updateAgentPin(agentResult.data.id, {
+      model: body.model,
+      effort: body.effort,
+    });
+    if (!result.ok) return c.json({ error: result.error }, 500);
+
+    emit('agent.updated', 'agent', result.data.id, {
+      name: result.data.name,
+      model: result.data.model,
+      effort: result.data.effort,
+    });
+
+    logger.info(
+      { agentId: result.data.id, model: result.data.model, effort: result.data.effort },
+      'Agent pin updated',
+    );
+    return c.json(enrichAgent(result.data));
   });
 
   app.post('/api/agents/spawn', async (c) => {
@@ -152,6 +203,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       runtime: Agent['runtime'];
       repo?: string;
       branch?: string;
+      model?: string | null;
+      effort?: EffortLevel | null;
     }>();
 
     const spawnValidation = validate.validateSpawnBody(body);
@@ -167,6 +220,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       runtime: agent.runtime,
       tmuxSession: agent.tmux_session,
       workspace: agent.workspace,
+      model: agent.model,
+      effort: agent.effort,
     });
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent spawned');

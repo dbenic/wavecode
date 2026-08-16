@@ -7,6 +7,7 @@ import {
   validateAdoptBody,
   validateSendBody,
   validateSpawnBody,
+  validateAgentPinBody,
   validateTaskBody,
   validateChatBody,
   validateIntParam,
@@ -87,6 +88,34 @@ describe('validate.ts — input validation', () => {
     it('rejects invalid depends_on payloads', () => {
       expect(validateTaskBody({ prompt: 'ok', depends_on: ['task-1', ''] })).not.toBeNull();
       expect(validateTaskBody({ prompt: 'ok', depends_on: 'task-1' as any })).not.toBeNull();
+    });
+  });
+
+  describe('model/effort pins', () => {
+    it('accepts spawn bodies with valid pins', () => {
+      expect(validateSpawnBody({ name: 'grok-fe', runtime: 'grok', model: 'grok-4.6', effort: 'xhigh' })).toBeNull();
+      expect(validateSpawnBody({ name: 'be', runtime: 'claude-code', model: 'claude-opus-5' })).toBeNull();
+      expect(validateSpawnBody({ name: 'be', runtime: 'aider', model: 'ollama/qwen3-coder:32b' })).toBeNull();
+    });
+
+    it('rejects unsafe model names (shell metacharacters)', () => {
+      expect(validateSpawnBody({ name: 'a', runtime: 'codex', model: 'x; rm -rf /' })).not.toBeNull();
+      expect(validateSpawnBody({ name: 'a', runtime: 'codex', model: 'x$(whoami)' })).not.toBeNull();
+      expect(validateSpawnBody({ name: 'a', runtime: 'codex', model: 'x model' })).not.toBeNull();
+      expect(validateSpawnBody({ name: 'a', runtime: 'codex', model: '-leading-dash' })).not.toBeNull();
+    });
+
+    it('rejects unknown effort levels', () => {
+      expect(validateSpawnBody({ name: 'a', runtime: 'codex', effort: 'ultra' })).not.toBeNull();
+      expect(validateSpawnBody({ name: 'a', runtime: 'codex', effort: 'HIGH' })).not.toBeNull();
+    });
+
+    it('validateAgentPinBody requires at least one field and allows null to clear', () => {
+      expect(validateAgentPinBody({})).not.toBeNull();
+      expect(validateAgentPinBody({ model: 'grok-4.6' })).toBeNull();
+      expect(validateAgentPinBody({ model: null, effort: null })).toBeNull();
+      expect(validateAgentPinBody({ effort: 'high' })).toBeNull();
+      expect(validateAgentPinBody({ effort: 'bogus' })).not.toBeNull();
     });
   });
 

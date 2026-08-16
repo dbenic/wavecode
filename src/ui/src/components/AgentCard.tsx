@@ -103,6 +103,11 @@ export default function AgentCard({
               </h3>
               <p className="text-[10px] text-slate-500 tracking-wide uppercase flex items-center gap-1">
                 {agent.runtime} &middot; {agent.mode}
+                {agent.model && (
+                  <span className="px-1 py-px rounded bg-indigo-900/50 border border-indigo-500/30 text-[8px] text-indigo-300 font-bold normal-case">
+                    {agent.model}{agent.effort ? ` @${agent.effort}` : ''}
+                  </span>
+                )}
                 {agent.lastOutputLine?.includes("don't ask") || agent.lastOutputLine?.includes('dontAsk') ? (
                   <span className="px-1 py-px rounded bg-emerald-900/50 border border-emerald-500/30 text-[8px] text-emerald-400 font-bold">AUTO</span>
                 ) : agent.lastOutputLine?.includes('bypass permissions') || agent.lastOutputLine?.includes('bypassPermissions') ? (

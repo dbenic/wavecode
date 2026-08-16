@@ -852,6 +852,21 @@ export default function AgentView() {
               >
                 Yes
               </button>
+              {agent.mode === 'spawned' && (
+                <button
+                  onClick={async () => {
+                    if (!window.confirm(`KILL agent '${agent.name}'? This terminates its tmux session and removes it.`)) return;
+                    try {
+                      await apiPost(`/agents/${id}/kill`);
+                      navigate('/');
+                    } catch {}
+                  }}
+                  title="Kill agent: terminate tmux session and remove the agent"
+                  className="flex-shrink-0 px-2.5 py-1 rounded bg-red-950 border-2 border-red-500/80 text-[10px] font-mono font-bold text-red-200 hover:bg-red-800 hover:border-red-400 active:scale-95 transition-all shadow-[0_0_10px_rgba(239,68,68,0.3)]"
+                >
+                  KILL
+                </button>
+              )}
             </div>
           </div>
 

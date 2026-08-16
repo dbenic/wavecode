@@ -76,6 +76,7 @@ vi.mock('./config.js', () => ({
 
 vi.mock('./runtime-launcher.js', () => ({
   getTranscriptsRoot: vi.fn(),
+  buildRuntimeCommand: vi.fn((runtimeConfig: { command: string }) => runtimeConfig.command),
 }));
 
 vi.mock('./tmux.js', () => ({

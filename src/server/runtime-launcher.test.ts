@@ -16,10 +16,13 @@ vi.mock('./config.js', () => ({
       'claude-code': {
         command: 'claude --permission-mode bypassPermissions',
         idle_pattern: '\\$\\s*$',
+        model_flag: '--model',
+        effort_flag: '--effort',
       },
       codex: {
         command: 'codex --full-auto',
         idle_pattern: '^>\\s*$',
+        model_flag: '-m',
       },
     },
   })),
@@ -99,5 +102,55 @@ describe('runtime-launcher.ts', () => {
     });
 
     expect(result.ok).toBe(false);
+  });
+
+  it('injects pinned model and effort into the launch command', async () => {
+    const tmux = await import('./tmux.js');
+    const { launchRuntimeInNewSession } = await import('./runtime-launcher.js');
+
+    const result = launchRuntimeInNewSession({
+      sessionName: 'wc-claude',
+      workDir: '/repo/project',
+      runtime: 'claude-code',
+      model: 'claude-opus-5',
+      effort: 'xhigh',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(vi.mocked(tmux.newSession)).toHaveBeenCalledWith(
+      'wc-claude',
+      '/repo/project',
+      'claude --permission-mode bypassPermissions --model claude-opus-5 --effort xhigh',
+    );
+  });
+
+  describe('buildRuntimeCommand', () => {
+    const base = { command: 'codex --full-auto', idle_pattern: '^>\\s*$' };
+
+    it('appends the model via the configured flag', async () => {
+      const { buildRuntimeCommand } = await import('./runtime-launcher.js');
+      expect(buildRuntimeCommand({ ...base, model_flag: '-m' }, { model: 'grok-4.6' }))
+        .toBe('codex --full-auto -m grok-4.6');
+    });
+
+    it('leaves the command unchanged when no pin or no flag is configured', async () => {
+      const { buildRuntimeCommand } = await import('./runtime-launcher.js');
+      expect(buildRuntimeCommand({ ...base, model_flag: '-m' }, {})).toBe('codex --full-auto');
+      expect(buildRuntimeCommand(base, { model: 'grok-4.6' })).toBe('codex --full-auto');
+    });
+
+    it('never embeds unsafe model values or unknown efforts', async () => {
+      const { buildRuntimeCommand } = await import('./runtime-launcher.js');
+      expect(buildRuntimeCommand({ ...base, model_flag: '-m' }, { model: 'x; rm -rf /' }))
+        .toBe('codex --full-auto');
+      expect(buildRuntimeCommand({ ...base, effort_flag: '--effort' }, { effort: 'ultra' }))
+        .toBe('codex --full-auto');
+    });
+
+    it('appends effort via the configured flag', async () => {
+      const { buildRuntimeCommand } = await import('./runtime-launcher.js');
+      expect(buildRuntimeCommand({ ...base, effort_flag: '--effort' }, { effort: 'xhigh' }))
+        .toBe('codex --full-auto --effort xhigh');
+    });
   });
 });

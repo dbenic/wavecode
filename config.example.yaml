@@ -20,16 +20,23 @@ sandbox:
   disable_git_push: true
   restrict_network: true
 
+# Each runtime maps to a CLI command. Optional model_flag/effort_flag are used
+# to inject an agent's pinned model/effort into the command at spawn time
+# (e.g. `claude ... --model claude-opus-5`). Without the flag the pin is still
+# recorded on the agent and checked against delivery reports at review time.
 runtimes:
   claude-code:
     command: claude --permission-mode bypassPermissions
     idle_pattern: '\$\s*$'
+    model_flag: --model
   codex:
     command: codex --full-auto
     idle_pattern: '^>\s*$'
+    model_flag: -m
   aider:
     command: aider --yes
     idle_pattern: '^>\s*$'
+    model_flag: --model
 
 auth:
   method: token                  # default portable mode; set a token before exposing the port
@@ -46,11 +53,18 @@ artifacts:
   storage: .wavecode-data/artifacts
   retention_days: 30
 
+# Cross-agent review loop. With auto_review on, every finished run is
+# reviewed by another agent (default_reviewer by name or runtime; falls back
+# to the WaveCode LLM), non-pass verdicts are sent back to the author up to
+# max_fix_loops times, and promote is blocked without a 'pass' verdict
+# unless the reviewer supplies an explicit override reason.
 review:
   auto_review: false
   default_reviewer: aider
   self_review: true
   max_fix_loops: 2
+  require_pass_to_promote: false   # gate promote even when auto_review is off
+  gate_dependents_on_approval: false  # dependents wait for human approval, not just 'done'
 
 llm:
   provider: anthropic              # 'anthropic' or 'openai-compatible'

@@ -4,11 +4,41 @@
  */
 
 import { isValidSessionName, isAllowedRawKey } from './tmux.js';
+import { EFFORT_LEVELS, isEffortLevel } from './db.js';
 
 // Max lengths to prevent abuse
 const MAX_PROMPT_LENGTH = 50_000;
 const MAX_NAME_LENGTH = 64;
 const MAX_TEXT_LENGTH = 100_000;
+
+/**
+ * Model names are embedded in shell commands sent to tmux sessions —
+ * keep the alphabet strict. Mirrors runtime-launcher.SAFE_MODEL_PATTERN.
+ */
+const MODEL_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,99}$/;
+
+export function isValidModelName(model: string): boolean {
+  return MODEL_NAME_PATTERN.test(model);
+}
+
+/**
+ * Validate optional model/effort pin fields shared by spawn and pin-update
+ * bodies. `null` is allowed for pin updates (clears the pin).
+ */
+export function validatePinFields(body: {
+  model?: string | null;
+  effort?: string | null;
+}): string | null {
+  if (body.model !== undefined && body.model !== null) {
+    if (typeof body.model !== 'string' || !isValidModelName(body.model)) {
+      return 'model must be 1-100 chars of letters, numbers, dots, hyphens, slashes, colons';
+    }
+  }
+  if (body.effort !== undefined && body.effort !== null && !isEffortLevel(body.effort)) {
+    return `effort must be one of: ${EFFORT_LEVELS.join(', ')}`;
+  }
+  return null;
+}
 
 export function validateAdoptBody(body: {
   sessionName?: string;
@@ -55,6 +85,8 @@ export function validateSpawnBody(body: {
   name?: string;
   runtime?: string;
   repo?: string;
+  model?: string | null;
+  effort?: string | null;
 }): string | null {
   if (!body.name || typeof body.name !== 'string') {
     return 'name is required';
@@ -68,7 +100,17 @@ export function validateSpawnBody(body: {
   if (!body.runtime || typeof body.runtime !== 'string') {
     return 'runtime is required';
   }
-  return null;
+  return validatePinFields(body);
+}
+
+export function validateAgentPinBody(body: {
+  model?: string | null;
+  effort?: string | null;
+}): string | null {
+  if (body.model === undefined && body.effort === undefined) {
+    return 'Provide model and/or effort (null clears a pin)';
+  }
+  return validatePinFields(body);
 }
 
 export function validateTaskBody(body: {

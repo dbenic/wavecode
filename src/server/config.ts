@@ -6,6 +6,10 @@ import yaml from 'js-yaml';
 export interface RuntimeConfig {
   command: string;
   idle_pattern: string;
+  /** CLI flag used to pass a pinned model (e.g. '--model'). Unset = pin is recorded but not injected. */
+  model_flag?: string;
+  /** CLI flag used to pass a pinned reasoning effort (e.g. '--effort'). Unset = pin is recorded but not injected. */
+  effort_flag?: string;
   // Future deploy agent fields (optional)
   scope?: string;
   claude_md?: string;
@@ -58,6 +62,10 @@ export interface WaveConfig {
     default_reviewer: string;
     self_review: boolean;
     max_fix_loops: number;
+    /** Block promote unless the latest completed review verdict is 'pass' (override requires a stored reason). */
+    require_pass_to_promote: boolean;
+    /** Dependent tasks dispatch only after their dependency's run is human-approved, not merely 'done'. */
+    gate_dependents_on_approval: boolean;
   };
   llm: {
     provider: 'anthropic' | 'openai-compatible';
@@ -237,20 +245,30 @@ function buildDefaults(baseDir: string): WaveConfig {
       'claude-code': {
         command: 'claude --permission-mode bypassPermissions',
         idle_pattern: '\\$\\s*$',
+        model_flag: '--model',
       },
       codex: {
         command: 'codex --full-auto',
         idle_pattern: '^>\\s*$',
+        model_flag: '-m',
       },
       aider: {
         command: 'aider --yes',
         idle_pattern: '^>\\s*$',
+        model_flag: '--model',
       },
     },
     auth: { method: 'token', fallback_token: null, trusted_proxies: [] },
     notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
     artifacts: { storage: path.join(dataRoot, 'artifacts'), retention_days: 30 },
-    review: { auto_review: false, default_reviewer: 'aider-deepseek', self_review: true, max_fix_loops: 2 },
+    review: {
+      auto_review: false,
+      default_reviewer: 'aider-deepseek',
+      self_review: true,
+      max_fix_loops: 2,
+      require_pass_to_promote: false,
+      gate_dependents_on_approval: false,
+    },
     llm: {
       provider: 'anthropic',
       api_key: null,

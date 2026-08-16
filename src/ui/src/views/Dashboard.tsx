@@ -17,6 +17,8 @@ function SpawnAgentModal({
   const [runtime, setRuntime] = useState<Agent['runtime']>('codex');
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('');
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,6 +33,8 @@ function SpawnAgentModal({
         runtime,
         repo: repo.trim() || undefined,
         branch: branch.trim() || undefined,
+        model: model.trim() || undefined,
+        effort: effort || undefined,
       });
       onSpawned(agent);
       onClose();
@@ -89,7 +93,7 @@ function SpawnAgentModal({
           />
         </label>
 
-        <label className="block">
+        <label className="block mb-3">
           <span className="text-[10px] text-slate-500 uppercase tracking-wider">Branch</span>
           <input
             type="text"
@@ -100,6 +104,36 @@ function SpawnAgentModal({
             className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 font-mono focus:border-emerald-500 focus:outline-none"
           />
         </label>
+
+        <div className="flex gap-2">
+          <label className="block flex-1">
+            <span className="text-[10px] text-slate-500 uppercase tracking-wider">Model Pin</span>
+            <input
+              type="text"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              aria-label="Model Pin"
+              placeholder="e.g. claude-opus-5"
+              className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 font-mono focus:border-emerald-500 focus:outline-none"
+            />
+          </label>
+
+          <label className="block w-28">
+            <span className="text-[10px] text-slate-500 uppercase tracking-wider">Effort</span>
+            <select
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+              aria-label="Effort"
+              className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
+            >
+              <option value="">default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </label>
+        </div>
 
         <div className="text-[10px] text-slate-600 mt-2 leading-relaxed">
           Leave repo empty to create or reuse <span className="font-mono text-slate-500">projects_root/&lt;agent-name&gt;</span>.
@@ -165,7 +199,7 @@ export default function Dashboard() {
       apiGet<Agent[]>('/agents').then(setAgents).catch(() => {});
     }
 
-    if (event.type === 'agent.detached') {
+    if (event.type === 'agent.detached' || event.type === 'agent.killed') {
       setAgents((prev) => prev.filter((a) => a.id !== event.entityId));
     }
   }, []);
@@ -210,6 +244,19 @@ export default function Dashboard() {
   const workingCount = agents.filter((a) => a.status === 'working').length;
   const errorCount = agents.filter((a) => a.status === 'error').length;
 
+  const handleStopAll = async () => {
+    if (!window.confirm('EMERGENCY STOP: kill all spawned agents, interrupt adopted ones, and disable auto-dispatch?')) {
+      return;
+    }
+    try {
+      await apiPost('/system/stop-all');
+      const data = await apiGet<Agent[]>('/agents');
+      setAgents(data);
+    } catch {
+      // Stop-all failed; SSE will reconcile state
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 relative">
       {/* Global scan-line overlay */}
@@ -251,6 +298,17 @@ export default function Dashboard() {
                   <span className="text-red-400">{errorCount} ERROR</span>
                 )}
               </div>
+            )}
+
+            {/* Emergency stop — always visible, including mobile */}
+            {agents.length > 0 && (
+              <button
+                onClick={handleStopAll}
+                title="Kill all spawned agents, interrupt adopted ones, disable auto-dispatch"
+                className="inline-flex px-3 py-1.5 rounded bg-red-950 border border-red-500/60 text-[11px] font-bold tracking-wider uppercase text-red-300 hover:bg-red-900 hover:border-red-400 transition-all duration-200 active:scale-95 shadow-[0_0_8px_rgba(239,68,68,0.15)]"
+              >
+                Stop All
+              </button>
             )}
 
             {/* Nav buttons — hidden on mobile, BottomNav handles it */}

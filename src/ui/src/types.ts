@@ -1,3 +1,5 @@
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface Agent {
   id: string;
   name: string;
@@ -6,6 +8,8 @@ export interface Agent {
   workspace: string | null;
   mode: 'adopted' | 'spawned';
   status: 'idle' | 'working' | 'error';
+  model: string | null;
+  effort: EffortLevel | null;
   created_at: string;
   lastOutputLine?: string;
   outputVersion?: number;
@@ -52,12 +56,21 @@ export interface Artifact {
   created_at: string;
 }
 
+export type ReviewVerdict = 'pass' | 'needs-fixes' | 'reject';
+
 export interface ReviewItem {
   run: Run;
   task: Task;
   agentName: string;
   artifacts: Artifact[];
   duration: number | null;
+  latestReview: {
+    id: string;
+    verdict: ReviewVerdict | null;
+    issues_found: number;
+    fix_round: number;
+    created_at: string;
+  } | null;
 }
 
 export interface TmuxSession {
@@ -77,6 +90,9 @@ export interface CodeReview {
   diff: string | null;
   feedback: string | null;
   issues_found: number;
+  verdict: ReviewVerdict | null;
+  fix_round: number;
+  fixes_sent_at: string | null;
   created_at: string;
 }
 

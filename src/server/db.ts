@@ -6,6 +6,14 @@ export type Result<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };
 
+/** Reasoning-effort levels an agent can be pinned to. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -14,6 +22,8 @@ export interface Agent {
   workspace: string | null;
   mode: 'adopted' | 'spawned';
   status: 'idle' | 'working' | 'error';
+  model: string | null;       // pinned LLM model (e.g. 'claude-opus-5', 'grok-4.6'); null = runtime default
+  effort: EffortLevel | null; // pinned reasoning effort; null = runtime default
   created_at: string;
 }
 
@@ -158,7 +168,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -172,6 +182,8 @@ const SCHEMA_SQL = `
     workspace TEXT,
     mode TEXT NOT NULL DEFAULT 'adopted',
     status TEXT NOT NULL DEFAULT 'idle',
+    model TEXT,
+    effort TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -363,6 +375,23 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_agent_messages_workspace ON agent_messages(workspace, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_agent_messages_to ON agent_messages(to_agent_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS code_reviews (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    reviewer_type TEXT NOT NULL,
+    reviewer_agent_id TEXT,
+    reviewer_runtime TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    diff TEXT,
+    feedback TEXT,
+    issues_found INTEGER DEFAULT 0,
+    verdict TEXT,
+    fix_round INTEGER NOT NULL DEFAULT 0,
+    fixes_sent_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_code_reviews_run ON code_reviews(run_id);
 `;
 
 /**
@@ -498,6 +527,11 @@ const MIGRATIONS: Record<number, string> = {
     CREATE INDEX IF NOT EXISTS idx_agent_messages_workspace ON agent_messages(workspace, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_messages_to ON agent_messages(to_agent_id, created_at DESC);
   `,
+  // v8 → v9: Add model/effort pinning columns on agents
+  8: `
+    ALTER TABLE agents ADD COLUMN model TEXT;
+    ALTER TABLE agents ADD COLUMN effort TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -549,13 +583,21 @@ export function generateId(): string {
 
 // --- Agent helpers ---
 
-export function insertAgent(agent: Omit<Agent, 'id' | 'created_at'>): Result<Agent> {
+export function insertAgent(
+  agent: Omit<Agent, 'id' | 'created_at' | 'model' | 'effort'> & {
+    model?: string | null;
+    effort?: EffortLevel | null;
+  },
+): Result<Agent> {
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, agent.name, agent.runtime, agent.tmux_session, agent.workspace, agent.mode, agent.status);
+      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status, model, effort)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, agent.name, agent.runtime, agent.tmux_session, agent.workspace,
+      agent.mode, agent.status, agent.model ?? null, agent.effort ?? null,
+    );
     const row = getDb().prepare('SELECT * FROM agents WHERE id = ?').get(id) as Agent;
     return { ok: true, data: row };
   } catch (e) {
@@ -581,6 +623,32 @@ export function listAgents(): Agent[] {
 
 export function updateAgentStatus(id: string, status: Agent['status']): Result<Agent> {
   const result = getDb().prepare('UPDATE agents SET status = ? WHERE id = ?').run(status, id);
+  if (result.changes === 0) return { ok: false, error: `Agent ${id} not found` };
+  return getAgent(id);
+}
+
+/**
+ * Update an agent's model/effort pin. Passing `null` clears the pin;
+ * omitting a field leaves it unchanged.
+ */
+export function updateAgentPin(
+  id: string,
+  pin: { model?: string | null; effort?: EffortLevel | null },
+): Result<Agent> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if (pin.model !== undefined) {
+    sets.push('model = ?');
+    params.push(pin.model);
+  }
+  if (pin.effort !== undefined) {
+    sets.push('effort = ?');
+    params.push(pin.effort);
+  }
+  if (sets.length === 0) return getAgent(id);
+
+  params.push(id);
+  const result = getDb().prepare(`UPDATE agents SET ${sets.join(', ')} WHERE id = ?`).run(...params);
   if (result.changes === 0) return { ok: false, error: `Agent ${id} not found` };
   return getAgent(id);
 }

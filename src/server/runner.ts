@@ -4,7 +4,7 @@ import path from 'node:path';
 import { finishRun, insertRun, updateTaskStatus, getAgent, type Run } from './db.js';
 import { emit } from './event-bus.js';
 import { getConfig } from './config.js';
-import { getTranscriptsRoot } from './runtime-launcher.js';
+import { buildRuntimeCommand, getTranscriptsRoot } from './runtime-launcher.js';
 import * as tmux from './tmux.js';
 
 interface RunnerInstance {
@@ -131,7 +131,7 @@ export async function executeRun(
   // Build the command that will run inside tmux and emit events
   // The runner script sends ndjson events to our Unix socket
   const runnerScript = buildRunnerScript(
-    runtimeConfig.command,
+    buildRuntimeCommand(runtimeConfig, agent),
     prompt,
     instance.socketPath,
     run.id,

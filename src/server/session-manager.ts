@@ -6,7 +6,9 @@ import {
   listAgents,
   deleteAgent,
   updateAgentStatus,
+  isEffortLevel,
   type Agent,
+  type EffortLevel,
   type Result,
 } from './db.js';
 import { execFileSync } from 'node:child_process';
@@ -60,6 +62,10 @@ export interface SpawnOptions {
   branch?: string;
   /** Explicit workspace path (bypasses worktree creation and projects_root resolution) */
   workspace?: string;
+  /** Pinned LLM model — injected into the runtime command and recorded on the agent */
+  model?: string | null;
+  /** Pinned reasoning effort level — recorded on the agent */
+  effort?: EffortLevel | null;
 }
 
 export function spawnAgent(opts: SpawnOptions): Result<Agent> {
@@ -67,6 +73,15 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
   const runtimeConfig = config.runtimes[opts.runtime];
   if (!runtimeConfig) {
     return { ok: false, error: `Unknown runtime '${opts.runtime}'` };
+  }
+
+  // Defense in depth: pins reach a shell via the runtime command, so
+  // reject unsafe values here even if route validation was bypassed.
+  if (opts.model && !/^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,99}$/.test(opts.model)) {
+    return { ok: false, error: `Invalid model name '${opts.model}'` };
+  }
+  if (opts.effort && !isEffortLevel(opts.effort)) {
+    return { ok: false, error: `Invalid effort level '${opts.effort}'` };
   }
 
   const sessionName = `wc-${opts.name}`;
@@ -118,6 +133,8 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     sessionName,
     workDir: workspace,
     runtime: opts.runtime,
+    model: opts.model ?? null,
+    effort: opts.effort ?? null,
   });
   if (!launchResult.ok) return launchResult;
 
@@ -129,6 +146,8 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     workspace,
     mode: 'spawned',
     status: 'idle',
+    model: opts.model ?? null,
+    effort: opts.effort ?? null,
   });
 
   if (!agentResult.ok) {
@@ -178,6 +197,8 @@ export function upgrade(agentId: string, repo?: string): Result<Agent> {
     sessionName: newSessionName,
     workDir,
     runtime: agent.runtime,
+    model: agent.model,
+    effort: agent.effort,
   });
   if (!launchResult.ok) return launchResult;
 
@@ -213,6 +234,8 @@ export function ensureSpawnedAgentSession(agentId: string): Result<{ agent: Agen
       sessionName: agent.tmux_session,
       workDir,
       runtime: agent.runtime,
+      model: agent.model,
+      effort: agent.effort,
     });
     if (!launchResult.ok) {
       return { ok: false, error: launchResult.error };
@@ -264,6 +287,56 @@ export function kill(agentId: string): Result<void> {
   tmux.killSession(agent.tmux_session);
 
   return deleteAgent(agentId);
+}
+
+/**
+ * Detach an agent: stop its runner and remove the record, leaving the tmux
+ * session running. This is the right teardown for adopted sessions; for
+ * spawned agents kill() also terminates the session.
+ */
+export function detach(agentId: string): Result<Agent> {
+  const agentResult = getAgent(agentId);
+  if (!agentResult.ok) return agentResult;
+
+  stopRunner(agentId);
+
+  const deleted = deleteAgent(agentId);
+  if (!deleted.ok) return { ok: false, error: deleted.error };
+
+  return agentResult;
+}
+
+export interface StopAllSummary {
+  /** Spawned agents whose tmux sessions were terminated */
+  killed: string[];
+  /** Adopted agents that received a Ctrl+C interrupt (session left running) */
+  interrupted: string[];
+  errors: { agent: string; error: string }[];
+}
+
+/**
+ * Emergency stop: kill every spawned agent's session and interrupt every
+ * adopted agent with Ctrl+C. Never throws — collects per-agent errors.
+ */
+export function stopAll(): StopAllSummary {
+  const summary: StopAllSummary = { killed: [], interrupted: [], errors: [] };
+
+  for (const agent of listAgents()) {
+    try {
+      if (agent.mode === 'spawned') {
+        const result = kill(agent.id);
+        if (result.ok) summary.killed.push(agent.id);
+        else summary.errors.push({ agent: agent.name, error: result.error });
+      } else if (tmux.hasSession(agent.tmux_session)) {
+        tmux.sendRawKey(agent.tmux_session, 'C-c');
+        summary.interrupted.push(agent.id);
+      }
+    } catch (e) {
+      summary.errors.push({ agent: agent.name, error: (e as Error).message });
+    }
+  }
+
+  return summary;
 }
 
 export function sendKeys(agentId: string, text: string): Result<void> {

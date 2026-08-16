@@ -79,9 +79,61 @@ describe('db.ts — schema migrations', () => {
     const columns = db.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
     expect(columns.map(c => c.name)).toContain('changed_files');
 
+    // Check that model/effort pin columns were added to agents (v8 → v9)
+    const agentColumns = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    expect(agentColumns.map(c => c.name)).toContain('model');
+    expect(agentColumns.map(c => c.name)).toContain('effort');
+
     // Version should be bumped
     const version = db.pragma('user_version', { simple: true });
     expect(version).toBe(SCHEMA_VERSION);
+  });
+
+  it('stores and updates model/effort pins on agents', async () => {
+    const mod = await import('./db.js');
+    mod.initDb(dbPath);
+
+    const created = mod.insertAgent({
+      name: 'pinned-agent',
+      runtime: 'claude-code',
+      tmux_session: 'wc-pinned',
+      workspace: null,
+      mode: 'spawned',
+      status: 'idle',
+      model: 'claude-opus-5',
+      effort: 'xhigh',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.data.model).toBe('claude-opus-5');
+    expect(created.data.effort).toBe('xhigh');
+
+    // Unpinned agents default to null
+    const plain = mod.insertAgent({
+      name: 'plain-agent',
+      runtime: 'codex',
+      tmux_session: 'wc-plain',
+      workspace: null,
+      mode: 'adopted',
+      status: 'idle',
+    });
+    expect(plain.ok && plain.data.model === null && plain.data.effort === null).toBe(true);
+
+    // Partial update: only effort changes
+    const updated = mod.updateAgentPin(created.data.id, { effort: 'high' });
+    expect(updated.ok).toBe(true);
+    if (updated.ok) {
+      expect(updated.data.model).toBe('claude-opus-5');
+      expect(updated.data.effort).toBe('high');
+    }
+
+    // null clears a pin
+    const cleared = mod.updateAgentPin(created.data.id, { model: null });
+    expect(cleared.ok && cleared.data.model === null).toBe(true);
+
+    // Unknown agent
+    const missing = mod.updateAgentPin('nope', { model: 'x' });
+    expect(missing.ok).toBe(false);
   });
 
   it('CRUD operations work after migration', async () => {
