@@ -47,8 +47,11 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result.data);
   });
 
-  app.post('/api/reviews/:runId/promote', (c) => {
-    const result = reviewQueue.promote(c.req.param('runId'));
+  app.post('/api/reviews/:runId/promote', async (c) => {
+    const body = await c.req.json<{ overrideReason?: string }>().catch(() => ({} as { overrideReason?: string }));
+    const result = reviewQueue.promote(c.req.param('runId'), {
+      overrideReason: typeof body.overrideReason === 'string' ? body.overrideReason : undefined,
+    });
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
   });

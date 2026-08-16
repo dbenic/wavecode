@@ -3,7 +3,15 @@ import { capturePane } from './session-manager.js';
 import { emit } from './event-bus.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
+import { onAuthorAgentIdle } from './code-review.js';
 import logger from './logger.js';
+
+/** Fire-and-forget: continue any pending fix-review loop for this agent. */
+function notifyReviewLoopAgentIdle(agentId: string): void {
+  onAuthorAgentIdle(agentId).catch((err) =>
+    logger.debug({ error: (err as Error).message }, 'Review-loop idle hook failed'),
+  );
+}
 
 interface WatcherState {
   timer: ReturnType<typeof setInterval>;
@@ -150,6 +158,7 @@ function tickInner(agentId: string, state: WatcherState): void {
       if (agent.mode === 'adopted') {
         completeRunningRuns(agentId);
       }
+      notifyReviewLoopAgentIdle(agentId);
     }
   } else if (detectedStatus !== dbStatus && dbStatus !== 'error') {
     state.idleOverrideCounter = 0;
@@ -167,6 +176,9 @@ function tickInner(agentId: string, state: WatcherState): void {
 
     if (agent.mode === 'adopted' && wasWorking && detectedStatus === 'idle') {
       completeRunningRuns(agentId);
+    }
+    if (wasWorking && detectedStatus === 'idle') {
+      notifyReviewLoopAgentIdle(agentId);
     }
   } else if (outputChanged) {
     emit('agent.output_updated', 'agent', agentId, {

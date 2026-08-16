@@ -9,6 +9,20 @@ vi.mock('./event-bus.js', () => ({
 
 vi.mock('./task-dispatcher.js', () => ({
   dispatchNext: vi.fn(),
+  unblockDependentsPublic: vi.fn(),
+}));
+
+const reviewConfig = {
+  auto_review: false,
+  default_reviewer: 'aider',
+  self_review: true,
+  max_fix_loops: 2,
+  require_pass_to_promote: false,
+  gate_dependents_on_approval: false,
+};
+
+vi.mock('./config.js', () => ({
+  getConfig: vi.fn(() => ({ review: reviewConfig })),
 }));
 
 describe('review-queue.ts', () => {
@@ -18,6 +32,9 @@ describe('review-queue.ts', () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.resetModules();
+    reviewConfig.auto_review = false;
+    reviewConfig.require_pass_to_promote = false;
+    reviewConfig.gate_dependents_on_approval = false;
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-review-test-'));
     dbPath = path.join(tmpDir, 'test.db');
 
@@ -94,6 +111,75 @@ describe('review-queue.ts', () => {
     }
     return result.data;
   }
+
+  async function insertCompletedAiReview(runId: string, verdict: string) {
+    const db = await import('./db.js');
+    const id = db.generateId();
+    db.getDb().prepare(`
+      INSERT INTO code_reviews (id, run_id, reviewer_type, status, verdict)
+      VALUES (?, ?, 'cross-model', 'done', ?)
+    `).run(id, runId, verdict);
+    return id;
+  }
+
+  it('blocks promote without a pass verdict when gating is on', async () => {
+    const fixture = await seedReviewFixture();
+    const queue = await import('./review-queue.js');
+    reviewConfig.require_pass_to_promote = true;
+
+    // No review at all → blocked
+    const noReview = queue.promote(fixture.runId);
+    expect(noReview.ok).toBe(false);
+    if (!noReview.ok) expect(noReview.error).toContain('no completed review');
+
+    // Non-pass verdict → blocked
+    await insertCompletedAiReview(fixture.runId, 'needs-fixes');
+    const nonPass = queue.promote(fixture.runId);
+    expect(nonPass.ok).toBe(false);
+    if (!nonPass.ok) expect(nonPass.error).toContain("'needs-fixes'");
+  });
+
+  it('allows promote with a pass verdict, and auto_review implies gating', async () => {
+    const db = await import('./db.js');
+    const fixture = await seedReviewFixture();
+    const queue = await import('./review-queue.js');
+    reviewConfig.auto_review = true; // gating implied, require flag stays off
+
+    await insertCompletedAiReview(fixture.runId, 'pass');
+    const result = queue.promote(fixture.runId);
+    expect(result.ok).toBe(true);
+    expect(expectOk(db.getRun(fixture.runId)).review_status).toBe('approved');
+  });
+
+  it('allows a blocked promote through with an explicit override reason, stored in the event', async () => {
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+    const fixture = await seedReviewFixture();
+    const queue = await import('./review-queue.js');
+    reviewConfig.require_pass_to_promote = true;
+
+    await insertCompletedAiReview(fixture.runId, 'needs-fixes');
+    const result = queue.promote(fixture.runId, { overrideReason: 'accepting vs known-red baseline' });
+
+    expect(result.ok).toBe(true);
+    expect(expectOk(db.getRun(fixture.runId)).review_status).toBe('approved');
+    expect(vi.mocked(events.emit)).toHaveBeenCalledWith(
+      'review.promoted', 'run', fixture.runId,
+      expect.objectContaining({ override_reason: 'accepting vs known-red baseline' }),
+    );
+  });
+
+  it('unblocks dependents on promote when approval-gating is on', async () => {
+    const fixture = await seedReviewFixture();
+    const queue = await import('./review-queue.js');
+    const dispatcher = await import('./task-dispatcher.js');
+    reviewConfig.gate_dependents_on_approval = true;
+
+    const result = queue.promote(fixture.runId);
+
+    expect(result.ok).toBe(true);
+    expect(vi.mocked(dispatcher.unblockDependentsPublic)).toHaveBeenCalledWith(fixture.taskId);
+  });
 
   it('promotes a pending review inside a transaction', async () => {
     const db = await import('./db.js');

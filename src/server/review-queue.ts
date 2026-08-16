@@ -13,7 +13,10 @@ import {
   type Result,
 } from './db.js';
 import { emit } from './event-bus.js';
-import { dispatchNext } from './task-dispatcher.js';
+import { getConfig } from './config.js';
+import { dispatchNext, unblockDependentsPublic } from './task-dispatcher.js';
+import { getLatestCompletedReview, type CodeReview } from './code-review.js';
+import logger from './logger.js';
 
 export interface ReviewItem {
   run: Run;
@@ -21,6 +24,8 @@ export interface ReviewItem {
   agentName: string;
   artifacts: Artifact[];
   duration: number | null;
+  /** Latest completed AI review, so the queue UI can show the verdict inline */
+  latestReview: Pick<CodeReview, 'id' | 'verdict' | 'issues_found' | 'fix_round' | 'created_at'> | null;
 }
 
 /**
@@ -46,10 +51,30 @@ export function getReview(runId: string): Result<ReviewItem> {
 
 /**
  * Promote: approve the work. Mark run as approved.
+ *
+ * When promote-gating is active (review.require_pass_to_promote, or
+ * review.auto_review which implies it), the latest completed AI review must
+ * have a 'pass' verdict — otherwise promotion is blocked unless the caller
+ * supplies an explicit override reason, which is stored in the audit event.
  */
-export function promote(runId: string): Result<Run> {
+export function promote(runId: string, opts: { overrideReason?: string } = {}): Result<Run> {
   const runResult = getRun(runId);
   if (!runResult.ok) return runResult;
+
+  const config = getConfig();
+  const gated = config.review.require_pass_to_promote || config.review.auto_review;
+  const latestReview = getLatestCompletedReview(runId);
+  const overrideReason = opts.overrideReason?.trim() || null;
+
+  if (gated && latestReview?.verdict !== 'pass' && !overrideReason) {
+    const state = latestReview
+      ? `latest review verdict is '${latestReview.verdict}'`
+      : 'no completed review exists for this run';
+    return {
+      ok: false,
+      error: `Promotion blocked: ${state}. Provide an explicit override reason to promote anyway.`,
+    };
+  }
 
   try {
     getDb().transaction(() => {
@@ -67,7 +92,19 @@ export function promote(runId: string): Result<Run> {
 
   emit('review.promoted', 'run', runId, {
     task_id: runResult.data.task_id,
+    verdict: latestReview?.verdict ?? null,
+    override_reason: overrideReason,
   });
+
+  if (overrideReason) {
+    logger.warn({ runId, overrideReason }, 'Run promoted with verdict override');
+  }
+
+  // With approval-gated dependents, downstream tasks wait for this moment.
+  if (config.review.gate_dependents_on_approval) {
+    unblockDependentsPublic(runResult.data.task_id);
+    setTimeout(() => dispatchNext(), 500);
+  }
 
   return getRun(runId);
 }
@@ -209,11 +246,22 @@ function runToReviewItem(run: Run): ReviewItem | null {
     duration = Math.floor((end - start) / 1000);
   }
 
+  const latest = getLatestCompletedReview(run.id);
+
   return {
     run,
     task: taskResult.data,
     agentName,
     artifacts,
     duration,
+    latestReview: latest
+      ? {
+          id: latest.id,
+          verdict: latest.verdict,
+          issues_found: latest.issues_found,
+          fix_round: latest.fix_round,
+          created_at: latest.created_at,
+        }
+      : null,
   };
 }

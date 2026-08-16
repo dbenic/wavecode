@@ -64,6 +64,31 @@ export default function ReviewItem({
     }
   };
 
+  // Promote is gated on a passing AI verdict; a blocked promote can be
+  // pushed through with an explicit override reason, which the server stores.
+  const promote = async () => {
+    setActing('promote');
+    try {
+      await apiPost(`/reviews/${item.run.id}/promote`);
+      onAction();
+    } catch (e) {
+      const msg = (e as Error).message ?? '';
+      if (msg.includes('Promotion blocked')) {
+        const reason = window.prompt(`${msg}\n\nOverride reason (leave empty to cancel):`);
+        if (reason?.trim()) {
+          try {
+            await apiPost(`/reviews/${item.run.id}/promote`, { overrideReason: reason.trim() });
+            onAction();
+          } catch { /* second failure already surfaced via error banner */ }
+        }
+      }
+    } finally {
+      setActing(null);
+    }
+  };
+
+  const verdict = item.latestReview?.verdict ?? aiReviews.find((r) => r.status === 'done')?.verdict ?? null;
+
   return (
     <div
       className="rounded-lg border border-slate-800/50 bg-gradient-to-br from-slate-900/80 to-slate-950/90 overflow-hidden transition-all duration-200 hover:border-slate-700/50"
@@ -78,9 +103,22 @@ export default function ReviewItem({
           <p className="text-[12px] text-slate-200 font-mono leading-relaxed line-clamp-2 flex-1">
             {item.task.prompt}
           </p>
-          <span className="flex-shrink-0 text-[9px] font-bold tracking-wider text-slate-600 border border-slate-800 rounded px-1.5 py-0.5">
-            #{item.run.attempt}
-          </span>
+          <div className="flex-shrink-0 flex items-center gap-1.5">
+            {verdict && (
+              <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${
+                verdict === 'pass'
+                  ? 'text-emerald-300 border-emerald-500/40 bg-emerald-950/50'
+                  : verdict === 'reject'
+                    ? 'text-red-300 border-red-500/40 bg-red-950/50'
+                    : 'text-amber-300 border-amber-500/40 bg-amber-950/50'
+              }`}>
+                {verdict === 'pass' ? '✓ PASS' : verdict === 'reject' ? '✗ REJECT' : '⚠ NEEDS FIXES'}
+              </span>
+            )}
+            <span className="text-[9px] font-bold tracking-wider text-slate-600 border border-slate-800 rounded px-1.5 py-0.5">
+              #{item.run.attempt}
+            </span>
+          </div>
         </div>
 
         {/* Meta row: agent, duration, artifacts */}
@@ -101,8 +139,9 @@ export default function ReviewItem({
         {/* Action buttons */}
         <div className="flex items-center gap-2 pt-1">
           <button
-            onClick={() => act('promote')}
+            onClick={promote}
             disabled={acting !== null}
+            title={verdict !== 'pass' ? 'Requires a passing AI review (or an explicit override reason)' : undefined}
             className="px-2.5 py-1 rounded border border-emerald-500/30 text-[10px] font-semibold tracking-wider text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-500/50 transition-all active:scale-95 disabled:opacity-40"
           >
             {acting === 'promote' ? '...' : 'PROMOTE'}

@@ -87,6 +87,11 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
         .then((de) => de.extractDecisions(run, agentResult.data))
         .catch((err) => logger.warn({ error: (err as Error).message }, 'Decision extraction import failed'));
     }
+
+    // Automatic cross-model review of the finished work (fire-and-forget)
+    import('./code-review.js')
+      .then((cr) => cr.maybeAutoReview(runId))
+      .catch((err) => logger.warn({ error: (err as Error).message }, 'Auto-review trigger failed'));
   } else if (run.status === 'failed') {
     // Check if we should retry
     const attempts = listRuns({ task_id: task.id });
@@ -277,11 +282,26 @@ function getDispatchableTasks(): Task[] {
 
     if (deps.length === 0) return true;
 
-    return deps.every((dep) => {
-      const depTask = getTask(dep.depends_on_id);
-      return depTask.ok && depTask.data.status === 'done';
-    });
+    return deps.every((dep) => isDependencySatisfied(dep.depends_on_id));
   });
+}
+
+/**
+ * A dependency is satisfied when its task is 'done' — and, when
+ * review.gate_dependents_on_approval is on, its latest finished run has
+ * additionally been approved in the review queue.
+ */
+function isDependencySatisfied(depTaskId: string): boolean {
+  const depTask = getTask(depTaskId);
+  if (!depTask.ok || depTask.data.status !== 'done') return false;
+
+  if (!getConfig().review.gate_dependents_on_approval) return true;
+
+  const doneRuns = listRuns({ task_id: depTaskId })
+    .filter((r) => r.status === 'done')
+    .sort((a, b) => (a.started_at < b.started_at ? 1 : -1));
+
+  return doneRuns.length > 0 && doneRuns[0].review_status === 'approved';
 }
 
 /**
@@ -348,10 +368,7 @@ function unblockDependents(completedTaskId: string): void {
       'SELECT depends_on_id FROM task_dependencies WHERE task_id = ?',
     ).all(dep.task_id) as { depends_on_id: string }[];
 
-    const allDone = allDeps.every((d) => {
-      const t = getTask(d.depends_on_id);
-      return t.ok && t.data.status === 'done';
-    });
+    const allDone = allDeps.every((d) => isDependencySatisfied(d.depends_on_id));
 
     if (allDone) {
       updateTaskStatus(dep.task_id, 'pending');
