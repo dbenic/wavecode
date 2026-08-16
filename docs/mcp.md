@@ -11,17 +11,20 @@ semantics) lives server-side, so all clients get the same guarantees.
 ## Starting the server
 
 ```bash
-wavecode mcp                                   # local daemon, no auth
-wavecode mcp --url https://vps:3777 --token …  # remote daemon, token auth
+wavecode mcp                                   # local daemon; reads config.yaml
+wavecode mcp --url https://vps:3777 --token …  # remote daemon, explicit token
 ```
 
-Environment variables (flags take precedence):
+Connection resolution (flags override env override config), same as `wavecode queue`:
 
-| Variable | Meaning | Default |
+| Source | URL | Token |
 |---|---|---|
-| `WAVECODE_URL` | Daemon base URL | `http://localhost:3777` |
-| `WAVECODE_TOKEN` | Bearer token (when `auth.method: token`) | none |
+| `--url` / `--token` | flag | flag |
+| `WAVECODE_URL` / `WAVECODE_TOKEN` | env | env |
+| `config.yaml` | `server.host` + `server.port` | `auth.fallback_token` |
+| built-in default | `http://localhost:3777` | none |
 
+`wavecode mcp` loads the install `config.yaml`, so a token-auth daemon works over SSH (`ssh host wavecode mcp`) without putting the operator token in the MCP client environment. Do not log the token.
 The transport is stdio — the standard for MCP clients. The process speaks
 JSON-RPC on stdout and logs to stderr only.
 

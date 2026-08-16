@@ -8,9 +8,11 @@
  */
 
 import { WaveCodeApiError, WaveCodeClient } from '../mcp/client.js';
-import { getConfig } from '../server/config.js';
 import { insertTask } from '../server/db.js';
 import { addDependency } from '../server/task-dispatcher.js';
+import { resolveDaemonConnection } from './daemon-connection.js';
+
+export { resolveDaemonConnection };
 
 export const DAEMON_DOWN_HINT =
   'Daemon is not reachable. Task saved locally as pending. A run starts only after the daemon is up and POST /api/dispatch (or auto_dispatch) picks it up.';
@@ -41,31 +43,6 @@ export interface QueueTaskDeps {
   insertTaskFn?: typeof insertTask;
   addDependencyFn?: typeof addDependency;
   resolveConnection?: () => { url: string; token: string | null };
-}
-
-export function resolveDaemonConnection(): { url: string; token: string | null } {
-  const envUrl = process.env.WAVECODE_URL?.trim();
-  const envToken = process.env.WAVECODE_TOKEN ?? null;
-
-  let url = envUrl || 'http://localhost:3777';
-  let token = envToken;
-
-  try {
-    const cfg = getConfig();
-    if (!envUrl) {
-      const host = cfg.server.host === '0.0.0.0' || cfg.server.host === '::'
-        ? '127.0.0.1'
-        : cfg.server.host;
-      url = `http://${host}:${cfg.server.port}`;
-    }
-    if (token == null) {
-      token = cfg.auth.fallback_token;
-    }
-  } catch {
-    // config not loaded — keep env/defaults
-  }
-
-  return { url, token };
 }
 
 export async function queueTask(

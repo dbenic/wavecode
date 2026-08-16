@@ -5,26 +5,36 @@
  * MCP-capable client (Claude Code, Grok, custom orchestrators) to a local
  * or remote WaveCode daemon over its REST API.
  *
- * Configuration (flags override env):
- *   WAVECODE_URL    daemon base URL (default http://localhost:3777)
- *   WAVECODE_TOKEN  bearer token when the daemon uses token auth
+ * Connection (flags override env override config):
+ *   --url / WAVECODE_URL / config server.host+port
+ *   --token / WAVECODE_TOKEN / auth.fallback_token
+ *
+ * Never log the token.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { resolveDaemonConnection } from '../cli/daemon-connection.js';
 import { WaveCodeClient } from './client.js';
 import { registerWaveCodeTools } from './tools.js';
 
 export interface McpServerOptions {
   url?: string;
   token?: string;
+  fetchImpl?: typeof fetch;
+}
+
+export function createMcpClient(opts: McpServerOptions = {}): WaveCodeClient {
+  const conn = resolveDaemonConnection();
+  return new WaveCodeClient({
+    baseUrl: opts.url ?? conn.url,
+    token: opts.token ?? conn.token,
+    fetchImpl: opts.fetchImpl,
+  });
 }
 
 export function buildMcpServer(opts: McpServerOptions = {}): McpServer {
-  const client = new WaveCodeClient({
-    baseUrl: opts.url ?? process.env.WAVECODE_URL ?? 'http://localhost:3777',
-    token: opts.token ?? process.env.WAVECODE_TOKEN ?? null,
-  });
+  const client = createMcpClient(opts);
 
   const server = new McpServer({
     name: 'wavecode',
@@ -36,9 +46,10 @@ export function buildMcpServer(opts: McpServerOptions = {}): McpServer {
 }
 
 export async function runStdioMcpServer(opts: McpServerOptions = {}): Promise<void> {
+  const conn = resolveDaemonConnection();
   const server = buildMcpServer(opts);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // stderr only — stdout is the MCP protocol channel
-  console.error(`WaveCode MCP server connected (daemon: ${opts.url ?? process.env.WAVECODE_URL ?? 'http://localhost:3777'})`);
+  // stderr only — stdout is the MCP protocol channel. Do not print the token.
+  console.error(`WaveCode MCP server connected (daemon: ${opts.url ?? conn.url})`);
 }

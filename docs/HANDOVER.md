@@ -66,7 +66,8 @@ Read in this order:
    Optional `review.gate_dependents_on_approval` makes the DAG advance on
    human approval instead of mere completion.
 4. **MCP control plane** — `wavecode mcp` (stdio) with 19 tools wrapping the
-   REST API; config via `WAVECODE_URL`/`WAVECODE_TOKEN`. Includes
+   REST API; connection via `--token` / `WAVECODE_TOKEN` / `auth.fallback_token`
+   (same `resolveDaemonConnection()` as `wavecode queue`). Includes
    `await_events`: cursor-based long-poll so an orchestrator loop costs one
    call per idle minute and misses nothing.
 5. **The wire** — `wavecode msg <to|all> "<text>" --type result --task <id>`

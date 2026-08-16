@@ -472,9 +472,10 @@ program
 program
   .command('mcp')
   .description('Run the WaveCode MCP server on stdio (connect Grok, Claude, or any MCP client)')
-  .option('--url <url>', 'WaveCode daemon URL (default: $WAVECODE_URL or http://localhost:3777)')
-  .option('--token <token>', 'Bearer token for the daemon (default: $WAVECODE_TOKEN)')
+  .option('--url <url>', 'WaveCode daemon URL (default: $WAVECODE_URL or config server)')
+  .option('--token <token>', 'Bearer token (default: $WAVECODE_TOKEN or config auth.fallback_token)')
   .action(async (opts: { url?: string; token?: string }) => {
+    loadInstalledConfig();
     const { runStdioMcpServer } = await import('../mcp/index.js');
     await runStdioMcpServer(opts);
     // Keep the process alive; the transport closes it when the client disconnects
