@@ -24,6 +24,21 @@ export interface DecomposeGoalOptions {
   external_id?: string | null;
 }
 
+export interface PersistGoalOptions {
+  title?: string;
+  goal?: string;
+  workspace?: string | null;
+  external_id?: string | null;
+}
+
+/** True when the caller asked to record a goal without decomposing or dispatching. */
+export function isPersistOnlyGoal(body: {
+  decompose?: unknown;
+  persist_only?: unknown;
+}): boolean {
+  return body.decompose === false || body.persist_only === true;
+}
+
 interface GoalTask {
   title: string;
   prompt: string;
@@ -175,6 +190,38 @@ async function callLlmForDecomposition(goal: string): Promise<Result<DecomposedP
 export async function previewGoalPlan(goal: string): Promise<Result<DecomposedPlan>> {
   logger.info({ goal: goal.slice(0, 200) }, 'Previewing goal decomposition');
   return callLlmForDecomposition(goal);
+}
+
+/**
+ * Persist a goal row only — no LLM decomposition, no child tasks, no dispatch.
+ * Used by orchestrators (Grok Bot, CountixDev) to seed W0/G1 before assigning work.
+ */
+export function persistGoal(opts: PersistGoalOptions): Result<Goal> {
+  const title = (opts.title?.trim() || opts.goal?.trim() || '').slice(0, 200);
+  if (!title) {
+    return { ok: false, error: 'title or goal is required' };
+  }
+
+  const goalResult = insertGoal({
+    title,
+    workspace: opts.workspace ?? null,
+    external_id: opts.external_id?.trim() || null,
+  });
+  if (!goalResult.ok) {
+    logger.error({ error: goalResult.error, title }, 'Failed to persist goal');
+    return { ok: false, error: `Failed to persist goal: ${goalResult.error}` };
+  }
+
+  const persisted = goalResult.data;
+  emit('goal.created', 'goal', persisted.id, {
+    title: persisted.title,
+    external_id: persisted.external_id,
+    task_count: 0,
+    persist_only: true,
+  });
+
+  logger.info({ goalId: persisted.id, externalId: persisted.external_id }, 'Goal persisted without decomposition');
+  return goalResult;
 }
 
 /**

@@ -74,6 +74,7 @@ describe('validate.ts — input validation', () => {
       expect(validateTaskBody({ prompt: 'Build auth module' })).toBeNull();
       expect(validateTaskBody({ prompt: 'Test', priority: 5 })).toBeNull();
       expect(validateTaskBody({ prompt: 'Test', depends_on: ['task-1', 'task-2'] })).toBeNull();
+      expect(validateTaskBody({ prompt: 'Test', goal_id: 'W0', hold: true })).toBeNull();
     });
 
     it('rejects empty prompt', () => {
@@ -88,6 +89,11 @@ describe('validate.ts — input validation', () => {
     it('rejects invalid depends_on payloads', () => {
       expect(validateTaskBody({ prompt: 'ok', depends_on: ['task-1', ''] })).not.toBeNull();
       expect(validateTaskBody({ prompt: 'ok', depends_on: 'task-1' as any })).not.toBeNull();
+    });
+
+    it('rejects empty goal_id and non-boolean hold', () => {
+      expect(validateTaskBody({ prompt: 'ok', goal_id: '   ' })).not.toBeNull();
+      expect(validateTaskBody({ prompt: 'ok', hold: 'yes' as any })).not.toBeNull();
     });
   });
 

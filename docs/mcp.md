@@ -68,7 +68,7 @@ via any stdio-to-HTTP MCP bridge, or connect through SSH:
 
 | Tool | What it does |
 |---|---|
-| `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee |
+| `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee; optional `goal_id` (ULID or `external_id`) links a child; `hold:true` skips auto-dispatch. After a file share, put the artifact id and `attached_path` in the prompt |
 | `list_tasks` | Tasks by status |
 
 ### Goals
@@ -77,7 +77,33 @@ via any stdio-to-HTTP MCP bridge, or connect through SSH:
 |---|---|
 | `list_goals` | Persisted goals with child-task rollup counts |
 | `get_goal` | One goal by id or `external_id`, plus child tasks |
-| `create_goal` | Persist a goal and decompose it into a DAG of child tasks |
+| `create_goal` | Persist a goal. Default decomposes + dispatches. `decompose:false` / `persist_only:true` records the row only (no children, no dispatch) |
+
+### Artifacts (the share path)
+
+This is how a product agent hands a spec / PDF / screenshot to an
+implementer. The file does **not** stay in Grok Bot chat. CountixDev
+pushes it into WaveCode, then assigns.
+
+```
+1. upload_artifact     MCP `path` (read locally) or content_base64 + filename
+                       (optional agent_id copies immediately).
+                       The daemon JSON API does not accept `path`.
+2. share_artifact      artifact_id + agent_id
+                       → file lands at attached_path in the
+                         agent's .wavecode/artifacts workspace
+3. create_task         put artifact id and attached_path in the prompt
+4. list_artifacts      agent_id=implementer — confirm they have the file
+```
+
+Same immutable hashed store as the PWA. No second store. No chat bridge.
+
+| Tool | What it does |
+|---|---|
+| `list_artifacts` | Filter by `agent_id` to confirm the implementer has the file |
+| `upload_artifact` | `path` or `content_base64` + `filename`; optional `agent_id` attaches on upload |
+| `share_artifact` | Copy into the target agent's workspace; returns `attached_path` |
+| `attach_artifact` | Quiet copy (no pane notify); same workspace landing |
 
 ### Decisions
 

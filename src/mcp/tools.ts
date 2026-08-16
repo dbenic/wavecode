@@ -97,12 +97,14 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'create_task',
     description:
-      'Queue a task. Unassigned tasks go to any idle agent; depends_on task IDs build a DAG — dependents dispatch only after prerequisites finish (and are approved, when approval-gating is on).',
+      'Queue a task. Unassigned tasks go to any idle agent when auto_dispatch is on — pass agent_id to pin the assignee. depends_on builds a DAG. Optional goal_id (ULID or external_id like W0/G1) links a child to a seeded goal. Persist-only goals create no tasks; you add children yourself. hold:true skips auto-dispatch. After upload_artifact / share_artifact, put the artifact id and attached_path in the prompt so the implementer can open the file in their workspace — do not leave the file only in chat.',
     schema: {
       prompt: z.string().describe('The task prompt'),
       agent_id: z.string().optional().describe('Assign to a specific agent (omit for any idle agent)'),
       priority: z.number().int().optional().describe('Higher dispatches first (default 0)'),
       depends_on: z.array(z.string()).optional().describe('Task IDs that must finish first'),
+      goal_id: z.string().optional().describe('Parent goal ULID or external_id (e.g. W0, G1)'),
+      hold: z.boolean().optional().describe('If true, do not auto-dispatch this task'),
     },
     handler: (client, args) => client.post('/tasks', args),
   },
@@ -136,14 +138,106 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'create_goal',
     description:
-      'Persist a goal and LLM-decompose it into a DAG of child tasks (depends_on). Optional external_id links an outside tracker (F-16, G1) without importing it.',
+      'Persist a goal. Default: LLM-decompose into a DAG of child tasks and dispatch. Set decompose:false or persist_only:true to record the row only (title, workspace, external_id) with no child tasks and no dispatch — use this to seed W0/G1 before assigning work. Optional external_id is a label (F-16, G1), not an import.',
     schema: {
-      goal: z.string().describe('High-level goal to decompose into tasks'),
+      goal: z.string().optional().describe('High-level goal text (required unless persist-only + title)'),
       title: z.string().optional().describe('Short title (defaults to the goal text)'),
       workspace: z.string().optional(),
       external_id: z.string().optional().describe('Optional outside id such as F-16 or G1'),
+      decompose: z.boolean().optional().describe('false = persist the goal row only; default true'),
+      persist_only: z.boolean().optional().describe('Alias for decompose:false'),
     },
     handler: (client, args) => client.post('/goals', args),
+  },
+
+  // --- Artifacts (the share path: upload → attach → agent workspace) ---
+  {
+    name: 'list_artifacts',
+    description:
+      'List artifacts in the WaveCode store. Filter by agent_id to confirm the implementer has the file (created by or attached/shared to that agent). This is how CountixDev verifies a spec/PDF/screenshot landed after upload_artifact + share_artifact.',
+    schema: {
+      agent_id: z.string().optional().describe('Agent ID or name — created by or shared/attached to'),
+      run_id: z.string().optional().describe('Source run ID'),
+    },
+    handler: (client, args) => {
+      const params = new URLSearchParams();
+      if (args.agent_id) params.set('agent_id', String(args.agent_id));
+      if (args.run_id) params.set('run_id', String(args.run_id));
+      const qs = params.toString();
+      return client.get(`/artifacts${qs ? `?${qs}` : ''}`);
+    },
+  },
+  {
+    name: 'upload_artifact',
+    description:
+      'THE share path step 1: push a file from the orchestrator into WaveCode (not Grok Bot chat). Path (read by this MCP process) or content_base64 + filename. Pass agent_id to copy into that agent\'s .wavecode/artifacts workspace immediately (returns attached_path the CLI agent can open). Otherwise call share_artifact / attach_artifact next. Same hashed store as the PWA — no second store.',
+    schema: {
+      path: z.string().optional().describe('Local file path readable by the MCP process'),
+      content_base64: z.string().optional().describe('File bytes as base64 (use when the daemon cannot see path)'),
+      filename: z.string().optional().describe('Required with content_base64; defaults to path basename'),
+      note: z.string().optional(),
+      agent_id: z.string().optional().describe('Attach into this agent\'s workspace after upload'),
+      run_id: z.string().optional().describe('Link as a run artifact (role=output on upload)'),
+    },
+    handler: async (client, args) => {
+      const { readFileSync, existsSync } = await import('node:fs');
+      const { basename } = await import('node:path');
+
+      let contentBase64 = typeof args.content_base64 === 'string' ? args.content_base64 : undefined;
+      let filename = typeof args.filename === 'string' ? args.filename : undefined;
+
+      if (!contentBase64 && typeof args.path === 'string' && args.path.trim()) {
+        const filePath = args.path.trim();
+        if (!existsSync(filePath)) {
+          throw new Error(`File not found: ${filePath}`);
+        }
+        contentBase64 = readFileSync(filePath).toString('base64');
+        filename = filename || basename(filePath);
+      }
+
+      if (!contentBase64 || !filename) {
+        throw new Error('Provide path, or content_base64 + filename');
+      }
+
+      return client.post('/artifacts/upload', {
+        filename,
+        content_base64: contentBase64,
+        note: args.note,
+        agent_id: args.agent_id,
+        run_id: args.run_id,
+      });
+    },
+  },
+  {
+    name: 'attach_artifact',
+    description:
+      'Quiet copy of an existing artifact into an agent workspace (.wavecode/artifacts + artifact_targets) and/or a run. Returns attached_path. Prefer share_artifact when handing a spec/PDF/screenshot to an implementer; use this when you only need the file on disk.',
+    schema: {
+      artifact_id: z.string().describe('Artifact ID'),
+      agent_id: z.string().optional().describe('Copy into this agent\'s workspace'),
+      run_id: z.string().optional().describe('Link to this run'),
+      role: z.string().optional().describe('run_artifacts role when run_id is set (default input)'),
+    },
+    handler: (client, args) =>
+      client.post(`/artifacts/${args.artifact_id}/attach`, {
+        agent_id: args.agent_id,
+        run_id: args.run_id,
+        role: args.role,
+      }),
+  },
+  {
+    name: 'share_artifact',
+    description:
+      'THE share path step 2: hand an uploaded artifact to a target agent. Copies the file into that agent\'s .wavecode/artifacts workspace (CLI agent can open attached_path), records artifact_targets, and tries to notify the pane. File-on-disk is success even if notify fails. Then create_task with the id/path in the prompt, and list_artifacts(agent_id) to confirm.',
+    schema: {
+      artifact_id: z.string().describe('Artifact ID from upload_artifact'),
+      agent_id: z.string().describe('Target agent ID or name (the implementer)'),
+    },
+    handler: (client, args) =>
+      client.post(`/artifacts/${args.artifact_id}/share`, {
+        agent_id: args.agent_id,
+        targetAgentId: args.agent_id,
+      }),
   },
 
   // --- Decisions (binding calls other agents must see) ---

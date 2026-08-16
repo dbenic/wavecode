@@ -7,6 +7,7 @@ import {
   listTasks,
   updateTaskStatus,
   listRuns,
+  findGoal,
 } from '../db.js';
 import { getConfig } from '../config.js';
 import { emit } from '../event-bus.js';
@@ -60,6 +61,8 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       agent_id?: string;
       priority?: number;
       depends_on?: string[];
+      goal_id?: string;
+      hold?: boolean;
     }>();
 
     const taskValidation = validate.validateTaskBody(body);
@@ -70,6 +73,15 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     if (body.agent_id) {
       const agentResult = getAgent(body.agent_id);
       if (!agentResult.ok) return c.json({ error: agentResult.error }, 400);
+    }
+
+    let resolvedGoalId: string | null = null;
+    if (body.goal_id?.trim()) {
+      const goalResult = findGoal(body.goal_id.trim());
+      if (!goalResult.ok) {
+        return c.json({ error: `Goal not found: ${body.goal_id}` }, 400);
+      }
+      resolvedGoalId = goalResult.data.id;
     }
 
     for (const depId of dependencyIds) {
@@ -86,6 +98,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
           prompt: body.prompt,
           agent_id: body.agent_id,
           priority: body.priority,
+          goal_id: resolvedGoalId,
         });
         if (!result.ok) {
           throw new Error(result.error);
@@ -107,11 +120,14 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       prompt: task.prompt.substring(0, 200),
       agent_id: task.agent_id,
       priority: task.priority,
+      goal_id: task.goal_id,
     });
 
-    logger.info({ taskId: task.id }, 'Task created');
+    logger.info({ taskId: task.id, goalId: task.goal_id }, 'Task created');
 
-    if (getConfig().autonomy.auto_dispatch) {
+    // hold:true skips auto-dispatch. Persist-only goals create no tasks;
+    // if auto_dispatch is on and this task is unassigned, an idle agent may pick it up.
+    if (getConfig().autonomy.auto_dispatch && body.hold !== true) {
       setTimeout(() => taskDispatcher.dispatchNext(), 500);
     }
 

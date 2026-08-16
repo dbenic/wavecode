@@ -28,6 +28,7 @@ vi.mock('./config.js', () => ({
 vi.mock('./session-manager.js', () => ({
   sendKeys: vi.fn(() => ({ ok: true, data: undefined })),
   capturePane: vi.fn(() => ({ ok: true, data: '' })),
+  get: vi.fn((id: string) => ({ ok: false, error: `Agent ${id} not found` })),
 }));
 
 vi.mock('./llm-provider.js', () => ({

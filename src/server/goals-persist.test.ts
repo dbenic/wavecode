@@ -2,7 +2,7 @@
  * Goals persist as first-class rows; child tasks roll up; unattached tasks still work.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -126,5 +126,45 @@ describe('goals persist + rollup', () => {
     expect(one.tasks).toHaveLength(2);
     expect(one.tasks.every((t) => t.goal_id === goal.data.id)).toBe(true);
     expect(one.rollup).toMatchObject({ done: 1, pending: 1, total: 2 });
+  });
+
+  it('POST /api/goals decompose:false inserts a row with zero children and does not dispatch', async () => {
+    const db = await import('./db.js');
+    db.initDb(dbPath);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    const llm = await import('./llm-provider.js');
+    const dispatchSpy = vi.spyOn(dispatcher, 'dispatchNext');
+    const llmSpy = vi.spyOn(llm, 'completeText');
+
+    const { registerGoalRoutes } = await import('./routes/goals.js');
+    const app = new Hono();
+    registerGoalRoutes(app);
+
+    const res = await app.fetch(new Request('http://localhost/api/goals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'W0 seed',
+        workspace: '/ws/countix',
+        external_id: 'W0',
+        decompose: false,
+      }),
+    }));
+
+    expect(res.status).toBe(201);
+    const body = await res.json() as {
+      goal: { id: string; external_id: string; title: string };
+      created_task_ids: string[];
+      persist_only: boolean;
+    };
+    expect(body.persist_only).toBe(true);
+    expect(body.created_task_ids).toEqual([]);
+    expect(body.goal.external_id).toBe('W0');
+    expect(body.goal.title).toBe('W0 seed');
+    expect(db.listTasks({ goal_id: body.goal.id })).toHaveLength(0);
+    expect(db.getGoalWithRollup('W0').ok).toBe(true);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(llmSpy).not.toHaveBeenCalled();
   });
 });

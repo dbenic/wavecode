@@ -4,6 +4,9 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { WAVECODE_TOOLS } from './tools.js';
 import { WaveCodeClient } from './client.js';
 
@@ -38,6 +41,7 @@ describe('mcp tools', () => {
       'promote_run', 'retry_run', 'handoff_run', 'reject_run',
       'send_message', 'list_messages',
       'list_goals', 'get_goal', 'create_goal',
+      'list_artifacts', 'upload_artifact', 'attach_artifact', 'share_artifact',
       'list_decisions', 'record_decision',
     ]) {
       expect(names).toContain(required);
@@ -123,6 +127,92 @@ describe('mcp tools', () => {
     expect(url).toBe('http://wavecode.test:3777/api/goals');
     expect(init.method).toBe('POST');
     expect(body).toEqual({ goal: 'Employee incoming view', external_id: 'F-16' });
+  });
+
+  it('create_goal forwards decompose:false for persist-only seeding', async () => {
+    const { client, fetchMock } = makeClient({ persist_only: true });
+    await tool('create_goal').handler(client, {
+      title: 'W0 seed',
+      external_id: 'W0',
+      decompose: false,
+    });
+
+    const { body } = lastCall(fetchMock);
+    expect(body).toEqual({ title: 'W0 seed', external_id: 'W0', decompose: false });
+  });
+
+  it('create_task forwards goal_id and hold', async () => {
+    const { client, fetchMock } = makeClient({ id: 't1' });
+    await tool('create_task').handler(client, {
+      prompt: 'Add /incoming',
+      goal_id: 'W0',
+      hold: true,
+      agent_id: 'agent-1',
+    });
+
+    const { url, body } = lastCall(fetchMock);
+    expect(url).toBe('http://wavecode.test:3777/api/tasks');
+    expect(body).toEqual({
+      prompt: 'Add /incoming',
+      goal_id: 'W0',
+      hold: true,
+      agent_id: 'agent-1',
+    });
+  });
+
+  it('upload_artifact posts JSON base64 and list/attach wrap REST', async () => {
+    const { client, fetchMock } = makeClient({ id: 'art-1' });
+    await tool('upload_artifact').handler(client, {
+      filename: 'brief.md',
+      content_base64: Buffer.from('# hi').toString('base64'),
+      agent_id: 'agent-1',
+    });
+    const uploaded = lastCall(fetchMock);
+    expect(uploaded.url).toBe('http://wavecode.test:3777/api/artifacts/upload');
+    expect(uploaded.init.method).toBe('POST');
+    expect(uploaded.body).toEqual({
+      filename: 'brief.md',
+      content_base64: Buffer.from('# hi').toString('base64'),
+      agent_id: 'agent-1',
+    });
+
+    await tool('list_artifacts').handler(client, { agent_id: 'agent-1' });
+    expect(lastCall(fetchMock).url).toBe(
+      'http://wavecode.test:3777/api/artifacts?agent_id=agent-1',
+    );
+
+    await tool('attach_artifact').handler(client, {
+      artifact_id: 'art-1',
+      agent_id: 'agent-1',
+    });
+    const attached = lastCall(fetchMock);
+    expect(attached.url).toBe('http://wavecode.test:3777/api/artifacts/art-1/attach');
+    expect(attached.body).toEqual({ agent_id: 'agent-1' });
+
+    await tool('share_artifact').handler(client, {
+      artifact_id: 'art-1',
+      agent_id: 'agent-1',
+    });
+    const shared = lastCall(fetchMock);
+    expect(shared.url).toBe('http://wavecode.test:3777/api/artifacts/art-1/share');
+    expect(shared.body).toEqual({ agent_id: 'agent-1', targetAgentId: 'agent-1' });
+  });
+
+  it('upload_artifact reads a local path and posts base64', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-mcp-art-'));
+    const filePath = path.join(tmp, 'drop.txt');
+    fs.writeFileSync(filePath, 'from chat');
+    const { client, fetchMock } = makeClient({ id: 'art-2' });
+
+    await tool('upload_artifact').handler(client, { path: filePath, agent_id: 'agent-9' });
+
+    const { body } = lastCall(fetchMock);
+    expect(body).toEqual({
+      filename: 'drop.txt',
+      content_base64: Buffer.from('from chat').toString('base64'),
+      agent_id: 'agent-9',
+    });
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 
   it('get_goal and list_goals hit the goals API', async () => {

@@ -36,7 +36,11 @@ is context that WaveCode attaches around it.
    briefing (sibling agents, recent changes, recorded decisions) to the task
    prompt, so agents in one workspace share situational awareness.
 3. **Guides** (Library) — persistent reference docs attached per agent.
-4. **Artifacts** — immutable, hashed files shared to agents or tasks.
+4. **Artifacts** — immutable, hashed files. The operator share path is
+   MCP `upload_artifact` → `share_artifact` / attach-on-upload → file
+   lands in the agent's `.wavecode/artifacts` workspace (`attached_path`).
+   `list_artifacts?agent_id=` confirms the implementer has the file.
+   Put the id/path in the `create_task` prompt. Not a chat bridge.
 5. **Messages** (the wire) — persistent addressed/broadcast messages with
    task/run references (`send_message` / `list_messages`, mirrored on SSE).
 6. **Specs** (Research) — research runs produce markdown specs that can be
