@@ -32,7 +32,7 @@ export interface ProjectGateConfig {
 }
 
 export interface ProjectConfig {
-  /** Glob or prefix matched against `agents.workspace` (e.g. `**/wavepulse*`). */
+  // Glob or prefix matched against agents.workspace (e.g. "**/" + "wavepulse*").
   workspace_match: string;
   gate?: ProjectGateConfig;
   /** When a gate is configured this defaults to true — RESULT is required to promote. */
