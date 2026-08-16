@@ -34,6 +34,32 @@ export interface Task {
   status: 'pending' | 'running' | 'done' | 'failed' | 'blocked';
   priority: number;
   created_at: string;
+  goal_id: string | null;
+}
+
+export const GOAL_STATUSES = ['active', 'done', 'failed', 'cancelled'] as const;
+export type GoalStatus = (typeof GOAL_STATUSES)[number];
+
+export interface Goal {
+  id: string;
+  title: string;
+  status: GoalStatus;
+  workspace: string | null;
+  external_id: string | null;
+  created_at: string;
+}
+
+export interface GoalRollup {
+  pending: number;
+  running: number;
+  done: number;
+  failed: number;
+  blocked: number;
+  total: number;
+}
+
+export interface GoalWithRollup extends Goal {
+  rollup: GoalRollup;
 }
 
 export interface Run {
@@ -168,7 +194,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -187,13 +213,25 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    workspace TEXT,
+    external_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_goals_external ON goals(external_id);
+  CREATE INDEX IF NOT EXISTS idx_goals_created ON goals(created_at DESC);
+
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     agent_id TEXT REFERENCES agents(id),
     prompt TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     priority INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    goal_id TEXT REFERENCES goals(id)
   );
 
   CREATE TABLE IF NOT EXISTS task_dependencies (
@@ -255,6 +293,8 @@ const SCHEMA_SQL = `
     ON events(entity_type, entity_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_tasks_status_agent
     ON tasks(status, agent_id);
+  CREATE INDEX IF NOT EXISTS idx_tasks_goal
+    ON tasks(goal_id);
   CREATE INDEX IF NOT EXISTS idx_runs_task_status
     ON runs(task_id, status);
   CREATE INDEX IF NOT EXISTS idx_artifacts_source_run
@@ -532,6 +572,21 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE agents ADD COLUMN model TEXT;
     ALTER TABLE agents ADD COLUMN effort TEXT;
   `,
+  // v9 → v10: Persist goals as first-class rows; tasks may point at a goal
+  9: `
+    CREATE TABLE IF NOT EXISTS goals (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      workspace TEXT,
+      external_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_goals_external ON goals(external_id);
+    CREATE INDEX IF NOT EXISTS idx_goals_created ON goals(created_at DESC);
+    ALTER TABLE tasks ADD COLUMN goal_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id);
+  `,
 };
 
 let db: Database.Database;
@@ -667,13 +722,18 @@ export function deleteAgent(id: string): Result<void> {
 
 // --- Task helpers ---
 
-export function insertTask(task: { agent_id?: string | null; prompt: string; priority?: number }): Result<Task> {
+export function insertTask(task: {
+  agent_id?: string | null;
+  prompt: string;
+  priority?: number;
+  goal_id?: string | null;
+}): Result<Task> {
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO tasks (id, agent_id, prompt, priority)
-      VALUES (?, ?, ?, ?)
-    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0);
+      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null);
     const row = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task;
     return { ok: true, data: row };
   } catch (e) {
@@ -687,7 +747,7 @@ export function getTask(id: string): Result<Task> {
   return { ok: true, data: row };
 }
 
-export function listTasks(filters?: { status?: string; agent_id?: string }): Task[] {
+export function listTasks(filters?: { status?: string; agent_id?: string; goal_id?: string }): Task[] {
   let sql = 'SELECT * FROM tasks';
   const conditions: string[] = [];
   const params: unknown[] = [];
@@ -700,6 +760,10 @@ export function listTasks(filters?: { status?: string; agent_id?: string }): Tas
     conditions.push('agent_id = ?');
     params.push(filters.agent_id);
   }
+  if (filters?.goal_id) {
+    conditions.push('goal_id = ?');
+    params.push(filters.goal_id);
+  }
 
   if (conditions.length > 0) {
     sql += ' WHERE ' + conditions.join(' AND ');
@@ -707,6 +771,114 @@ export function listTasks(filters?: { status?: string; agent_id?: string }): Tas
   sql += ' ORDER BY priority DESC, created_at ASC';
 
   return getDb().prepare(sql).all(...params) as Task[];
+}
+
+export function insertGoal(goal: {
+  title: string;
+  status?: GoalStatus;
+  workspace?: string | null;
+  external_id?: string | null;
+}): Result<Goal> {
+  const id = generateId();
+  try {
+    getDb().prepare(`
+      INSERT INTO goals (id, title, status, workspace, external_id)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      id,
+      goal.title,
+      goal.status ?? 'active',
+      goal.workspace ?? null,
+      goal.external_id ?? null,
+    );
+    const row = getDb().prepare('SELECT * FROM goals WHERE id = ?').get(id) as Goal;
+    return { ok: true, data: row };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export function getGoal(id: string): Result<Goal> {
+  const row = getDb().prepare('SELECT * FROM goals WHERE id = ?').get(id) as Goal | undefined;
+  if (!row) return { ok: false, error: `Goal ${id} not found` };
+  return { ok: true, data: row };
+}
+
+export function getGoalByExternalId(externalId: string): Result<Goal> {
+  const row = getDb().prepare(
+    'SELECT * FROM goals WHERE external_id = ? ORDER BY created_at DESC LIMIT 1',
+  ).get(externalId) as Goal | undefined;
+  if (!row) return { ok: false, error: `Goal '${externalId}' not found` };
+  return { ok: true, data: row };
+}
+
+/** Look up a goal by ULID or optional external_id (e.g. F-16). */
+export function findGoal(idOrExternal: string): Result<Goal> {
+  const byId = getGoal(idOrExternal);
+  if (byId.ok) return byId;
+  return getGoalByExternalId(idOrExternal);
+}
+
+export function listGoals(): Goal[] {
+  return getDb().prepare('SELECT * FROM goals ORDER BY created_at DESC').all() as Goal[];
+}
+
+const GOAL_ROLLUP_SELECT = `
+  SELECT
+    g.*,
+    COALESCE(SUM(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+    COALESCE(SUM(CASE WHEN t.status = 'running' THEN 1 ELSE 0 END), 0) AS running,
+    COALESCE(SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END), 0) AS done,
+    COALESCE(SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+    COALESCE(SUM(CASE WHEN t.status = 'blocked' THEN 1 ELSE 0 END), 0) AS blocked,
+    COALESCE(COUNT(t.id), 0) AS total
+  FROM goals g
+  LEFT JOIN tasks t ON t.goal_id = g.id
+`;
+
+interface GoalRollupRow extends Goal {
+  pending: number;
+  running: number;
+  done: number;
+  failed: number;
+  blocked: number;
+  total: number;
+}
+
+function toGoalWithRollup(row: GoalRollupRow): GoalWithRollup {
+  return {
+    id: row.id,
+    title: row.title,
+    status: row.status,
+    workspace: row.workspace,
+    external_id: row.external_id,
+    created_at: row.created_at,
+    rollup: {
+      pending: Number(row.pending),
+      running: Number(row.running),
+      done: Number(row.done),
+      failed: Number(row.failed),
+      blocked: Number(row.blocked),
+      total: Number(row.total),
+    },
+  };
+}
+
+export function listGoalsWithRollup(): GoalWithRollup[] {
+  const rows = getDb().prepare(
+    `${GOAL_ROLLUP_SELECT} GROUP BY g.id ORDER BY g.created_at DESC`,
+  ).all() as GoalRollupRow[];
+  return rows.map(toGoalWithRollup);
+}
+
+export function getGoalWithRollup(idOrExternal: string): Result<GoalWithRollup> {
+  const found = findGoal(idOrExternal);
+  if (!found.ok) return found;
+  const row = getDb().prepare(
+    `${GOAL_ROLLUP_SELECT} WHERE g.id = ? GROUP BY g.id`,
+  ).get(found.data.id) as GoalRollupRow | undefined;
+  if (!row) return { ok: false, error: `Goal ${idOrExternal} not found` };
+  return { ok: true, data: toGoalWithRollup(row) };
 }
 
 export function updateTaskStatus(id: string, status: Task['status']): Result<Task> {

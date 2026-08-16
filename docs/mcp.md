@@ -68,6 +68,21 @@ via any stdio-to-HTTP MCP bridge, or connect through SSH:
 | `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee |
 | `list_tasks` | Tasks by status |
 
+### Goals
+
+| Tool | What it does |
+|---|---|
+| `list_goals` | Persisted goals with child-task rollup counts |
+| `get_goal` | One goal by id or `external_id`, plus child tasks |
+| `create_goal` | Persist a goal and decompose it into a DAG of child tasks |
+
+### Decisions
+
+| Tool | What it does |
+|---|---|
+| `list_decisions` | Binding decisions, optionally filtered by workspace |
+| `record_decision` | Record a binding call other agents must honor |
+
 ### Review loop
 
 | Tool | What it does |

@@ -42,6 +42,10 @@ describe('db.ts — schema migrations', () => {
     expect(tableNames).toContain('push_subscriptions');
     expect(tableNames).toContain('kv_settings');
     expect(tableNames).toContain('decisions');
+    expect(tableNames).toContain('goals');
+
+    const taskColumns = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    expect(taskColumns.map((c) => c.name)).toContain('goal_id');
 
     // Schema version should be current
     const version = db.pragma('user_version', { simple: true });
@@ -74,6 +78,7 @@ describe('db.ts — schema migrations', () => {
     expect(tableNames).toContain('push_subscriptions');
     expect(tableNames).toContain('kv_settings');
     expect(tableNames).toContain('decisions');
+    expect(tableNames).toContain('goals');
 
     // Check that changed_files column was added to runs
     const columns = db.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
@@ -83,6 +88,9 @@ describe('db.ts — schema migrations', () => {
     const agentColumns = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
     expect(agentColumns.map(c => c.name)).toContain('model');
     expect(agentColumns.map(c => c.name)).toContain('effort');
+
+    const migratedTaskColumns = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    expect(migratedTaskColumns.map((c) => c.name)).toContain('goal_id');
 
     // Version should be bumped
     const version = db.pragma('user_version', { simple: true });

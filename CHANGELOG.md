@@ -5,6 +5,9 @@ All notable changes to WaveCode are documented here.
 ## Unreleased
 
 ### Added
+- Persisted goals (`goals` table, schema v10). `POST /api/goals` writes a parent row; decomposed tasks store `goal_id`. `GET /api/goals` and `GET /api/goals/:id` return child-task rollup counts. Optional `external_id` (e.g. `F-16`) is a label only.
+- MCP tools `list_goals`, `get_goal`, `create_goal`, `list_decisions`, `record_decision` so orchestrators can track epics and binding decisions without the UI.
+- Task Board goal rollup (title + n/m tasks done).
 - Per-project verify/referee profile (`projects` in config). A matching workspace invokes the configured gate after `run.finished`, persists the RESULT line, and `promote()` uses that RESULT as the only test evidence. Unmatched workspaces are unchanged. LLM `verify_completion` is skipped when a gate is configured.
 - Codex runtime default `effort_flag: -c model_reasoning_effort=` so a pin of `high`/`xhigh` is actually injected.
 

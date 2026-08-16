@@ -37,6 +37,8 @@ describe('mcp tools', () => {
       'list_reviews', 'request_ai_review', 'get_ai_reviews',
       'promote_run', 'retry_run', 'handoff_run', 'reject_run',
       'send_message', 'list_messages',
+      'list_goals', 'get_goal', 'create_goal',
+      'list_decisions', 'record_decision',
     ]) {
       expect(names).toContain(required);
     }
@@ -107,6 +109,48 @@ describe('mcp tools', () => {
     });
     expect(lastCall(fetchMock).url).toBe(
       'http://wavecode.test:3777/api/events/log?since=12&wait_ms=30000&types=run.*%2Cmessage.created',
+    );
+  });
+
+  it('create_goal posts the goal plus optional external_id', async () => {
+    const { client, fetchMock } = makeClient({ goal: { id: 'g1' } });
+    await tool('create_goal').handler(client, {
+      goal: 'Employee incoming view',
+      external_id: 'F-16',
+    });
+
+    const { url, init, body } = lastCall(fetchMock);
+    expect(url).toBe('http://wavecode.test:3777/api/goals');
+    expect(init.method).toBe('POST');
+    expect(body).toEqual({ goal: 'Employee incoming view', external_id: 'F-16' });
+  });
+
+  it('get_goal and list_goals hit the goals API', async () => {
+    const { client, fetchMock } = makeClient([]);
+    await tool('list_goals').handler(client, {});
+    expect(lastCall(fetchMock).url).toBe('http://wavecode.test:3777/api/goals');
+
+    await tool('get_goal').handler(client, { goal_id: 'F-16' });
+    expect(lastCall(fetchMock).url).toBe('http://wavecode.test:3777/api/goals/F-16');
+  });
+
+  it('record_decision and list_decisions wrap the decisions API', async () => {
+    const { client, fetchMock } = makeClient([]);
+    await tool('record_decision').handler(client, {
+      workspace: '/ws/countix',
+      summary: 'employee view IS /incoming, stripped by role',
+    });
+    const posted = lastCall(fetchMock);
+    expect(posted.url).toBe('http://wavecode.test:3777/api/decisions');
+    expect(posted.init.method).toBe('POST');
+    expect(posted.body).toEqual({
+      workspace: '/ws/countix',
+      summary: 'employee view IS /incoming, stripped by role',
+    });
+
+    await tool('list_decisions').handler(client, { workspace: '/ws/countix' });
+    expect(lastCall(fetchMock).url).toBe(
+      'http://wavecode.test:3777/api/decisions?workspace=%2Fws%2Fcountix',
     );
   });
 

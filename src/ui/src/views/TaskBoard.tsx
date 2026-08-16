@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, Task, TaskStatus } from '../types';
+import type { Agent, Goal, Task, TaskStatus } from '../types';
 import { isTaskEventType } from '../sse-events';
 import TaskCard from '../components/TaskCard';
 
@@ -42,6 +42,7 @@ interface AgentMessage {
 export default function TaskBoard() {
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -75,10 +76,11 @@ export default function TaskBoard() {
     let active = true;
 
     const loadBoard = async () => {
-      const [taskResult, agentResult, messageResult] = await Promise.allSettled([
+      const [taskResult, agentResult, messageResult, goalResult] = await Promise.allSettled([
         apiGet<Task[]>('/tasks'),
         apiGet<Agent[]>('/agents'),
         apiGet<AgentMessage[]>('/messages?limit=30'),
+        apiGet<Goal[]>('/goals'),
       ]);
 
       if (!active) return;
@@ -92,6 +94,7 @@ export default function TaskBoard() {
 
       setAgents(agentResult.status === 'fulfilled' ? agentResult.value : []);
       setMessages(messageResult.status === 'fulfilled' ? messageResult.value : []);
+      setGoals(goalResult.status === 'fulfilled' ? goalResult.value : []);
       setLoaded(true);
     };
 
@@ -110,6 +113,7 @@ export default function TaskBoard() {
     }).catch((e) => {
       setLoadError((e as Error).message || 'Failed to refresh tasks');
     });
+    apiGet<Goal[]>('/goals').then(setGoals).catch(() => {});
   }, []);
 
   const handleSSE = useCallback((event: SSEEvent) => {
@@ -147,8 +151,12 @@ export default function TaskBoard() {
     setGoalError(null);
     try {
       await apiPost('/goals', { goal: goalText });
-      const updated = await apiGet<Task[]>('/tasks');
+      const [updated, nextGoals] = await Promise.all([
+        apiGet<Task[]>('/tasks'),
+        apiGet<Goal[]>('/goals'),
+      ]);
       setTasks(updated);
+      setGoals(nextGoals);
       setGoalText('');
       setGoalPlan(null);
       setMode(null);
@@ -566,6 +574,39 @@ export default function TaskBoard() {
         {loadError && (
           <div className="mb-4 rounded border border-red-500/30 bg-red-950/20 px-3 py-2 text-[11px] text-red-300">
             {loadError}
+          </div>
+        )}
+
+        {goals.length > 0 && (
+          <div className="mb-4 space-y-1.5">
+            <p className="text-[10px] font-bold tracking-[0.2em] text-amber-400/60 uppercase">
+              Goals
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {goals.map((goal) => {
+                const done = goal.rollup?.done ?? 0;
+                const total = goal.rollup?.total ?? 0;
+                return (
+                  <div
+                    key={goal.id}
+                    className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-amber-500/20 bg-amber-950/20"
+                    title={goal.title}
+                  >
+                    {goal.external_id && (
+                      <span className="text-[9px] font-mono font-bold text-amber-400/80">
+                        {goal.external_id}
+                      </span>
+                    )}
+                    <span className="text-[11px] text-slate-200 max-w-[220px] truncate">
+                      {goal.title}
+                    </span>
+                    <span className="text-[10px] font-mono text-amber-400/70">
+                      {done}/{total} done
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
