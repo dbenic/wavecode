@@ -42,6 +42,35 @@ describe('config.ts — security', () => {
     }
   });
 
+  it('defaults Codex effort_flag so high/xhigh pins are injected', async () => {
+    const { loadConfig, getConfig } = await import('./config.js');
+    loadConfig(configPath);
+    expect(getConfig().runtimes.codex?.effort_flag).toBe('-c model_reasoning_effort=');
+    expect(getConfig().projects).toEqual({});
+  });
+
+  it('loads a per-project referee profile from yaml', async () => {
+    fs.writeFileSync(configPath, `
+projects:
+  wavepulse:
+    workspace_match: '**/wavepulse*'
+    gate:
+      command: wavepulse-gate
+      branch: landing-v3-human-first
+      mode: full
+      baseline_glob: ~/gate-results/landing-v3-human-first-*-full.log
+    require_result_to_promote: true
+`, 'utf8');
+
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig(configPath);
+    expect(cfg.projects.wavepulse?.workspace_match).toBe('**/wavepulse*');
+    expect(cfg.projects.wavepulse?.gate?.command).toBe('wavepulse-gate');
+    expect(cfg.projects.wavepulse?.gate?.branch).toBe('landing-v3-human-first');
+    expect(cfg.projects.wavepulse?.gate?.mode).toBe('full');
+    expect(cfg.projects.wavepulse?.require_result_to_promote).toBe(true);
+  });
+
   it('uses the live no-click bypass runtime commands', async () => {
     const { loadConfig, updateConfig, getConfig } = await import('./config.js');
 

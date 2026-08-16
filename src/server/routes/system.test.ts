@@ -457,11 +457,14 @@ function makeConfig(overrides: Partial<WaveConfig> & {
       storage: '/tmp/artifacts',
       retention_days: 30,
     },
+    projects: {},
     review: {
       auto_review: false,
       default_reviewer: 'aider',
       self_review: true,
       max_fix_loops: 2,
+      require_pass_to_promote: false,
+      gate_dependents_on_approval: false,
     },
     llm: {
       provider: 'anthropic',

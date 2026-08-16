@@ -18,6 +18,7 @@ import { emit } from './event-bus.js';
 import { executeRun } from './runner.js';
 import * as sessionManager from './session-manager.js';
 import { buildBriefing } from './briefing-builder.js';
+import { maybeInvokeProjectGate } from './project-gate.js';
 import logger from './logger.js';
 
 let dispatchInProgress = false;
@@ -86,6 +87,11 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
       import('./decision-extractor.js')
         .then((de) => de.extractDecisions(run, agentResult.data))
         .catch((err) => logger.warn({ error: (err as Error).message }, 'Decision extraction import failed'));
+      // Gated projects: invoke the referee. RESULT is the only evidence —
+      // do not wait on it here (full mode can take ≥60 minutes).
+      void maybeInvokeProjectGate(runId, agentResult.data).catch((err) =>
+        logger.warn({ runId, error: (err as Error).message }, 'Project referee invoke failed'),
+      );
     }
 
     // Automatic cross-model review of the finished work (fire-and-forget)

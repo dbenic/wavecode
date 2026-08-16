@@ -100,6 +100,40 @@ describe('task-verifier.ts', () => {
     vi.restoreAllMocks();
   });
 
+  it('skips LLM verification when a project referee is configured', async () => {
+    const config = await import('./config.js');
+    const sessions = await import('./session-manager.js');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(config.getConfig).mockReturnValue({
+      autonomy: {
+        auto_dispatch: true,
+        auto_restart: true,
+        hang_timeout_min: 10,
+        max_task_retries: 2,
+        verify_completion: true,
+      },
+      projects: {
+        wavepulse: {
+          workspace_match: '**/builder*',
+          gate: {
+            command: 'wavepulse-gate',
+            branch: 'landing-v3-human-first',
+            mode: 'full',
+          },
+          require_result_to_promote: true,
+        },
+      },
+    } as never);
+
+    const verifier = await import('./task-verifier.js');
+    const result = await verifier.verifyTaskCompletion('task-1', 'agent-1');
+
+    expect(result).toBeNull();
+    expect(sessions.capturePane).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('skips verification when the feature is disabled', async () => {
     const config = await import('./config.js');
     const sessions = await import('./session-manager.js');

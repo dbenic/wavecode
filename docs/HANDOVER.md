@@ -41,6 +41,11 @@ Read in this order:
 
 ## Recently landed (see git log for detail)
 
+0. **Per-project referee** — `projects.<name>` in config (workspace glob +
+   gate command). Matching agents skip LLM `verify_completion`; promote
+   requires a stored `RESULT GREEN|RED` from the referee. RED is allowed
+   only when failing test *files* are a subset of the newest nightly
+   `*-full.log`. No schema bump (RESULT JSON in `kv_settings`).
 1. **Agent pinning** — `agents.model` + `agents.effort` (`low|medium|high|xhigh`),
    injected into runtime commands via per-runtime `model_flag`/`effort_flag`.
    Pins are shell-embedded, so they are validated with a strict alphabet at
@@ -112,10 +117,13 @@ Test-suite gotchas that will bite you:
 2. **Escalation timers (spec F6)** — agent silent N hours on an active task
    → notify orchestrator; orchestrator silent M hours → notify human.
    `health-monitor.ts` only covers crash/hang of `working` agents today.
-3. **Gate-verdict binding (spec F1)** — persist `(branch, sha)` on runs,
-   poll an external referee's GREEN/RED verdict per sha, block approval on
-   mismatch. The review loop reviews *diffs*; the referee verdict is the
-   only test truth.
+3. **Gate-verdict binding (spec F1)** — landed as a per-project referee
+   profile (`projects.<name>.gate` in config). Matching workspaces invoke
+   the configured command after `run.finished`, persist the RESULT line on
+   the run (kv, no schema bump), and `promote()` treats that RESULT as the
+   only test evidence. Unmatched workspaces keep today's behavior. The
+   review loop still reviews diffs; a human "known-red" override cannot
+   substitute for a missing RESULT.
 4. **Resident orchestrator loop** — command-chat is reactive-only. A
    daemon-hosted loop (LLM + command-chat tool set, woken by events) would
    let the PM survive client disconnects.

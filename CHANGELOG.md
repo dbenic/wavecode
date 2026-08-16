@@ -4,6 +4,10 @@ All notable changes to WaveCode are documented here.
 
 ## Unreleased
 
+### Added
+- Per-project verify/referee profile (`projects` in config). A matching workspace invokes the configured gate after `run.finished`, persists the RESULT line, and `promote()` uses that RESULT as the only test evidence. Unmatched workspaces are unchanged. LLM `verify_completion` is skipped when a gate is configured.
+- Codex runtime default `effort_flag: -c model_reasoning_effort=` so a pin of `high`/`xhigh` is actually injected.
+
 ### Fixed
 - `wavecode queue` and `wavecode send` POST `/api/tasks` so the daemon creates and dispatches a run (same as MCP `create_task`). If the daemon is down, the task is saved locally as pending with a clear message.
 - Auto-review after `run.finished` always leaves a completed `code_reviews` row with a parsed verdict, including empty diffs and LLM/poll failures. `/api/reviews` `latestReview` is no longer null after a successful run.

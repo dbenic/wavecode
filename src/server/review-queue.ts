@@ -16,6 +16,7 @@ import { emit } from './event-bus.js';
 import { getConfig } from './config.js';
 import { dispatchNext, unblockDependentsPublic } from './task-dispatcher.js';
 import { getLatestCompletedReview, type CodeReview } from './code-review.js';
+import { evaluateRefereeForPromote } from './project-gate.js';
 import logger from './logger.js';
 
 export interface ReviewItem {
@@ -62,6 +63,13 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
   if (!runResult.ok) return runResult;
 
   const config = getConfig();
+  const author = getAgent(runResult.data.agent_id);
+  const referee = evaluateRefereeForPromote(
+    runId,
+    author.ok ? author.data.workspace : null,
+  );
+  if (!referee.ok) return referee;
+
   const gated = config.review.require_pass_to_promote || config.review.auto_review;
   const latestReview = getLatestCompletedReview(runId);
   const overrideReason = opts.overrideReason?.trim() || null;

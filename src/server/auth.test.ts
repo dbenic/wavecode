@@ -25,7 +25,8 @@ function makeConfig(auth: Partial<WaveConfig['auth']>): WaveConfig {
     },
     notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
     artifacts: { storage: '/tmp/wavecode/artifacts', retention_days: 30 },
-    review: { auto_review: false, default_reviewer: 'aider', self_review: true, max_fix_loops: 2 },
+    projects: {},
+    review: { auto_review: false, default_reviewer: 'aider', self_review: true, max_fix_loops: 2, require_pass_to_promote: false, gate_dependents_on_approval: false },
     llm: {
       provider: 'anthropic',
       api_key: null,
