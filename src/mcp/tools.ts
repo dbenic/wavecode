@@ -116,6 +116,60 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       client.get(`/tasks${args.status ? `?status=${args.status}` : ''}`),
   },
 
+  // --- Goals (parent epics for decomposed task DAGs) ---
+  {
+    name: 'list_goals',
+    description:
+      'List persisted goals (big tasks / epics) with child-task rollup counts (pending/running/done/failed/blocked).',
+    schema: {},
+    handler: (client) => client.get('/goals'),
+  },
+  {
+    name: 'get_goal',
+    description:
+      'Get one goal by id or external_id (e.g. F-16) plus child tasks and status rollup.',
+    schema: {
+      goal_id: z.string().describe('Goal ULID or optional external_id'),
+    },
+    handler: (client, args) => client.get(`/goals/${encodeURIComponent(String(args.goal_id))}`),
+  },
+  {
+    name: 'create_goal',
+    description:
+      'Persist a goal and LLM-decompose it into a DAG of child tasks (depends_on). Optional external_id links an outside tracker (F-16, G1) without importing it.',
+    schema: {
+      goal: z.string().describe('High-level goal to decompose into tasks'),
+      title: z.string().optional().describe('Short title (defaults to the goal text)'),
+      workspace: z.string().optional(),
+      external_id: z.string().optional().describe('Optional outside id such as F-16 or G1'),
+    },
+    handler: (client, args) => client.post('/goals', args),
+  },
+
+  // --- Decisions (binding calls other agents must see) ---
+  {
+    name: 'list_decisions',
+    description:
+      'List recorded binding decisions, optionally filtered by workspace. Use this to see calls like routing or role-stripping rules.',
+    schema: {
+      workspace: z.string().optional().describe('Filter to one workspace path'),
+    },
+    handler: (client, args) =>
+      client.get(`/decisions${args.workspace ? `?workspace=${encodeURIComponent(String(args.workspace))}` : ''}`),
+  },
+  {
+    name: 'record_decision',
+    description:
+      'Record a binding decision other agents must honor (e.g. "employee view IS /incoming, stripped by role"). Requires workspace or an agent_id whose workspace is set.',
+    schema: {
+      summary: z.string().describe('Short binding statement'),
+      workspace: z.string().optional().describe('Workspace path (required unless agent_id has one)'),
+      detail: z.string().optional(),
+      agent_id: z.string().optional().describe('Source agent; used to resolve workspace if omitted'),
+    },
+    handler: (client, args) => client.post('/decisions', args),
+  },
+
   // --- Review loop ---
   {
     name: 'list_reviews',

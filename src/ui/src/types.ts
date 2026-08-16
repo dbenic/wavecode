@@ -25,8 +25,28 @@ export interface Task {
   status: TaskStatus;
   priority: number;
   created_at: string;
+  goal_id?: string | null;
   dependencies?: string[];
   dependents?: string[];
+}
+
+export interface GoalRollup {
+  pending: number;
+  running: number;
+  done: number;
+  failed: number;
+  blocked: number;
+  total: number;
+}
+
+export interface Goal {
+  id: string;
+  title: string;
+  status: 'active' | 'done' | 'failed' | 'cancelled';
+  workspace: string | null;
+  external_id: string | null;
+  created_at: string;
+  rollup: GoalRollup;
 }
 
 export interface Run {

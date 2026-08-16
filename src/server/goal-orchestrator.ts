@@ -1,13 +1,27 @@
 import { completeText } from './llm-provider.js';
-import { insertTask, listAgents, type Task, type Agent, type Result } from './db.js';
+import {
+  insertGoal,
+  insertTask,
+  listAgents,
+  type Goal,
+  type Task,
+  type Agent,
+  type Result,
+} from './db.js';
 import { addDependency, dispatchNext } from './task-dispatcher.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 
 export interface GoalPlan {
-  goal: string;
+  goal: Goal;
   tasks: GoalTask[];
   created_task_ids: string[];
+}
+
+export interface DecomposeGoalOptions {
+  title?: string;
+  workspace?: string | null;
+  external_id?: string | null;
 }
 
 interface GoalTask {
@@ -164,10 +178,13 @@ export async function previewGoalPlan(goal: string): Promise<Result<DecomposedPl
 }
 
 /**
- * Decompose a goal into tasks, create them in the DB, set up dependencies,
- * and trigger dispatch.
+ * Decompose a goal into tasks, persist the parent goal, create child tasks
+ * with goal_id, set up dependencies, and trigger dispatch.
  */
-export async function decomposeGoal(goal: string): Promise<Result<GoalPlan>> {
+export async function decomposeGoal(
+  goal: string,
+  opts: DecomposeGoalOptions = {},
+): Promise<Result<GoalPlan>> {
   logger.info({ goal: goal.slice(0, 200) }, 'Decomposing goal into tasks');
 
   const planResult = await callLlmForDecomposition(goal);
@@ -175,12 +192,24 @@ export async function decomposeGoal(goal: string): Promise<Result<GoalPlan>> {
     return { ok: false, error: planResult.error };
   }
 
+  const title = (opts.title?.trim() || goal).slice(0, 200);
+  const goalResult = insertGoal({
+    title,
+    workspace: opts.workspace ?? null,
+    external_id: opts.external_id?.trim() || null,
+  });
+  if (!goalResult.ok) {
+    logger.error({ error: goalResult.error, title }, 'Failed to persist goal');
+    return { ok: false, error: `Failed to persist goal: ${goalResult.error}` };
+  }
+  const persisted = goalResult.data;
+
   const plan = planResult.data;
   const agents = listAgents();
   const createdTaskIds: string[] = [];
   const createdTasks: Task[] = [];
 
-  // Create all tasks in the DB
+  // Create all tasks in the DB, linked to the parent goal
   for (const goalTask of plan.tasks) {
     const agentId = matchAgentHint(goalTask.agent_hint, agents);
 
@@ -188,6 +217,7 @@ export async function decomposeGoal(goal: string): Promise<Result<GoalPlan>> {
       agent_id: agentId,
       prompt: goalTask.prompt,
       priority: goalTask.priority ?? 5,
+      goal_id: persisted.id,
     });
 
     if (!taskResult.ok) {
@@ -212,13 +242,17 @@ export async function decomposeGoal(goal: string): Promise<Result<GoalPlan>> {
     }
   }
 
-  emit('goal.created', 'system', 'goal-orchestrator', {
-    goal: goal.slice(0, 500),
+  emit('goal.created', 'goal', persisted.id, {
+    title: persisted.title,
+    external_id: persisted.external_id,
     task_count: createdTaskIds.length,
     task_ids: createdTaskIds,
   });
 
-  logger.info({ taskCount: createdTaskIds.length, taskIds: createdTaskIds }, 'Goal decomposed into tasks');
+  logger.info(
+    { goalId: persisted.id, taskCount: createdTaskIds.length, taskIds: createdTaskIds },
+    'Goal decomposed into tasks',
+  );
 
   // Trigger dispatch
   await dispatchNext({ manual: true });
@@ -226,7 +260,7 @@ export async function decomposeGoal(goal: string): Promise<Result<GoalPlan>> {
   return {
     ok: true,
     data: {
-      goal,
+      goal: persisted,
       tasks: plan.tasks,
       created_task_ids: createdTaskIds,
     },

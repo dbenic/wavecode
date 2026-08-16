@@ -72,6 +72,7 @@ describe('task-dispatcher.ts', () => {
         status: 'pending' as const,
         priority: 1,
         created_at: '2026-04-03T00:00:00Z',
+        goal_id: null,
       };
 
       if (filters?.status === 'pending') {

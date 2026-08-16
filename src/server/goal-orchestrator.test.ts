@@ -6,6 +6,7 @@ vi.mock('./llm-provider.js', () => ({
 
 vi.mock('./db.js', () => ({
   insertTask: vi.fn(),
+  insertGoal: vi.fn(),
   listAgents: vi.fn(),
 }));
 
@@ -103,6 +104,17 @@ describe('goal-orchestrator.ts', () => {
         ],
       }),
     } as never);
+    vi.mocked(db.insertGoal).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'goal-1',
+        title: 'Ship the backend',
+        status: 'active',
+        workspace: null,
+        external_id: null,
+        created_at: '2026-04-08T00:00:00Z',
+      },
+    } as never);
     vi.mocked(db.insertTask)
       .mockReturnValueOnce({
         ok: true,
@@ -116,23 +128,30 @@ describe('goal-orchestrator.ts', () => {
     const orchestrator = await import('./goal-orchestrator.js');
     const result = await orchestrator.decomposeGoal('Ship the backend');
 
+    expect(db.insertGoal).toHaveBeenCalledWith({
+      title: 'Ship the backend',
+      workspace: null,
+      external_id: null,
+    });
     expect(db.insertTask).toHaveBeenNthCalledWith(1, {
       agent_id: 'agent-1',
       prompt: 'Build the backend API',
       priority: 9,
+      goal_id: 'goal-1',
     });
     expect(db.insertTask).toHaveBeenNthCalledWith(2, {
       agent_id: 'agent-2',
       prompt: 'Review the backend changes',
       priority: 5,
+      goal_id: 'goal-1',
     });
     expect(dispatcher.addDependency).toHaveBeenCalledWith('task-2', 'task-1');
     expect(events.emit).toHaveBeenCalledWith(
       'goal.created',
-      'system',
-      'goal-orchestrator',
+      'goal',
+      'goal-1',
       expect.objectContaining({
-        goal: 'Ship the backend',
+        title: 'Ship the backend',
         task_count: 2,
         task_ids: ['task-1', 'task-2'],
       }),
@@ -141,7 +160,14 @@ describe('goal-orchestrator.ts', () => {
     expect(result).toEqual({
       ok: true,
       data: {
-        goal: 'Ship the backend',
+        goal: {
+          id: 'goal-1',
+          title: 'Ship the backend',
+          status: 'active',
+          workspace: null,
+          external_id: null,
+          created_at: '2026-04-08T00:00:00Z',
+        },
         tasks: [
           {
             title: 'Implement API',

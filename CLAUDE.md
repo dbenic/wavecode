@@ -107,13 +107,23 @@ CREATE TABLE agents (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE goals (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'done' | 'failed' | 'cancelled'
+  workspace TEXT,
+  external_id TEXT,                       -- optional outside label (F-16, G1)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
   agent_id TEXT REFERENCES agents(id),
   prompt TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'running' | 'done' | 'failed' | 'blocked'
   priority INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  goal_id TEXT REFERENCES goals(id)
 );
 
 CREATE TABLE task_dependencies (

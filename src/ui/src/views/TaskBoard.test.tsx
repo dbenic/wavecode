@@ -53,6 +53,10 @@ describe('TaskBoard', () => {
         return [] as never;
       }
 
+      if (path === '/goals') {
+        return [] as never;
+      }
+
       throw new Error(`Unexpected path: ${path}`);
     });
 
@@ -90,6 +94,10 @@ describe('TaskBoard', () => {
         throw new Error('Messages unavailable');
       }
 
+      if (path === '/goals') {
+        return [] as never;
+      }
+
       throw new Error(`Unexpected path: ${path}`);
     });
 
@@ -106,7 +114,7 @@ describe('TaskBoard', () => {
     const useApi = await import('../hooks/useApi');
 
     vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
-      if (path === '/tasks' || path === '/agents' || path === '/messages?limit=30') {
+      if (path === '/tasks' || path === '/agents' || path === '/messages?limit=30' || path === '/goals') {
         return [] as never;
       }
 
@@ -137,6 +145,41 @@ describe('TaskBoard', () => {
     fireEvent.click(screen.getByText('Create'));
 
     expect(await screen.findByText('Dependency task not found: task-123')).toBeInTheDocument();
+  });
+
+  it('shows a goal rollup of done vs total child tasks', async () => {
+    const useApi = await import('../hooks/useApi');
+
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/tasks') {
+        return [makeTask('Add /incoming route')] as never;
+      }
+      if (path === '/agents' || path === '/messages?limit=30') {
+        return [] as never;
+      }
+      if (path === '/goals') {
+        return [{
+          id: 'goal-1',
+          title: 'Employee incoming view',
+          status: 'active',
+          workspace: null,
+          external_id: 'F-16',
+          created_at: '2026-08-16T00:00:00Z',
+          rollup: { pending: 1, running: 0, done: 2, failed: 0, blocked: 0, total: 3 },
+        }] as never;
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    render(
+      <MemoryRouter>
+        <TaskBoard />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Employee incoming view')).toBeInTheDocument();
+    expect(screen.getByText('F-16')).toBeInTheDocument();
+    expect(screen.getByText('2/3 done')).toBeInTheDocument();
   });
 });
 

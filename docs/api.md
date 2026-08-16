@@ -172,6 +172,35 @@ List runs for a task.
 ### `POST /api/dispatch`
 Manually dispatch queued work, even when `autonomy.auto_dispatch` is disabled.
 
+## Goals
+
+A goal is a persisted parent row for an LLM-decomposed task DAG. Child
+tasks store `goal_id`. Standalone tasks (no goal) still work.
+
+### `GET /api/goals`
+List goals with child-task rollup counts
+(`pending` / `running` / `done` / `failed` / `blocked` / `total`).
+
+### `GET /api/goals/:id`
+Get one goal by ULID or `external_id` (e.g. `F-16`), plus child tasks
+and the same rollup.
+
+### `POST /api/goals`
+Persist a goal, decompose it into tasks with `depends_on`, and attach
+those tasks to the goal. Emits `goal.created`.
+
+Body:
+`{ goal: string, title?: string, workspace?: string, external_id?: string }`
+
+`external_id` is an optional outside label (`F-16`, `G1`) — not an import
+from another tracker.
+
+### `POST /api/goals/preview`
+Decompose a goal without writing rows.
+
+Body:
+`{ goal: string }`
+
 ## Decisions And Briefings
 
 ### `GET /api/decisions`
