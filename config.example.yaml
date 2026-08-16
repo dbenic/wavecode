@@ -39,6 +39,9 @@ runtimes:
     command: codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust
     idle_pattern: '^>\s*$'
     model_flag: -m
+    # Current Codex CLI: `-c model_reasoning_effort=high`. Flag ends with `=`
+    # so WaveCode concatenates the pin with no extra space.
+    effort_flag: -c model_reasoning_effort=
   aider:
     command: aider --yes
     idle_pattern: '^>\s*$'
@@ -67,10 +70,31 @@ artifacts:
 review:
   auto_review: false
   default_reviewer: aider
-  self_review: true
+  self_review: false
   max_fix_loops: 2
-  require_pass_to_promote: false   # gate promote even when auto_review is off
+  require_pass_to_promote: true   # gate promote even when auto_review is off
   gate_dependents_on_approval: false  # dependents wait for human approval, not just 'done'
+
+# Per-project verify/referee profiles. A project with a `gate` uses that
+# command's RESULT line as the only promote/completion evidence — never the
+# agent's self-report, and never the LLM last-30-lines verifier.
+# A project (or workspace) without a gate keeps today's behavior.
+# The referee cds itself to a shared checkout; WaveCode does not run it
+# against worktrees. Unmatched workspaces never invoke this command.
+#
+# projects:
+#   wavepulse:
+#     workspace_match: '**/wavepulse*'
+#     gate:
+#       command: wavepulse-gate
+#       branch: landing-v3-human-first
+#       mode: full
+#       # newest nightly *-full.log for this branch; override if logs live elsewhere
+#       # baseline_glob: ~/gate-results/landing-v3-human-first-*-full.log
+#     require_result_to_promote: true
+#     # optional per-agent branch override
+#     # agent_branches:
+#     #   opus-wavepulse: landing-v3-human-first
 
 llm:
   provider: anthropic              # 'anthropic' or 'openai-compatible'

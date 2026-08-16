@@ -17,6 +17,30 @@ export interface RuntimeConfig {
   ssh_key?: string;
 }
 
+export interface ProjectGateConfig {
+  /** Executable on PATH or an absolute path. WaveCode never cds into a worktree. */
+  command: string;
+  /** Shared-checkout branch the referee fetches (e.g. landing-v3-human-first). */
+  branch: string;
+  /** Promote always uses full. */
+  mode?: 'fast' | 'full';
+  /**
+   * Newest matching nightly `*-full.log` used as the known-red baseline.
+   * If omitted, WaveCode looks for `~/gate-results/<branch-with-/-as-->-*-full.log`.
+   */
+  baseline_glob?: string;
+}
+
+export interface ProjectConfig {
+  /** Glob or prefix matched against `agents.workspace` (e.g. `**/wavepulse*`). */
+  workspace_match: string;
+  gate?: ProjectGateConfig;
+  /** When a gate is configured this defaults to true — RESULT is required to promote. */
+  require_result_to_promote?: boolean;
+  /** Optional per-agent branch override (agent name → branch). */
+  agent_branches?: Record<string, string>;
+}
+
 export interface WaveConfig {
   server: {
     port: number;
@@ -30,6 +54,8 @@ export interface WaveConfig {
     guides_root: string;
     templates_root: string;
   };
+  /** Per-project verify/referee profiles. Unmatched workspaces keep today's behavior. */
+  projects: Record<string, ProjectConfig>;
   autonomy: {
     auto_dispatch: boolean;
     auto_restart: boolean;
@@ -256,6 +282,9 @@ function buildDefaults(baseDir: string): WaveConfig {
         command: 'codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust',
         idle_pattern: '^>\\s*$',
         model_flag: '-m',
+        // Current Codex CLI (Rust): `-c model_reasoning_effort=xhigh`.
+        // Injector concatenates without a space when the flag ends with `=`.
+        effort_flag: '-c model_reasoning_effort=',
       },
       aider: {
         command: 'aider --yes',
@@ -263,6 +292,7 @@ function buildDefaults(baseDir: string): WaveConfig {
         model_flag: '--model',
       },
     },
+    projects: {},
     auth: { method: 'token', fallback_token: null, trusted_proxies: [] },
     notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
     artifacts: { storage: path.join(dataRoot, 'artifacts'), retention_days: 30 },

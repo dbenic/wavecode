@@ -21,8 +21,14 @@ const reviewConfig = {
   gate_dependents_on_approval: false,
 };
 
+const projectsConfig: Record<string, {
+  workspace_match: string;
+  gate?: { command: string; branch: string; mode?: 'fast' | 'full'; baseline_glob?: string };
+  require_result_to_promote?: boolean;
+}> = {};
+
 vi.mock('./config.js', () => ({
-  getConfig: vi.fn(() => ({ review: reviewConfig })),
+  getConfig: vi.fn(() => ({ review: reviewConfig, projects: projectsConfig })),
 }));
 
 describe('review-queue.ts', () => {
@@ -35,6 +41,7 @@ describe('review-queue.ts', () => {
     reviewConfig.auto_review = false;
     reviewConfig.require_pass_to_promote = false;
     reviewConfig.gate_dependents_on_approval = false;
+    for (const key of Object.keys(projectsConfig)) delete projectsConfig[key];
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-review-test-'));
     dbPath = path.join(tmpDir, 'test.db');
 
@@ -49,14 +56,14 @@ describe('review-queue.ts', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  async function seedReviewFixture() {
+  async function seedReviewFixture(workspace: string | null = null) {
     const db = await import('./db.js');
 
     const sourceAgent = db.insertAgent({
       name: 'source-agent',
       runtime: 'codex',
       tmux_session: 'wc-source-agent',
-      workspace: null,
+      workspace,
       mode: 'spawned',
       status: 'idle',
     });
@@ -227,6 +234,45 @@ describe('review-queue.ts', () => {
     expect(expectOk(db.getTask(fixture.taskId)).agent_id).toBe(fixture.targetAgentId);
     expect(expectOk(db.getTask(fixture.taskId)).status).toBe('pending');
     expect(dispatcher.dispatchNext).toHaveBeenCalled();
+  });
+
+  it('blocks promote on a gated project when no referee RESULT is stored', async () => {
+    const fixture = await seedReviewFixture('/srv/apps/wavepulse');
+    const queue = await import('./review-queue.js');
+    projectsConfig.wavepulse = {
+      workspace_match: '**/wavepulse*',
+      gate: { command: 'wavepulse-gate', branch: 'landing-v3-human-first', mode: 'full' },
+      require_result_to_promote: true,
+    };
+
+    const blocked = queue.promote(fixture.runId, { overrideReason: 'known-red' });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.error).toContain('no referee RESULT');
+  });
+
+  it('allows promote on a gated project after a GREEN RESULT (AI review can still gate)', async () => {
+    const db = await import('./db.js');
+    const gate = await import('./project-gate.js');
+    const fixture = await seedReviewFixture('/srv/apps/wavepulse');
+    const queue = await import('./review-queue.js');
+    projectsConfig.wavepulse = {
+      workspace_match: '**/wavepulse*',
+      gate: { command: 'wavepulse-gate', branch: 'landing-v3-human-first', mode: 'full' },
+      require_result_to_promote: true,
+    };
+    gate.storeGateResult(fixture.runId, {
+      result_line: 'RESULT GREEN branch=landing-v3-human-first sha=abc12345 lint=PASS unit=PASS frontend=PASS',
+      log_path: null,
+      exit_code: 0,
+      mode: 'full',
+      branch: 'landing-v3-human-first',
+      sha: 'abc12345',
+      checked_at: '2026-08-16T00:00:00Z',
+    });
+
+    const result = queue.promote(fixture.runId);
+    expect(result.ok).toBe(true);
+    expect(expectOk(db.getRun(fixture.runId)).review_status).toBe('approved');
   });
 
   it('rejects a review atomically and fails the task', async () => {

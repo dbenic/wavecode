@@ -152,5 +152,17 @@ describe('runtime-launcher.ts', () => {
       expect(buildRuntimeCommand({ ...base, effort_flag: '--effort' }, { effort: 'xhigh' }))
         .toBe('codex --full-auto --effort xhigh');
     });
+
+    it('concatenates Codex -c model_reasoning_effort= without an extra space', async () => {
+      const { buildRuntimeCommand } = await import('./runtime-launcher.js');
+      expect(buildRuntimeCommand(
+        { ...base, effort_flag: '-c model_reasoning_effort=' },
+        { effort: 'xhigh' },
+      )).toBe('codex --full-auto -c model_reasoning_effort=xhigh');
+      expect(buildRuntimeCommand(
+        { ...base, effort_flag: '-c model_reasoning_effort=' },
+        { effort: 'high' },
+      )).toBe('codex --full-auto -c model_reasoning_effort=high');
+    });
   });
 });

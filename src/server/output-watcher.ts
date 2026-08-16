@@ -4,6 +4,7 @@ import { emit } from './event-bus.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
 import { onAuthorAgentIdle } from './code-review.js';
+import { projectRequiresReferee } from './project-gate.js';
 import logger from './logger.js';
 
 /** Cooldown between unattended Claude first-run dialog dismissals. */
@@ -390,6 +391,11 @@ function completeRunningRuns(agentId: string): void {
 
   if (runs.length > 0 || runningTasks.length > 0) {
     setTimeout(() => taskDispatcher.dispatchNext(), 1500);
+  }
+
+  const agentResult = getAgent(agentId);
+  if (agentResult.ok && projectRequiresReferee(agentResult.data.workspace)) {
+    return;
   }
 
   const allCompletedTaskIds = [

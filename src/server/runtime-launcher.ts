@@ -30,7 +30,11 @@ export function buildRuntimeCommand(runtimeConfig: RuntimeConfig, pin: RuntimePi
     command += ` ${runtimeConfig.model_flag} ${pin.model}`;
   }
   if (pin.effort && runtimeConfig.effort_flag && isEffortLevel(pin.effort)) {
-    command += ` ${runtimeConfig.effort_flag} ${pin.effort}`;
+    // Flags that already end with `=` (e.g. `-c model_reasoning_effort=`) take
+    // the value with no extra space so Codex sees `key=xhigh`, not `key= xhigh`.
+    command += runtimeConfig.effort_flag.endsWith('=')
+      ? ` ${runtimeConfig.effort_flag}${pin.effort}`
+      : ` ${runtimeConfig.effort_flag} ${pin.effort}`;
   }
 
   return command;

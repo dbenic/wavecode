@@ -20,6 +20,7 @@ import { capturePane } from './session-manager.js';
 import { getResolvedLlmConfig, isLlmConfigured } from './llm-provider.js';
 import { emit } from './event-bus.js';
 import * as taskDispatcher from './task-dispatcher.js';
+import { projectRequiresReferee } from './project-gate.js';
 import logger from './logger.js';
 
 export type VerifyResult = 'completed' | 'failed' | 'partial' | 'unknown';
@@ -76,6 +77,14 @@ export async function verifyTaskCompletion(
 
   const task = taskResult.data;
   const agent = agentResult.data;
+
+  if (projectRequiresReferee(agent.workspace)) {
+    logger.debug(
+      { taskId, agentId, workspace: agent.workspace },
+      'Task verification skipped — project referee is the only evidence',
+    );
+    return null;
+  }
 
   // Capture last 30 lines of terminal output
   const captureResult = capturePane(agent.tmux_session, 30);
