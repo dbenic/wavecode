@@ -13,6 +13,7 @@ import {
   CLAUDE_BYPASS_DIALOG_COOLDOWN_MS,
   detectPermissionMode,
   detectStatus,
+  extractFinishedRunIdsFromPane,
   isClaudeBypassAcceptDialog,
   maybeDismissFirstRunDialog,
   resetFirstRunDialogStateForTest,
@@ -72,6 +73,73 @@ gpt-5.4 xhigh · 47% left · ~/project
   describe('Aider', () => {
     it('detects idle at prompt', () => {
       expect(detectStatus('some output\n> ', 'aider')).toBe('idle');
+    });
+  });
+
+  describe('Grok CLI', () => {
+    it('detects working while Responding', () => {
+      const output = `
+Earlier context
+RESULT: PASS
+Responding…
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('working');
+    });
+
+    it('detects working while Thinking', () => {
+      const output = `
+Planning the change
+✦ Thinking
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('working');
+    });
+
+    it('detects working for Worked-for and the TUI interrupt line', () => {
+      expect(detectStatus('Worked for 12s\nGenerating a patch', 'grok')).toBe('working');
+      expect(detectStatus('esc to interrupt\nwriting files', 'grok')).toBe('working');
+    });
+
+    it('detects idle at the Grok prompt after a RESULT line', () => {
+      const output = `
+Implement the gate
+RESULT: PASS lint=PASS unit=PASS
+>
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('idle');
+    });
+
+    it('does not treat a RESULT line alone as working', () => {
+      const output = `
+Done with the review
+RESULT: PASS
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('idle');
+    });
+  });
+
+  describe('pane run_id binding', () => {
+    const grokRunId = '01M0886K75AJDRRR1BPTA4X7ZC';
+    const grokTaskId = '01M0886JQC1ZME43DW286V36YM';
+    const laterRunId = '01M0829117QXE7QP6GNG8EPQQT';
+
+    it('binds the echo|nc run_id that appears before RESULT PASS', () => {
+      const output = [
+        `echo '{"type":"run.started","run_id":"${grokRunId}","task_id":"${grokTaskId}","agent_id":"agent-1"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null; echo 'do the work' | grok --always-approve;`,
+        'RESULT: PASS lint=PASS unit=PASS',
+        '>',
+      ].join('\n');
+      expect(extractFinishedRunIdsFromPane(output)).toEqual([grokRunId]);
+    });
+
+    it('does not bind a later echo|nc pasted after RESULT (new task)', () => {
+      const output = [
+        `echo '{"type":"run.started","run_id":"${grokRunId}","task_id":"${grokTaskId}"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null;`,
+        'RESULT: PASS',
+        `echo '{"type":"run.started","run_id":"${laterRunId}","task_id":"01M0NEWTASK000000000000000"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null;`,
+        '◦ Working (3s • esc to interrupt)',
+        'gpt-5.4 xhigh · 47% left · ~/project',
+      ].join('\n');
+      expect(extractFinishedRunIdsFromPane(output)).toEqual([grokRunId]);
     });
   });
 

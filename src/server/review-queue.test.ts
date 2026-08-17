@@ -10,6 +10,8 @@ vi.mock('./event-bus.js', () => ({
 vi.mock('./task-dispatcher.js', () => ({
   dispatchNext: vi.fn(),
   unblockDependentsPublic: vi.fn(),
+  onRunComplete: vi.fn(),
+  finalizeRun: vi.fn(),
 }));
 
 const reviewConfig = {
@@ -287,5 +289,26 @@ describe('review-queue.ts', () => {
     expect(transactionSpy).toHaveBeenCalledTimes(1);
     expect(expectOk(db.getRun(fixture.runId)).review_status).toBe('rejected');
     expect(expectOk(db.getTask(fixture.taskId)).status).toBe('failed');
+    expect(expectOk(db.getRun(fixture.runId)).finished_at).toBeTruthy();
+  });
+
+  it('reject_run finishes a still-running run before failing the task', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+    const fixture = await seedReviewFixture();
+    db.getDb().prepare(`UPDATE runs SET status = 'running', finished_at = NULL, exit_code = NULL WHERE id = ?`)
+      .run(fixture.runId);
+    db.updateTaskStatus(fixture.taskId, 'running');
+
+    const queue = await import('./review-queue.js');
+    const result = queue.reject(fixture.runId);
+
+    expect(result.ok).toBe(true);
+    const closed = expectOk(db.getRun(fixture.runId));
+    expect(closed.finished_at).toBeTruthy();
+    expect(closed.exit_code).toBe(1);
+    expect(closed.review_status).toBe('rejected');
+    expect(expectOk(db.getTask(fixture.taskId)).status).toBe('failed');
+    expect(dispatcher.onRunComplete).toHaveBeenCalledWith(fixture.runId, fixture.sourceAgentId);
   });
 });

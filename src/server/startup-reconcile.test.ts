@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./db.js', () => ({
   listAgents: vi.fn(),
   listRuns: vi.fn(),
+  listOpenRuns: vi.fn(() => []),
+  hasOpenRun: vi.fn(() => false),
   listTasks: vi.fn(),
   finishRun: vi.fn(),
   updateAgentStatus: vi.fn(),

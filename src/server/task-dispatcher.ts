@@ -2,6 +2,8 @@ import {
   getDb,
   listTasks,
   listRuns,
+  listOpenRuns,
+  hasOpenRun,
   getTask,
   getRun,
   getAgent,
@@ -10,8 +12,11 @@ import {
   listAgents,
   insertAgentMessage,
   insertRun,
+  finishRun,
   type Task,
   type Agent,
+  type Result,
+  type Run,
 } from './db.js';
 import { getConfig } from './config.js';
 import { emit } from './event-bus.js';
@@ -37,12 +42,24 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
 
   const task = taskResult.data;
   const config = getConfig();
+  const seatStillBusy = listOpenRuns(agentId).some((r) => r.id !== runId);
 
-  if (run.status === 'done') {
-    // Success — mark task done
-    updateTaskStatus(task.id, 'done');
-    updateAgentStatus(agentId, 'idle');
+  if (run.review_status === 'rejected') {
+    if (task.status !== 'failed') updateTaskStatus(task.id, 'failed');
+    if (!seatStillBusy) updateAgentStatus(agentId, 'idle');
+    blockDependents(task.id);
+  } else if (run.status === 'done') {
+    // Success — mark task done unless reject/cancel already failed it
+    if (task.status !== 'failed') {
+      updateTaskStatus(task.id, 'done');
+    }
+    if (!seatStillBusy) {
+      updateAgentStatus(agentId, 'idle');
+    }
 
+    if (task.status === 'failed') {
+      blockDependents(task.id);
+    } else {
     emit('task.completed', 'task', task.id, {
       agent_id: agentId,
       run_id: runId,
@@ -98,12 +115,17 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
     import('./code-review.js')
       .then((cr) => cr.maybeAutoReview(runId))
       .catch((err) => logger.warn({ error: (err as Error).message }, 'Auto-review trigger failed'));
+    }
   } else if (run.status === 'failed') {
+    if (task.status === 'failed') {
+      if (!seatStillBusy) updateAgentStatus(agentId, 'idle');
+      blockDependents(task.id);
+    } else {
     // Check if we should retry
     const attempts = listRuns({ task_id: task.id });
     if (attempts.length < config.autonomy.max_task_retries) {
       // Retry — create new run
-      updateAgentStatus(agentId, 'idle');
+      if (!seatStillBusy) updateAgentStatus(agentId, 'idle');
       emit('task.retrying', 'task', task.id, {
         attempt: attempts.length + 1,
         max: config.autonomy.max_task_retries,
@@ -113,7 +135,7 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
     } else {
       // Max retries exceeded — mark task failed
       updateTaskStatus(task.id, 'failed');
-      updateAgentStatus(agentId, 'idle');
+      if (!seatStillBusy) updateAgentStatus(agentId, 'idle');
 
       emit('task.failed', 'task', task.id, {
         agent_id: agentId,
@@ -123,6 +145,7 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
       // Block dependent tasks
       blockDependents(task.id);
     }
+    }
   }
 
   // Trigger dispatch for idle agents
@@ -130,6 +153,27 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
     // Stagger slightly to avoid CLI rate limits
     setTimeout(() => dispatchNext(), 1500);
   }
+}
+
+/**
+ * Terminal close: persist finished_at + exit_code, then onRunComplete.
+ * Used by idle-complete, reject_run, cancel, and executeRun send failure.
+ */
+export function finalizeRun(
+  runId: string,
+  agentId: string,
+  exitCode: number,
+): Result<Run> {
+  const finished = finishRun(runId, exitCode);
+  if (!finished.ok) return finished;
+  import('./runner.js').then((r) => r.clearRunnerRun?.(agentId, runId)).catch(() => {});
+  emit(exitCode === 0 ? 'run.finished' : 'run.failed', 'run', runId, {
+    agent_id: agentId,
+    exit_code: exitCode,
+    auto_detected: true,
+  });
+  void onRunComplete(runId, agentId);
+  return finished;
 }
 
 /**
@@ -154,7 +198,7 @@ async function dispatchNextInner(): Promise<void> {
   const config = getConfig();
 
   const idleAgents = listAgents().filter(
-    (a) => a.status === 'idle',
+    (a) => a.status === 'idle' && !hasOpenRun(a.id),
   );
 
   if (idleAgents.length === 0) return;
@@ -215,10 +259,29 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
     logger.warn({ error: (err as Error).message }, 'Failed to build briefing, dispatching without');
   }
 
+  const open = listOpenRuns(agent.id);
+  if (open.length > 0) {
+    logger.warn(
+      { agentId: agent.id, openRunId: open[0].id, taskId: task.id },
+      'Refusing dispatch — agent already has an open run',
+    );
+    const current = getTask(task.id);
+    if (current.ok && current.data.status === 'running' && current.data.id !== open[0].task_id) {
+      updateTaskStatus(task.id, 'pending');
+    }
+    return;
+  }
+
   if (agent.mode === 'spawned') {
-    // Use runner for spawned agents
     const run = await executeRun(agent.id, task.id, prompt);
-    if (!run) {
+    if (!run.ok) {
+      if (run.code === 'busy') {
+        const current = getTask(task.id);
+        if (current.ok && current.data.status === 'running') {
+          updateTaskStatus(task.id, 'pending');
+        }
+        return;
+      }
       const current = getTask(task.id);
       if (current.ok && current.data.status === 'running') {
         updateTaskStatus(task.id, 'failed');
@@ -226,7 +289,7 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       updateAgentStatus(agent.id, 'error');
       emit('task.failed', 'task', task.id, {
         agent_id: agent.id,
-        error: 'Failed to start task run',
+        error: run.error,
       });
     }
   } else {

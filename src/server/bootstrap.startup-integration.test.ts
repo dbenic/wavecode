@@ -34,6 +34,8 @@ vi.mock('./artifact-manager.js', () => ({
 vi.mock('./db.js', () => ({
   listAgents: vi.fn(),
   listRuns: vi.fn(),
+  listOpenRuns: vi.fn(() => []),
+  hasOpenRun: vi.fn(() => false),
   listTasks: vi.fn(),
   finishRun: vi.fn(),
   updateAgentStatus: vi.fn(),
