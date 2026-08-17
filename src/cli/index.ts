@@ -9,9 +9,11 @@ import path from 'node:path';
 import { getServerEntryUrl, resolveAppRoot, resolveServerEntry } from './server-entry.js';
 import { queueTask, type QueueTaskResult } from './queue-task.js';
 import { registerQaCommands } from '../qa/cli.js';
+import { installStdioEpipeGuard, writeLine } from './stdio-guard.js';
 
 const APP_ROOT = resolveAppRoot(import.meta.dirname);
 process.chdir(APP_ROOT);
+installStdioEpipeGuard();
 
 const PID_FILE = path.join(APP_ROOT, '.wavecode.pid');
 const CONFIG_FILE = path.join(APP_ROOT, 'config.yaml');
@@ -252,7 +254,7 @@ program
     const tasks = listTasks({ agent_id: agentId, status: opts.status });
 
     if (tasks.length === 0) {
-      console.log('No tasks found.');
+      writeLine(process.stdout, 'No tasks found.');
       return;
     }
 
@@ -264,14 +266,19 @@ program
       blocked: '⊘',
     };
 
-    console.log(`\n  ${'ID'.padEnd(28)} ${'STATUS'.padEnd(10)} ${'PRI'.padEnd(5)} PROMPT`);
-    console.log('  ' + '-'.repeat(80));
+    if (!writeLine(process.stdout, `\n  ${'ID'.padEnd(28)} ${'STATUS'.padEnd(10)} ${'PRI'.padEnd(5)} PROMPT`)) return;
+    if (!writeLine(process.stdout, '  ' + '-'.repeat(80))) return;
     for (const t of tasks) {
       const icon = STATUS_ICONS[t.status] ?? '?';
       const promptPreview = t.prompt.substring(0, 40) + (t.prompt.length > 40 ? '...' : '');
-      console.log(`  ${t.id.padEnd(28)} ${(icon + ' ' + t.status).padEnd(10)} ${String(t.priority).padEnd(5)} ${promptPreview}`);
+      if (!writeLine(
+        process.stdout,
+        `  ${t.id.padEnd(28)} ${(icon + ' ' + t.status).padEnd(10)} ${String(t.priority).padEnd(5)} ${promptPreview}`,
+      )) {
+        return;
+      }
     }
-    console.log('');
+    writeLine(process.stdout, '');
   });
 
 // --- upgrade ---

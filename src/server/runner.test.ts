@@ -62,6 +62,7 @@ vi.mock('./db.js', () => ({
   insertRun: vi.fn(),
   updateTaskStatus: vi.fn(),
   getAgent: vi.fn(),
+  getRun: vi.fn(),
   listRuns: vi.fn(),
   updateRunChangedFiles: vi.fn(),
 }));
@@ -190,6 +191,10 @@ describe('runner.ts', () => {
       data: makeAgent({ id: 'agent-finish', tmux_session: 'wc-finish' }),
     } as never);
     vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: makeRun({ id: 'run-finish', task_id: 'task-finish', agent_id: 'agent-finish' }),
+    } as never);
     vi.mocked(db.insertRun).mockReturnValue({
       ok: true,
       data: makeRun({ id: 'run-finish', task_id: 'task-finish', agent_id: 'agent-finish' }),

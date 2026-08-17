@@ -1,7 +1,7 @@
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
-import { finishRun, insertRun, updateTaskStatus, getAgent, type Run } from './db.js';
+import { finishRun, insertRun, updateTaskStatus, getAgent, getRun, type Run } from './db.js';
 import { emit } from './event-bus.js';
 import { getConfig } from './config.js';
 import { buildRuntimeCommand, getTranscriptsRoot } from './runtime-launcher.js';
@@ -84,6 +84,29 @@ export function stopRunner(agentId: string): void {
 
 export function getRunner(agentId: string): RunnerInstance | undefined {
   return runners.get(agentId);
+}
+
+/**
+ * Drop in-memory runner state for the current run (heartbeat + transcript).
+ * Used when the output watcher idle-completes a spawned TUI run that never
+ * emitted run.finished on the Unix socket.
+ */
+export function clearRunnerRun(agentId: string): void {
+  const instance = runners.get(agentId);
+  if (!instance) return;
+  cleanupRunnerInstance(instance);
+}
+
+function cleanupRunnerInstance(instance: RunnerInstance): void {
+  if (instance.heartbeatTimer) {
+    clearInterval(instance.heartbeatTimer);
+    instance.heartbeatTimer = null;
+  }
+  if (instance.transcriptStream) {
+    instance.transcriptStream.end();
+    instance.transcriptStream = null;
+  }
+  instance.currentRunId = null;
 }
 
 export async function executeRun(
@@ -229,6 +252,11 @@ function handleRunnerEvent(agentId: string, line: string): void {
       break;
 
     case 'run.finished': {
+      const existing = getRun(runId);
+      if (existing.ok && existing.data.status !== 'running') {
+        cleanupRunnerInstance(instance);
+        break;
+      }
       const exitCode = (event.exit_code as number) ?? 0;
       finishRun(runId, exitCode);
       // Persist changed files list on the run record
@@ -238,15 +266,7 @@ function handleRunnerEvent(agentId: string, line: string): void {
         }).catch(() => { /* best-effort */ });
       }
       import('./task-dispatcher.js').then((td) => td.onRunComplete(runId, agentId));
-      if (instance.heartbeatTimer) {
-        clearInterval(instance.heartbeatTimer);
-        instance.heartbeatTimer = null;
-      }
-      if (instance.transcriptStream) {
-        instance.transcriptStream.end();
-        instance.transcriptStream = null;
-      }
-      instance.currentRunId = null;
+      cleanupRunnerInstance(instance);
 
       emit('run.finished', 'run', runId, {
         agent_id: agentId,
@@ -257,18 +277,15 @@ function handleRunnerEvent(agentId: string, line: string): void {
     }
 
     case 'run.failed': {
+      const existing = getRun(runId);
+      if (existing.ok && existing.data.status !== 'running') {
+        cleanupRunnerInstance(instance);
+        break;
+      }
       const exitCode = (event.exit_code as number) ?? 1;
       finishRun(runId, exitCode);
       import('./task-dispatcher.js').then((td) => td.onRunComplete(runId, agentId));
-      if (instance.heartbeatTimer) {
-        clearInterval(instance.heartbeatTimer);
-        instance.heartbeatTimer = null;
-      }
-      if (instance.transcriptStream) {
-        instance.transcriptStream.end();
-        instance.transcriptStream = null;
-      }
-      instance.currentRunId = null;
+      cleanupRunnerInstance(instance);
 
       emit('run.failed', 'run', runId, {
         agent_id: agentId,

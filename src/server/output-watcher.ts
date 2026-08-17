@@ -5,6 +5,7 @@ import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
 import { onAuthorAgentIdle } from './code-review.js';
 import { projectRequiresReferee } from './project-gate.js';
+import { clearRunnerRun } from './runner.js';
 import logger from './logger.js';
 
 /** Cooldown between unattended Claude first-run dialog dismissals. */
@@ -76,7 +77,7 @@ interface WatcherState {
 
 /** How many consecutive idle detections before we override DB 'working' -> 'idle'.
  *  Each tick is ~2s, so 4 ticks ~= 8 seconds - enough for send-keys to be received. */
-const IDLE_OVERRIDE_THRESHOLD = 4;
+export const IDLE_OVERRIDE_THRESHOLD = 4;
 
 const watchers = new Map<string, WatcherState>();
 
@@ -119,6 +120,11 @@ export function getOutputVersion(agentId: string): number {
 
 export function isWatching(agentId: string): boolean {
   return watchers.has(agentId);
+}
+
+/** Drive one watcher tick without waiting on the interval. Tests only. */
+export function tickForTest(agentId: string): void {
+  tick(agentId);
 }
 
 function tick(agentId: string): void {
@@ -184,29 +190,43 @@ function tickInner(agentId: string, state: WatcherState): void {
       });
     }
   } else if (detectedStatus === 'idle' && dbStatus === 'working') {
-    state.idleOverrideCounter++;
-
-    if (state.idleOverrideCounter >= IDLE_OVERRIDE_THRESHOLD) {
-      logger.info(
-        { agentId, name: agent.name, after: `${state.idleOverrideCounter * 2}s` },
-        'Output shows idle but DB says working - correcting to idle',
-      );
-      updateAgentStatus(agentId, 'idle');
+    // Pane still changing means the agent is generating even if status
+    // patterns missed a working indicator. Do not count those ticks.
+    // First capture (outputVersion === 1) is the baseline, not streaming.
+    const stillStreaming = outputChanged && state.outputVersion > 1;
+    if (stillStreaming) {
       state.idleOverrideCounter = 0;
-
-      emit('agent.status_changed', 'agent', agentId, {
-        status: 'idle',
+      emit('agent.output_updated', 'agent', agentId, {
         lastOutputLine: state.lastOutputLine,
         permissionMode: permMode,
         outputVersion: state.outputVersion,
         outputUpdatedAt: new Date().toISOString(),
-        autoCorrect: true,
       });
+    } else {
+      state.idleOverrideCounter++;
 
-      if (agent.mode === 'adopted') {
+      if (state.idleOverrideCounter >= IDLE_OVERRIDE_THRESHOLD) {
+        logger.info(
+          { agentId, name: agent.name, mode: agent.mode, after: `${state.idleOverrideCounter * 2}s` },
+          'Output shows idle but DB says working - correcting to idle',
+        );
+        updateAgentStatus(agentId, 'idle');
+        state.idleOverrideCounter = 0;
+
+        emit('agent.status_changed', 'agent', agentId, {
+          status: 'idle',
+          lastOutputLine: state.lastOutputLine,
+          permissionMode: permMode,
+          outputVersion: state.outputVersion,
+          outputUpdatedAt: new Date().toISOString(),
+          autoCorrect: true,
+        });
+
+        // Adopted and spawned both auto-close stuck runs. Spawned TUI seats
+        // (Grok/Claude/Codex chat) never emit runner-socket run.finished.
         completeRunningRuns(agentId);
+        notifyReviewLoopAgentIdle(agentId);
       }
-      notifyReviewLoopAgentIdle(agentId);
     }
   } else if (detectedStatus !== dbStatus && dbStatus !== 'error') {
     state.idleOverrideCounter = 0;
@@ -222,10 +242,8 @@ function tickInner(agentId: string, state: WatcherState): void {
       outputUpdatedAt: new Date().toISOString(),
     });
 
-    if (agent.mode === 'adopted' && wasWorking && detectedStatus === 'idle') {
-      completeRunningRuns(agentId);
-    }
     if (wasWorking && detectedStatus === 'idle') {
+      completeRunningRuns(agentId);
       notifyReviewLoopAgentIdle(agentId);
     }
   } else if (outputChanged) {
@@ -330,7 +348,9 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
   if (last5.includes('Press enter to confirm') || last5.includes('esc to cancel')) return 'idle';
   if (last5.includes('Enter to confirm')) return 'idle';
 
-  // ============ AIDER ============
+  // ============ AIDER / GROK IDLE PROMPT ============
+  // Grok's configured idle_pattern is `^>\s*$`. A prompt on the last line
+  // means generation already finished — even if "Responding" is still in view.
   if (/^>\s*$/.test(lastLine)) return 'idle';
 
   // ============ SHELL PROMPT ============
@@ -339,23 +359,38 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
   // ============ RUNNER SOCKET (spawned mode) ============
   if (lastLine.includes('wavecode-runner-') && lastLine.includes('.sock')) return 'idle';
 
+  // ============ GROK / GENERIC TUI WORKING ============
+  // Grok (and similar TUIs) show "Responding…" / "Thinking" while generating.
+  // Without these, panes fall through to idle and flip the agent without
+  // closing the run — or worse, close it while still streaming.
+  if (hasGrokLikeWorkingIndicator(last5)) return 'working';
+
   // ============ ERROR ============
   if (last10.includes('FATAL') || last10.includes('panic:')) return 'error';
 
   return 'idle';
 }
 
+/** True when recent pane lines show a Grok-like generation indicator. */
+export function hasGrokLikeWorkingIndicator(text: string): boolean {
+  return /(?:^|\n)\s*(?:[*✦✧✶✻◦●]\s*)?(Responding|Thinking)\b/i.test(text);
+}
+
 /**
- * When an adopted agent transitions from working -> idle,
- * auto-complete any running runs and tasks for that agent.
+ * When an agent transitions from working -> idle, auto-complete any
+ * running runs via onRunComplete (referee / wavepulse-gate still run).
+ * Spawned TUI seats never get run.finished from the Unix-socket runner,
+ * so they use this same path as adopted agents.
  */
 function completeRunningRuns(agentId: string): void {
   const runs = listRuns({ agent_id: agentId, status: 'running' });
   const completedTaskIds = new Set<string>();
+  const agentResult = getAgent(agentId);
 
   for (const run of runs) {
     finishRun(run.id, 0);
     completedTaskIds.add(run.task_id);
+    clearRunnerRun(agentId);
     emit('run.finished', 'run', run.id, {
       agent_id: agentId,
       exit_code: 0,
@@ -369,9 +404,15 @@ function completeRunningRuns(agentId: string): void {
   }
 
   const runningTasks = listTasks({ status: 'running', agent_id: agentId });
+  const noRunCompletedIds = new Set<string>();
+  const skipNoRunComplete = agentResult.ok && agentResult.data.mode === 'spawned';
   for (const task of runningTasks) {
     if (completedTaskIds.has(task.id)) continue;
+    // Spawned tasks are created with a run via executeRun. Do not mark
+    // them done without onRunComplete (skips referee / wavepulse-gate).
+    if (skipNoRunComplete) continue;
     updateTaskStatus(task.id, 'done');
+    noRunCompletedIds.add(task.id);
     emit('task.completed', 'task', task.id, {
       agent_id: agentId,
       auto_detected: true,
@@ -383,25 +424,19 @@ function completeRunningRuns(agentId: string): void {
     );
   }
 
-  for (const task of runningTasks) {
-    if (!completedTaskIds.has(task.id)) {
-      taskDispatcher.unblockDependentsPublic(task.id);
-    }
+  for (const taskId of noRunCompletedIds) {
+    taskDispatcher.unblockDependentsPublic(taskId);
   }
 
-  if (runs.length > 0 || runningTasks.length > 0) {
+  if (runs.length > 0 || noRunCompletedIds.size > 0) {
     setTimeout(() => taskDispatcher.dispatchNext(), 1500);
   }
 
-  const agentResult = getAgent(agentId);
   if (agentResult.ok && projectRequiresReferee(agentResult.data.workspace)) {
     return;
   }
 
-  const allCompletedTaskIds = [
-    ...completedTaskIds,
-    ...runningTasks.filter((t) => !completedTaskIds.has(t.id)).map((t) => t.id),
-  ];
+  const allCompletedTaskIds = [...completedTaskIds, ...noRunCompletedIds];
   for (const taskId of allCompletedTaskIds) {
     verifyTaskCompletion(taskId, agentId).catch((err) =>
       logger.debug({ error: (err as Error).message }, 'Task verification fire-and-forget failed'),

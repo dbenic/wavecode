@@ -75,6 +75,42 @@ gpt-5.4 xhigh · 47% left · ~/project
     });
   });
 
+  describe('Grok CLI', () => {
+    it('detects working while Responding', () => {
+      const output = `
+Earlier context
+RESULT: PASS
+Responding…
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('working');
+    });
+
+    it('detects working while Thinking', () => {
+      const output = `
+Planning the change
+✦ Thinking
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('working');
+    });
+
+    it('detects idle at the Grok prompt after a RESULT line', () => {
+      const output = `
+Implement the gate
+RESULT: PASS lint=PASS unit=PASS
+>
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('idle');
+    });
+
+    it('does not treat a RESULT line alone as working', () => {
+      const output = `
+Done with the review
+RESULT: PASS
+`.trim();
+      expect(detectStatus(output, 'grok')).toBe('idle');
+    });
+  });
+
   describe('Error detection', () => {
     it('detects FATAL errors', () => {
       expect(detectStatus('FATAL: out of memory', 'claude-code')).toBe('error');
