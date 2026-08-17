@@ -129,6 +129,7 @@ const runnerMocks = vi.hoisted(() => ({
   stopRunner: vi.fn(),
   executeRun: vi.fn(async () => null),
   getRunner: vi.fn(),
+  clearRunnerRun: vi.fn(),
 }));
 
 vi.mock('./tmux.js', () => ({

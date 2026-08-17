@@ -5,7 +5,7 @@ import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
 import { onAuthorAgentIdle } from './code-review.js';
 import { projectRequiresReferee } from './project-gate.js';
-import { clearRunnerRun } from './runner.js';
+import * as runner from './runner.js';
 import logger from './logger.js';
 
 /** Cooldown between unattended Claude first-run dialog dismissals. */
@@ -190,10 +190,10 @@ function tickInner(agentId: string, state: WatcherState): void {
       });
     }
   } else if (detectedStatus === 'idle' && dbStatus === 'working') {
-    // Pane still changing means the agent is generating even if status
-    // patterns missed a working indicator. Do not count those ticks.
-    // First capture (outputVersion === 1) is the baseline, not streaming.
-    const stillStreaming = outputChanged && state.outputVersion > 1;
+    // The first idle-looking capture (including the working→idle pane
+    // change) starts the counter. Further output changes while we are
+    // already counting mean the agent is still generating.
+    const stillStreaming = outputChanged && state.idleOverrideCounter > 0;
     if (stillStreaming) {
       state.idleOverrideCounter = 0;
       emit('agent.output_updated', 'agent', agentId, {
@@ -390,7 +390,7 @@ function completeRunningRuns(agentId: string): void {
   for (const run of runs) {
     finishRun(run.id, 0);
     completedTaskIds.add(run.task_id);
-    clearRunnerRun(agentId);
+    runner.clearRunnerRun?.(agentId);
     emit('run.finished', 'run', run.id, {
       agent_id: agentId,
       exit_code: 0,
