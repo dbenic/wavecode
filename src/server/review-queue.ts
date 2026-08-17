@@ -2,6 +2,7 @@ import {
   getDb,
   getRun,
   getTask,
+  finishRun,
   listReviewableRuns,
   updateRunReviewStatus,
   updateTaskStatus,
@@ -14,7 +15,7 @@ import {
 } from './db.js';
 import { emit } from './event-bus.js';
 import { getConfig } from './config.js';
-import { dispatchNext, unblockDependentsPublic } from './task-dispatcher.js';
+import { dispatchNext, onRunComplete, unblockDependentsPublic } from './task-dispatcher.js';
 import { getLatestCompletedReview, type CodeReview } from './code-review.js';
 import { evaluateRefereeForPromote } from './project-gate.js';
 import logger from './logger.js';
@@ -203,6 +204,9 @@ export function reject(runId: string): Result<Run> {
   if (!runResult.ok) return runResult;
 
   const run = runResult.data;
+  const exitCode = run.status === 'running' || !run.finished_at ? 1 : (run.exit_code ?? 0);
+  const finished = finishRun(runId, exitCode);
+  if (!finished.ok) return finished;
 
   try {
     getDb().transaction(() => {
@@ -223,6 +227,8 @@ export function reject(runId: string): Result<Run> {
   emit('review.rejected', 'run', runId, {
     task_id: run.task_id,
   });
+
+  void onRunComplete(runId, run.agent_id);
 
   return getRun(runId);
 }

@@ -1,4 +1,5 @@
 import { getAgent, updateAgentStatus, listRuns, listTasks, finishRun, updateTaskStatus, type Agent } from './db.js';
+import { getConfig } from './config.js';
 import { capturePane, sendRawKeys } from './session-manager.js';
 import { emit } from './event-bus.js';
 import * as taskDispatcher from './task-dispatcher.js';
@@ -194,7 +195,7 @@ function tickInner(agentId: string, state: WatcherState): void {
         outputUpdatedAt: new Date().toISOString(),
       });
     }
-  } else if (detectedStatus === 'idle' && dbStatus === 'working') {
+  } else if (detectedStatus === 'idle' && (dbStatus === 'working' || dbStatus === 'error')) {
     // The first idle-looking capture (including the working→idle pane
     // change) starts the counter. Further output changes while we are
     // already counting mean the agent is still generating.
@@ -213,7 +214,7 @@ function tickInner(agentId: string, state: WatcherState): void {
       if (state.idleOverrideCounter >= IDLE_OVERRIDE_THRESHOLD) {
         logger.info(
           { agentId, name: agent.name, mode: agent.mode, after: `${state.idleOverrideCounter * 2}s` },
-          'Output shows idle but DB says working - correcting to idle',
+          'Output shows idle but DB says working/error - correcting to idle',
         );
         updateAgentStatus(agentId, 'idle');
         state.idleOverrideCounter = 0;
@@ -233,11 +234,11 @@ function tickInner(agentId: string, state: WatcherState): void {
         notifyReviewLoopAgentIdle(agentId);
       }
     }
-  } else if (detectedStatus !== dbStatus && dbStatus !== 'error') {
+  } else if (detectedStatus !== dbStatus) {
     state.idleOverrideCounter = 0;
     updateAgentStatus(agentId, detectedStatus);
 
-    const wasWorking = dbStatus === 'working';
+    const wasWorking = dbStatus === 'working' || dbStatus === 'error';
 
     emit('agent.status_changed', 'agent', agentId, {
       status: detectedStatus,
@@ -367,10 +368,19 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
   if (lastLine.includes('wavecode-runner-') && lastLine.includes('.sock')) return 'idle';
 
   // ============ GROK / GENERIC TUI WORKING ============
-  // Grok (and similar TUIs) show "Responding…" / "Thinking" while generating.
-  // Without these, panes fall through to idle and flip the agent without
-  // closing the run — or worse, close it while still streaming.
-  if (hasGrokLikeWorkingIndicator(last5)) return 'working';
+  // Grok (and similar TUIs) show "Responding…" / "Thinking" / "Worked for"
+  // and an interrupt affordance while generating.
+  if (hasGrokLikeWorkingIndicator(last10)) return 'working';
+
+  // Configured idle_pattern (wired so it is not unread dead config).
+  const idlePattern = runtimeIdlePattern(runtime);
+  if (idlePattern) {
+    try {
+      if (new RegExp(idlePattern).test(lastLine)) return 'idle';
+    } catch {
+      // Invalid pattern — fall through
+    }
+  }
 
   // ============ ERROR ============
   if (last10.includes('FATAL') || last10.includes('panic:')) return 'error';
@@ -380,7 +390,18 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
 
 /** True when recent pane lines show a Grok-like generation indicator. */
 export function hasGrokLikeWorkingIndicator(text: string): boolean {
-  return /(?:^|\n)\s*(?:[*✦✧✶✻◦●]\s*)?(Responding|Thinking)\b/i.test(text);
+  if (/(?:^|\n)\s*(?:[*✦✧✶✻◦●]\s*)?(Responding|Thinking|Worked[ -]for)\b/i.test(text)) {
+    return true;
+  }
+  return /esc to interrupt|(?:ctrl\+c|⌘c) to interrupt|\bto interrupt\b/i.test(text);
+}
+
+function runtimeIdlePattern(runtime: string): string | null {
+  try {
+    return getConfig().runtimes[runtime]?.idle_pattern ?? null;
+  } catch {
+    return null;
+  }
 }
 
 const RUN_ID_IN_PANE = /"run_id"\s*:\s*"(01[0-9A-HJKMNP-TV-Z]{24})"/g;

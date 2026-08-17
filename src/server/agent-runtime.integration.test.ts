@@ -127,7 +127,7 @@ const tmuxHarness = vi.hoisted(() => {
 const runnerMocks = vi.hoisted(() => ({
   startRunner: vi.fn(),
   stopRunner: vi.fn(),
-  executeRun: vi.fn(async () => null),
+  executeRun: vi.fn(async () => ({ ok: false, error: 'not started', code: 'unavailable' })),
   getRunner: vi.fn(),
   clearRunnerRun: vi.fn(),
 }));
@@ -531,7 +531,7 @@ describe('agent runtime integration', () => {
     const db = await import('./db.js');
     const healthMonitor = await import('./health-monitor.js');
 
-    runnerMocks.executeRun.mockResolvedValue({ id: 'restarted-run' });
+    runnerMocks.executeRun.mockResolvedValue({ ok: true, data: { id: 'restarted-run' } });
 
     const spawned = await postJson(app, '/api/agents/spawn', {
       name: 'builder',

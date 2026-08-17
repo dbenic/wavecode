@@ -30,6 +30,7 @@ vi.mock('../event-bus.js', () => ({
 vi.mock('../task-dispatcher.js', () => ({
   addDependency: vi.fn(),
   dispatchNext: vi.fn(),
+  finalizeRun: vi.fn(),
   getDependencies: vi.fn(() => []),
   getDependents: vi.fn(() => []),
 }));
@@ -193,7 +194,7 @@ describe('task routes', () => {
     const response = await requestJson(app, '/api/tasks/task-1', 'DELETE');
 
     expect(response.status).toBe(400);
-    expect(response.json).toEqual({ error: 'Only pending or blocked tasks can be cancelled' });
+    expect(response.json).toEqual({ error: 'Only pending, blocked, or running tasks can be cancelled' });
     expect(db.updateTaskStatus).not.toHaveBeenCalled();
   });
 });

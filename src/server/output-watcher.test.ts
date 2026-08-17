@@ -94,6 +94,11 @@ Planning the change
       expect(detectStatus(output, 'grok')).toBe('working');
     });
 
+    it('detects working for Worked-for and the TUI interrupt line', () => {
+      expect(detectStatus('Worked for 12s\nGenerating a patch', 'grok')).toBe('working');
+      expect(detectStatus('esc to interrupt\nwriting files', 'grok')).toBe('working');
+    });
+
     it('detects idle at the Grok prompt after a RESULT line', () => {
       const output = `
 Implement the gate

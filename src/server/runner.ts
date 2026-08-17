@@ -1,10 +1,9 @@
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
-import { finishRun, insertRun, updateTaskStatus, getAgent, getRun, type Run } from './db.js';
+import { finishRun, insertRun, updateTaskStatus, getAgent, getRun, listOpenRuns, type Run, type Result } from './db.js';
 import { emit } from './event-bus.js';
-import { getConfig } from './config.js';
-import { buildRuntimeCommand, getTranscriptsRoot } from './runtime-launcher.js';
+import { getTranscriptsRoot } from './runtime-launcher.js';
 import * as tmux from './tmux.js';
 
 interface RunnerInstance {
@@ -112,41 +111,56 @@ function cleanupRunnerInstance(instance: RunnerInstance): void {
   instance.currentRunId = null;
 }
 
+export type ExecuteRunFailure = Result<Run> & { code: 'busy' | 'unavailable' | 'send_failed' };
+export type ExecuteRunResult = { ok: true; data: Run } | ExecuteRunFailure;
+
+/**
+ * Start a run on a spawned seat. Interactive TUIs (Grok/Claude/Codex/Aider)
+ * get the prompt via send-keys — never an echo|nc shell script. Close is
+ * stable-idle via the output watcher, same as adopted.
+ * Refuses if the agent already has a run with finished_at null.
+ */
 export async function executeRun(
   agentId: string,
   taskId: string,
   prompt: string,
-): Promise<Run | null> {
-  const instance = runners.get(agentId);
+): Promise<ExecuteRunResult> {
   const agentResult = getAgent(agentId);
-  if (!instance || !agentResult.ok) return null;
+  if (!agentResult.ok) {
+    return { ok: false, error: agentResult.error, code: 'unavailable' };
+  }
+
+  const open = listOpenRuns(agentId);
+  if (open.length > 0) {
+    return {
+      ok: false,
+      error: `Agent already has an open run (${open[0].id})`,
+      code: 'busy',
+    };
+  }
 
   const agent = agentResult.data;
-  const config = getConfig();
-  const runtimeConfig = config.runtimes[agent.runtime];
-  if (!runtimeConfig) return null;
+  const instance = runners.get(agentId);
 
-  // Count existing runs for this task to determine attempt number
   const { listRuns } = await import('./db.js');
   const existingRuns = listRuns({ task_id: taskId });
   const attempt = existingRuns.length + 1;
 
-  // Create run record
   const runResult = insertRun({ task_id: taskId, agent_id: agentId, attempt });
-  if (!runResult.ok) return null;
+  if (!runResult.ok) {
+    return { ok: false, error: runResult.error, code: 'unavailable' };
+  }
 
   const run = runResult.data;
-  instance.currentRunId = run.id;
+  if (instance) {
+    instance.currentRunId = run.id;
+    const transcriptDir = getTranscriptDir();
+    const transcriptPath = path.join(transcriptDir, `run_${run.id}.log`);
+    instance.transcriptStream = fs.createWriteStream(transcriptPath, { flags: 'a' });
+  }
 
-  // Set up transcript
-  const transcriptDir = getTranscriptDir();
-  const transcriptPath = path.join(transcriptDir, `run_${run.id}.log`);
-  instance.transcriptStream = fs.createWriteStream(transcriptPath, { flags: 'a' });
-
-  // Update task status
   updateTaskStatus(taskId, 'running');
 
-  // Emit run.started event
   emit('run.started', 'run', run.id, {
     task_id: taskId,
     agent_id: agentId,
@@ -154,67 +168,27 @@ export async function executeRun(
     prompt: prompt.substring(0, 500),
   });
 
-  // Build the command that will run inside tmux and emit events
-  // The runner script sends ndjson events to our Unix socket
-  const runnerScript = buildRunnerScript(
-    buildRuntimeCommand(runtimeConfig, agent),
-    prompt,
-    instance.socketPath,
-    run.id,
-    taskId,
-    agentId,
-  );
-
-  // Send the runner script to the tmux session
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, runnerScript);
+    tmux.sendTextAndEnter(agent.tmux_session, prompt);
   } catch (e) {
-    // Failed to send to tmux
-    finishRun(run.id, 1);
-    updateTaskStatus(taskId, 'failed');
+    const { finalizeRun } = await import('./task-dispatcher.js');
+    finalizeRun(run.id, agentId, 1);
     emit('run.failed', 'run', run.id, {
       error: (e as Error).message,
     });
-    return null;
+    return { ok: false, error: (e as Error).message, code: 'send_failed' };
   }
 
-  // Start heartbeat monitoring
-  instance.heartbeatTimer = setInterval(() => {
-    emit('heartbeat', 'run', run.id, {
-      agent_id: agentId,
-      timestamp: new Date().toISOString(),
-    });
-  }, 30000);
+  if (instance) {
+    instance.heartbeatTimer = setInterval(() => {
+      emit('heartbeat', 'run', run.id, {
+        agent_id: agentId,
+        timestamp: new Date().toISOString(),
+      });
+    }, 30000);
+  }
 
-  return run;
-}
-
-function buildRunnerScript(
-  command: string,
-  prompt: string,
-  socketPath: string,
-  runId: string,
-  taskId: string,
-  agentId: string,
-): string {
-  // Escape the prompt for shell embedding
-  const escapedPrompt = prompt.replace(/'/g, "'\\''");
-
-  // Build a shell one-liner that:
-  // 1. Sends run.started event
-  // 2. Pipes prompt to the CLI command
-  // 3. Captures exit code
-  // 4. Sends run.finished or run.failed event
-  return [
-    `echo '{"type":"run.started","run_id":"${runId}","task_id":"${taskId}","agent_id":"${agentId}"}' | nc -U '${socketPath}' 2>/dev/null;`,
-    `echo '${escapedPrompt}' | ${command};`,
-    `_EC=$?;`,
-    `if [ $_EC -eq 0 ]; then`,
-    `  echo '{"type":"run.finished","run_id":"${runId}","exit_code":0}' | nc -U '${socketPath}' 2>/dev/null;`,
-    `else`,
-    `  echo '{"type":"run.failed","run_id":"${runId}","exit_code":'$_EC'}' | nc -U '${socketPath}' 2>/dev/null;`,
-    `fi`,
-  ].join(' ');
+  return { ok: true, data: run };
 }
 
 function handleRunnerEvent(agentId: string, line: string): void {

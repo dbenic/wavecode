@@ -26,7 +26,7 @@ function canRetryTask(status: string): boolean {
 }
 
 function canCancelTask(status: string): boolean {
-  return ['pending', 'blocked'].includes(status);
+  return ['pending', 'blocked', 'running'].includes(status);
 }
 
 export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
@@ -210,7 +210,12 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     if (!result.ok) return c.json({ error: result.error }, 404);
 
     if (!canCancelTask(result.data.status)) {
-      return c.json({ error: 'Only pending or blocked tasks can be cancelled' }, 400);
+      return c.json({ error: 'Only pending, blocked, or running tasks can be cancelled' }, 400);
+    }
+
+    const openRuns = listRuns({ task_id: taskId, status: 'running' });
+    for (const run of openRuns) {
+      taskDispatcher.finalizeRun(run.id, run.agent_id, 1);
     }
 
     updateTaskStatus(taskId, 'failed');

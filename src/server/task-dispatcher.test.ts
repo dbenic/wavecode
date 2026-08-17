@@ -4,6 +4,10 @@ vi.mock('./db.js', () => ({
   getDb: vi.fn(),
   listTasks: vi.fn(),
   listRuns: vi.fn(),
+  listOpenRuns: vi.fn(() => []),
+  hasOpenRun: vi.fn(() => false),
+  finishRun: vi.fn(),
+  insertRun: vi.fn(),
   getTask: vi.fn(),
   getRun: vi.fn(),
   getAgent: vi.fn(),
@@ -133,7 +137,7 @@ describe('task-dispatcher.ts', () => {
     await setupBaseMocks(false);
 
     const runner = await import('./runner.js');
-    vi.mocked(runner.executeRun).mockResolvedValue({ id: 'run-1' } as never);
+    vi.mocked(runner.executeRun).mockResolvedValue({ ok: true, data: { id: 'run-1' } } as never);
 
     const dispatcher = await import('./task-dispatcher.js');
     dispatcher.resetDispatcherForTest();
@@ -176,6 +180,9 @@ describe('task-dispatcher.ts', () => {
     vi.mocked(db.listRuns).mockReturnValue([
       { id: '01M089NEWRXN00000000000001', status: 'running' },
     ] as never);
+    vi.mocked(db.listOpenRuns).mockReturnValue([
+      { id: '01M089NEWRXN00000000000001', status: 'running', finished_at: null },
+    ] as never);
     vi.mocked(db.getAgent).mockReturnValue({
       ok: true,
       data: { id: 'agent-1', workspace: null },
@@ -189,5 +196,23 @@ describe('task-dispatcher.ts', () => {
 
     expect(db.updateTaskStatus).toHaveBeenCalledWith('01M08290HDW155AYGYXG936AA0', 'done');
     expect(db.updateAgentStatus).not.toHaveBeenCalledWith('agent-1', 'idle');
+  });
+
+  it('refuses dispatch when the agent already has an open run', async () => {
+    await setupBaseMocks(true);
+    const db = await import('./db.js');
+    const runner = await import('./runner.js');
+
+    vi.mocked(db.hasOpenRun).mockReturnValue(true);
+    vi.mocked(db.listOpenRuns).mockReturnValue([
+      { id: '01M0829117QXE7QP6GNG8EPQQT', task_id: 'task-old', status: 'running', finished_at: null },
+    ] as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.resetDispatcherForTest();
+    await dispatcher.dispatchNext({ manual: true });
+    vi.runAllTimers();
+
+    expect(vi.mocked(runner.executeRun)).not.toHaveBeenCalled();
   });
 });

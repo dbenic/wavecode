@@ -5,6 +5,8 @@ vi.mock('./db.js', () => ({
   getAgent: vi.fn(),
   updateAgentStatus: vi.fn(),
   listRuns: vi.fn(),
+  listOpenRuns: vi.fn(() => []),
+  hasOpenRun: vi.fn(() => false),
   updateTaskStatus: vi.fn(),
   finishRun: vi.fn(),
 }));

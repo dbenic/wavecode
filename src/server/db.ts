@@ -937,6 +937,11 @@ export function listReviewableRuns(): Run[] {
 }
 
 export function finishRun(id: string, exitCode: number): Result<Run> {
+  const existing = getRun(id);
+  if (!existing.ok) return existing;
+  if (existing.data.finished_at && existing.data.status !== 'running') {
+    return existing;
+  }
   const status = exitCode === 0 ? 'done' : 'failed';
   const result = getDb().prepare(`
     UPDATE runs SET status = ?, exit_code = ?, finished_at = datetime('now')
@@ -944,6 +949,17 @@ export function finishRun(id: string, exitCode: number): Result<Run> {
   `).run(status, exitCode, id);
   if (result.changes === 0) return { ok: false, error: `Run ${id} not found` };
   return getRun(id);
+}
+
+/** Runs that still occupy the seat: status=running or finished_at IS NULL. */
+export function listOpenRuns(agentId: string): Run[] {
+  return listRuns({ agent_id: agentId }).filter(
+    (run) => run.status === 'running' || run.finished_at == null,
+  );
+}
+
+export function hasOpenRun(agentId: string): boolean {
+  return listOpenRuns(agentId).length > 0;
 }
 
 // --- Event helpers ---

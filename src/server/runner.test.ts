@@ -64,6 +64,8 @@ vi.mock('./db.js', () => ({
   getAgent: vi.fn(),
   getRun: vi.fn(),
   listRuns: vi.fn(),
+  listOpenRuns: vi.fn(() => []),
+  hasOpenRun: vi.fn(() => false),
   updateRunChangedFiles: vi.fn(),
 }));
 
@@ -84,17 +86,30 @@ vi.mock('./tmux.js', () => ({
   sendTextAndEnter: vi.fn(),
 }));
 
-vi.mock('./task-dispatcher.js', () => ({
+const dispatcherHarness = vi.hoisted(() => ({
   onRunComplete: vi.fn(),
+  finalizeRun: vi.fn(),
+}));
+
+vi.mock('./task-dispatcher.js', () => ({
+  onRunComplete: dispatcherHarness.onRunComplete,
+  finalizeRun: dispatcherHarness.finalizeRun,
 }));
 
 describe('runner.ts', () => {
   const tmpDirs: string[] = [];
   const runnerIds = new Set<string>();
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     netHarness.reset();
+    const db = await import('./db.js');
+    vi.mocked(db.listOpenRuns).mockReturnValue([]);
+    dispatcherHarness.finalizeRun.mockImplementation((runId: string, agentId: string, exitCode: number) => {
+      db.finishRun(runId, exitCode);
+      dispatcherHarness.onRunComplete(runId, agentId);
+      return { ok: true, data: { id: runId } };
+    });
   });
 
   afterEach(async () => {
@@ -118,7 +133,7 @@ describe('runner.ts', () => {
     vi.restoreAllMocks();
   });
 
-  it('builds and sends the runner script for a new run', async () => {
+  it('sends the prompt to the TUI and does not paste an echo|nc script', async () => {
     const db = await import('./db.js');
     const config = await import('./config.js');
     const events = await import('./event-bus.js');
@@ -147,7 +162,10 @@ describe('runner.ts', () => {
     const run = await runner.executeRun('agent-script', 'task-1', "Implement 'auth' middleware");
     const transcriptPath = path.join(transcriptDir, 'run_run-script.log');
 
-    expect(run).toEqual(makeRun({ id: 'run-script', task_id: 'task-1', agent_id: 'agent-script' }));
+    expect(run).toEqual({
+      ok: true,
+      data: makeRun({ id: 'run-script', task_id: 'task-1', agent_id: 'agent-script' }),
+    });
     expect(db.insertRun).toHaveBeenCalledWith({ task_id: 'task-1', agent_id: 'agent-script', attempt: 1 });
     expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'running');
     expect(events.emit).toHaveBeenCalledWith(
@@ -162,15 +180,39 @@ describe('runner.ts', () => {
     );
     expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
       'wc-script',
-      expect.stringContaining("echo 'Implement '\\''auth'\\'' middleware' | codex --full-auto;"),
+      "Implement 'auth' middleware",
     );
-    expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
+    expect(tmux.sendTextAndEnter).not.toHaveBeenCalledWith(
       'wc-script',
-      expect.stringContaining("nc -U '/tmp/wavecode-runner-agent-script.sock'"),
+      expect.stringContaining('nc -U'),
     );
     await waitForCondition(() => {
       expect(fs.existsSync(transcriptPath)).toBe(true);
     });
+  });
+
+  it('refuses a second executeRun while a run is still open', async () => {
+    const db = await import('./db.js');
+    const tmux = await import('./tmux.js');
+
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: makeAgent({ id: 'agent-busy', tmux_session: 'wc-busy' }),
+    } as never);
+    vi.mocked(db.listOpenRuns).mockReturnValue([
+      makeRun({ id: '01M0829117QXE7QP6GNG8EPQQT', task_id: 'task-old', agent_id: 'agent-busy' }),
+    ]);
+
+    const runner = await import('./runner.js');
+    const result = await runner.executeRun('agent-busy', 'task-new', 'Another task');
+
+    expect(result).toEqual({
+      ok: false,
+      code: 'busy',
+      error: 'Agent already has an open run (01M0829117QXE7QP6GNG8EPQQT)',
+    });
+    expect(db.insertRun).not.toHaveBeenCalled();
+    expect(tmux.sendTextAndEnter).not.toHaveBeenCalled();
   });
 
   it('processes socket-delivered run.finished events and writes transcripts', async () => {
@@ -277,10 +319,10 @@ describe('runner.ts', () => {
     const result = await runner.executeRun('agent-error', 'task-error', 'Ship it');
     const transcriptPath = path.join(transcriptDir, 'run_run-error.log');
 
-    expect(result).toBeNull();
+    expect(result).toMatchObject({ ok: false, code: 'send_failed' });
     expect(db.finishRun).toHaveBeenCalledWith('run-error', 1);
-    expect(db.updateTaskStatus).toHaveBeenNthCalledWith(1, 'task-error', 'running');
-    expect(db.updateTaskStatus).toHaveBeenNthCalledWith(2, 'task-error', 'failed');
+    expect(dispatcherHarness.onRunComplete).toHaveBeenCalledWith('run-error', 'agent-error');
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-error', 'running');
     expect(events.emit).toHaveBeenCalledWith(
       'run.failed',
       'run',
