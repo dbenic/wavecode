@@ -5,6 +5,7 @@ import { notifyAgentCrashed } from './notifications.js';
 import * as sessionManager from './session-manager.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
+import { resultPathForRun, settleRunResultFile } from './run-result.js';
 import logger from './logger.js';
 
 interface AgentHealthState {
@@ -163,6 +164,17 @@ async function handleHungSpawnedAgent(agent: Agent): Promise<void> {
 function reQueueRunningTasks(agentId: string): number {
   const runs = listRuns({ agent_id: agentId, status: 'running' });
   for (const run of runs) {
+    try {
+      const agent = getAgent(agentId);
+      const workspace = agent && 'ok' in agent && agent.ok ? agent.data.workspace : null;
+      settleRunResultFile(
+        resultPathForRun(run, workspace),
+        'Agent hung or crashed',
+        { forceFail: true },
+      );
+    } catch {
+      // Result file is best-effort; crash recovery must still finish the run.
+    }
     // Mark run as failed
     finishRun(run.id, 1);
     emit('run.failed', 'run', run.id, {

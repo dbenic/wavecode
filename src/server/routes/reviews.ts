@@ -1,7 +1,9 @@
 import type { Hono } from 'hono';
-import { getRunArtifacts } from '../db.js';
+import fs from 'node:fs';
+import { getRun, getRunArtifacts } from '../db.js';
 import * as reviewQueue from '../review-queue.js';
 import * as codeReview from '../code-review.js';
+import { presentRunResult } from '../run-result.js';
 import type { NodeAppEnv } from '../auth.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
@@ -77,5 +79,20 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   app.get('/api/runs/:id/artifacts', (c) => {
     return c.json(getRunArtifacts(c.req.param('id')));
+  });
+
+  app.get('/api/runs/:id/result', (c) => {
+    const runId = c.req.param('id');
+    const result = getRun(runId);
+    if (!result.ok) return c.json({ error: result.error }, 404);
+    const presented = presentRunResult(result.data.result_path);
+    return c.json({
+      run_id: runId,
+      path: presented.result_path,
+      exists: Boolean(result.data.result_path && fs.existsSync(result.data.result_path)),
+      result: presented.result,
+      reason: presented.result_reason,
+      last_line: presented.result_last_line,
+    });
   });
 }

@@ -61,6 +61,16 @@ All checks are periodic and automatic; none rely on the agent's honesty:
 A run's self-reported "success" is never the end of the story — it only
 moves the work into the review pipeline below.
 
+**Orchestrate signal (not promote):** every run has an append-only local
+result file (`{workspace}/.wavecode/runs/<runId>/result.txt`). Last line
+must be exactly `RESULT: PASS` or `RESULT: FAIL`, with a one-line reason
+above it. Orchestrate reads that file only — never tmux/pane scrape. API
+fields are a convenience; the file is the source of truth. Idle, a
+collapsed TUI ("reviewed by another AI"), short duration, or pane scrape
+is never PASS. If the agent did not write a valid RESULT, WaveCode may
+append `RESULT: FAIL` or leave the file missing. Referee / wavepulse-gate
+RESULT remains the only promote evidence.
+
 ## 4. Who tests the work afterwards
 
 The review pipeline, in order:

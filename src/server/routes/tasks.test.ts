@@ -5,6 +5,8 @@ vi.mock('../db.js', () => ({
   getDb: vi.fn(),
   getAgent: vi.fn(),
   getTask: vi.fn(),
+  getRun: vi.fn(),
+  getRunArtifacts: vi.fn(() => []),
   insertTask: vi.fn(),
   findGoal: vi.fn(),
   listRuns: vi.fn(() => []),
@@ -196,6 +198,90 @@ describe('task routes', () => {
     expect(response.status).toBe(400);
     expect(response.json).toEqual({ error: 'Only pending, blocked, or running tasks can be cancelled' });
     expect(db.updateTaskStatus).not.toHaveBeenCalled();
+  });
+
+  it('exposes result_path and parsed RESULT on GET /api/tasks/:id', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { writeRunResult } = await import('../run-result.js');
+    const db = await import('../db.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-task-result-'));
+    const resultPath = path.join(dir, 'result.txt');
+    writeRunResult(resultPath, 'FAIL', 'Idle close without a parseable RESULT file');
+
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: makeTask('done'),
+    });
+    vi.mocked(db.listRuns).mockReturnValue([
+      {
+        id: '01M08B7WSC1F3XKYQMNYMC68YB',
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        attempt: 1,
+        status: 'failed',
+        started_at: '2026-08-17T00:00:00Z',
+        finished_at: '2026-08-17T00:00:03Z',
+        exit_code: 1,
+        transcript_path: null,
+        review_status: 'pending',
+        changed_files: null,
+        result_path: resultPath,
+      },
+    ] as never);
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks/task-1', 'GET');
+    expect(response.status).toBe(200);
+    expect(response.json.runs[0]).toMatchObject({
+      id: '01M08B7WSC1F3XKYQMNYMC68YB',
+      result_path: resultPath,
+      result: 'FAIL',
+      result_reason: 'Idle close without a parseable RESULT file',
+      result_last_line: 'RESULT: FAIL',
+    });
+
+    const runsResponse = await requestJson(app, '/api/tasks/task-1/runs', 'GET');
+    expect(runsResponse.json[0].result).toBe('FAIL');
+    expect(runsResponse.json[0].result).not.toBe('PASS');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('GET /api/runs/:id/result exposes path and contents', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { writeRunResult } = await import('../run-result.js');
+    const db = await import('../db.js');
+    const { registerReviewRoutes } = await import('./reviews.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-run-result-api-'));
+    const resultPath = path.join(dir, 'result.txt');
+    writeRunResult(resultPath, 'PASS', 'All checks green');
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'run-1',
+        result_path: resultPath,
+      },
+    } as never);
+
+    const { Hono } = await import('hono');
+    const app = new Hono();
+    registerReviewRoutes(app);
+    const response = await requestJson(app, '/api/runs/run-1/result', 'GET');
+    expect(response.status).toBe(200);
+    expect(response.json).toMatchObject({
+      run_id: 'run-1',
+      path: resultPath,
+      exists: true,
+      result: 'PASS',
+      reason: 'All checks green',
+      last_line: 'RESULT: PASS',
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 

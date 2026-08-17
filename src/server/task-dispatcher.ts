@@ -13,6 +13,7 @@ import {
   insertAgentMessage,
   insertRun,
   finishRun,
+  updateRunResultPath,
   type Task,
   type Agent,
   type Result,
@@ -24,6 +25,12 @@ import { executeRun } from './runner.js';
 import * as sessionManager from './session-manager.js';
 import { buildBriefing } from './briefing-builder.js';
 import { maybeInvokeProjectGate } from './project-gate.js';
+import {
+  appendRunResultBriefing,
+  exitCodeForVerdict,
+  resultPathForRun,
+  settleRunResultFile,
+} from './run-result.js';
 import logger from './logger.js';
 
 let dispatchInProgress = false;
@@ -158,19 +165,41 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
 /**
  * Terminal close: persist finished_at + exit_code, then onRunComplete.
  * Used by idle-complete, reject_run, cancel, and executeRun send failure.
+ *
+ * Exit 0 / status=done requires a valid RESULT: PASS file. Idle, cancel,
+ * reject, and missing/unparseable files finish as FAIL.
  */
 export function finalizeRun(
   runId: string,
   agentId: string,
   exitCode: number,
+  fallbackReason?: string,
 ): Result<Run> {
-  const finished = finishRun(runId, exitCode);
+  const existing = getRun(runId);
+  if (!existing.ok) return existing;
+  const agent = getAgent(agentId);
+  const resultPath = resultPathForRun(existing.data, agent.ok ? agent.data.workspace : null);
+  if (!existing.data.result_path) updateRunResultPath(runId, resultPath);
+
+  const forceFail = exitCode !== 0;
+  const settled = settleRunResultFile(
+    resultPath,
+    fallbackReason ?? (forceFail
+      ? 'Run failed without a parseable RESULT file'
+      : 'Run closed without a parseable RESULT file'),
+    { forceFail },
+  );
+  const usedExit = forceFail ? 1 : exitCodeForVerdict(settled.verdict);
+
+  const finished = finishRun(runId, usedExit);
   if (!finished.ok) return finished;
   import('./runner.js').then((r) => r.clearRunnerRun?.(agentId, runId)).catch(() => {});
-  emit(exitCode === 0 ? 'run.finished' : 'run.failed', 'run', runId, {
+  emit(usedExit === 0 ? 'run.finished' : 'run.failed', 'run', runId, {
     agent_id: agentId,
-    exit_code: exitCode,
+    exit_code: usedExit,
     auto_detected: true,
+    result: settled.verdict,
+    result_reason: settled.reason,
   });
   void onRunComplete(runId, agentId);
   return finished;
@@ -293,34 +322,39 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       });
     }
   } else {
-    // For adopted agents, inject via send-keys
+    // Insert the run first so the result-file path is known, then send the
+    // prompt + briefing. Same insertRun path as spawned — no echo|nc.
+    const existingRuns = listRuns({ task_id: task.id });
+    const runResult = insertRun({
+      task_id: task.id,
+      agent_id: agent.id,
+      attempt: existingRuns.length + 1,
+    });
+    if (runResult.ok) {
+      emit('run.started', 'run', runResult.data.id, {
+        task_id: task.id,
+        agent_id: agent.id,
+        mode: 'adopted',
+      });
+      logger.info(
+        { runId: runResult.data.id, taskId: task.id, agentId: agent.id },
+        'Created run record for adopted agent dispatch',
+      );
+      if (runResult.data.result_path) {
+        prompt = appendRunResultBriefing(prompt, runResult.data.result_path);
+      }
+    }
+
     const sendResult = sessionManager.sendKeys(agent.id, prompt);
     if (!sendResult.ok) {
+      if (runResult.ok) {
+        finalizeRun(runResult.data.id, agent.id, 1, 'Failed to send prompt to agent');
+      }
       updateTaskStatus(task.id, 'failed');
       updateAgentStatus(agent.id, 'error');
       emit('task.failed', 'task', task.id, {
         error: sendResult.error,
       });
-    } else {
-      // Create a run record so the output watcher can auto-complete the task
-      // when it detects the agent going from working → idle.
-      const existingRuns = listRuns({ task_id: task.id });
-      const runResult = insertRun({
-        task_id: task.id,
-        agent_id: agent.id,
-        attempt: existingRuns.length + 1,
-      });
-      if (runResult.ok) {
-        emit('run.started', 'run', runResult.data.id, {
-          task_id: task.id,
-          agent_id: agent.id,
-          mode: 'adopted',
-        });
-        logger.info(
-          { runId: runResult.data.id, taskId: task.id, agentId: agent.id },
-          'Created run record for adopted agent dispatch',
-        );
-      }
     }
   }
 }

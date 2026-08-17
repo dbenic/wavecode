@@ -13,6 +13,7 @@ import { getConfig } from '../config.js';
 import { emit } from '../event-bus.js';
 import * as taskDispatcher from '../task-dispatcher.js';
 import * as validate from '../validate.js';
+import { presentRun } from '../run-result.js';
 import logger from '../logger.js';
 import type { NodeAppEnv } from '../auth.js';
 
@@ -51,7 +52,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       ...task,
       dependencies: taskDispatcher.getDependencies(task.id),
       dependents: taskDispatcher.getDependents(task.id),
-      runs: listRuns({ task_id: task.id }),
+      runs: listRuns({ task_id: task.id }).map(presentRun),
     });
   });
 
@@ -215,7 +216,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
 
     const openRuns = listRuns({ task_id: taskId, status: 'running' });
     for (const run of openRuns) {
-      taskDispatcher.finalizeRun(run.id, run.agent_id, 1);
+      taskDispatcher.finalizeRun(run.id, run.agent_id, 1, 'Task cancelled');
     }
 
     updateTaskStatus(taskId, 'failed');
@@ -225,7 +226,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   app.get('/api/tasks/:id/runs', (c) => {
-    return c.json(listRuns({ task_id: c.req.param('id') }));
+    return c.json(listRuns({ task_id: c.req.param('id') }).map(presentRun));
   });
 
   app.post('/api/dispatch', async (c) => {

@@ -291,8 +291,9 @@ describe('agent runtime integration', () => {
     await taskDispatcher.dispatchNext({ manual: true });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(tmuxHarness.getSentTexts('alpha-session')).toContain('Build the shared auth middleware');
-    expect(tmuxHarness.getSentTexts('beta-session')).not.toContain('Wire the dashboard to the auth middleware');
+    expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('Build the shared auth middleware'))).toBe(true);
+    expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('RESULT: PASS'))).toBe(true);
+    expect(tmuxHarness.getSentTexts('beta-session').some((t) => t.includes('Wire the dashboard to the auth middleware'))).toBe(false);
 
     await completeAdoptedRun('alpha-session');
 
@@ -321,7 +322,7 @@ describe('agent runtime integration', () => {
     await taskDispatcher.dispatchNext({ manual: true });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(tmuxHarness.getSentTexts('beta-session')).toContain('Wire the dashboard to the auth middleware');
+    expect(tmuxHarness.getSentTexts('beta-session').some((t) => t.includes('Wire the dashboard to the auth middleware'))).toBe(true);
 
     await completeAdoptedRun('beta-session');
 
@@ -835,6 +836,17 @@ async function postJson(app: Hono, url: string, body: unknown) {
 }
 
 async function completeAdoptedRun(sessionName: string): Promise<void> {
+  const db = await import('./db.js');
+  const { resultPathForRun, writeRunResult } = await import('./run-result.js');
+  for (const agent of db.listAgents().filter((a) => a.tmux_session === sessionName)) {
+    for (const run of db.listOpenRuns(agent.id)) {
+      writeRunResult(
+        resultPathForRun(run, agent.workspace),
+        'PASS',
+        'Integration test completed the run',
+      );
+    }
+  }
   tmuxHarness.setOutput(sessionName, CODEX_WORKING_OUTPUT);
   await vi.advanceTimersByTimeAsync(2000);
   tmuxHarness.setOutput(sessionName, CODEX_IDLE_OUTPUT);

@@ -67,6 +67,7 @@ vi.mock('./db.js', () => ({
   listOpenRuns: vi.fn(() => []),
   hasOpenRun: vi.fn(() => false),
   updateRunChangedFiles: vi.fn(),
+  updateRunResultPath: vi.fn(),
 }));
 
 vi.mock('./event-bus.js', () => ({
@@ -150,9 +151,15 @@ describe('runner.ts', () => {
       data: makeAgent({ id: 'agent-script', tmux_session: 'wc-script' }),
     } as never);
     vi.mocked(db.listRuns).mockReturnValue([]);
+    const resultPath = path.join(transcriptDir, '.wavecode', 'runs', 'run-script', 'result.txt');
     vi.mocked(db.insertRun).mockReturnValue({
       ok: true,
-      data: makeRun({ id: 'run-script', task_id: 'task-1', agent_id: 'agent-script' }),
+      data: makeRun({
+        id: 'run-script',
+        task_id: 'task-1',
+        agent_id: 'agent-script',
+        result_path: resultPath,
+      }),
     } as never);
 
     const runner = await import('./runner.js');
@@ -164,7 +171,12 @@ describe('runner.ts', () => {
 
     expect(run).toEqual({
       ok: true,
-      data: makeRun({ id: 'run-script', task_id: 'task-1', agent_id: 'agent-script' }),
+      data: makeRun({
+        id: 'run-script',
+        task_id: 'task-1',
+        agent_id: 'agent-script',
+        result_path: resultPath,
+      }),
     });
     expect(db.insertRun).toHaveBeenCalledWith({ task_id: 'task-1', agent_id: 'agent-script', attempt: 1 });
     expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'running');
@@ -180,7 +192,15 @@ describe('runner.ts', () => {
     );
     expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
       'wc-script',
-      "Implement 'auth' middleware",
+      expect.stringContaining("Implement 'auth' middleware"),
+    );
+    expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
+      'wc-script',
+      expect.stringContaining(resultPath),
+    );
+    expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
+      'wc-script',
+      expect.stringContaining('RESULT: PASS'),
     );
     expect(tmux.sendTextAndEnter).not.toHaveBeenCalledWith(
       'wc-script',
@@ -225,6 +245,7 @@ describe('runner.ts', () => {
 
     const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-runner-finish-'));
     tmpDirs.push(transcriptDir);
+    const resultPath = path.join(transcriptDir, '.wavecode', 'runs', 'run-finish', 'result.txt');
 
     vi.mocked(config.getConfig).mockReturnValue(makeConfig());
     vi.mocked(runtimeLauncher.getTranscriptsRoot).mockReturnValue(transcriptDir);
@@ -235,11 +256,21 @@ describe('runner.ts', () => {
     vi.mocked(db.listRuns).mockReturnValue([]);
     vi.mocked(db.getRun).mockReturnValue({
       ok: true,
-      data: makeRun({ id: 'run-finish', task_id: 'task-finish', agent_id: 'agent-finish' }),
+      data: makeRun({
+        id: 'run-finish',
+        task_id: 'task-finish',
+        agent_id: 'agent-finish',
+        result_path: resultPath,
+      }),
     } as never);
     vi.mocked(db.insertRun).mockReturnValue({
       ok: true,
-      data: makeRun({ id: 'run-finish', task_id: 'task-finish', agent_id: 'agent-finish' }),
+      data: makeRun({
+        id: 'run-finish',
+        task_id: 'task-finish',
+        agent_id: 'agent-finish',
+        result_path: resultPath,
+      }),
     } as never);
 
     const runner = await import('./runner.js');
@@ -260,8 +291,9 @@ describe('runner.ts', () => {
     );
 
     await waitForCondition(() => {
-      expect(db.finishRun).toHaveBeenCalledWith('run-finish', 0);
+      expect(db.finishRun).toHaveBeenCalledWith('run-finish', 1);
     });
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe('RESULT: FAIL');
     await waitForCondition(() => {
       expect(db.updateRunChangedFiles).toHaveBeenCalledWith('run-finish', ['src/auth.ts']);
     });
@@ -275,7 +307,7 @@ describe('runner.ts', () => {
       'run-finish',
       {
         agent_id: 'agent-finish',
-        exit_code: 0,
+        exit_code: 1,
         changed_files: ['src/auth.ts'],
       },
     );
@@ -285,6 +317,45 @@ describe('runner.ts', () => {
       expect(fs.existsSync(transcriptPath)).toBe(true);
     });
     expect(fs.readFileSync(transcriptPath, 'utf-8')).toContain('"type":"run.finished"');
+  });
+
+  it('honors an agent-written RESULT: PASS file on socket run.finished', async () => {
+    const db = await import('./db.js');
+    const config = await import('./config.js');
+    const runtimeLauncher = await import('./runtime-launcher.js');
+    const { writeRunResult } = await import('./run-result.js');
+
+    const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-runner-pass-'));
+    tmpDirs.push(transcriptDir);
+    const resultPath = path.join(transcriptDir, '.wavecode', 'runs', 'run-pass', 'result.txt');
+    writeRunResult(resultPath, 'PASS', 'All checks green');
+
+    vi.mocked(config.getConfig).mockReturnValue(makeConfig());
+    vi.mocked(runtimeLauncher.getTranscriptsRoot).mockReturnValue(transcriptDir);
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: makeAgent({ id: 'agent-pass', tmux_session: 'wc-pass' }),
+    } as never);
+    vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: makeRun({
+        id: 'run-pass',
+        task_id: 'task-pass',
+        agent_id: 'agent-pass',
+        result_path: resultPath,
+      }),
+    } as never);
+    const runner = await import('./runner.js');
+    runner.startRunner('agent-pass', 'wc-pass', 'codex');
+    runnerIds.add('agent-pass');
+
+    netHarness.emitData('{"type":"run.finished","run_id":"run-pass","exit_code":0}\n');
+
+    await waitForCondition(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-pass', 0);
+    });
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe('RESULT: PASS');
   });
 
   it('marks the run failed when tmux sendTextAndEnter throws', async () => {
@@ -369,6 +440,7 @@ function makeRun(overrides: Partial<{
   id: string;
   task_id: string;
   agent_id: string;
+  result_path: string | null;
 }> = {}) {
   return {
     id: 'run-1',
@@ -382,6 +454,7 @@ function makeRun(overrides: Partial<{
     transcript_path: null,
     review_status: 'pending' as const,
     changed_files: null,
+    result_path: null,
     ...overrides,
   };
 }

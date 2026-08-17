@@ -15,7 +15,6 @@ vi.mock('./db.js', () => ({
   updateAgentStatus: vi.fn(),
   listRuns: vi.fn(),
   listTasks: vi.fn(),
-  finishRun: vi.fn(),
   updateTaskStatus: vi.fn(),
 }));
 
@@ -27,6 +26,7 @@ vi.mock('./task-dispatcher.js', () => ({
   onRunComplete: vi.fn(),
   dispatchNext: vi.fn(),
   unblockDependentsPublic: vi.fn(),
+  finalizeRun: vi.fn(),
 }));
 
 vi.mock('./task-verifier.js', () => ({
@@ -87,7 +87,6 @@ describe('output-watcher — idle-complete', () => {
   it('closes a stuck running run when a spawned agent is stably idle', async () => {
     const db = await import('./db.js');
     const dispatcher = await import('./task-dispatcher.js');
-    const runner = await import('./runner.js');
 
     const agent = makeAgent({ mode: 'spawned', status: 'working' });
     const run = makeRun();
@@ -102,16 +101,18 @@ describe('output-watcher — idle-complete', () => {
     }
 
     expect(db.updateAgentStatus).toHaveBeenCalledWith(agent.id, 'idle');
-    expect(db.finishRun).toHaveBeenCalledWith(run.id, 0);
-    expect(dispatcher.onRunComplete).toHaveBeenCalledWith(run.id, agent.id);
-    expect(runner.clearRunnerRun).toHaveBeenCalledWith(agent.id, run.id);
+    expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
+      run.id,
+      agent.id,
+      0,
+      'Idle close without a parseable RESULT file',
+    );
     expect(db.updateTaskStatus).not.toHaveBeenCalled();
   });
 
   it('closes the pane-named run on an already-idle Grok seat (no daemon restart)', async () => {
     const db = await import('./db.js');
     const dispatcher = await import('./task-dispatcher.js');
-    const runner = await import('./runner.js');
 
     const grokRunId = '01M0886K75AJDRRR1BPTA4X7ZC';
     const grokTaskId = '01M0886JQC1ZME43DW286V36YM';
@@ -132,15 +133,46 @@ describe('output-watcher — idle-complete', () => {
     startWatching(agent.id);
     tickForTest(agent.id);
 
-    expect(db.finishRun).toHaveBeenCalledWith(grokRunId, 0);
-    expect(dispatcher.onRunComplete).toHaveBeenCalledWith(grokRunId, agent.id);
-    expect(runner.clearRunnerRun).toHaveBeenCalledWith(agent.id, grokRunId);
+    expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
+      grokRunId,
+      agent.id,
+      0,
+      'Idle close without a parseable RESULT file',
+    );
+  });
+
+  it('closes a Grok TUI review with no RESULT file via finalizeRun (never pane PASS)', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+
+    const grokRunId = '01M08B7WSC1F3XKYQMNYMC68YB';
+    const agent = makeAgent({ mode: 'spawned', status: 'idle', runtime: 'grok' });
+    const stuck = makeRun({ id: grokRunId, task_id: 'task-review' });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([stuck]);
+    vi.mocked(db.listTasks).mockReturnValue([makeTask({ id: 'task-review', status: 'running' })]);
+    vi.mocked(capturePane).mockReturnValue({
+      ok: true,
+      data: [
+        'Your code was reviewed by another AI model. Here are the issues found.',
+        '>',
+      ].join('\n'),
+    });
+
+    startWatching(agent.id);
+    tickForTest(agent.id);
+
+    expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
+      grokRunId,
+      agent.id,
+      0,
+      'Idle close without a parseable RESULT file',
+    );
   });
 
   it('closes the older stuck run when Codex is already on a later task', async () => {
     const db = await import('./db.js');
     const dispatcher = await import('./task-dispatcher.js');
-    const runner = await import('./runner.js');
 
     const oldRunId = '01M0829117QXE7QP6GNG8EPQQT';
     const oldTaskId = '01M08290HDW155AYGYXG936AA0';
@@ -177,11 +209,18 @@ describe('output-watcher — idle-complete', () => {
     startWatching(agent.id);
     tickForTest(agent.id);
 
-    expect(db.finishRun).toHaveBeenCalledWith(oldRunId, 0);
-    expect(dispatcher.onRunComplete).toHaveBeenCalledWith(oldRunId, agent.id);
-    expect(db.finishRun).not.toHaveBeenCalledWith(newRunId, 0);
-    expect(dispatcher.onRunComplete).not.toHaveBeenCalledWith(newRunId, agent.id);
-    expect(runner.clearRunnerRun).toHaveBeenCalledWith(agent.id, oldRunId);
+    expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
+      oldRunId,
+      agent.id,
+      0,
+      'Idle close without a parseable RESULT file',
+    );
+    expect(dispatcher.finalizeRun).not.toHaveBeenCalledWith(
+      newRunId,
+      agent.id,
+      0,
+      expect.anything(),
+    );
     expect(db.updateAgentStatus).not.toHaveBeenCalledWith(agent.id, 'idle');
   });
 
@@ -200,8 +239,7 @@ describe('output-watcher — idle-complete', () => {
       tickForTest(agent.id);
     }
 
-    expect(db.finishRun).not.toHaveBeenCalled();
-    expect(dispatcher.onRunComplete).not.toHaveBeenCalled();
+    expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
     expect(db.updateAgentStatus).not.toHaveBeenCalledWith(agent.id, 'idle');
   });
 
@@ -225,8 +263,7 @@ describe('output-watcher — idle-complete', () => {
       tickForTest(agent.id);
     }
 
-    expect(db.finishRun).not.toHaveBeenCalled();
-    expect(dispatcher.onRunComplete).not.toHaveBeenCalled();
+    expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
   });
 
   it('still closes a stuck running run for an adopted agent', async () => {
@@ -248,8 +285,12 @@ describe('output-watcher — idle-complete', () => {
       tickForTest(agent.id);
     }
 
-    expect(db.finishRun).toHaveBeenCalledWith(run.id, 0);
-    expect(dispatcher.onRunComplete).toHaveBeenCalledWith(run.id, agent.id);
+    expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
+      run.id,
+      agent.id,
+      0,
+      'Idle close without a parseable RESULT file',
+    );
   });
 });
 
@@ -291,6 +332,7 @@ function makeRun(overrides: Partial<{
     transcript_path: null,
     review_status: 'pending' as const,
     changed_files: null,
+    result_path: null,
     ...overrides,
   };
 }
