@@ -379,13 +379,15 @@ describe('agent runtime integration', () => {
 
     expect(result.sessionsRecreated).toBe(1);
     expect(result.runsRecovered).toBe(1);
-    expect(result.tasksRequeued).toBe(1);
+    expect(result.tasksRequeued).toBe(0);
+    expect(result.tasksFailed).toBe(1);
     expect(db.listAgents()).toHaveLength(1);
     expect(tmuxHarness.hasSession('wc-builder')).toBe(true);
     expect(outputWatcher.isWatching(agent.id)).toBe(true);
     expect(runnerMocks.startRunner).toHaveBeenCalledTimes(2);
     expect(events).toContain('run.failed');
-    expect(events).toContain('task.retrying');
+    expect(events).toContain('task.failed');
+    expect(events).not.toContain('task.retrying');
 
     expect(recoveredAgent.ok).toBe(true);
     if (recoveredAgent.ok) {
@@ -396,7 +398,7 @@ describe('agent runtime integration', () => {
 
     expect(recoveredTask.ok).toBe(true);
     if (recoveredTask.ok) {
-      expect(recoveredTask.data.status).toBe('pending');
+      expect(recoveredTask.data.status).toBe('failed');
     }
 
     expect(recoveredRun.ok).toBe(true);
@@ -473,7 +475,7 @@ describe('agent runtime integration', () => {
     }
   });
 
-  it('backfills workspace and requeues orphan running tasks when sessions survive restart', async () => {
+  it('backfills workspace and fails orphan spawned tasks without a second dispatch', async () => {
     await setupEnvironment();
 
     const db = await import('./db.js');
@@ -510,8 +512,10 @@ describe('agent runtime integration', () => {
     const events = db.listEvents().map((event) => event.type);
 
     expect(result.sessionsRecreated).toBe(0);
-    expect(result.orphanRunningTasksRequeued).toBe(1);
-    expect(events).toContain('task.retrying');
+    expect(result.orphanRunningTasksRequeued).toBe(0);
+    expect(result.orphanRunningTasksFailed).toBe(1);
+    expect(events).toContain('task.failed');
+    expect(events).not.toContain('task.retrying');
     expect(outputWatcher.isWatching(agent.data.id)).toBe(true);
 
     expect(recoveredAgent.ok).toBe(true);
@@ -521,11 +525,11 @@ describe('agent runtime integration', () => {
 
     expect(recoveredTask.ok).toBe(true);
     if (recoveredTask.ok) {
-      expect(recoveredTask.data.status).toBe('pending');
+      expect(recoveredTask.data.status).toBe('failed');
     }
   });
 
-  it('restarts crashed spawned agents, emits recovery events, and redispatches work', async () => {
+  it('restarts crashed spawned agents and does not redispatch the failed work', async () => {
     await setupEnvironment({ autoDispatch: true });
 
     const app = await createTestApp();
@@ -571,31 +575,28 @@ describe('agent runtime integration', () => {
     const events = db.listEvents().map((event) => event.type);
 
     expect(tmuxHarness.hasSession('wc-builder')).toBe(true);
-    expect(runnerMocks.executeRun).toHaveBeenCalledWith(
-      agent.id,
-      task.data.id,
-      'Continue the interrupted build',
-    );
+    expect(runnerMocks.executeRun).not.toHaveBeenCalled();
     expect(notificationsMocks.notifyAgentCrashed).toHaveBeenCalledWith('builder', agent.id);
 
     expect(events).toEqual(expect.arrayContaining([
       'agent.crashed',
       'run.failed',
-      'task.retrying',
+      'task.failed',
       'agent.restarted',
-      'task.dispatched',
     ]));
+    expect(events).not.toContain('task.retrying');
+    expect(events).not.toContain('task.dispatched');
     expect(events.indexOf('agent.crashed')).toBeLessThan(events.indexOf('agent.restarted'));
-    expect(events.indexOf('run.failed')).toBeLessThan(events.indexOf('task.retrying'));
+    expect(events.indexOf('run.failed')).toBeLessThan(events.indexOf('task.failed'));
 
     expect(recoveredAgent.ok).toBe(true);
     if (recoveredAgent.ok) {
-      expect(recoveredAgent.data.status).toBe('working');
+      expect(recoveredAgent.data.status).toBe('idle');
     }
 
     expect(recoveredTask.ok).toBe(true);
     if (recoveredTask.ok) {
-      expect(recoveredTask.data.status).toBe('running');
+      expect(recoveredTask.data.status).toBe('failed');
     }
 
     expect(recoveredRun.ok).toBe(true);
@@ -659,9 +660,10 @@ describe('agent runtime integration', () => {
     expect(events).toEqual(expect.arrayContaining([
       'agent.crashed',
       'run.failed',
-      'task.retrying',
+      'task.failed',
       'agent.restarted',
     ]));
+    expect(events).not.toContain('task.retrying');
 
     expect(recoveredAgent.ok).toBe(true);
     if (recoveredAgent.ok) {
@@ -670,7 +672,7 @@ describe('agent runtime integration', () => {
 
     expect(recoveredTask.ok).toBe(true);
     if (recoveredTask.ok) {
-      expect(recoveredTask.data.status).toBe('pending');
+      expect(recoveredTask.data.status).toBe('failed');
     }
 
     expect(recoveredRun.ok).toBe(true);

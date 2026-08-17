@@ -64,7 +64,7 @@ describe('health-monitor.ts', () => {
     vi.restoreAllMocks();
   });
 
-  it('restarts crashed spawned agents, requeues runs, and redispatches recovered work', async () => {
+  it('restarts crashed spawned agents and leaves the task failed (no second dispatch)', async () => {
     const db = await import('./db.js');
     const config = await import('./config.js');
     const events = await import('./event-bus.js');
@@ -101,10 +101,11 @@ describe('health-monitor.ts', () => {
 
     expect(db.updateAgentStatus).toHaveBeenCalledWith('agent-1', 'error');
     expect(db.finishRun).toHaveBeenCalledWith('run-1', 1);
-    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'pending');
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'failed');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-1', 'pending');
     expect(sessionManager.ensureSpawnedAgentSession).toHaveBeenCalledWith('agent-1');
     expect(notifications.notifyAgentCrashed).toHaveBeenCalledWith('builder', 'agent-1');
-    expect(dispatcher.dispatchNext).toHaveBeenCalledTimes(1);
+    expect(dispatcher.dispatchNext).not.toHaveBeenCalled();
     expect(events.emit).toHaveBeenCalledWith(
       'agent.crashed',
       'agent',
@@ -122,14 +123,20 @@ describe('health-monitor.ts', () => {
       }),
     );
     expect(events.emit).toHaveBeenCalledWith(
-      'task.retrying',
+      'task.failed',
       'task',
       'task-1',
       expect.objectContaining({
         agent_id: 'agent-1',
         run_id: 'run-1',
-        reason: 'agent_crash_recovery',
+        reason: 'spawned_result_not_pass',
       }),
+    );
+    expect(events.emit).not.toHaveBeenCalledWith(
+      'task.retrying',
+      'task',
+      'task-1',
+      expect.anything(),
     );
     expect(events.emit).toHaveBeenCalledWith(
       'agent.restarted',
@@ -243,7 +250,8 @@ describe('health-monitor.ts', () => {
 
     expect(sessionManager.ensureSpawnedAgentSession).toHaveBeenCalledWith('agent-3');
     expect(db.finishRun).toHaveBeenCalledWith('run-3', 1);
-    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-3', 'pending');
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-3', 'failed');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-3', 'pending');
     expect(notifications.notifyAgentCrashed).toHaveBeenCalledWith('reviewer', 'agent-3');
     expect(events.emit).toHaveBeenCalledWith(
       'agent.restarted',

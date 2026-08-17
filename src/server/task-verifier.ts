@@ -7,8 +7,9 @@
  *
  * Based on the answer it either:
  *   - Confirms → task stays 'done'
- *   - Failed → marks task 'failed', optionally retries
- *   - Partial → marks task 'pending' for another attempt
+ *   - Failed → marks task 'failed'; adopted seats may retry
+ *   - Spawned missing/FAIL does not re-queue the same seat
+ *   - Partial → logs; user can manually retry if needed
  *
  * Uses whichever LLM provider is configured (Anthropic, OpenAI, Gemini, etc.)
  * Cost is minimal: ~200-500 input tokens + ~50 output tokens per check.
@@ -16,6 +17,7 @@
 
 import { getConfig } from './config.js';
 import { getTask, getAgent, updateTaskStatus, type Task, type Agent } from './db.js';
+import { resultPathForRun, shouldAutoRetryFailedRun } from './run-result.js';
 import { capturePane } from './session-manager.js';
 import { getResolvedLlmConfig, isLlmConfigured } from './llm-provider.js';
 import { emit } from './event-bus.js';
@@ -114,11 +116,17 @@ export async function verifyTaskCompletion(
         verified: true,
       });
 
-      // Retry if we haven't exceeded max retries
+      // Adopted seats may retry. Spawned missing/FAIL is the signal —
+      // do not re-queue the same WaveCode seat.
       const config = getConfig();
       const { listRuns } = await import('./db.js');
       const attempts = listRuns({ task_id: taskId });
-      if (attempts.length < config.autonomy.max_task_retries) {
+      const latest = attempts[attempts.length - 1];
+      const retryOk = shouldAutoRetryFailedRun({
+        agentMode: agent.mode,
+        resultPath: latest ? resultPathForRun(latest, agent.workspace) : null,
+      }) && attempts.length < config.autonomy.max_task_retries;
+      if (retryOk) {
         updateTaskStatus(taskId, 'pending');
         emit('task.retrying', 'task', taskId, {
           reason: result.reason,

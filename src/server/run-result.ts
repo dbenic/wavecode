@@ -176,6 +176,20 @@ export function exitCodeForVerdict(verdict: RunResultVerdict | null | undefined)
   return verdict === 'PASS' ? 0 : 1;
 }
 
+/**
+ * Spawned missing / unparseable / FAIL is the orchestrate signal.
+ * Do not auto-retry or re-queue the same WaveCode seat — CountixDev
+ * failovers to a Cursor cloud agent. WaveCode stays primary.
+ * Adopted seats keep the existing retry budget.
+ */
+export function shouldAutoRetryFailedRun(opts: {
+  agentMode?: string | null;
+  resultPath?: string | null;
+}): boolean {
+  if (opts.agentMode !== 'spawned') return true;
+  return readRunResult(opts.resultPath)?.verdict === 'PASS';
+}
+
 export function resultPathForRun(
   run: { id: string; result_path?: string | null },
   _workspace?: string | null,

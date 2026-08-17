@@ -16,6 +16,7 @@ import {
   resolveRunResultPath,
   runResultRelPath,
   settleRunResultFile,
+  shouldAutoRetryFailedRun,
   writeRunResult,
 } from './run-result.js';
 
@@ -166,6 +167,19 @@ describe('run-result', () => {
       result_reason: 'No parseable RESULT file',
       result_last_line: RESULT_FAIL_LINE,
     });
+  });
+
+  it('does not auto-retry a spawned run with missing, unparseable, or FAIL result', () => {
+    const filePath = path.join(tmpDir(), 'result.txt');
+    expect(shouldAutoRetryFailedRun({ agentMode: 'spawned', resultPath: filePath })).toBe(false);
+    writeRunResult(filePath, 'FAIL', 'Idle close without a parseable RESULT file');
+    expect(shouldAutoRetryFailedRun({ agentMode: 'spawned', resultPath: filePath })).toBe(false);
+    fs.writeFileSync(filePath, 'Your code was reviewed by another AI model.\n', 'utf8');
+    expect(shouldAutoRetryFailedRun({ agentMode: 'spawned', resultPath: filePath })).toBe(false);
+    writeRunResult(filePath, 'PASS', 'All checks green');
+    expect(shouldAutoRetryFailedRun({ agentMode: 'spawned', resultPath: filePath })).toBe(true);
+    expect(shouldAutoRetryFailedRun({ agentMode: 'adopted', resultPath: filePath })).toBe(true);
+    expect(shouldAutoRetryFailedRun({ agentMode: 'adopted', resultPath: null })).toBe(true);
   });
 
   it('briefs the agent to write the file once and never mentions echo|nc or a message bus', () => {

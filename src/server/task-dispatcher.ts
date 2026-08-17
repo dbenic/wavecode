@@ -28,8 +28,10 @@ import { maybeInvokeProjectGate } from './project-gate.js';
 import {
   appendRunResultBriefing,
   exitCodeForVerdict,
+  readRunResult,
   resultPathForRun,
   settleRunResultFile,
+  shouldAutoRetryFailedRun,
 } from './run-result.js';
 import logger from './logger.js';
 
@@ -128,28 +130,36 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
       if (!seatStillBusy) updateAgentStatus(agentId, 'idle');
       blockDependents(task.id);
     } else {
-    // Check if we should retry
+    const agentResult = getAgent(agentId);
+    const resultPath = resultPathForRun(run, agentResult.ok ? agentResult.data.workspace : null);
     const attempts = listRuns({ task_id: task.id });
-    if (attempts.length < config.autonomy.max_task_retries) {
-      // Retry — create new run
+    const retryOk = shouldAutoRetryFailedRun({
+      agentMode: agentResult.ok ? agentResult.data.mode : null,
+      resultPath,
+    }) && attempts.length < config.autonomy.max_task_retries;
+
+    if (retryOk) {
       if (!seatStillBusy) updateAgentStatus(agentId, 'idle');
       emit('task.retrying', 'task', task.id, {
         attempt: attempts.length + 1,
         max: config.autonomy.max_task_retries,
       });
-      // Will be picked up by next dispatch cycle
       updateTaskStatus(task.id, 'pending');
     } else {
-      // Max retries exceeded — mark task failed
+      // Spawned missing/unparseable/FAIL is the signal — not a second
+      // dispatch on this seat. Adopted still fails after max retries.
       updateTaskStatus(task.id, 'failed');
       if (!seatStillBusy) updateAgentStatus(agentId, 'idle');
 
       emit('task.failed', 'task', task.id, {
         agent_id: agentId,
         attempts: attempts.length,
+        result: readRunResult(resultPath)?.verdict ?? null,
+        reason: agentResult.ok && agentResult.data.mode === 'spawned'
+          ? 'spawned_result_not_pass'
+          : undefined,
       });
 
-      // Block dependent tasks
       blockDependents(task.id);
     }
     }

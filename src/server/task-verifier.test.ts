@@ -154,7 +154,7 @@ describe('task-verifier.ts', () => {
     expect(sessions.capturePane).not.toHaveBeenCalled();
   });
 
-  it('marks tasks pending again and schedules retry on high-confidence failure', async () => {
+  it('does not re-queue a spawned high-confidence failure (result file is the signal)', async () => {
     vi.useFakeTimers();
 
     const db = await import('./db.js');
@@ -182,10 +182,9 @@ describe('task-verifier.ts', () => {
       reason: 'Tests are still failing',
       confidence: 0.92,
     });
-    expect(db.updateTaskStatus).toHaveBeenNthCalledWith(1, 'task-1', 'failed');
-    expect(db.updateTaskStatus).toHaveBeenNthCalledWith(2, 'task-1', 'pending');
-    expect(events.emit).toHaveBeenNthCalledWith(
-      1,
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'failed');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-1', 'pending');
+    expect(events.emit).toHaveBeenCalledWith(
       'task.failed',
       'task',
       'task-1',
@@ -195,6 +194,62 @@ describe('task-verifier.ts', () => {
         verified: true,
       }),
     );
+    expect(events.emit).not.toHaveBeenCalledWith(
+      'task.retrying',
+      'task',
+      'task-1',
+      expect.anything(),
+    );
+
+    vi.advanceTimersByTime(2000);
+    await Promise.resolve();
+
+    expect(dispatcher.dispatchNext).not.toHaveBeenCalled();
+  });
+
+  it('marks adopted tasks pending again and schedules retry on high-confidence failure', async () => {
+    vi.useFakeTimers();
+
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+    const dispatcher = await import('./task-dispatcher.js');
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'agent-1',
+        name: 'builder',
+        runtime: 'codex',
+        tmux_session: 'legacy-builder',
+        workspace: '/workspace/builder',
+        mode: 'adopted',
+        status: 'idle',
+        created_at: '2026-04-08T00:00:00Z',
+      },
+    } as never);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: '{"result":"failed","reason":"Tests are still failing","confidence":0.92}',
+          },
+        },
+      ],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const verifier = await import('./task-verifier.js');
+    const result = await verifier.verifyTaskCompletion('task-1', 'agent-1');
+
+    expect(result).toEqual({
+      result: 'failed',
+      reason: 'Tests are still failing',
+      confidence: 0.92,
+    });
+    expect(db.updateTaskStatus).toHaveBeenNthCalledWith(1, 'task-1', 'failed');
+    expect(db.updateTaskStatus).toHaveBeenNthCalledWith(2, 'task-1', 'pending');
     expect(events.emit).toHaveBeenNthCalledWith(
       2,
       'task.retrying',

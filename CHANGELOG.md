@@ -16,6 +16,7 @@ All notable changes to WaveCode are documented here.
 - Codex runtime default `effort_flag: -c model_reasoning_effort=` so a pin of `high`/`xhigh` is actually injected.
 
 ### Fixed
+- Spawned missing / unparseable / `RESULT: FAIL` does not auto-retry or re-queue the same WaveCode seat. The write-once `runs/<run_id>/result.txt` file is the signal; CountixDev failovers to a Cursor cloud agent. The seat stays up (WaveCode remains primary). Adopted seats keep the retry budget. Manual `POST /api/tasks/:id/retry` is unchanged.
 - Spawned-agent lifecycle is one open run per seat: `executeRun` / dispatch refuse a second run while `finished_at` is null. Interactive TUIs get the prompt + `insertRun` (no `echo|nc` paste) and close on stable idle via `onRunComplete`. `reject_run` and cancel persist `finished_at` before failing the task. Grok `Responding` / `Thinking` / `Worked-for` / interrupt lines are working; `idle_pattern` is wired; `status=error` is correctable when the pane is healthy. `wavecode tasks` no longer throws EPIPE when a consumer closes the pipe.
 - `wavecode mcp` uses the same daemon connection resolution as `wavecode queue` (`auth.fallback_token`, then `WAVECODE_TOKEN`, then `--token`), so a token-auth daemon works without injecting the token into the MCP client environment.
 - `wavecode queue` and `wavecode send` POST `/api/tasks` so the daemon creates and dispatches a run (same as MCP `create_task`). If the daemon is down, the task is saved locally as pending with a clear message.

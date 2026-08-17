@@ -5,7 +5,7 @@ import { notifyAgentCrashed } from './notifications.js';
 import * as sessionManager from './session-manager.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
-import { resultPathForRun, settleRunResultFile } from './run-result.js';
+import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
 import logger from './logger.js';
 
 interface AgentHealthState {
@@ -163,19 +163,16 @@ async function handleHungSpawnedAgent(agent: Agent): Promise<void> {
 
 function reQueueRunningTasks(agentId: string): number {
   const runs = listRuns({ agent_id: agentId, status: 'running' });
+  let requeued = 0;
   for (const run of runs) {
+    const agent = getAgent(agentId);
+    const workspace = agent && 'ok' in agent && agent.ok ? agent.data.workspace : null;
+    const resultPath = resultPathForRun(run, workspace);
     try {
-      const agent = getAgent(agentId);
-      const workspace = agent && 'ok' in agent && agent.ok ? agent.data.workspace : null;
-      settleRunResultFile(
-        resultPathForRun(run, workspace),
-        'Agent hung or crashed',
-        { forceFail: true },
-      );
+      settleRunResultFile(resultPath, 'Agent hung or crashed', { forceFail: true });
     } catch {
       // Result file is best-effort; crash recovery must still finish the run.
     }
-    // Mark run as failed
     finishRun(run.id, 1);
     emit('run.failed', 'run', run.id, {
       agent_id: agentId,
@@ -183,16 +180,36 @@ function reQueueRunningTasks(agentId: string): number {
       exit_code: 1,
       reason: 'agent_crash_recovery',
     });
-    // Reset task to pending for re-dispatch
-    updateTaskStatus(run.task_id, 'pending');
-    emit('task.retrying', 'task', run.task_id, {
-      agent_id: agentId,
-      run_id: run.id,
-      reason: 'agent_crash_recovery',
+
+    const retryOk = shouldAutoRetryFailedRun({
+      agentMode: agent && 'ok' in agent && agent.ok ? agent.data.mode : 'spawned',
+      resultPath,
     });
-    logger.info({ runId: run.id, taskId: run.task_id }, 'Re-queued task after agent crash');
+    if (retryOk) {
+      updateTaskStatus(run.task_id, 'pending');
+      emit('task.retrying', 'task', run.task_id, {
+        agent_id: agentId,
+        run_id: run.id,
+        reason: 'agent_crash_recovery',
+      });
+      requeued += 1;
+      logger.info({ runId: run.id, taskId: run.task_id }, 'Re-queued task after agent crash');
+    } else {
+      // Spawned missing/FAIL is the signal. Restart the seat; do not
+      // dispatch the same work again.
+      updateTaskStatus(run.task_id, 'failed');
+      emit('task.failed', 'task', run.task_id, {
+        agent_id: agentId,
+        run_id: run.id,
+        reason: 'spawned_result_not_pass',
+      });
+      logger.info(
+        { runId: run.id, taskId: run.task_id },
+        'Left spawned task failed after crash — no second WaveCode dispatch',
+      );
+    }
   }
-  return runs.length;
+  return requeued;
 }
 
 function isSessionAlive(sessionName: string): boolean {
