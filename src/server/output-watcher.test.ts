@@ -40,13 +40,38 @@ Brewed for 2m 30s
       expect(detectStatus(output, 'claude-code')).toBe('idle');
     });
 
-    it('detects working with thinking indicator', () => {
+    it('detects working with thinking indicator and esc to interrupt', () => {
       const output = `
 Previous output
 ✻ Brewing... (45s)
-⏵⏵ claude-code (shift+tab to cycle)
+⏵⏵ claude-code (shift+tab to cycle) · esc to interrupt
 `.trim();
       expect(detectStatus(output, 'claude-code')).toBe('working');
+    });
+
+    it('detects idle on a fresh Claude splash (sparkle + tip + shift+tab, no interrupt)', () => {
+      const output = `
+     ✻ Welcome to Claude Code
+
+     Try refactor db.ts
+
+     bypass permissions on (shift+tab to cycle) · gh auth login for PR status
+`.trim();
+      expect(detectStatus(output, 'claude-code')).toBe('idle');
+    });
+
+    it('detects idle when the splash sparkle sits above an idle ⏵⏵ bar', () => {
+      const output = `
+✶ Claude Code
+Try refactor db.ts
+⏵⏵ bypass permissions on (shift+tab to cycle)
+`.trim();
+      expect(detectStatus(output, 'claude-code')).toBe('idle');
+    });
+
+    it('detects working from an action-verb status line while actually running', () => {
+      expect(detectStatus('✻ Brewing... (45s)', 'claude-code')).toBe('working');
+      expect(detectStatus('Some output\n✶ Creating... (12s)', 'claude-code')).toBe('working');
     });
   });
 

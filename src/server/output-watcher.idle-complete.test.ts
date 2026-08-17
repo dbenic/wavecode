@@ -73,6 +73,14 @@ Working on the patch
 Responding…
 `.trim();
 
+const CLAUDE_SPLASH = `
+     ✻ Welcome to Claude Code
+
+     Try refactor db.ts
+
+     bypass permissions on (shift+tab to cycle) · gh auth login for PR status
+`.trim();
+
 describe('output-watcher — idle-complete', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -264,6 +272,26 @@ describe('output-watcher — idle-complete', () => {
     }
 
     expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
+  });
+
+  it('overrides a spawned Claude splash from working to idle (no run to close)', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+
+    const agent = makeAgent({ mode: 'spawned', status: 'working', runtime: 'claude-code' });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.listTasks).mockReturnValue([]);
+    vi.mocked(capturePane).mockReturnValue({ ok: true, data: CLAUDE_SPLASH });
+
+    startWatching(agent.id);
+    for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
+      tickForTest(agent.id);
+    }
+
+    expect(db.updateAgentStatus).toHaveBeenCalledWith(agent.id, 'idle');
+    expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
+    expect(db.updateTaskStatus).not.toHaveBeenCalled();
   });
 
   it('still closes a stuck running run for an adopted agent', async () => {

@@ -287,13 +287,12 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
   //
   // WORKING signals:
   //   "esc to interrupt" in status bar -> actively processing
-  //   "✻" (sparkle) -> thinking/creating
-  //   "✶" (star) -> creating
-  //   Action verbs: Scurrying, Brewing, Churning, Cooking, etc.
+  //   Action-verb status line while running: "✻ Brewing... (45s)"
   //   "● Bash(...)" / "● Read(...)" etc. with "Creating..." / "Initializing..."
   //
   // IDLE signals:
-  //   Status bar without "esc to interrupt"
+  //   Status bar (shift+tab / ⏵⏵) without "esc to interrupt"
+  //   Marketing splash sparkle (✻/✶) and "Try refactor …" tips are NOT work
   //   "Brewed for / Churned for" etc. -> just finished
   //   "Context left until auto-compact" -> info display, at prompt
   //   File counts like "9 files +0 -0"
@@ -308,31 +307,17 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
       return 'working';
     }
 
-    const finishedPhrases = [
-      'Brewed for', 'Churned for', 'Cooked for', 'Crunched for',
-      'Scurried for', 'Simmered for', 'Improvised for', 'Composed for',
-      'Crafted for', 'Sautéed for', 'Sauteed for',
-    ];
-    for (const phrase of finishedPhrases) {
-      if (last10.includes(phrase)) return 'idle';
-    }
-
-    if (last5.includes('✻') || last5.includes('✶')) return 'working';
-
-    const workingVerbs = [
-      'Scurrying', 'Brewing', 'Churning', 'Cooking', 'Crunching',
-      'Simmering', 'Improvising', 'Composing', 'Crafting', 'Creating',
-      'Initializing', 'Exploring', 'Searching', 'Analyzing',
-      'Contemplating', 'Sautéing',
-    ];
-    for (const verb of workingVerbs) {
-      if (last5.includes(verb)) return 'working';
-    }
-
+    // Idle / splash footer. Do not scan last5 for ✻/✶ or tip verbs —
+    // the welcome sparkle and "Try refactor db.ts" are not work.
     return 'idle';
   }
 
   if (/^❯\s*$/.test(lastLine)) return 'idle';
+
+  // Claude is running but the footer bar is not the last captured line.
+  if (isClaudeWorkingVerbLine(lastLine) || isClaudeWorkingVerbLine(secondLast)) {
+    return 'working';
+  }
 
   // ============ CODEX CLI ============
   // Status bar: "gpt-X.X xhigh · NN% left · ~/path"
@@ -386,6 +371,21 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
   if (last10.includes('FATAL') || last10.includes('panic:')) return 'error';
 
   return 'idle';
+}
+
+const CLAUDE_WORKING_VERBS = [
+  'Scurrying', 'Brewing', 'Churning', 'Cooking', 'Crunching',
+  'Simmering', 'Improvising', 'Composing', 'Crafting', 'Creating',
+  'Initializing', 'Exploring', 'Searching', 'Analyzing',
+  'Contemplating', 'Sautéing',
+];
+
+/** True for a live Claude status line ("Brewing... (45s)"), not splash tips. */
+export function isClaudeWorkingVerbLine(line: string): boolean {
+  for (const verb of CLAUDE_WORKING_VERBS) {
+    if (line.includes(verb) && (/\.\.\.|…|\(\d/.test(line))) return true;
+  }
+  return false;
 }
 
 /** True when recent pane lines show a Grok-like generation indicator. */
