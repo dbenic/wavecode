@@ -294,10 +294,10 @@ describe('code-review.ts', () => {
 
       const reviews = codeReview.getReviewsForRun(runId);
       expect(reviews).toHaveLength(2);
-      const latest = reviews[0];
-      expect(latest.status).toBe('done');
-      expect(latest.verdict).toBe('needs-fixes');
-      expect(latest.fix_round).toBe(1);
+      // created_at is second-precision; do not assume reviews[0] is the new row
+      const nextRound = reviews.find((r) => r.fix_round === 1);
+      expect(nextRound?.status).toBe('done');
+      expect(nextRound?.verdict).toBe('needs-fixes');
     });
   });
 
