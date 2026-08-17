@@ -142,7 +142,8 @@ CREATE TABLE runs (
   finished_at TEXT,
   exit_code INTEGER,
   transcript_path TEXT,
-  review_status TEXT NOT NULL DEFAULT 'pending'  -- 'pending' | 'approved' | 'rejected'
+  review_status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'approved' | 'rejected'
+  result_path TEXT  -- parseable orchestrate RESULT file; last line RESULT: PASS|FAIL
 );
 
 CREATE TABLE artifacts (

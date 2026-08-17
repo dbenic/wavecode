@@ -18,6 +18,7 @@ import { getConfig } from './config.js';
 import { dispatchNext, onRunComplete, unblockDependentsPublic } from './task-dispatcher.js';
 import { getLatestCompletedReview, type CodeReview } from './code-review.js';
 import { evaluateRefereeForPromote } from './project-gate.js';
+import { resultPathForRun, settleRunResultFile } from './run-result.js';
 import logger from './logger.js';
 
 export interface ReviewItem {
@@ -204,6 +205,12 @@ export function reject(runId: string): Result<Run> {
   if (!runResult.ok) return runResult;
 
   const run = runResult.data;
+  const author = getAgent(run.agent_id);
+  settleRunResultFile(
+    resultPathForRun(run, author.ok ? author.data.workspace : null),
+    'Run rejected',
+    { forceFail: true },
+  );
   const exitCode = run.status === 'running' || !run.finished_at ? 1 : (run.exit_code ?? 0);
   const finished = finishRun(runId, exitCode);
   if (!finished.ok) return finished;

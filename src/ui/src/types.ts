@@ -60,6 +60,10 @@ export interface Run {
   exit_code: number | null;
   transcript_path: string | null;
   review_status: 'pending' | 'approved' | 'rejected';
+  result_path?: string | null;
+  result?: 'PASS' | 'FAIL' | null;
+  result_reason?: string | null;
+  result_last_line?: string | null;
 }
 
 export interface Artifact {

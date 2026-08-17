@@ -17,6 +17,7 @@ import * as sessionManager from './session-manager.js';
 import * as outputWatcher from './output-watcher.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
+import { resultPathForRun, settleRunResultFile } from './run-result.js';
 import logger from './logger.js';
 
 export interface StartupReconcileResult {
@@ -144,6 +145,15 @@ function recoverRunningRuns(
   result: StartupReconcileResult,
 ): void {
   for (const run of runs) {
+    try {
+      settleRunResultFile(
+        resultPathForRun(run, agent.workspace),
+        'Startup recovery: run was still open',
+        { forceFail: true },
+      );
+    } catch {
+      // Result file is best-effort; startup recovery must still finish the run.
+    }
     finishRun(run.id, 1);
     result.runsRecovered += 1;
 

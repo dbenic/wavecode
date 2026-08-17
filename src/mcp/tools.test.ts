@@ -36,7 +36,7 @@ describe('mcp tools', () => {
     const names = WAVECODE_TOOLS.map((t) => t.name);
     for (const required of [
       'list_agents', 'spawn_agent', 'pin_agent', 'kill_agent', 'stop_all',
-      'send_prompt', 'get_agent_output', 'create_task', 'list_tasks',
+      'send_prompt', 'get_agent_output', 'create_task', 'list_tasks', 'get_task',
       'list_reviews', 'request_ai_review', 'get_ai_reviews',
       'promote_run', 'retry_run', 'handoff_run', 'reject_run',
       'send_message', 'list_messages',
@@ -139,6 +139,13 @@ describe('mcp tools', () => {
 
     const { body } = lastCall(fetchMock);
     expect(body).toEqual({ title: 'W0 seed', external_id: 'W0', decompose: false });
+  });
+
+  it('get_task fetches the task with runs', async () => {
+    const { client, fetchMock } = makeClient({ id: 't1', runs: [] });
+    await tool('get_task').handler(client, { task_id: '01TASK' });
+    const { url } = lastCall(fetchMock);
+    expect(url).toBe('http://wavecode.test:3777/api/tasks/01TASK');
   });
 
   it('create_task forwards goal_id and hold', async () => {

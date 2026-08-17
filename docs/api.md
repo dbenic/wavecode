@@ -153,7 +153,22 @@ Query:
 `status`, `agent_id`
 
 ### `GET /api/tasks/:id`
-Get one task with dependency and run context.
+Get one task with dependency and run context. Each run includes
+`result_path`, `result` (`PASS` | `FAIL` | `null`), `result_reason`, and
+`result_last_line` from the parseable per-run result file. `null` means
+missing or unparseable — that is not PASS. Do not infer success from idle,
+pane scrape, or duration.
+
+### `GET /api/runs/:id/result`
+Read the orchestrate result file for a run.
+
+Response:
+`{ run_id, path, exists, result, reason, last_line }`
+
+`result` is `PASS`, `FAIL`, or `null`. Last line of the file must be
+exactly `RESULT: PASS` or `RESULT: FAIL`. This is the run/orchestrate
+signal, not the promote gate (referee / wavepulse-gate RESULT stays
+the promote evidence).
 
 ### `POST /api/tasks`
 Create a task. When `autonomy.auto_dispatch` is on, the daemon dispatches

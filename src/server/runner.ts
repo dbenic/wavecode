@@ -4,6 +4,12 @@ import path from 'node:path';
 import { finishRun, insertRun, updateTaskStatus, getAgent, getRun, listOpenRuns, type Run, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import { getTranscriptsRoot } from './runtime-launcher.js';
+import {
+  appendRunResultBriefing,
+  exitCodeForVerdict,
+  resultPathForRun,
+  settleRunResultFile,
+} from './run-result.js';
 import * as tmux from './tmux.js';
 
 interface RunnerInstance {
@@ -168,11 +174,15 @@ export async function executeRun(
     prompt: prompt.substring(0, 500),
   });
 
+  const briefedPrompt = run.result_path
+    ? appendRunResultBriefing(prompt, run.result_path)
+    : prompt;
+
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, prompt);
+    tmux.sendTextAndEnter(agent.tmux_session, briefedPrompt);
   } catch (e) {
     const { finalizeRun } = await import('./task-dispatcher.js');
-    finalizeRun(run.id, agentId, 1);
+    finalizeRun(run.id, agentId, 1, 'Failed to send prompt to agent');
     emit('run.failed', 'run', run.id, {
       error: (e as Error).message,
     });
@@ -234,7 +244,20 @@ function handleRunnerEvent(agentId: string, line: string): void {
         if (instance.currentRunId === runId) cleanupRunnerInstance(instance);
         break;
       }
-      const exitCode = (event.exit_code as number) ?? 0;
+      const requested = (event.exit_code as number) ?? 0;
+      const agent = getAgent(agentId);
+      const resultPath = resultPathForRun(
+        existing.ok ? existing.data : { id: runId, result_path: null },
+        agent.ok ? agent.data.workspace : null,
+      );
+      const settled = settleRunResultFile(
+        resultPath,
+        requested === 0
+          ? 'Runner finished without a parseable RESULT file'
+          : 'Runner reported failure without a parseable RESULT file',
+        { forceFail: requested !== 0 },
+      );
+      const exitCode = requested !== 0 ? 1 : exitCodeForVerdict(settled.verdict);
       finishRun(runId, exitCode);
       // Persist changed files list on the run record
       if (event.changed_files && Array.isArray(event.changed_files)) {
@@ -259,8 +282,16 @@ function handleRunnerEvent(agentId: string, line: string): void {
         if (instance.currentRunId === runId) cleanupRunnerInstance(instance);
         break;
       }
+      const agent = getAgent(agentId);
+      const resultPath = resultPathForRun(
+        existing.ok ? existing.data : { id: runId, result_path: null },
+        agent.ok ? agent.data.workspace : null,
+      );
+      settleRunResultFile(resultPath, String(event.error_message ?? event.error ?? 'Runner reported run.failed'), {
+        forceFail: true,
+      });
       const exitCode = (event.exit_code as number) ?? 1;
-      finishRun(runId, exitCode);
+      finishRun(runId, exitCode === 0 ? 1 : exitCode);
       import('./task-dispatcher.js').then((td) => td.onRunComplete(runId, agentId));
       if (instance.currentRunId === runId) cleanupRunnerInstance(instance);
 

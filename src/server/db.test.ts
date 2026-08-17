@@ -83,6 +83,7 @@ describe('db.ts — schema migrations', () => {
     // Check that changed_files column was added to runs
     const columns = db.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
     expect(columns.map(c => c.name)).toContain('changed_files');
+    expect(columns.map(c => c.name)).toContain('result_path');
 
     // Check that model/effort pin columns were added to agents (v8 → v9)
     const agentColumns = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
@@ -153,7 +154,7 @@ describe('db.ts — schema migrations', () => {
       name: 'test-agent',
       runtime: 'claude-code',
       tmux_session: 'test-session',
-      workspace: null,
+      workspace: tmpDir,
       mode: 'adopted',
       status: 'idle',
     });
@@ -169,6 +170,16 @@ describe('db.ts — schema migrations', () => {
     // Insert task
     const taskResult = mod.insertTask({ prompt: 'test task', priority: 5 });
     expect(taskResult.ok).toBe(true);
+
+    // Insert run records a stable result_path
+    const runResult = mod.insertRun({
+      task_id: taskResult.ok ? taskResult.data.id : 'missing',
+      agent_id: agents[0].id,
+    });
+    expect(runResult.ok).toBe(true);
+    if (runResult.ok) {
+      expect(runResult.data.result_path).toContain(path.join('.wavecode', 'runs', runResult.data.id, 'result.txt'));
+    }
 
     // Insert event
     const eventResult = mod.insertEvent({

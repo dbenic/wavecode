@@ -1,4 +1,4 @@
-import { getAgent, updateAgentStatus, listRuns, listTasks, finishRun, updateTaskStatus, type Agent } from './db.js';
+import { getAgent, updateAgentStatus, listRuns, listTasks, updateTaskStatus, type Agent } from './db.js';
 import { getConfig } from './config.js';
 import { capturePane, sendRawKeys } from './session-manager.js';
 import { emit } from './event-bus.js';
@@ -521,16 +521,16 @@ function closeFinishedRuns(
 }
 
 function finishOneStuckRun(agentId: string, run: { id: string; task_id: string }): void {
-  finishRun(run.id, 0);
-  runner.clearRunnerRun?.(agentId, run.id);
-  emit('run.finished', 'run', run.id, {
-    agent_id: agentId,
-    exit_code: 0,
-    auto_detected: true,
-  });
-  void taskDispatcher.onRunComplete(run.id, agentId);
+  // Idle-close must not imply PASS. finalizeRun writes FAIL unless the
+  // agent already left a parseable RESULT: PASS file.
+  taskDispatcher.finalizeRun(
+    run.id,
+    agentId,
+    0,
+    'Idle close without a parseable RESULT file',
+  );
   logger.info(
     { agentId, runId: run.id, taskId: run.task_id },
-    'Auto-completed run (working -> idle)',
+    'Auto-closed run (working -> idle); verdict from result file only',
   );
 }

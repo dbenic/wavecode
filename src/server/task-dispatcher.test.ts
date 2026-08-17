@@ -8,6 +8,7 @@ vi.mock('./db.js', () => ({
   hasOpenRun: vi.fn(() => false),
   finishRun: vi.fn(),
   insertRun: vi.fn(),
+  updateRunResultPath: vi.fn(),
   getTask: vi.fn(),
   getRun: vi.fn(),
   getAgent: vi.fn(),
@@ -214,5 +215,66 @@ describe('task-dispatcher.ts', () => {
     vi.runAllTimers();
 
     expect(vi.mocked(runner.executeRun)).not.toHaveBeenCalled();
+  });
+
+  it('finalizeRun writes FAIL and does not invent PASS when the result file is missing', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-finalize-'));
+    const resultPath = path.join(dir, 'result.txt');
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'run-1',
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        result_path: resultPath,
+        status: 'running',
+        finished_at: null,
+      },
+    } as never);
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: { id: 'agent-1', workspace: dir },
+    } as never);
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: { id: 'task-1', status: 'running', prompt: 'Review', agent_id: 'agent-1' },
+    } as never);
+    vi.mocked(db.listOpenRuns).mockReturnValue([]);
+    vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.finishRun).mockImplementation((id: string, exit: number) => ({
+      ok: true,
+      data: { id, status: exit === 0 ? 'done' : 'failed', exit_code: exit, result_path: resultPath },
+    }) as never);
+    vi.mocked(db.getDb).mockReturnValue({
+      prepare: () => ({ all: () => [] }),
+    } as never);
+    vi.mocked((await import('./config.js')).getConfig).mockReturnValue({
+      autonomy: { auto_dispatch: false, max_task_retries: 2 },
+    } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    const finished = dispatcher.finalizeRun(
+      'run-1',
+      'agent-1',
+      0,
+      'Idle close without a parseable RESULT file',
+    );
+
+    expect(finished.ok).toBe(true);
+    expect(db.finishRun).toHaveBeenCalledWith('run-1', 1);
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe('RESULT: FAIL');
+    expect(events.emit).toHaveBeenCalledWith(
+      'run.failed',
+      'run',
+      'run-1',
+      expect.objectContaining({ exit_code: 1, result: 'FAIL' }),
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

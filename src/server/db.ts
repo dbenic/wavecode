@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import { ulid } from 'ulid';
+import { resolveRunResultPath } from './run-result.js';
 
 export type Result<T> =
   | { ok: true; data: T }
@@ -74,6 +75,7 @@ export interface Run {
   transcript_path: string | null;
   review_status: 'pending' | 'approved' | 'rejected';
   changed_files: string | null;  // JSON array of file paths
+  result_path: string | null;
 }
 
 export interface Artifact {
@@ -194,7 +196,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -251,7 +253,8 @@ const SCHEMA_SQL = `
     exit_code INTEGER,
     transcript_path TEXT,
     review_status TEXT NOT NULL DEFAULT 'pending',
-    changed_files TEXT
+    changed_files TEXT,
+    result_path TEXT
   );
 
   CREATE TABLE IF NOT EXISTS artifacts (
@@ -587,6 +590,10 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE tasks ADD COLUMN goal_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id);
   `,
+  // v10 → v11: Per-run orchestrate result file path
+  10: `
+    ALTER TABLE runs ADD COLUMN result_path TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -892,15 +899,23 @@ export function updateTaskStatus(id: string, status: Task['status']): Result<Tas
 export function insertRun(run: { task_id: string; agent_id: string; attempt?: number }): Result<Run> {
   const id = generateId();
   try {
+    const agent = getAgent(run.agent_id);
+    const resultPath = resolveRunResultPath(id, agent.ok ? agent.data.workspace : null);
     getDb().prepare(`
-      INSERT INTO runs (id, task_id, agent_id, attempt)
-      VALUES (?, ?, ?, ?)
-    `).run(id, run.task_id, run.agent_id, run.attempt ?? 1);
+      INSERT INTO runs (id, task_id, agent_id, attempt, result_path)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, run.task_id, run.agent_id, run.attempt ?? 1, resultPath);
     const row = getDb().prepare('SELECT * FROM runs WHERE id = ?').get(id) as Run;
     return { ok: true, data: row };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
+}
+
+export function updateRunResultPath(id: string, resultPath: string): Result<Run> {
+  const result = getDb().prepare('UPDATE runs SET result_path = ? WHERE id = ?').run(resultPath, id);
+  if (result.changes === 0) return { ok: false, error: `Run ${id} not found` };
+  return getRun(id);
 }
 
 export function getRun(id: string): Result<Run> {
