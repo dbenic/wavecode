@@ -54,22 +54,27 @@ All checks are periodic and automatic; none rely on the agent's honesty:
 |---|---|---|---|
 | Output watch | 2 s | `tmux capture-pane` diff + status regex per runtime | status flips on the dashboard in real time (SSE) |
 | Runner heartbeat | 30 s | ndjson events from spawned runners over Unix socket | run marked failed on exit codes |
-| Session liveness | 30 s | `tmux has-session` | spawned + `auto_restart`: session recreated, running tasks re-queued; adopted: `agent.crashed` + push/ntfy/Telegram notification |
-| Hang detection | 30 s | pane content hash unchanged for `hang_timeout_min` while `working` | spawned: session killed → auto-restart cycle; adopted: `agent.hung` event |
-| Completion verification | on idle | `verify_completion`: a cheap LLM judges the last 30 terminal lines against the task | `failed` verdicts re-queue the task (bounded by `max_task_retries`) |
+| Session liveness | 30 s | `tmux has-session` | spawned + `auto_restart`: session recreated; in-flight work is FAIL (not re-queued on that seat); adopted: `agent.crashed` + push/ntfy/Telegram notification |
+| Hang detection | 30 s | pane content hash unchanged for `hang_timeout_min` while `working` | spawned: session killed → auto-restart cycle, work left FAIL; adopted: `agent.hung` event |
+| Completion verification | on idle | `verify_completion`: a cheap LLM judges the last 30 terminal lines against the task | adopted `failed` verdicts may re-queue (bounded by `max_task_retries`); spawned missing/FAIL does not |
 
 A run's self-reported "success" is never the end of the story — it only
 moves the work into the review pipeline below.
 
-**Orchestrate signal (not promote):** every run has an append-only local
-result file (`{workspace}/.wavecode/runs/<runId>/result.txt`). Last line
-must be exactly `RESULT: PASS` or `RESULT: FAIL`, with a one-line reason
-above it. Orchestrate reads that file only — never tmux/pane scrape. API
-fields are a convenience; the file is the source of truth. Idle, a
-collapsed TUI ("reviewed by another AI"), short duration, or pane scrape
-is never PASS. If the agent did not write a valid RESULT, WaveCode may
-append `RESULT: FAIL` or leave the file missing. Referee / wavepulse-gate
-RESULT remains the only promote evidence.
+**Orchestrate signal (not promote):** every run has one small file
+(`<data-dir>/runs/<runId>/result.txt`). Written once at the end
+(overwrite, capped — not an append-forever buffer). Last line must be
+exactly `RESULT: PASS` or `RESULT: FAIL`, with a one-line reason above
+it. Orchestrate reads that file by run_id only — never tmux or a
+transcript scrape. API fields are a convenience; the file is the source
+of truth. Idle, a collapsed TUI ("reviewed by another AI"), short
+duration, or pane scrape is never PASS. If the agent did not write a
+valid RESULT, WaveCode may overwrite `RESULT: FAIL` or leave the file
+missing. A spawned run with no file, an unparseable last line, or
+`RESULT: FAIL` is the orchestrate signal — WaveCode does not auto-retry
+or re-queue that work on the same seat. CountixDev failovers to a Cursor
+cloud agent on the same model. WaveCode stays primary. Referee /
+wavepulse-gate RESULT remains the only promote evidence.
 
 ## 4. Who tests the work afterwards
 

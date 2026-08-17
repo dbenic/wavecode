@@ -17,7 +17,7 @@ import * as sessionManager from './session-manager.js';
 import * as outputWatcher from './output-watcher.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
-import { resultPathForRun, settleRunResultFile } from './run-result.js';
+import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
 import logger from './logger.js';
 
 export interface StartupReconcileResult {
@@ -76,7 +76,7 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
       }
 
       if (inFlightRuns.length > 0) {
-        recoverRunningRuns(agent, inFlightRuns, 'requeue', result);
+        recoverRunningRuns(agent, inFlightRuns, 'fail', result);
       }
 
       const resumeResult = sessionManager.ensureSpawnedAgentSession(agent.id);
@@ -165,7 +165,11 @@ function recoverRunningRuns(
       reason: 'startup_recovery',
     });
 
-    if (mode === 'requeue') {
+    const retryOk = mode === 'requeue' && shouldAutoRetryFailedRun({
+      agentMode: agent.mode,
+      resultPath: resultPathForRun(run, agent.workspace),
+    });
+    if (retryOk) {
       updateTaskStatus(run.task_id, 'pending');
       result.tasksRequeued += 1;
       emit('task.retrying', 'task', run.task_id, {
@@ -182,9 +186,10 @@ function recoverRunningRuns(
         agent_id: agent.id,
         run_id: run.id,
         startup_reconciled: true,
-        reason: 'startup_recovery',
+        reason: agent.mode === 'spawned' ? 'spawned_result_not_pass' : 'startup_recovery',
       });
-      updateAgentStatus(agent.id, 'error');
+      // Spawned seat stays primary (idle). Adopted missing work stays error.
+      updateAgentStatus(agent.id, agent.mode === 'spawned' ? 'idle' : 'error');
     }
   }
 }
@@ -217,7 +222,11 @@ function reconcileOrphanRunningTask(task: Task, result: StartupReconcileResult):
     agentResult.data.mode === 'spawned'
   );
 
-  if (recoverable) {
+  const retryOk = recoverable && shouldAutoRetryFailedRun({
+    agentMode: agentResult && agentResult.ok ? agentResult.data.mode : null,
+    resultPath: null,
+  });
+  if (retryOk) {
     updateTaskStatus(task.id, 'pending');
     result.orphanRunningTasksRequeued += 1;
     emit('task.retrying', 'task', task.id, {
@@ -231,7 +240,7 @@ function reconcileOrphanRunningTask(task: Task, result: StartupReconcileResult):
     emit('task.failed', 'task', task.id, {
       agent_id: task.agent_id,
       startup_reconciled: true,
-      reason: 'orphan_running_task',
+      reason: recoverable ? 'spawned_result_not_pass' : 'orphan_running_task',
     });
   }
 }

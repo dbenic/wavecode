@@ -1,13 +1,15 @@
 /**
- * Durable per-run write buffer on the VPS.
+ * One small per-run result file under the WaveCode data dir.
  *
- * Append-only local file. Orchestrate reads this file only — never tmux
- * or pane scrape. Last line must be exactly `RESULT: PASS` or
- * `RESULT: FAIL`, with a one-line reason above it.
+ * Path: runs/<run_id>/result.txt
+ * Written once at the end (overwrite, capped). Orchestrate reads this
+ * file by run_id only — never tmux, never a transcript scrape.
  *
- * Missing or unparseable is not PASS. WaveCode never invents PASS from
- * idle, duration, or TUI chrome. If the agent did not write a valid
- * RESULT, WaveCode may append FAIL or leave the file missing.
+ * Last line must be exactly `RESULT: PASS` or `RESULT: FAIL`, with a
+ * one-line reason above it. Missing or unparseable is not PASS.
+ * WaveCode never invents PASS from idle or TUI chrome. If the agent
+ * did not write a valid RESULT, WaveCode may overwrite with FAIL or
+ * leave the file missing.
  *
  * The file is the source of truth. API fields are a convenience.
  * Referee / wavepulse-gate RESULT remains the promote gate.
@@ -20,6 +22,9 @@ import { getConfig } from './config.js';
 
 export const RESULT_PASS_LINE = 'RESULT: PASS';
 export const RESULT_FAIL_LINE = 'RESULT: FAIL';
+/** Hard cap so the result file cannot grow. */
+export const RESULT_FILE_MAX_BYTES = 4096;
+export const RESULT_REASON_MAX_CHARS = 240;
 
 export type RunResultVerdict = 'PASS' | 'FAIL';
 
@@ -38,26 +43,25 @@ export interface PresentedRunResult {
 
 const EXACT_RESULT_LINE = /^RESULT: (PASS|FAIL)$/;
 
-export function runResultRelPath(runId: string): string {
-  return path.join('.wavecode', 'runs', runId, 'result.txt');
-}
-
-export function fallbackResultRoot(): string {
+export function getRunsRoot(): string {
   try {
-    const root = getConfig().paths.transcripts_root;
-    if (root && root.trim()) return root;
+    const transcripts = getConfig().paths.transcripts_root;
+    if (transcripts && transcripts.trim()) {
+      return path.join(path.dirname(transcripts), 'runs');
+    }
   } catch {
     // Config not loaded (unit tests) — keep leftovers out of the repo.
   }
-  return path.join(os.tmpdir(), 'wavecode-run-results');
+  return path.join(os.tmpdir(), 'wavecode-run-results', 'runs');
 }
 
-/** Stable absolute path for a run's result file. */
-export function resolveRunResultPath(runId: string, workspace?: string | null): string {
-  if (workspace && workspace.trim()) {
-    return path.join(workspace, runResultRelPath(runId));
-  }
-  return path.join(fallbackResultRoot(), 'runs', runId, 'result.txt');
+export function runResultRelPath(runId: string): string {
+  return path.join('runs', runId, 'result.txt');
+}
+
+/** Stable path: <data-dir>/runs/<run_id>/result.txt */
+export function resolveRunResultPath(runId: string, _workspace?: string | null): string {
+  return path.join(getRunsRoot(), runId, 'result.txt');
 }
 
 export function parseRunResultText(text: string): ParsedRunResult | null {
@@ -94,7 +98,18 @@ export function parseRunResultText(text: string): ParsedRunResult | null {
 export function readRunResult(filePath: string | null | undefined): ParsedRunResult | null {
   if (!filePath) return null;
   try {
-    return parseRunResultText(fs.readFileSync(filePath, 'utf8'));
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const stat = fs.fstatSync(fd);
+      const size = Number(stat.size);
+      if (size <= 0) return null;
+      const readLen = Math.min(size, RESULT_FILE_MAX_BYTES);
+      const buf = Buffer.alloc(readLen);
+      fs.readSync(fd, buf, 0, readLen, Math.max(0, size - readLen));
+      return parseRunResultText(buf.toString('utf8'));
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     return null;
   }
@@ -102,46 +117,42 @@ export function readRunResult(filePath: string | null | undefined): ParsedRunRes
 
 export function oneLineReason(reason: string, verdict: RunResultVerdict): string {
   const collapsed = reason.replace(/\s+/g, ' ').trim();
-  if (collapsed) return collapsed;
-  return verdict === 'PASS' ? 'Completed' : 'No parseable RESULT file';
+  const fallback = verdict === 'PASS' ? 'Completed' : 'No parseable RESULT file';
+  const text = collapsed || fallback;
+  return text.length > RESULT_REASON_MAX_CHARS
+    ? text.slice(0, RESULT_REASON_MAX_CHARS)
+    : text;
 }
 
-/** Append a reason + RESULT line. Last line in the file is the verdict. */
-export function appendRunResult(
-  filePath: string,
-  verdict: RunResultVerdict,
-  reason: string,
-): ParsedRunResult {
-  const line = oneLineReason(reason, verdict);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  let prefix = '';
-  try {
-    const existing = fs.readFileSync(filePath, 'utf8');
-    if (existing.length > 0 && !existing.endsWith('\n')) prefix = '\n';
-  } catch {
-    // New buffer
-  }
-  fs.appendFileSync(filePath, `${prefix}${line}\nRESULT: ${verdict}\n`, 'utf8');
-  return { verdict, reason: line, lastLine: `RESULT: ${verdict}` };
-}
-
-/** @deprecated Use appendRunResult — the buffer is append-only. */
+/** Overwrite the small result file. Never append-forever. */
 export function writeRunResult(
   filePath: string,
   verdict: RunResultVerdict,
   reason: string,
 ): ParsedRunResult {
-  return appendRunResult(filePath, verdict, reason);
+  const line = oneLineReason(reason, verdict);
+  const body = `${line}\nRESULT: ${verdict}\n`;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, body, 'utf8');
+  return { verdict, reason: line, lastLine: `RESULT: ${verdict}` };
 }
 
 export function ensureRunResultDir(filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+function resultFileBytes(filePath: string): number {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return 0;
+  }
+}
+
 /**
- * Honor a valid last-line RESULT. Otherwise append FAIL.
+ * Honor a valid last-line RESULT. Otherwise overwrite with a small FAIL.
  * Never upgrades missing/unparseable/pane text to PASS.
- * forceFail appends FAIL (does not rewrite history); last line wins.
+ * Rewrite if the file grew past the cap.
  */
 export function settleRunResultFile(
   filePath: string,
@@ -149,24 +160,42 @@ export function settleRunResultFile(
   opts?: { forceFail?: boolean },
 ): ParsedRunResult {
   const existing = readRunResult(filePath);
+  const oversized = resultFileBytes(filePath) > RESULT_FILE_MAX_BYTES;
   if (opts?.forceFail) {
-    if (existing?.verdict === 'FAIL') return existing;
-    return appendRunResult(filePath, 'FAIL', fallbackReason);
+    if (existing?.verdict === 'FAIL' && !oversized) return existing;
+    return writeRunResult(filePath, 'FAIL', fallbackReason);
   }
-  if (existing) return existing;
-  return appendRunResult(filePath, 'FAIL', fallbackReason);
+  if (existing) {
+    if (oversized) return writeRunResult(filePath, existing.verdict, existing.reason);
+    return existing;
+  }
+  return writeRunResult(filePath, 'FAIL', fallbackReason);
 }
 
 export function exitCodeForVerdict(verdict: RunResultVerdict | null | undefined): number {
   return verdict === 'PASS' ? 0 : 1;
 }
 
+/**
+ * Spawned missing / unparseable / FAIL is the orchestrate signal.
+ * Do not auto-retry or re-queue the same WaveCode seat — CountixDev
+ * failovers to a Cursor cloud agent. WaveCode stays primary.
+ * Adopted seats keep the existing retry budget.
+ */
+export function shouldAutoRetryFailedRun(opts: {
+  agentMode?: string | null;
+  resultPath?: string | null;
+}): boolean {
+  if (opts.agentMode !== 'spawned') return true;
+  return readRunResult(opts.resultPath)?.verdict === 'PASS';
+}
+
 export function resultPathForRun(
   run: { id: string; result_path?: string | null },
-  workspace?: string | null,
+  _workspace?: string | null,
 ): string {
   if (run.result_path) return run.result_path;
-  return resolveRunResultPath(run.id, workspace);
+  return resolveRunResultPath(run.id);
 }
 
 export function presentRunResult(filePath: string | null | undefined): PresentedRunResult {
@@ -184,14 +213,10 @@ export function presentRun<T extends { result_path?: string | null }>(run: T): T
 }
 
 export function buildRunResultBriefing(resultPath: string): string {
-  const relHint = resultPath.includes(`${path.sep}.wavecode${path.sep}`)
-    ? resultPath.slice(resultPath.indexOf(`${path.sep}.wavecode${path.sep}`) + 1)
-    : resultPath;
   return [
     '## WAVECODE RUN RESULT',
-    'Before you go idle, append to this local file (durable write buffer — do not only print in the terminal, and do not paste shell/netcat into the TUI):',
+    'Before you go idle, write this small file once (overwrite, do not append, do not only print in the terminal, and do not paste shell/netcat into the TUI):',
     `  ${resultPath}`,
-    `Relative path: ${relHint}`,
     '',
     'Last line must be exactly:',
     RESULT_PASS_LINE,

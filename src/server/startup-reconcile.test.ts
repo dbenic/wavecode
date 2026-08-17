@@ -57,7 +57,7 @@ describe('startup-reconcile.ts', () => {
     vi.restoreAllMocks();
   });
 
-  it('requeues in-flight spawned runs, recreates missing sessions, and re-dispatches recovered work', async () => {
+  it('fails in-flight spawned runs, recreates missing sessions, and does not re-dispatch that work', async () => {
     const db = await import('./db.js');
     const config = await import('./config.js');
     const tmux = await import('./tmux.js');
@@ -128,19 +128,27 @@ describe('startup-reconcile.ts', () => {
     vi.runAllTimers();
 
     expect(db.finishRun).toHaveBeenCalledWith('run-1', 1);
-    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'pending');
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'failed');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-1', 'pending');
     expect(sessionManager.ensureSpawnedAgentSession).toHaveBeenCalledWith('agent-1');
     expect(outputWatcher.startWatching).toHaveBeenCalledWith('agent-1');
-    expect(dispatcher.dispatchNext).toHaveBeenCalled();
+    expect(dispatcher.dispatchNext).not.toHaveBeenCalled();
     expect(events.emit).toHaveBeenCalledWith(
+      'task.failed',
+      'task',
+      'task-1',
+      expect.objectContaining({ startup_reconciled: true, reason: 'spawned_result_not_pass' }),
+    );
+    expect(events.emit).not.toHaveBeenCalledWith(
       'task.retrying',
       'task',
       'task-1',
-      expect.objectContaining({ startup_reconciled: true, reason: 'startup_recovery' }),
+      expect.anything(),
     );
     expect(result.sessionsRecreated).toBe(1);
     expect(result.runsRecovered).toBe(1);
-    expect(result.tasksRequeued).toBe(1);
+    expect(result.tasksRequeued).toBe(0);
+    expect(result.tasksFailed).toBe(1);
   });
 
   it('marks adopted agents with missing sessions as errored', async () => {
@@ -190,7 +198,7 @@ describe('startup-reconcile.ts', () => {
     expect(result.adoptedMissingSessions).toBe(1);
   });
 
-  it('repairs orphan running tasks without active runs', async () => {
+  it('fails orphan spawned running tasks without a second dispatch', async () => {
     const db = await import('./db.js');
     const config = await import('./config.js');
     const tmux = await import('./tmux.js');
@@ -269,14 +277,16 @@ describe('startup-reconcile.ts', () => {
 
     expect(sessionManager.ensureSpawnedAgentSession).toHaveBeenCalledWith('agent-3');
     expect(outputWatcher.startWatching).toHaveBeenCalledWith('agent-3');
-    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-9', 'pending');
-    expect(dispatcher.dispatchNext).toHaveBeenCalled();
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-9', 'failed');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-9', 'pending');
+    expect(dispatcher.dispatchNext).not.toHaveBeenCalled();
     expect(events.emit).toHaveBeenCalledWith(
-      'task.retrying',
+      'task.failed',
       'task',
       'task-9',
-      expect.objectContaining({ reason: 'orphan_running_task' }),
+      expect.objectContaining({ reason: 'spawned_result_not_pass' }),
     );
-    expect(result.orphanRunningTasksRequeued).toBe(1);
+    expect(result.orphanRunningTasksRequeued).toBe(0);
+    expect(result.orphanRunningTasksFailed).toBe(1);
   });
 });

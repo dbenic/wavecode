@@ -129,21 +129,23 @@ describe('bootstrap startup recovery integration', () => {
     vi.advanceTimersByTime(500);
 
     expect(db.finishRun).toHaveBeenCalledWith('run-1', 1);
-    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'pending');
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'failed');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-1', 'pending');
     expect(outputWatcher.startWatching).toHaveBeenCalledWith('agent-1');
-    expect(dispatcher.dispatchNext).toHaveBeenCalledTimes(1);
+    expect(dispatcher.dispatchNext).not.toHaveBeenCalled();
     expect(events.emit).toHaveBeenCalledWith(
-      'task.retrying',
+      'task.failed',
       'task',
       'task-1',
       expect.objectContaining({
         startup_reconciled: true,
-        reason: 'startup_recovery',
+        reason: 'spawned_result_not_pass',
       }),
     );
     expect(healthMonitor.startHealthMonitor).toHaveBeenCalledTimes(1);
     expect(result.startupReconciliation.sessionsRecreated).toBe(1);
-    expect(result.startupReconciliation.tasksRequeued).toBe(1);
+    expect(result.startupReconciliation.tasksRequeued).toBe(0);
+    expect(result.startupReconciliation.tasksFailed).toBe(1);
     expect(result.agentCount).toBe(1);
   });
 });

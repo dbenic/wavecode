@@ -899,8 +899,7 @@ export function updateTaskStatus(id: string, status: Task['status']): Result<Tas
 export function insertRun(run: { task_id: string; agent_id: string; attempt?: number }): Result<Run> {
   const id = generateId();
   try {
-    const agent = getAgent(run.agent_id);
-    const resultPath = resolveRunResultPath(id, agent.ok ? agent.data.workspace : null);
+    const resultPath = resolveRunResultPath(id);
     getDb().prepare(`
       INSERT INTO runs (id, task_id, agent_id, attempt, result_path)
       VALUES (?, ?, ?, ?, ?)

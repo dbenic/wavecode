@@ -239,18 +239,26 @@ describe('task-dispatcher.ts', () => {
     } as never);
     vi.mocked(db.getAgent).mockReturnValue({
       ok: true,
-      data: { id: 'agent-1', workspace: dir },
+      data: { id: 'agent-1', workspace: dir, mode: 'spawned' },
     } as never);
     vi.mocked(db.getTask).mockReturnValue({
       ok: true,
       data: { id: 'task-1', status: 'running', prompt: 'Review', agent_id: 'agent-1' },
     } as never);
     vi.mocked(db.listOpenRuns).mockReturnValue([]);
-    vi.mocked(db.listRuns).mockReturnValue([]);
-    vi.mocked(db.finishRun).mockImplementation((id: string, exit: number) => ({
-      ok: true,
-      data: { id, status: exit === 0 ? 'done' : 'failed', exit_code: exit, result_path: resultPath },
-    }) as never);
+    vi.mocked(db.listRuns).mockReturnValue([{ id: 'run-1' }] as never);
+    vi.mocked(db.finishRun).mockImplementation((id: string, exit: number) => {
+      const data = {
+        id,
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        status: exit === 0 ? 'done' : 'failed',
+        exit_code: exit,
+        result_path: resultPath,
+      };
+      vi.mocked(db.getRun).mockReturnValue({ ok: true, data } as never);
+      return { ok: true, data } as never;
+    });
     vi.mocked(db.getDb).mockReturnValue({
       prepare: () => ({ all: () => [] }),
     } as never);
@@ -275,6 +283,64 @@ describe('task-dispatcher.ts', () => {
       'run-1',
       expect.objectContaining({ exit_code: 1, result: 'FAIL' }),
     );
+    await Promise.resolve();
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'failed');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-1', 'pending');
+    expect(events.emit).toHaveBeenCalledWith(
+      'task.failed',
+      'task',
+      'task-1',
+      expect.objectContaining({ reason: 'spawned_result_not_pass', result: 'FAIL' }),
+    );
+    expect(events.emit).not.toHaveBeenCalledWith(
+      'task.retrying',
+      'task',
+      'task-1',
+      expect.anything(),
+    );
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('auto-retries an adopted failed run within the retry budget', async () => {
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+
+    vi.mocked((await import('./config.js')).getConfig).mockReturnValue({
+      autonomy: { auto_dispatch: false, max_task_retries: 2 },
+    } as never);
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'run-adopted',
+        task_id: 'task-adopted',
+        agent_id: 'agent-adopted',
+        status: 'failed',
+        result_path: null,
+      },
+    } as never);
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: { id: 'task-adopted', status: 'running', prompt: 'Review', agent_id: 'agent-adopted' },
+    } as never);
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: { id: 'agent-adopted', workspace: null, mode: 'adopted' },
+    } as never);
+    vi.mocked(db.listOpenRuns).mockReturnValue([]);
+    vi.mocked(db.listRuns).mockReturnValue([{ id: 'run-adopted' }] as never);
+    vi.mocked(db.getDb).mockReturnValue({
+      prepare: () => ({ all: () => [] }),
+    } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    await dispatcher.onRunComplete('run-adopted', 'agent-adopted');
+
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-adopted', 'pending');
+    expect(events.emit).toHaveBeenCalledWith(
+      'task.retrying',
+      'task',
+      'task-adopted',
+      expect.objectContaining({ attempt: 2, max: 2 }),
+    );
   });
 });

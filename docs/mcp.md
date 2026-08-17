@@ -70,7 +70,7 @@ via any stdio-to-HTTP MCP bridge, or connect through SSH:
 |---|---|
 | `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee; optional `goal_id` (ULID or `external_id`) links a child; `hold:true` skips auto-dispatch. After a file share, put the artifact id and `attached_path` in the prompt |
 | `list_tasks` | Tasks by status |
-| `get_task` | One task plus runs, including `result_path` / `result` / `result_reason` from the parseable per-run RESULT file |
+| `get_task` | One task plus runs, including `result_path` / `result` / `result_reason` from `runs/<run_id>/result.txt` |
 
 ### Goals
 
