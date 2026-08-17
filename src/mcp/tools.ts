@@ -120,7 +120,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'get_task',
     description:
-      'Get one task plus its runs. Each run includes result_path / result / result_reason from the append-only per-run RESULT file (source of truth; last line RESULT: PASS or RESULT: FAIL). Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration.',
+      'Get one task plus its runs. Each run includes result_path / result / result_reason from the small per-run RESULT file at runs/<run_id>/result.txt (source of truth; last line RESULT: PASS or RESULT: FAIL). Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration.',
     schema: {
       task_id: z.string().describe('Task ULID'),
     },

@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   RESULT_FAIL_LINE,
+  RESULT_FILE_MAX_BYTES,
   RESULT_PASS_LINE,
-  appendRunResult,
+  RESULT_REASON_MAX_CHARS,
   appendRunResultBriefing,
   buildRunResultBriefing,
   exitCodeForVerdict,
@@ -15,6 +16,7 @@ import {
   resolveRunResultPath,
   runResultRelPath,
   settleRunResultFile,
+  writeRunResult,
 } from './run-result.js';
 
 describe('run-result', () => {
@@ -33,28 +35,49 @@ describe('run-result', () => {
     return dir;
   }
 
-  it('resolves a stable workspace path under .wavecode/runs/<id>/result.txt', () => {
+  it('resolves runs/<run_id>/result.txt under the WaveCode data dir', () => {
     const runId = '01M08B7WSC1F3XKYQMNYMC68YB';
-    expect(runResultRelPath(runId)).toBe(path.join('.wavecode', 'runs', runId, 'result.txt'));
-    expect(resolveRunResultPath(runId, '/ws/agent')).toBe(
-      path.join('/ws/agent', '.wavecode', 'runs', runId, 'result.txt'),
-    );
+    expect(runResultRelPath(runId)).toBe(path.join('runs', runId, 'result.txt'));
+    const resolved = resolveRunResultPath(runId, '/ws/agent');
+    expect(resolved.endsWith(path.join('runs', runId, 'result.txt'))).toBe(true);
+    expect(resolved).not.toContain(`${path.sep}.wavecode${path.sep}`);
   });
 
-  it('appends RESULT: PASS or RESULT: FAIL as the last line plus a one-line reason', () => {
+  it('overwrites a small RESULT file once; last line is PASS or FAIL plus a reason', () => {
     const filePath = path.join(tmpDir(), 'result.txt');
-    appendRunResult(filePath, 'FAIL', 'Idle close without a parseable RESULT file');
-    const text = fs.readFileSync(filePath, 'utf8');
-    const lines = text.replace(/\n$/, '').split('\n');
-    expect(lines.at(-1)).toBe(RESULT_FAIL_LINE);
-    expect(lines[0]).toBe('Idle close without a parseable RESULT file');
-    expect(lines[0]).not.toContain('\n');
+    writeRunResult(filePath, 'FAIL', 'Idle close without a parseable RESULT file');
+    const first = fs.readFileSync(filePath, 'utf8');
+    expect(first.trim().split('\n').at(-1)).toBe(RESULT_FAIL_LINE);
+    expect(first.split('\n')[0]).toBe('Idle close without a parseable RESULT file');
 
-    appendRunResult(filePath, 'PASS', 'Tests and review are green');
+    writeRunResult(filePath, 'PASS', 'Tests and review are green');
     const after = fs.readFileSync(filePath, 'utf8');
-    expect(after).toContain('Idle close without a parseable RESULT file');
-    expect(after.trim().split('\n').at(-1)).toBe(RESULT_PASS_LINE);
-    expect(parseRunResultText(after)?.verdict).toBe('PASS');
+    expect(after).not.toContain('Idle close without a parseable RESULT file');
+    expect(after.trim().split('\n')).toEqual(['Tests and review are green', RESULT_PASS_LINE]);
+    expect(after.length).toBeLessThan(RESULT_FILE_MAX_BYTES);
+  });
+
+  it('caps the reason so the file cannot grow', () => {
+    const filePath = path.join(tmpDir(), 'result.txt');
+    writeRunResult(filePath, 'FAIL', 'x'.repeat(5000));
+    const text = fs.readFileSync(filePath, 'utf8');
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(RESULT_FILE_MAX_BYTES);
+    expect(text.split('\n')[0]?.length).toBe(RESULT_REASON_MAX_CHARS);
+    expect(text.trim().split('\n').at(-1)).toBe(RESULT_FAIL_LINE);
+  });
+
+  it('settle rewrites an oversized file to the cap and does not treat it as PASS unless last line is PASS', () => {
+    const filePath = path.join(tmpDir(), 'result.txt');
+    fs.writeFileSync(filePath, `${'junk\n'.repeat(2000)}Reviewed auth.ts; 2 issues remain\n${RESULT_FAIL_LINE}\n`, 'utf8');
+    expect(fs.statSync(filePath).size).toBeGreaterThan(RESULT_FILE_MAX_BYTES);
+    const settled = settleRunResultFile(filePath, 'Idle close without a parseable RESULT file');
+    expect(settled.verdict).toBe('FAIL');
+    expect(settled.reason).toBe('Reviewed auth.ts; 2 issues remain');
+    expect(fs.statSync(filePath).size).toBeLessThanOrEqual(RESULT_FILE_MAX_BYTES);
+    expect(fs.readFileSync(filePath, 'utf8').trim().split('\n')).toEqual([
+      'Reviewed auth.ts; 2 issues remain',
+      RESULT_FAIL_LINE,
+    ]);
   });
 
   it('parses the last non-empty line and the reason above it', () => {
@@ -89,7 +112,7 @@ describe('run-result', () => {
     expect(presentRunResult(pane).result).toBeNull();
   });
 
-  it('settle appends FAIL when the file is missing or unparseable, and never invents PASS', () => {
+  it('settle overwrites FAIL when the file is missing or unparseable, and never invents PASS', () => {
     const filePath = path.join(tmpDir(), 'result.txt');
     const settled = settleRunResultFile(filePath, 'Idle close without a parseable RESULT file');
     expect(settled.verdict).toBe('FAIL');
@@ -106,28 +129,26 @@ describe('run-result', () => {
     const fromPane = settleRunResultFile(grokPane, 'Idle close without a parseable RESULT file');
     expect(fromPane.verdict).toBe('FAIL');
     expect(fromPane.verdict).not.toBe('PASS');
+    expect(fs.readFileSync(grokPane, 'utf8')).not.toContain('reviewed by another AI');
   });
 
-  it('settle keeps a valid agent-written PASS and does not append over it', () => {
+  it('settle keeps a valid agent-written PASS and does not overwrite it', () => {
     const filePath = path.join(tmpDir(), 'result.txt');
-    appendRunResult(filePath, 'PASS', 'All checks green');
+    writeRunResult(filePath, 'PASS', 'All checks green');
     const settled = settleRunResultFile(filePath, 'Idle close without a parseable RESULT file');
     expect(settled).toMatchObject({ verdict: 'PASS', reason: 'All checks green' });
     expect(exitCodeForVerdict(settled.verdict)).toBe(0);
-    expect(fs.readFileSync(filePath, 'utf8').trim().split('\n').filter((l) => l.startsWith('RESULT:'))).toEqual([
-      RESULT_PASS_LINE,
-    ]);
   });
 
-  it('forceFail appends FAIL so cancel/reject last-line is not PASS', () => {
+  it('forceFail overwrites with a small FAIL so cancel/reject is not PASS', () => {
     const filePath = path.join(tmpDir(), 'result.txt');
-    appendRunResult(filePath, 'PASS', 'All checks green');
+    writeRunResult(filePath, 'PASS', 'All checks green');
     const settled = settleRunResultFile(filePath, 'Task cancelled', { forceFail: true });
     expect(settled.verdict).toBe('FAIL');
     expect(settled.reason).toBe('Task cancelled');
     const text = fs.readFileSync(filePath, 'utf8');
-    expect(text).toContain('All checks green');
-    expect(text.trim().split('\n').at(-1)).toBe(RESULT_FAIL_LINE);
+    expect(text).not.toContain('All checks green');
+    expect(text.trim().split('\n')).toEqual(['Task cancelled', RESULT_FAIL_LINE]);
   });
 
   it('API presentation exposes path, verdict, and reason; missing is not PASS', () => {
@@ -138,7 +159,7 @@ describe('run-result', () => {
       result_reason: null,
       result_last_line: null,
     });
-    appendRunResult(filePath, 'FAIL', 'No parseable RESULT file');
+    writeRunResult(filePath, 'FAIL', 'No parseable RESULT file');
     expect(presentRunResult(filePath)).toEqual({
       result_path: filePath,
       result: 'FAIL',
@@ -147,11 +168,13 @@ describe('run-result', () => {
     });
   });
 
-  it('briefs the agent to append the file and never mentions echo|nc or a message bus', () => {
-    const resultPath = '/ws/agent/.wavecode/runs/01ABC/result.txt';
+  it('briefs the agent to write the file once and never mentions echo|nc or a message bus', () => {
+    const resultPath = '/data/runs/01ABC/result.txt';
     const briefing = buildRunResultBriefing(resultPath);
     expect(briefing).toContain(resultPath);
-    expect(briefing).toContain('append');
+    expect(briefing).toContain('write this small file once');
+    expect(briefing).toContain('overwrite');
+    expect(briefing).toContain('do not append');
     expect(briefing).toContain(RESULT_PASS_LINE);
     expect(briefing).toContain(RESULT_FAIL_LINE);
     expect(briefing).not.toMatch(/echo\s*\|?\s*nc/i);

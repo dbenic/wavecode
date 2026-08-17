@@ -178,7 +178,8 @@ describe('db.ts — schema migrations', () => {
     });
     expect(runResult.ok).toBe(true);
     if (runResult.ok) {
-      expect(runResult.data.result_path).toContain(path.join('.wavecode', 'runs', runResult.data.id, 'result.txt'));
+      expect(runResult.data.result_path).toContain(path.join('runs', runResult.data.id, 'result.txt'));
+      expect(runResult.data.result_path).not.toContain(`${path.sep}.wavecode${path.sep}`);
     }
 
     // Insert event
