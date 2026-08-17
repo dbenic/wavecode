@@ -6,9 +6,27 @@ vi.mock('./db.js', () => ({
   listRuns: vi.fn(),
   getTask: vi.fn(),
   getRun: vi.fn(),
+  getAgent: vi.fn(),
+  insertAgentMessage: vi.fn(),
   updateTaskStatus: vi.fn(),
   updateAgentStatus: vi.fn(),
   listAgents: vi.fn(),
+}));
+
+vi.mock('./project-gate.js', () => ({
+  maybeInvokeProjectGate: vi.fn(async () => null),
+}));
+
+vi.mock('./code-review.js', () => ({
+  maybeAutoReview: vi.fn(async () => undefined),
+}));
+
+vi.mock('./decision-extractor.js', () => ({
+  extractDecisions: vi.fn(async () => []),
+}));
+
+vi.mock('./logger.js', () => ({
+  default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 vi.mock('./config.js', () => ({
@@ -30,6 +48,7 @@ vi.mock('./session-manager.js', () => ({
 describe('task-dispatcher.ts', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
   });
 
   afterEach(async () => {
@@ -128,5 +147,47 @@ describe('task-dispatcher.ts', () => {
       'task-1',
       'Implement auth hardening',
     );
+  });
+
+  it('does not idle the agent when a later run is still running', async () => {
+    const db = await import('./db.js');
+    const config = await import('./config.js');
+
+    vi.mocked(config.getConfig).mockReturnValue({
+      autonomy: { auto_dispatch: false, max_task_retries: 2 },
+    } as never);
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: {
+        id: '01M0829117QXE7QP6GNG8EPQQT',
+        task_id: '01M08290HDW155AYGYXG936AA0',
+        agent_id: 'agent-1',
+        status: 'done',
+      },
+    } as never);
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: {
+        id: '01M08290HDW155AYGYXG936AA0',
+        prompt: 'Codex review',
+        agent_id: 'agent-1',
+      },
+    } as never);
+    vi.mocked(db.listRuns).mockReturnValue([
+      { id: '01M089NEWRXN00000000000001', status: 'running' },
+    ] as never);
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: { id: 'agent-1', workspace: null },
+    } as never);
+    vi.mocked(db.getDb).mockReturnValue({
+      prepare: () => ({ all: () => [] }),
+    } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    await dispatcher.onRunComplete('01M0829117QXE7QP6GNG8EPQQT', 'agent-1');
+
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('01M08290HDW155AYGYXG936AA0', 'done');
+    expect(db.updateAgentStatus).not.toHaveBeenCalledWith('agent-1', 'idle');
   });
 });

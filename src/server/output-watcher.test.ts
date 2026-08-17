@@ -13,6 +13,7 @@ import {
   CLAUDE_BYPASS_DIALOG_COOLDOWN_MS,
   detectPermissionMode,
   detectStatus,
+  extractFinishedRunIdsFromPane,
   isClaudeBypassAcceptDialog,
   maybeDismissFirstRunDialog,
   resetFirstRunDialogStateForTest,
@@ -108,6 +109,32 @@ Done with the review
 RESULT: PASS
 `.trim();
       expect(detectStatus(output, 'grok')).toBe('idle');
+    });
+  });
+
+  describe('pane run_id binding', () => {
+    const grokRunId = '01M0886K75AJDRRR1BPTA4X7ZC';
+    const grokTaskId = '01M0886JQC1ZME43DW286V36YM';
+    const laterRunId = '01M0829117QXE7QP6GNG8EPQQT';
+
+    it('binds the echo|nc run_id that appears before RESULT PASS', () => {
+      const output = [
+        `echo '{"type":"run.started","run_id":"${grokRunId}","task_id":"${grokTaskId}","agent_id":"agent-1"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null; echo 'do the work' | grok --always-approve;`,
+        'RESULT: PASS lint=PASS unit=PASS',
+        '>',
+      ].join('\n');
+      expect(extractFinishedRunIdsFromPane(output)).toEqual([grokRunId]);
+    });
+
+    it('does not bind a later echo|nc pasted after RESULT (new task)', () => {
+      const output = [
+        `echo '{"type":"run.started","run_id":"${grokRunId}","task_id":"${grokTaskId}"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null;`,
+        'RESULT: PASS',
+        `echo '{"type":"run.started","run_id":"${laterRunId}","task_id":"01M0NEWTASK000000000000000"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null;`,
+        '◦ Working (3s • esc to interrupt)',
+        'gpt-5.4 xhigh · 47% left · ~/project',
+      ].join('\n');
+      expect(extractFinishedRunIdsFromPane(output)).toEqual([grokRunId]);
     });
   });
 

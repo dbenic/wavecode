@@ -104,8 +104,85 @@ describe('output-watcher — idle-complete', () => {
     expect(db.updateAgentStatus).toHaveBeenCalledWith(agent.id, 'idle');
     expect(db.finishRun).toHaveBeenCalledWith(run.id, 0);
     expect(dispatcher.onRunComplete).toHaveBeenCalledWith(run.id, agent.id);
-    expect(runner.clearRunnerRun).toHaveBeenCalledWith(agent.id);
+    expect(runner.clearRunnerRun).toHaveBeenCalledWith(agent.id, run.id);
     expect(db.updateTaskStatus).not.toHaveBeenCalled();
+  });
+
+  it('closes the pane-named run on an already-idle Grok seat (no daemon restart)', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+    const runner = await import('./runner.js');
+
+    const grokRunId = '01M0886K75AJDRRR1BPTA4X7ZC';
+    const grokTaskId = '01M0886JQC1ZME43DW286V36YM';
+    const agent = makeAgent({ mode: 'spawned', status: 'idle', runtime: 'grok' });
+    const stuck = makeRun({ id: grokRunId, task_id: grokTaskId });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([stuck]);
+    vi.mocked(db.listTasks).mockReturnValue([makeTask({ id: grokTaskId, status: 'running' })]);
+    vi.mocked(capturePane).mockReturnValue({
+      ok: true,
+      data: [
+        `echo '{"type":"run.started","run_id":"${grokRunId}","task_id":"${grokTaskId}"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null; echo 'review' | grok --always-approve;`,
+        'RESULT: PASS',
+        '>',
+      ].join('\n'),
+    });
+
+    startWatching(agent.id);
+    tickForTest(agent.id);
+
+    expect(db.finishRun).toHaveBeenCalledWith(grokRunId, 0);
+    expect(dispatcher.onRunComplete).toHaveBeenCalledWith(grokRunId, agent.id);
+    expect(runner.clearRunnerRun).toHaveBeenCalledWith(agent.id, grokRunId);
+  });
+
+  it('closes the older stuck run when Codex is already on a later task', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+    const runner = await import('./runner.js');
+
+    const oldRunId = '01M0829117QXE7QP6GNG8EPQQT';
+    const oldTaskId = '01M08290HDW155AYGYXG936AA0';
+    const newRunId = '01M089NEWRXN00000000000001';
+    const agent = makeAgent({ mode: 'spawned', status: 'working', runtime: 'codex' });
+    const newer = makeRun({
+      id: newRunId,
+      task_id: 'task-later',
+      started_at: '2026-08-17T12:00:00Z',
+    });
+    const older = makeRun({
+      id: oldRunId,
+      task_id: oldTaskId,
+      started_at: '2026-08-17T10:00:00Z',
+    });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    // listRuns is started_at DESC — newest first
+    vi.mocked(db.listRuns).mockReturnValue([newer, older]);
+    vi.mocked(db.listTasks).mockReturnValue([
+      makeTask({ id: oldTaskId, status: 'running' }),
+      makeTask({ id: 'task-later', status: 'running' }),
+    ]);
+    vi.mocked(capturePane).mockReturnValue({
+      ok: true,
+      data: [
+        `echo '{"type":"run.started","run_id":"${oldRunId}","task_id":"${oldTaskId}"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null;`,
+        'RESULT: PASS',
+        `echo '{"type":"run.started","run_id":"${newRunId}","task_id":"task-later"}' | nc -U '/tmp/wavecode-runner-agent-1.sock' 2>/dev/null;`,
+        '◦ Working (12s • esc to interrupt)',
+        'gpt-5.4 xhigh · 47% left · ~/project',
+      ].join('\n'),
+    });
+
+    startWatching(agent.id);
+    tickForTest(agent.id);
+
+    expect(db.finishRun).toHaveBeenCalledWith(oldRunId, 0);
+    expect(dispatcher.onRunComplete).toHaveBeenCalledWith(oldRunId, agent.id);
+    expect(db.finishRun).not.toHaveBeenCalledWith(newRunId, 0);
+    expect(dispatcher.onRunComplete).not.toHaveBeenCalledWith(newRunId, agent.id);
+    expect(runner.clearRunnerRun).toHaveBeenCalledWith(agent.id, oldRunId);
+    expect(db.updateAgentStatus).not.toHaveBeenCalledWith(agent.id, 'idle');
   });
 
   it('does not close a run while Grok is Responding/Thinking', async () => {
@@ -197,7 +274,11 @@ function makeAgent(overrides: Partial<{
   };
 }
 
-function makeRun() {
+function makeRun(overrides: Partial<{
+  id: string;
+  task_id: string;
+  started_at: string;
+}> = {}) {
   return {
     id: 'run-1',
     task_id: 'task-1',
@@ -210,10 +291,14 @@ function makeRun() {
     transcript_path: null,
     review_status: 'pending' as const,
     changed_files: null,
+    ...overrides,
   };
 }
 
-function makeTask(overrides: Partial<{ status: 'pending' | 'running' | 'done' }> = {}) {
+function makeTask(overrides: Partial<{
+  id: string;
+  status: 'pending' | 'running' | 'done';
+}> = {}) {
   return {
     id: 'task-1',
     agent_id: 'agent-1',

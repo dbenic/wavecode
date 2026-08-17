@@ -88,12 +88,15 @@ export function getRunner(agentId: string): RunnerInstance | undefined {
 
 /**
  * Drop in-memory runner state for the current run (heartbeat + transcript).
- * Used when the output watcher idle-completes a spawned TUI run that never
- * emitted run.finished on the Unix socket.
+ * When `runId` is passed, only clear if it is the in-memory current run —
+ * an older finished run must not wipe a later task's currentRunId.
  */
-export function clearRunnerRun(agentId: string): void {
+export function clearRunnerRun(agentId: string, runId?: string): void {
   const instance = runners.get(agentId);
   if (!instance) return;
+  if (runId != null && instance.currentRunId != null && instance.currentRunId !== runId) {
+    return;
+  }
   cleanupRunnerInstance(instance);
 }
 
@@ -254,7 +257,7 @@ function handleRunnerEvent(agentId: string, line: string): void {
     case 'run.finished': {
       const existing = getRun(runId);
       if (existing.ok && existing.data.status !== 'running') {
-        cleanupRunnerInstance(instance);
+        if (instance.currentRunId === runId) cleanupRunnerInstance(instance);
         break;
       }
       const exitCode = (event.exit_code as number) ?? 0;
@@ -266,7 +269,7 @@ function handleRunnerEvent(agentId: string, line: string): void {
         }).catch(() => { /* best-effort */ });
       }
       import('./task-dispatcher.js').then((td) => td.onRunComplete(runId, agentId));
-      cleanupRunnerInstance(instance);
+      if (instance.currentRunId === runId) cleanupRunnerInstance(instance);
 
       emit('run.finished', 'run', runId, {
         agent_id: agentId,
@@ -279,13 +282,13 @@ function handleRunnerEvent(agentId: string, line: string): void {
     case 'run.failed': {
       const existing = getRun(runId);
       if (existing.ok && existing.data.status !== 'running') {
-        cleanupRunnerInstance(instance);
+        if (instance.currentRunId === runId) cleanupRunnerInstance(instance);
         break;
       }
       const exitCode = (event.exit_code as number) ?? 1;
       finishRun(runId, exitCode);
       import('./task-dispatcher.js').then((td) => td.onRunComplete(runId, agentId));
-      cleanupRunnerInstance(instance);
+      if (instance.currentRunId === runId) cleanupRunnerInstance(instance);
 
       emit('run.failed', 'run', runId, {
         agent_id: agentId,

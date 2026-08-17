@@ -41,7 +41,12 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
   if (run.status === 'done') {
     // Success — mark task done
     updateTaskStatus(task.id, 'done');
-    updateAgentStatus(agentId, 'idle');
+    // A later run on this seat must keep the agent working (Codex moved on).
+    const otherRunning = listRuns({ agent_id: agentId, status: 'running' })
+      .filter((r) => r.id !== runId);
+    if (otherRunning.length === 0) {
+      updateAgentStatus(agentId, 'idle');
+    }
 
     emit('task.completed', 'task', task.id, {
       agent_id: agentId,

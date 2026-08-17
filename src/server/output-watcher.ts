@@ -178,8 +178,13 @@ function tickInner(agentId: string, state: WatcherState): void {
   // Compare against the actual DB status rather than a cached previous value.
   const dbStatus = agent.status;
 
+  let closeAllIfIdle = false;
+
   if (detectedStatus === dbStatus) {
     state.idleOverrideCounter = 0;
+    // Already idle with a stuck running run (Grok RESULT + echo|nc, no
+    // working→idle edge). Sweep on this tick — no daemon restart needed.
+    closeAllIfIdle = detectedStatus === 'idle';
 
     if (outputChanged) {
       emit('agent.output_updated', 'agent', agentId, {
@@ -224,7 +229,7 @@ function tickInner(agentId: string, state: WatcherState): void {
 
         // Adopted and spawned both auto-close stuck runs. Spawned TUI seats
         // (Grok/Claude/Codex chat) never emit runner-socket run.finished.
-        completeRunningRuns(agentId);
+        closeAllIfIdle = true;
         notifyReviewLoopAgentIdle(agentId);
       }
     }
@@ -243,7 +248,7 @@ function tickInner(agentId: string, state: WatcherState): void {
     });
 
     if (wasWorking && detectedStatus === 'idle') {
-      completeRunningRuns(agentId);
+      closeAllIfIdle = true;
       notifyReviewLoopAgentIdle(agentId);
     }
   } else if (outputChanged) {
@@ -254,6 +259,8 @@ function tickInner(agentId: string, state: WatcherState): void {
       outputUpdatedAt: new Date().toISOString(),
     });
   }
+
+  closeFinishedRuns(agentId, output, detectedStatus, { closeAllIfIdle });
 }
 
 export function detectPermissionMode(output: string): string {
@@ -376,59 +383,108 @@ export function hasGrokLikeWorkingIndicator(text: string): boolean {
   return /(?:^|\n)\s*(?:[*✦✧✶✻◦●]\s*)?(Responding|Thinking)\b/i.test(text);
 }
 
-/**
- * When an agent transitions from working -> idle, auto-complete any
- * running runs via onRunComplete (referee / wavepulse-gate still run).
- * Spawned TUI seats never get run.finished from the Unix-socket runner,
- * so they use this same path as adopted agents.
- */
-function completeRunningRuns(agentId: string): void {
-  const runs = listRuns({ agent_id: agentId, status: 'running' });
-  const completedTaskIds = new Set<string>();
-  const agentResult = getAgent(agentId);
+const RUN_ID_IN_PANE = /"run_id"\s*:\s*"(01[0-9A-HJKMNP-TV-Z]{24})"/g;
 
-  for (const run of runs) {
-    finishRun(run.id, 0);
-    completedTaskIds.add(run.task_id);
-    runner.clearRunnerRun?.(agentId);
-    emit('run.finished', 'run', run.id, {
-      agent_id: agentId,
-      exit_code: 0,
-      auto_detected: true,
-    });
-    void taskDispatcher.onRunComplete(run.id, agentId);
-    logger.info(
-      { agentId, runId: run.id, taskId: run.task_id },
-      'Auto-completed run (working -> idle)',
-    );
+function isRunnerScriptLine(line: string): boolean {
+  return line.includes('nc -U') && (line.includes('wavecode-runner-') || line.includes('"run_id"'));
+}
+
+/** Last index of a real RESULT verdict line (not text inside the echo|nc script). */
+export function lastFinishedResultIndex(output: string): number {
+  let last = -1;
+  let offset = 0;
+  for (const line of output.split('\n')) {
+    if (!isRunnerScriptLine(line) && /^\s*RESULT:\s*\S+/i.test(line)) {
+      last = offset;
+    }
+    offset += line.length + 1;
+  }
+  return last;
+}
+
+/** run_ids from echo|nc runner scripts that appear before a RESULT line. */
+export function extractFinishedRunIdsFromPane(output: string): string[] {
+  const resultIdx = lastFinishedResultIndex(output);
+  if (resultIdx < 0) return [];
+  const ids: string[] = [];
+  const re = new RegExp(RUN_ID_IN_PANE.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(output)) !== null) {
+    if (match.index < resultIdx) ids.push(match[1]);
+  }
+  return [...new Set(ids)];
+}
+
+/**
+ * Close the correct stuck run(s):
+ * - pane-named run_id whose echo|nc is followed by RESULT (Grok live dump)
+ * - older running runs when a newer run exists (Codex moved on)
+ * - all running runs only when the agent is stably idle
+ *
+ * Never keyed off runner.currentRunId alone. Closing goes through
+ * onRunComplete (referee / wavepulse-gate unchanged).
+ */
+function closeFinishedRuns(
+  agentId: string,
+  output: string,
+  detectedStatus: Agent['status'],
+  opts: { closeAllIfIdle: boolean },
+): void {
+  const running = listRuns({ agent_id: agentId, status: 'running' });
+  if (running.length === 0 && !opts.closeAllIfIdle) return;
+
+  const selected = new Map<string, (typeof running)[number]>();
+  const newestId = running[0]?.id;
+  const paneFinishedIds = new Set(extractFinishedRunIdsFromPane(output));
+
+  for (const run of running) {
+    if (newestId && run.id !== newestId) {
+      selected.set(run.id, run);
+    }
+    // RESULT after this run's echo|nc means *this* run finished. Do not
+    // close the newest run while the pane still shows generation.
+    if (paneFinishedIds.has(run.id) && !(run.id === newestId && detectedStatus === 'working')) {
+      selected.set(run.id, run);
+    }
   }
 
+  if (opts.closeAllIfIdle && detectedStatus !== 'working') {
+    for (const run of running) selected.set(run.id, run);
+  }
+
+  const completedTaskIds = new Set<string>();
+  for (const run of selected.values()) {
+    finishOneStuckRun(agentId, run);
+    completedTaskIds.add(run.task_id);
+  }
+
+  const agentResult = getAgent(agentId);
   const runningTasks = listTasks({ status: 'running', agent_id: agentId });
   const noRunCompletedIds = new Set<string>();
   const skipNoRunComplete = agentResult.ok && agentResult.data.mode === 'spawned';
-  for (const task of runningTasks) {
-    if (completedTaskIds.has(task.id)) continue;
-    // Spawned tasks are created with a run via executeRun. Do not mark
-    // them done without onRunComplete (skips referee / wavepulse-gate).
-    if (skipNoRunComplete) continue;
-    updateTaskStatus(task.id, 'done');
-    noRunCompletedIds.add(task.id);
-    emit('task.completed', 'task', task.id, {
-      agent_id: agentId,
-      auto_detected: true,
-      no_run_record: true,
-    });
-    logger.info(
-      { agentId, taskId: task.id },
-      'Auto-completed task without run record (working -> idle)',
-    );
+  if (opts.closeAllIfIdle && detectedStatus !== 'working') {
+    for (const task of runningTasks) {
+      if (completedTaskIds.has(task.id)) continue;
+      if (skipNoRunComplete) continue;
+      updateTaskStatus(task.id, 'done');
+      noRunCompletedIds.add(task.id);
+      emit('task.completed', 'task', task.id, {
+        agent_id: agentId,
+        auto_detected: true,
+        no_run_record: true,
+      });
+      logger.info(
+        { agentId, taskId: task.id },
+        'Auto-completed task without run record (working -> idle)',
+      );
+    }
   }
 
   for (const taskId of noRunCompletedIds) {
     taskDispatcher.unblockDependentsPublic(taskId);
   }
 
-  if (runs.length > 0 || noRunCompletedIds.size > 0) {
+  if (selected.size > 0 || noRunCompletedIds.size > 0) {
     setTimeout(() => taskDispatcher.dispatchNext(), 1500);
   }
 
@@ -436,10 +492,24 @@ function completeRunningRuns(agentId: string): void {
     return;
   }
 
-  const allCompletedTaskIds = [...completedTaskIds, ...noRunCompletedIds];
-  for (const taskId of allCompletedTaskIds) {
+  for (const taskId of [...completedTaskIds, ...noRunCompletedIds]) {
     verifyTaskCompletion(taskId, agentId).catch((err) =>
       logger.debug({ error: (err as Error).message }, 'Task verification fire-and-forget failed'),
     );
   }
+}
+
+function finishOneStuckRun(agentId: string, run: { id: string; task_id: string }): void {
+  finishRun(run.id, 0);
+  runner.clearRunnerRun?.(agentId, run.id);
+  emit('run.finished', 'run', run.id, {
+    agent_id: agentId,
+    exit_code: 0,
+    auto_detected: true,
+  });
+  void taskDispatcher.onRunComplete(run.id, agentId);
+  logger.info(
+    { agentId, runId: run.id, taskId: run.task_id },
+    'Auto-completed run (working -> idle)',
+  );
 }
