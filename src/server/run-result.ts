@@ -1,13 +1,16 @@
 /**
- * Per-run orchestrate result file.
+ * Durable per-run write buffer on the VPS.
  *
- * Last line must be exactly `RESULT: PASS` or `RESULT: FAIL`.
- * A one-line reason sits above that line. Missing, unparseable, or
- * pane-only text is never PASS. WaveCode never invents PASS from idle,
- * duration, or TUI copy such as "reviewed by another AI".
+ * Append-only local file. Orchestrate reads this file only — never tmux
+ * or pane scrape. Last line must be exactly `RESULT: PASS` or
+ * `RESULT: FAIL`, with a one-line reason above it.
  *
- * This is the run/orchestrate signal. Referee / wavepulse-gate RESULT
- * remains the promote gate.
+ * Missing or unparseable is not PASS. WaveCode never invents PASS from
+ * idle, duration, or TUI chrome. If the agent did not write a valid
+ * RESULT, WaveCode may append FAIL or leave the file missing.
+ *
+ * The file is the source of truth. API fields are a convenience.
+ * Referee / wavepulse-gate RESULT remains the promote gate.
  */
 
 import fs from 'node:fs';
@@ -103,15 +106,32 @@ export function oneLineReason(reason: string, verdict: RunResultVerdict): string
   return verdict === 'PASS' ? 'Completed' : 'No parseable RESULT file';
 }
 
-export function writeRunResult(
+/** Append a reason + RESULT line. Last line in the file is the verdict. */
+export function appendRunResult(
   filePath: string,
   verdict: RunResultVerdict,
   reason: string,
 ): ParsedRunResult {
   const line = oneLineReason(reason, verdict);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${line}\nRESULT: ${verdict}\n`, 'utf8');
+  let prefix = '';
+  try {
+    const existing = fs.readFileSync(filePath, 'utf8');
+    if (existing.length > 0 && !existing.endsWith('\n')) prefix = '\n';
+  } catch {
+    // New buffer
+  }
+  fs.appendFileSync(filePath, `${prefix}${line}\nRESULT: ${verdict}\n`, 'utf8');
   return { verdict, reason: line, lastLine: `RESULT: ${verdict}` };
+}
+
+/** @deprecated Use appendRunResult — the buffer is append-only. */
+export function writeRunResult(
+  filePath: string,
+  verdict: RunResultVerdict,
+  reason: string,
+): ParsedRunResult {
+  return appendRunResult(filePath, verdict, reason);
 }
 
 export function ensureRunResultDir(filePath: string): void {
@@ -119,8 +139,9 @@ export function ensureRunResultDir(filePath: string): void {
 }
 
 /**
- * Honor a valid agent-written file. Otherwise write FAIL.
+ * Honor a valid last-line RESULT. Otherwise append FAIL.
  * Never upgrades missing/unparseable/pane text to PASS.
+ * forceFail appends FAIL (does not rewrite history); last line wins.
  */
 export function settleRunResultFile(
   filePath: string,
@@ -130,10 +151,10 @@ export function settleRunResultFile(
   const existing = readRunResult(filePath);
   if (opts?.forceFail) {
     if (existing?.verdict === 'FAIL') return existing;
-    return writeRunResult(filePath, 'FAIL', fallbackReason);
+    return appendRunResult(filePath, 'FAIL', fallbackReason);
   }
   if (existing) return existing;
-  return writeRunResult(filePath, 'FAIL', fallbackReason);
+  return appendRunResult(filePath, 'FAIL', fallbackReason);
 }
 
 export function exitCodeForVerdict(verdict: RunResultVerdict | null | undefined): number {
@@ -168,7 +189,7 @@ export function buildRunResultBriefing(resultPath: string): string {
     : resultPath;
   return [
     '## WAVECODE RUN RESULT',
-    'Before you go idle, write this file (do not only print in the terminal, and do not paste shell/netcat into the TUI):',
+    'Before you go idle, append to this local file (durable write buffer — do not only print in the terminal, and do not paste shell/netcat into the TUI):',
     `  ${resultPath}`,
     `Relative path: ${relHint}`,
     '',

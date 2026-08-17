@@ -165,10 +165,11 @@ Read the orchestrate result file for a run.
 Response:
 `{ run_id, path, exists, result, reason, last_line }`
 
-`result` is `PASS`, `FAIL`, or `null`. Last line of the file must be
-exactly `RESULT: PASS` or `RESULT: FAIL`. This is the run/orchestrate
-signal, not the promote gate (referee / wavepulse-gate RESULT stays
-the promote evidence).
+`result` is `PASS`, `FAIL`, or `null`. The file is an append-only local
+buffer and the source of truth; this endpoint is a convenience. Last
+line must be exactly `RESULT: PASS` or `RESULT: FAIL`. Missing or
+unparseable is not PASS. This is the run/orchestrate signal, not the
+promote gate (referee / wavepulse-gate RESULT stays the promote evidence).
 
 ### `POST /api/tasks`
 Create a task. When `autonomy.auto_dispatch` is on, the daemon dispatches
