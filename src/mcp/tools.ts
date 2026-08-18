@@ -126,6 +126,16 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     },
     handler: (client, args) => client.get(`/tasks/${encodeURIComponent(String(args.task_id))}`),
   },
+  {
+    name: 'get_run_result',
+    description:
+      'Read the orchestrate result file for a run (GET /api/runs/:id/result). Returns path, exists, result (PASS|FAIL|null), reason, last_line from runs/<run_id>/result.txt. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration. This is the run signal, not the promote gate.',
+    schema: {
+      run_id: z.string().describe('Run ULID'),
+    },
+    handler: (client, args) =>
+      client.get(`/runs/${encodeURIComponent(String(args.run_id))}/result`),
+  },
 
   // --- Goals (parent epics for decomposed task DAGs) ---
   {

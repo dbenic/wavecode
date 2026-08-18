@@ -14,6 +14,6 @@
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["src/server/**/*", "src/cli/**/*"],
+  "include": ["src/server/**/*", "src/cli/**/*", "src/mcp/**/*"],
   "exclude": ["node_modules", "dist", "src/ui", "src/**/*.test.ts", "src/**/*.test.tsx"]
 }

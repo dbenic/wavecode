@@ -1,9 +1,8 @@
 /**
- * WaveCode MCP server — stdio transport.
+ * WaveCode MCP server — stdio transport (`wavecode mcp`).
  *
- * Launched via `wavecode mcp` (or `node dist/mcp/index.js`). Connects any
- * MCP-capable client (Claude Code, Grok, custom orchestrators) to a local
- * or remote WaveCode daemon over its REST API.
+ * HTTP-only clients (Grok Bot, Cursor remote) should use the daemon's
+ * Streamable HTTP endpoint at `/mcp` instead — see `http.ts` and docs/mcp.md.
  *
  * Connection (flags override env override config):
  *   --url / WAVECODE_URL / config server.host+port
