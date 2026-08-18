@@ -10,7 +10,7 @@ convention rather than enforcement, it says so.
 | Role | Runs as | Does | Never does |
 |---|---|---|---|
 | **Human** | phone/desktop PWA, or notifications (Web Push / ntfy / Telegram) | final approvals in the review queue, override decisions (with stored reasons), emergency stop, config changes | writes feature code |
-| **Orchestrator** | any MCP client (Grok, Claude, a script) via `wavecode mcp`, or the built-in Command Chat | decomposes goals into task DAGs, assigns tasks, watches output, requests reviews, recommends promote/reject | approves gated work without a pass verdict (the API blocks it the same as the UI) |
+| **Orchestrator** | any MCP client (Grok, Claude, a script) via daemon `/mcp` (Streamable HTTP + bearer) or local `wavecode mcp` stdio, or the built-in Command Chat | decomposes goals into task DAGs, assigns tasks, watches output, requests reviews, recommends promote/reject | approves gated work without a pass verdict (the API blocks it the same as the UI) |
 | **Developer agents** | one tmux session each (claude-code / codex / aider / any configured runtime), spawned or adopted | execute exactly the tasks dispatched to them, fix issues their reviewer found | review their own work in the auto loop (the reviewer resolver never picks the author), merge/approve anything |
 | **Reviewer agents** | same pool — any agent other than the author (config `review.default_reviewer` by name or runtime), falling back to the WaveCode LLM | review diffs, deliver a structured verdict (`PASS` / `NEEDS FIXES` / `REJECT`) | — |
 | **QA agent** | `wavecode qa` (browser + vision LLM) | goal-driven UI testing, findings with evidence, reports attached to agent docs | — |

@@ -8,11 +8,44 @@ the REST API (`docs/api.md`); it holds no state of its own and enforces
 nothing the API doesn't — every rule (promote gating, pin validation, kill
 semantics) lives server-side, so all clients get the same guarantees.
 
-## Starting the server
+## Remote MCP (Grok Bot, Cursor)
+
+The daemon serves MCP **Streamable HTTP** at `/mcp` (not under `/api`).
+This is the supported path for HTTP-only clients such as Grok Bot and
+Cursor's remote MCP connector. Add WaveCode as a remote connector:
+
+```
+URL: https://<host>/mcp
+Authorization: Bearer <token>
+```
+
+The token is `auth.fallback_token` or `WAVECODE_TOKEN`. Never log it.
+Auth on `/mcp` is the same rule as `/api/*` (Tailscale and/or bearer).
+Unauthenticated requests receive `401`.
+
+After `initialize`, the server returns `mcp-session-id`. Subsequent
+requests on that session (tool calls, `notifications/initialized`, GET
+SSE, DELETE) must send the same header:
+
+```
+mcp-session-id: <id from initialize>
+```
+
+Idle HTTP / SSE connections do not stop the daemon; a dropped client
+only closes that session. No long-lived SSH PTY is required.
+
+Do **not** configure Grok Bot as `ssh … wavecode mcp`. That path needs a
+local `ssh` binary and a PTY; HTTP-only hosts fail with
+`spawn ssh ENOENT`. SSH-to-stdio is deprecated and is not the Grok Bot
+path.
+
+## Local stdio (`wavecode mcp`)
+
+Claude Code and other stdio clients still use the local process:
 
 ```bash
-wavecode mcp                                   # local daemon; reads config.yaml
-wavecode mcp --url https://vps:3777 --token …  # remote daemon, explicit token
+wavecode mcp
+wavecode mcp --url http://127.0.0.1:3777 --token <token>
 ```
 
 Connection resolution (flags override env override config), same as `wavecode queue`:
@@ -24,11 +57,8 @@ Connection resolution (flags override env override config), same as `wavecode qu
 | `config.yaml` | `server.host` + `server.port` | `auth.fallback_token` |
 | built-in default | `http://localhost:3777` | none |
 
-`wavecode mcp` loads the install `config.yaml`, so a token-auth daemon works over SSH (`ssh host wavecode mcp`) without putting the operator token in the MCP client environment. Do not log the token.
-The transport is stdio — the standard for MCP clients. The process speaks
-JSON-RPC on stdout and logs to stderr only.
-
-## Connecting clients
+Do not log the token. The stdio process speaks JSON-RPC on stdout and
+logs to stderr only.
 
 **Claude Code** (`.mcp.json` in a project, or `claude mcp add`):
 
@@ -38,17 +68,11 @@ JSON-RPC on stdout and logs to stderr only.
     "wavecode": {
       "command": "wavecode",
       "args": ["mcp"],
-      "env": { "WAVECODE_URL": "http://localhost:3777", "WAVECODE_TOKEN": "…" }
+      "env": { "WAVECODE_URL": "http://localhost:3777", "WAVECODE_TOKEN": "<token>" }
     }
   }
 }
 ```
-
-**Grok / other MCP clients:** register a stdio server with the same command.
-For clients that only support remote (HTTP) MCP servers, run `wavecode mcp`
-on a machine that can reach the daemon (e.g. the VPS itself over Tailscale)
-via any stdio-to-HTTP MCP bridge, or connect through SSH:
-`ssh vps wavecode mcp`.
 
 ## Tool reference
 
@@ -71,6 +95,7 @@ via any stdio-to-HTTP MCP bridge, or connect through SSH:
 | `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee; optional `goal_id` (ULID or `external_id`) links a child; `hold:true` skips auto-dispatch. After a file share, put the artifact id and `attached_path` in the prompt |
 | `list_tasks` | Tasks by status |
 | `get_task` | One task plus runs, including `result_path` / `result` / `result_reason` from `runs/<run_id>/result.txt` |
+| `get_run_result` | Orchestrate result for one run (`GET /api/runs/:id/result`). Missing or unparseable is not PASS |
 
 ### Goals
 

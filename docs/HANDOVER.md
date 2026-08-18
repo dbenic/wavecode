@@ -12,9 +12,10 @@ WaveCode is a server-side daemon + mobile PWA that orchestrates multiple CLI
 coding agents (Claude Code, Codex, Grok, Aider) running in tmux sessions on
 one box. It dispatches a task DAG to agents, watches their terminals,
 cross-reviews every finished run with a *different* agent, and gates
-promotion on the review verdict. A stdio MCP server exposes the whole
-control plane so any MCP-capable client (a Claude session, Grok, a script)
-can act as the orchestrator.
+promotion on the review verdict. MCP exposes the whole control plane
+(stdio `wavecode mcp`, or Streamable HTTP at `/mcp` with bearer auth) so
+any MCP-capable client (Grok Bot, Cursor remote, Claude, a script) can
+act as the orchestrator.
 
 Read in this order:
 1. `CLAUDE.md` — architecture, schema, conventions, what NOT to do
@@ -35,7 +36,7 @@ Read in this order:
 | Human review queue (promote/retry/handoff/reject) | `review-queue.ts` |
 | Event log + SSE + long-poll | `event-bus.ts`, `routes/system.ts` (`/api/events/log`) |
 | Agent wire (messages) | `routes/messages.ts`, CLI `wavecode msg` |
-| MCP control plane | `../mcp/tools.ts` (`wavecode mcp`) |
+| MCP control plane | `../mcp/tools.ts` (stdio `wavecode mcp` + HTTP `/mcp`) |
 | Health / crash / hang | `health-monitor.ts` |
 | NL command chat (reactive LLM PM) | `command-chat.ts`, `llm-provider.ts` |
 
@@ -65,11 +66,11 @@ Read in this order:
    given an `overrideReason`, which is stored in the audit event.
    Optional `review.gate_dependents_on_approval` makes the DAG advance on
    human approval instead of mere completion.
-4. **MCP control plane** — `wavecode mcp` (stdio) with 19 tools wrapping the
-   REST API; connection via `--token` / `WAVECODE_TOKEN` / `auth.fallback_token`
-   (same `resolveDaemonConnection()` as `wavecode queue`). Includes
-   `await_events`: cursor-based long-poll so an orchestrator loop costs one
-   call per idle minute and misses nothing.
+4. **MCP control plane** — same tools in `tools.ts` over stdio (`wavecode mcp`)
+   and Streamable HTTP (`/mcp` on the daemon, bearer / Tailscale). Connection
+   via `--token` / `WAVECODE_TOKEN` / `auth.fallback_token` (same
+   `resolveDaemonConnection()` as `wavecode queue`). Includes `await_events`
+   and `get_run_result`. Grok Bot / Cursor remote use URL + bearer, not SSH.
 5. **The wire** — `wavecode msg <to|all> "<text>" --type result --task <id>`
    for agents to report back; mirrors to `/api/messages` + `message.created`
    events.

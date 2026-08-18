@@ -478,7 +478,7 @@ program
 // --- mcp ---
 program
   .command('mcp')
-  .description('Run the WaveCode MCP server on stdio (connect Grok, Claude, or any MCP client)')
+  .description('Run the WaveCode MCP server on stdio (local clients). Grok Bot / Cursor remote use the daemon /mcp URL + bearer')
   .option('--url <url>', 'WaveCode daemon URL (default: $WAVECODE_URL or config server)')
   .option('--token <token>', 'Bearer token (default: $WAVECODE_TOKEN or config auth.fallback_token)')
   .action(async (opts: { url?: string; token?: string }) => {

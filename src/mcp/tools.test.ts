@@ -37,6 +37,7 @@ describe('mcp tools', () => {
     for (const required of [
       'list_agents', 'spawn_agent', 'pin_agent', 'kill_agent', 'stop_all',
       'send_prompt', 'get_agent_output', 'create_task', 'list_tasks', 'get_task',
+      'get_run_result',
       'list_reviews', 'request_ai_review', 'get_ai_reviews',
       'promote_run', 'retry_run', 'handoff_run', 'reject_run',
       'send_message', 'list_messages',
@@ -146,6 +147,18 @@ describe('mcp tools', () => {
     await tool('get_task').handler(client, { task_id: '01TASK' });
     const { url } = lastCall(fetchMock);
     expect(url).toBe('http://wavecode.test:3777/api/tasks/01TASK');
+  });
+
+  it('get_run_result wraps GET /api/runs/:id/result', async () => {
+    const { client, fetchMock } = makeClient({
+      run_id: 'run-1',
+      exists: false,
+      result: null,
+    });
+    const payload = await tool('get_run_result').handler(client, { run_id: 'run-1' });
+    expect(lastCall(fetchMock).url).toBe('http://wavecode.test:3777/api/runs/run-1/result');
+    expect(payload).toMatchObject({ exists: false, result: null });
+    expect(payload).not.toMatchObject({ result: 'PASS' });
   });
 
   it('create_task forwards goal_id and hold', async () => {
