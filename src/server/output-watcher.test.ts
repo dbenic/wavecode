@@ -20,6 +20,7 @@ import {
   maybeDismissFirstRunDialog,
   parseRunStartedAtMs,
   resetFirstRunDialogStateForTest,
+  runShowedWorkingAfterStart,
 } from './output-watcher.js';
 import { sendRawKeys } from './session-manager.js';
 
@@ -213,6 +214,14 @@ describe('output-watcher — idle-close dispatch grace', () => {
     expect(isWithinIdleCloseGrace('2026-08-19T09:59:00Z', now)).toBe(false);
     expect(isWithinIdleCloseGrace('2026-08-19T10:00:00Z', now + IDLE_CLOSE_GRACE_MS)).toBe(false);
     expect(isWithinIdleCloseGrace('not-a-date', now)).toBe(false);
+  });
+
+  it('treats a run as having shown working only after started_at', () => {
+    const start = '2026-08-19T10:00:00Z';
+    expect(runShowedWorkingAfterStart(start, null)).toBe(false);
+    expect(runShowedWorkingAfterStart(start, Date.parse('2026-08-19T09:59:59Z'))).toBe(false);
+    expect(runShowedWorkingAfterStart(start, Date.parse('2026-08-19T10:00:00Z'))).toBe(true);
+    expect(runShowedWorkingAfterStart(start, Date.parse('2026-08-19T10:00:05Z'))).toBe(true);
   });
 });
 

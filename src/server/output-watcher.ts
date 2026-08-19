@@ -74,6 +74,8 @@ interface WatcherState {
    * to give just-dispatched tasks time to start (send-keys latency).
    */
   idleOverrideCounter: number;
+  /** Epoch ms of the last pane that detected working (for dispatch grace). */
+  lastWorkingAt: number | null;
 }
 
 /** How many consecutive idle detections before we override DB 'working' -> 'idle'.
@@ -81,10 +83,11 @@ interface WatcherState {
 export const IDLE_OVERRIDE_THRESHOLD = 4;
 
 /**
- * Do not idle-finalize a just-dispatched run whose pane still looks idle
+ * Do not idle-finalize a just-dispatched run that never showed working
  * (Codex status bar / ›, Claude splash). Those seats only report working
  * after Working/Thinking/Applying or a live action-verb line.
  * After this grace, idle + missing result is still FAIL.
+ * Once the pane has shown working, a later idle close is allowed.
  */
 export const IDLE_CLOSE_GRACE_MS = 60_000;
 
@@ -100,6 +103,7 @@ export function startWatching(agentId: string): void {
     outputVersion: 0,
     tickInProgress: false,
     idleOverrideCounter: 0,
+    lastWorkingAt: null,
   };
 
   watchers.set(agentId, state);
@@ -180,6 +184,9 @@ function tickInner(agentId: string, state: WatcherState): void {
 
   // Detect status from output patterns
   const detectedStatus = detectStatus(output, agent.runtime);
+  if (detectedStatus === 'working') {
+    state.lastWorkingAt = Date.now();
+  }
 
   // Detect permission mode from output
   const permMode = detectPermissionMode(output);
@@ -220,7 +227,7 @@ function tickInner(agentId: string, state: WatcherState): void {
       state.idleOverrideCounter++;
 
       if (state.idleOverrideCounter >= IDLE_OVERRIDE_THRESHOLD) {
-        if (hasYoungRunningRun(agentId)) {
+        if (hasProtectedYoungRun(agentId, state)) {
           // Codex/Claude splash looks idle until work starts. Hold the
           // override so a just-dispatched run is not failed in ~8s.
           logger.debug(
@@ -441,9 +448,29 @@ export function isWithinIdleCloseGrace(startedAt: string, now = Date.now()): boo
   return now - start < IDLE_CLOSE_GRACE_MS;
 }
 
-function hasYoungRunningRun(agentId: string, now = Date.now()): boolean {
+/** True when the pane has shown working at or after this run's started_at. */
+export function runShowedWorkingAfterStart(
+  startedAt: string,
+  lastWorkingAt: number | null,
+): boolean {
+  if (lastWorkingAt == null) return false;
+  const start = parseRunStartedAtMs(startedAt);
+  if (start === null) return true;
+  return lastWorkingAt >= start;
+}
+
+function shouldHoldIdleFinalize(
+  startedAt: string,
+  lastWorkingAt: number | null,
+  now = Date.now(),
+): boolean {
+  return isWithinIdleCloseGrace(startedAt, now)
+    && !runShowedWorkingAfterStart(startedAt, lastWorkingAt);
+}
+
+function hasProtectedYoungRun(agentId: string, state: WatcherState, now = Date.now()): boolean {
   return listRuns({ agent_id: agentId, status: 'running' }).some((run) =>
-    isWithinIdleCloseGrace(run.started_at, now),
+    shouldHoldIdleFinalize(run.started_at, state.lastWorkingAt, now),
   );
 }
 
@@ -511,9 +538,10 @@ function closeFinishedRuns(
   }
 
   if (opts.closeAllIfIdle && detectedStatus !== 'working') {
+    const lastWorkingAt = watchers.get(agentId)?.lastWorkingAt ?? null;
     for (const run of running) {
-      // Too young / never showed working after dispatch — do not FAIL yet.
-      if (isWithinIdleCloseGrace(run.started_at)) continue;
+      // Too young and never showed working after dispatch — do not FAIL yet.
+      if (shouldHoldIdleFinalize(run.started_at, lastWorkingAt)) continue;
       selected.set(run.id, run);
     }
   }

@@ -87,6 +87,11 @@ gpt-5.4 xhigh · 47% left · ~/project
 ›
 `.trim();
 
+const CODEX_WORKING = `
+◦ Working (12s • esc to interrupt)
+gpt-5.4 xhigh · 47% left · ~/project
+`.trim();
+
 function sqliteUtcNow(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 19).replace('T', ' ');
 }
@@ -348,6 +353,33 @@ describe('output-watcher — idle-complete', () => {
       'Idle close without a parseable RESULT file',
     );
     expect(db.updateAgentStatus).toHaveBeenCalledWith(agent.id, 'idle');
+  });
+
+  it('idle-finalizes a young run after the pane has shown working', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+
+    const agent = makeAgent({ mode: 'spawned', status: 'working', runtime: 'codex' });
+    const run = makeRun({ started_at: sqliteUtcNow() });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([run]);
+    vi.mocked(db.listTasks).mockReturnValue([makeTask({ status: 'running' })]);
+    vi.mocked(capturePane)
+      .mockReturnValueOnce({ ok: true, data: CODEX_WORKING })
+      .mockReturnValue({ ok: true, data: CODEX_IDLE_PROMPT });
+
+    startWatching(agent.id);
+    tickForTest(agent.id);
+    for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
+      tickForTest(agent.id);
+    }
+
+    expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
+      run.id,
+      agent.id,
+      0,
+      'Idle close without a parseable RESULT file',
+    );
   });
 
   it('overrides a spawned Claude splash from working to idle (no run to close)', async () => {
