@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import {
   getAgent,
+  getAgentByName,
   getDb,
   insertTask,
   getTask,
@@ -71,9 +72,14 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
 
     const dependencyIds = normalizeDependencyIds(body.depends_on);
 
+    let resolvedAgentId: string | undefined;
     if (body.agent_id) {
-      const agentResult = getAgent(body.agent_id);
+      // Same as GET /api/agents/:id — ULID or the name list_agents exposes.
+      // Resolve to the existing seat; never spawn a new one here.
+      const byId = getAgent(body.agent_id);
+      const agentResult = byId.ok ? byId : getAgentByName(body.agent_id);
       if (!agentResult.ok) return c.json({ error: agentResult.error }, 400);
+      resolvedAgentId = agentResult.data.id;
     }
 
     let resolvedGoalId: string | null = null;
@@ -97,7 +103,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       task = getDb().transaction(() => {
         const result = insertTask({
           prompt: body.prompt,
-          agent_id: body.agent_id,
+          agent_id: resolvedAgentId,
           priority: body.priority,
           goal_id: resolvedGoalId,
         });

@@ -181,6 +181,11 @@ lifecycle.
 Body:
 `{ prompt: string, agent_id?: string, priority?: number, depends_on?: string[], goal_id?: string, hold?: boolean }`
 
+`agent_id` is an agent ULID or the name `GET /api/agents` / `list_agents`
+exposes (same lookup as `GET /api/agents/:id`). The name is resolved to
+that existing seat before the task is queued — this does not spawn a
+new agent. Unknown names return 400.
+
 `goal_id` is a parent goal ULID or `external_id` (e.g. `W0`, `G1`).
 Persist-only goals create no tasks — attach children yourself with this
 field. If `auto_dispatch` is on and you omit both `hold` and `agent_id`,
