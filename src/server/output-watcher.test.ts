@@ -11,12 +11,16 @@ vi.mock('./session-manager.js', () => ({
 
 import {
   CLAUDE_BYPASS_DIALOG_COOLDOWN_MS,
+  IDLE_CLOSE_GRACE_MS,
   detectPermissionMode,
   detectStatus,
   extractFinishedRunIdsFromPane,
   isClaudeBypassAcceptDialog,
+  isWithinIdleCloseGrace,
   maybeDismissFirstRunDialog,
+  parseRunStartedAtMs,
   resetFirstRunDialogStateForTest,
+  runShowedWorkingAfterStart,
 } from './output-watcher.js';
 import { sendRawKeys } from './session-manager.js';
 
@@ -192,6 +196,32 @@ RESULT: PASS
     it('detects ask permission mode', () => {
       expect(detectPermissionMode('Do you want to proceed? Enter to confirm')).toBe('ask');
     });
+  });
+});
+
+describe('output-watcher — idle-close dispatch grace', () => {
+  it('parses SQLite datetime(now) and ISO started_at', () => {
+    expect(parseRunStartedAtMs('2026-08-19 10:00:00')).toBe(Date.parse('2026-08-19T10:00:00Z'));
+    expect(parseRunStartedAtMs('2026-08-19T10:00:00Z')).toBe(Date.parse('2026-08-19T10:00:00Z'));
+    expect(parseRunStartedAtMs('')).toBeNull();
+    expect(parseRunStartedAtMs('not-a-date')).toBeNull();
+  });
+
+  it('treats a just-started run as inside grace and an aged run as outside', () => {
+    const now = Date.parse('2026-08-19T10:01:00Z');
+    expect(isWithinIdleCloseGrace('2026-08-19 10:00:30', now)).toBe(true);
+    expect(isWithinIdleCloseGrace('2026-08-19T10:00:30.000Z', now)).toBe(true);
+    expect(isWithinIdleCloseGrace('2026-08-19T09:59:00Z', now)).toBe(false);
+    expect(isWithinIdleCloseGrace('2026-08-19T10:00:00Z', now + IDLE_CLOSE_GRACE_MS)).toBe(false);
+    expect(isWithinIdleCloseGrace('not-a-date', now)).toBe(false);
+  });
+
+  it('treats a run as having shown working only after started_at', () => {
+    const start = '2026-08-19T10:00:00Z';
+    expect(runShowedWorkingAfterStart(start, null)).toBe(false);
+    expect(runShowedWorkingAfterStart(start, Date.parse('2026-08-19T09:59:59Z'))).toBe(false);
+    expect(runShowedWorkingAfterStart(start, Date.parse('2026-08-19T10:00:00Z'))).toBe(true);
+    expect(runShowedWorkingAfterStart(start, Date.parse('2026-08-19T10:00:05Z'))).toBe(true);
   });
 });
 

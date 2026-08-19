@@ -97,10 +97,10 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'create_task',
     description:
-      'Queue a task. Unassigned tasks go to any idle agent when auto_dispatch is on — pass agent_id to pin the assignee. depends_on builds a DAG. Optional goal_id (ULID or external_id like W0/G1) links a child to a seeded goal. Persist-only goals create no tasks; you add children yourself. hold:true skips auto-dispatch. After upload_artifact / share_artifact, put the artifact id and attached_path in the prompt so the implementer can open the file in their workspace — do not leave the file only in chat.',
+      'Queue a task. Unassigned tasks go to any idle agent when auto_dispatch is on — pass agent_id (ULID or the name from list_agents / get_agent) to pin the existing assignee. Names are resolved to that seat; this does not spawn a new agent. depends_on builds a DAG. Optional goal_id (ULID or external_id like W0/G1) links a child to a seeded goal. Persist-only goals create no tasks; you add children yourself. hold:true skips auto-dispatch. After upload_artifact / share_artifact, put the artifact id and attached_path in the prompt so the implementer can open the file in their workspace — do not leave the file only in chat.',
     schema: {
       prompt: z.string().describe('The task prompt'),
-      agent_id: z.string().optional().describe('Assign to a specific agent (omit for any idle agent)'),
+      agent_id: z.string().optional().describe('Existing agent ID or name (omit for any idle agent)'),
       priority: z.number().int().optional().describe('Higher dispatches first (default 0)'),
       depends_on: z.array(z.string()).optional().describe('Task IDs that must finish first'),
       goal_id: z.string().optional().describe('Parent goal ULID or external_id (e.g. W0, G1)'),

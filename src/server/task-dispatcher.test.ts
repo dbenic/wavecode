@@ -301,6 +301,87 @@ describe('task-dispatcher.ts', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('finalizeRun keeps an existing PASS file (idle-close does not invent FAIL over PASS)', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+    const { writeRunResult, RESULT_PASS_LINE } = await import('./run-result.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-finalize-pass-'));
+    const resultPath = path.join(dir, 'result.txt');
+    writeRunResult(resultPath, 'PASS', 'All checks green');
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'run-pass',
+        task_id: 'task-pass',
+        agent_id: 'agent-1',
+        result_path: resultPath,
+        status: 'running',
+        finished_at: null,
+      },
+    } as never);
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: { id: 'agent-1', workspace: dir, mode: 'spawned' },
+    } as never);
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: { id: 'task-pass', status: 'running', prompt: 'Review', agent_id: 'agent-1' },
+    } as never);
+    vi.mocked(db.listOpenRuns).mockReturnValue([]);
+    vi.mocked(db.listRuns).mockReturnValue([{ id: 'run-pass' }] as never);
+    vi.mocked(db.insertAgentMessage).mockReturnValue({ ok: true, data: { id: 'msg-1' } } as never);
+    vi.mocked(db.finishRun).mockImplementation((id: string, exit: number) => {
+      const data = {
+        id,
+        task_id: 'task-pass',
+        agent_id: 'agent-1',
+        status: exit === 0 ? 'done' : 'failed',
+        exit_code: exit,
+        result_path: resultPath,
+      };
+      vi.mocked(db.getRun).mockReturnValue({ ok: true, data } as never);
+      return { ok: true, data } as never;
+    });
+    vi.mocked(db.getDb).mockReturnValue({
+      prepare: () => ({ all: () => [] }),
+    } as never);
+    vi.mocked((await import('./config.js')).getConfig).mockReturnValue({
+      autonomy: { auto_dispatch: false, max_task_retries: 2 },
+    } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    const finished = dispatcher.finalizeRun(
+      'run-pass',
+      'agent-1',
+      0,
+      'Idle close without a parseable RESULT file',
+    );
+
+    expect(finished.ok).toBe(true);
+    expect(db.finishRun).toHaveBeenCalledWith('run-pass', 0);
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe(RESULT_PASS_LINE);
+    expect(fs.readFileSync(resultPath, 'utf8')).not.toContain('Idle close without a parseable RESULT file');
+    expect(events.emit).toHaveBeenCalledWith(
+      'run.finished',
+      'run',
+      'run-pass',
+      expect.objectContaining({ exit_code: 0, result: 'PASS' }),
+    );
+    await Promise.resolve();
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-pass', 'done');
+    expect(events.emit).not.toHaveBeenCalledWith(
+      'task.retrying',
+      'task',
+      'task-pass',
+      expect.anything(),
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('auto-retries an adopted failed run within the retry budget', async () => {
     const db = await import('./db.js');
     const events = await import('./event-bus.js');

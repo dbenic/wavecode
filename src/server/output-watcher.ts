@@ -74,11 +74,22 @@ interface WatcherState {
    * to give just-dispatched tasks time to start (send-keys latency).
    */
   idleOverrideCounter: number;
+  /** Epoch ms of the last pane that detected working (for dispatch grace). */
+  lastWorkingAt: number | null;
 }
 
 /** How many consecutive idle detections before we override DB 'working' -> 'idle'.
  *  Each tick is ~2s, so 4 ticks ~= 8 seconds - enough for send-keys to be received. */
 export const IDLE_OVERRIDE_THRESHOLD = 4;
+
+/**
+ * Do not idle-finalize a just-dispatched run that never showed working
+ * (Codex status bar / ›, Claude splash). Those seats only report working
+ * after Working/Thinking/Applying or a live action-verb line.
+ * After this grace, idle + missing result is still FAIL.
+ * Once the pane has shown working, a later idle close is allowed.
+ */
+export const IDLE_CLOSE_GRACE_MS = 60_000;
 
 const watchers = new Map<string, WatcherState>();
 
@@ -92,6 +103,7 @@ export function startWatching(agentId: string): void {
     outputVersion: 0,
     tickInProgress: false,
     idleOverrideCounter: 0,
+    lastWorkingAt: null,
   };
 
   watchers.set(agentId, state);
@@ -172,6 +184,9 @@ function tickInner(agentId: string, state: WatcherState): void {
 
   // Detect status from output patterns
   const detectedStatus = detectStatus(output, agent.runtime);
+  if (detectedStatus === 'working') {
+    state.lastWorkingAt = Date.now();
+  }
 
   // Detect permission mode from output
   const permMode = detectPermissionMode(output);
@@ -212,26 +227,35 @@ function tickInner(agentId: string, state: WatcherState): void {
       state.idleOverrideCounter++;
 
       if (state.idleOverrideCounter >= IDLE_OVERRIDE_THRESHOLD) {
-        logger.info(
-          { agentId, name: agent.name, mode: agent.mode, after: `${state.idleOverrideCounter * 2}s` },
-          'Output shows idle but DB says working/error - correcting to idle',
-        );
-        updateAgentStatus(agentId, 'idle');
-        state.idleOverrideCounter = 0;
+        if (hasProtectedYoungRun(agentId, state)) {
+          // Codex/Claude splash looks idle until work starts. Hold the
+          // override so a just-dispatched run is not failed in ~8s.
+          logger.debug(
+            { agentId, name: agent.name },
+            'Holding idle override — open run still in dispatch grace',
+          );
+        } else {
+          logger.info(
+            { agentId, name: agent.name, mode: agent.mode, after: `${state.idleOverrideCounter * 2}s` },
+            'Output shows idle but DB says working/error - correcting to idle',
+          );
+          updateAgentStatus(agentId, 'idle');
+          state.idleOverrideCounter = 0;
 
-        emit('agent.status_changed', 'agent', agentId, {
-          status: 'idle',
-          lastOutputLine: state.lastOutputLine,
-          permissionMode: permMode,
-          outputVersion: state.outputVersion,
-          outputUpdatedAt: new Date().toISOString(),
-          autoCorrect: true,
-        });
+          emit('agent.status_changed', 'agent', agentId, {
+            status: 'idle',
+            lastOutputLine: state.lastOutputLine,
+            permissionMode: permMode,
+            outputVersion: state.outputVersion,
+            outputUpdatedAt: new Date().toISOString(),
+            autoCorrect: true,
+          });
 
-        // Adopted and spawned both auto-close stuck runs. Spawned TUI seats
-        // (Grok/Claude/Codex chat) never emit runner-socket run.finished.
-        closeAllIfIdle = true;
-        notifyReviewLoopAgentIdle(agentId);
+          // Adopted and spawned both auto-close stuck runs. Spawned TUI seats
+          // (Grok/Claude/Codex chat) never emit runner-socket run.finished.
+          closeAllIfIdle = true;
+          notifyReviewLoopAgentIdle(agentId);
+        }
       }
     }
   } else if (detectedStatus !== dbStatus) {
@@ -406,6 +430,50 @@ function runtimeIdlePattern(runtime: string): string | null {
 
 const RUN_ID_IN_PANE = /"run_id"\s*:\s*"(01[0-9A-HJKMNP-TV-Z]{24})"/g;
 
+const SQLITE_UTC_DATETIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/** Parse runs.started_at (SQLite datetime('now') or ISO) to epoch ms. */
+export function parseRunStartedAtMs(startedAt: string): number | null {
+  const raw = startedAt.trim();
+  if (!raw) return null;
+  const iso = SQLITE_UTC_DATETIME.test(raw) ? `${raw.replace(' ', 'T')}Z` : raw;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** True when the run is still inside the post-dispatch idle-close grace. */
+export function isWithinIdleCloseGrace(startedAt: string, now = Date.now()): boolean {
+  const start = parseRunStartedAtMs(startedAt);
+  if (start === null) return false;
+  return now - start < IDLE_CLOSE_GRACE_MS;
+}
+
+/** True when the pane has shown working at or after this run's started_at. */
+export function runShowedWorkingAfterStart(
+  startedAt: string,
+  lastWorkingAt: number | null,
+): boolean {
+  if (lastWorkingAt == null) return false;
+  const start = parseRunStartedAtMs(startedAt);
+  if (start === null) return true;
+  return lastWorkingAt >= start;
+}
+
+function shouldHoldIdleFinalize(
+  startedAt: string,
+  lastWorkingAt: number | null,
+  now = Date.now(),
+): boolean {
+  return isWithinIdleCloseGrace(startedAt, now)
+    && !runShowedWorkingAfterStart(startedAt, lastWorkingAt);
+}
+
+function hasProtectedYoungRun(agentId: string, state: WatcherState, now = Date.now()): boolean {
+  return listRuns({ agent_id: agentId, status: 'running' }).some((run) =>
+    shouldHoldIdleFinalize(run.started_at, state.lastWorkingAt, now),
+  );
+}
+
 function isRunnerScriptLine(line: string): boolean {
   return line.includes('nc -U') && (line.includes('wavecode-runner-') || line.includes('"run_id"'));
 }
@@ -470,7 +538,12 @@ function closeFinishedRuns(
   }
 
   if (opts.closeAllIfIdle && detectedStatus !== 'working') {
-    for (const run of running) selected.set(run.id, run);
+    const lastWorkingAt = watchers.get(agentId)?.lastWorkingAt ?? null;
+    for (const run of running) {
+      // Too young and never showed working after dispatch — do not FAIL yet.
+      if (shouldHoldIdleFinalize(run.started_at, lastWorkingAt)) continue;
+      selected.set(run.id, run);
+    }
   }
 
   const completedTaskIds = new Set<string>();

@@ -161,6 +161,14 @@ describe('mcp tools', () => {
     expect(payload).not.toMatchObject({ result: 'PASS' });
   });
 
+  it('create_task documents agent_id as existing ID or name', () => {
+    const create = tool('create_task');
+    expect(create.description).toMatch(/ULID or the name/i);
+    expect(create.description).toMatch(/does not spawn/i);
+    const agentId = create.schema.agent_id as { description?: string };
+    expect(agentId.description).toMatch(/ID or name/i);
+  });
+
   it('create_task forwards goal_id and hold', async () => {
     const { client, fetchMock } = makeClient({ id: 't1' });
     await tool('create_task').handler(client, {

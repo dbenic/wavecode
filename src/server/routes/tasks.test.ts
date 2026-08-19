@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../db.js', () => ({
   getDb: vi.fn(),
   getAgent: vi.fn(),
+  getAgentByName: vi.fn(),
   getTask: vi.fn(),
   getRun: vi.fn(),
   getRunArtifacts: vi.fn(() => []),
@@ -58,6 +59,114 @@ describe('task routes', () => {
   afterEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
+  });
+
+  it('resolves create_task agent_id by existing name (not ULID only)', async () => {
+    const db = await import('../db.js');
+    const existing = {
+      id: '01M0B9AGENTULID00000000001',
+      name: 'wavepulse-codex-sol',
+      runtime: 'codex',
+      tmux_session: 'wc-wavepulse-codex-sol',
+      workspace: '/tmp/sol',
+      mode: 'spawned',
+      status: 'idle',
+    };
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: false,
+      error: 'Agent wavepulse-codex-sol not found',
+    });
+    vi.mocked(db.getAgentByName).mockReturnValue({ ok: true, data: existing } as never);
+    vi.mocked(db.insertTask).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'task-named',
+        agent_id: existing.id,
+        prompt: 'PLAN the gate',
+        status: 'pending',
+        priority: 0,
+        created_at: '2026-08-19T00:00:00Z',
+        goal_id: null,
+      },
+    } as never);
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks', 'POST', {
+      prompt: 'PLAN the gate',
+      agent_id: 'wavepulse-codex-sol',
+      hold: true,
+    });
+
+    expect(response.status).toBe(201);
+    expect(db.getAgent).toHaveBeenCalledWith('wavepulse-codex-sol');
+    expect(db.getAgentByName).toHaveBeenCalledWith('wavepulse-codex-sol');
+    expect(db.insertTask).toHaveBeenCalledWith({
+      prompt: 'PLAN the gate',
+      agent_id: existing.id,
+      priority: undefined,
+      goal_id: null,
+    });
+    expect(response.json).toMatchObject({ id: 'task-named', agent_id: existing.id });
+  });
+
+  it('rejects create_task when the agent name does not match an existing seat', async () => {
+    const db = await import('../db.js');
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: false,
+      error: 'Agent wavepulse-fable not found',
+    });
+    vi.mocked(db.getAgentByName).mockReturnValue({
+      ok: false,
+      error: "Agent 'wavepulse-fable' not found",
+    });
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks', 'POST', {
+      prompt: 'PLAN the gate',
+      agent_id: 'wavepulse-fable',
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.json).toEqual({ error: "Agent 'wavepulse-fable' not found" });
+    expect(db.insertTask).not.toHaveBeenCalled();
+  });
+
+  it('still accepts create_task when agent_id is already a ULID', async () => {
+    const db = await import('../db.js');
+    const existing = {
+      id: '01M0B9AGENTULID00000000002',
+      name: 'wavepulse-fable',
+      runtime: 'claude-code',
+    };
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: existing } as never);
+    vi.mocked(db.insertTask).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'task-ulid',
+        agent_id: existing.id,
+        prompt: 'Implement',
+        status: 'pending',
+        priority: 0,
+        created_at: '2026-08-19T00:00:00Z',
+        goal_id: null,
+      },
+    } as never);
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks', 'POST', {
+      prompt: 'Implement',
+      agent_id: existing.id,
+      hold: true,
+    });
+
+    expect(response.status).toBe(201);
+    expect(db.getAgentByName).not.toHaveBeenCalled();
+    expect(db.insertTask).toHaveBeenCalledWith({
+      prompt: 'Implement',
+      agent_id: existing.id,
+      priority: undefined,
+      goal_id: null,
+    });
   });
 
   it('rejects task creation when a dependency task does not exist', async () => {
