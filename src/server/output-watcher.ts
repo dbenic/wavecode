@@ -80,6 +80,14 @@ interface WatcherState {
  *  Each tick is ~2s, so 4 ticks ~= 8 seconds - enough for send-keys to be received. */
 export const IDLE_OVERRIDE_THRESHOLD = 4;
 
+/**
+ * Do not idle-finalize a just-dispatched run whose pane still looks idle
+ * (Codex status bar / ›, Claude splash). Those seats only report working
+ * after Working/Thinking/Applying or a live action-verb line.
+ * After this grace, idle + missing result is still FAIL.
+ */
+export const IDLE_CLOSE_GRACE_MS = 60_000;
+
 const watchers = new Map<string, WatcherState>();
 
 export function startWatching(agentId: string): void {
@@ -212,26 +220,35 @@ function tickInner(agentId: string, state: WatcherState): void {
       state.idleOverrideCounter++;
 
       if (state.idleOverrideCounter >= IDLE_OVERRIDE_THRESHOLD) {
-        logger.info(
-          { agentId, name: agent.name, mode: agent.mode, after: `${state.idleOverrideCounter * 2}s` },
-          'Output shows idle but DB says working/error - correcting to idle',
-        );
-        updateAgentStatus(agentId, 'idle');
-        state.idleOverrideCounter = 0;
+        if (hasYoungRunningRun(agentId)) {
+          // Codex/Claude splash looks idle until work starts. Hold the
+          // override so a just-dispatched run is not failed in ~8s.
+          logger.debug(
+            { agentId, name: agent.name },
+            'Holding idle override — open run still in dispatch grace',
+          );
+        } else {
+          logger.info(
+            { agentId, name: agent.name, mode: agent.mode, after: `${state.idleOverrideCounter * 2}s` },
+            'Output shows idle but DB says working/error - correcting to idle',
+          );
+          updateAgentStatus(agentId, 'idle');
+          state.idleOverrideCounter = 0;
 
-        emit('agent.status_changed', 'agent', agentId, {
-          status: 'idle',
-          lastOutputLine: state.lastOutputLine,
-          permissionMode: permMode,
-          outputVersion: state.outputVersion,
-          outputUpdatedAt: new Date().toISOString(),
-          autoCorrect: true,
-        });
+          emit('agent.status_changed', 'agent', agentId, {
+            status: 'idle',
+            lastOutputLine: state.lastOutputLine,
+            permissionMode: permMode,
+            outputVersion: state.outputVersion,
+            outputUpdatedAt: new Date().toISOString(),
+            autoCorrect: true,
+          });
 
-        // Adopted and spawned both auto-close stuck runs. Spawned TUI seats
-        // (Grok/Claude/Codex chat) never emit runner-socket run.finished.
-        closeAllIfIdle = true;
-        notifyReviewLoopAgentIdle(agentId);
+          // Adopted and spawned both auto-close stuck runs. Spawned TUI seats
+          // (Grok/Claude/Codex chat) never emit runner-socket run.finished.
+          closeAllIfIdle = true;
+          notifyReviewLoopAgentIdle(agentId);
+        }
       }
     }
   } else if (detectedStatus !== dbStatus) {
@@ -406,6 +423,30 @@ function runtimeIdlePattern(runtime: string): string | null {
 
 const RUN_ID_IN_PANE = /"run_id"\s*:\s*"(01[0-9A-HJKMNP-TV-Z]{24})"/g;
 
+const SQLITE_UTC_DATETIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/** Parse runs.started_at (SQLite datetime('now') or ISO) to epoch ms. */
+export function parseRunStartedAtMs(startedAt: string): number | null {
+  const raw = startedAt.trim();
+  if (!raw) return null;
+  const iso = SQLITE_UTC_DATETIME.test(raw) ? `${raw.replace(' ', 'T')}Z` : raw;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** True when the run is still inside the post-dispatch idle-close grace. */
+export function isWithinIdleCloseGrace(startedAt: string, now = Date.now()): boolean {
+  const start = parseRunStartedAtMs(startedAt);
+  if (start === null) return false;
+  return now - start < IDLE_CLOSE_GRACE_MS;
+}
+
+function hasYoungRunningRun(agentId: string, now = Date.now()): boolean {
+  return listRuns({ agent_id: agentId, status: 'running' }).some((run) =>
+    isWithinIdleCloseGrace(run.started_at, now),
+  );
+}
+
 function isRunnerScriptLine(line: string): boolean {
   return line.includes('nc -U') && (line.includes('wavecode-runner-') || line.includes('"run_id"'));
 }
@@ -470,7 +511,11 @@ function closeFinishedRuns(
   }
 
   if (opts.closeAllIfIdle && detectedStatus !== 'working') {
-    for (const run of running) selected.set(run.id, run);
+    for (const run of running) {
+      // Too young / never showed working after dispatch — do not FAIL yet.
+      if (isWithinIdleCloseGrace(run.started_at)) continue;
+      selected.set(run.id, run);
+    }
   }
 
   const completedTaskIds = new Set<string>();

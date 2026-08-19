@@ -56,6 +56,7 @@ vi.mock('./logger.js', () => ({
 
 import { capturePane } from './session-manager.js';
 import {
+  IDLE_CLOSE_GRACE_MS,
   IDLE_OVERRIDE_THRESHOLD,
   startWatching,
   stopWatching,
@@ -80,6 +81,15 @@ const CLAUDE_SPLASH = `
 
      bypass permissions on (shift+tab to cycle) · gh auth login for PR status
 `.trim();
+
+const CODEX_IDLE_PROMPT = `
+gpt-5.4 xhigh · 47% left · ~/project
+›
+`.trim();
+
+function sqliteUtcNow(now = Date.now()): string {
+  return new Date(now).toISOString().slice(0, 19).replace('T', ' ');
+}
 
 describe('output-watcher — idle-complete', () => {
   beforeEach(() => {
@@ -272,6 +282,72 @@ describe('output-watcher — idle-complete', () => {
     }
 
     expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
+  });
+
+  it('does not idle-finalize a just-dispatched Codex run still showing the idle prompt', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+
+    const agent = makeAgent({ mode: 'spawned', status: 'working', runtime: 'codex' });
+    const run = makeRun({ started_at: sqliteUtcNow() });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([run]);
+    vi.mocked(db.listTasks).mockReturnValue([makeTask({ status: 'running' })]);
+    vi.mocked(capturePane).mockReturnValue({ ok: true, data: CODEX_IDLE_PROMPT });
+
+    startWatching(agent.id);
+    for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
+      tickForTest(agent.id);
+    }
+
+    expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
+    expect(db.updateAgentStatus).not.toHaveBeenCalledWith(agent.id, 'idle');
+  });
+
+  it('does not idle-finalize a just-dispatched Claude splash run (Fable/Claude)', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+
+    const agent = makeAgent({ mode: 'spawned', status: 'working', runtime: 'claude-code' });
+    const run = makeRun({ started_at: new Date().toISOString() });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([run]);
+    vi.mocked(db.listTasks).mockReturnValue([makeTask({ status: 'running' })]);
+    vi.mocked(capturePane).mockReturnValue({ ok: true, data: CLAUDE_SPLASH });
+
+    startWatching(agent.id);
+    for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
+      tickForTest(agent.id);
+    }
+
+    expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
+    expect(db.updateAgentStatus).not.toHaveBeenCalledWith(agent.id, 'idle');
+  });
+
+  it('after grace, idle + missing result still idle-finalizes (FAIL path)', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+
+    const agent = makeAgent({ mode: 'spawned', status: 'working', runtime: 'codex' });
+    const started = new Date(Date.now() - IDLE_CLOSE_GRACE_MS - 1_000).toISOString();
+    const run = makeRun({ started_at: started });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([run]);
+    vi.mocked(db.listTasks).mockReturnValue([makeTask({ status: 'running' })]);
+    vi.mocked(capturePane).mockReturnValue({ ok: true, data: CODEX_IDLE_PROMPT });
+
+    startWatching(agent.id);
+    for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
+      tickForTest(agent.id);
+    }
+
+    expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
+      run.id,
+      agent.id,
+      0,
+      'Idle close without a parseable RESULT file',
+    );
+    expect(db.updateAgentStatus).toHaveBeenCalledWith(agent.id, 'idle');
   });
 
   it('overrides a spawned Claude splash from working to idle (no run to close)', async () => {
