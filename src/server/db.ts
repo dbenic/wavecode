@@ -965,6 +965,24 @@ export function finishRun(id: string, exitCode: number): Result<Run> {
   return getRun(id);
 }
 
+/**
+ * Idle-close may stamp FAIL before the agent writes result.txt.
+ * When a later parseable RESULT: PASS appears, flip this failed run
+ * to done / exit 0. Write-once finishRun does not allow that.
+ * Does not invent PASS — the caller must have read the file.
+ */
+export function reconcileFailedRunToPass(id: string): Result<Run> {
+  const existing = getRun(id);
+  if (!existing.ok) return existing;
+  if (existing.data.status !== 'failed') return existing;
+  const result = getDb().prepare(`
+    UPDATE runs SET status = 'done', exit_code = 0
+    WHERE id = ? AND status = 'failed'
+  `).run(id);
+  if (result.changes === 0) return existing;
+  return getRun(id);
+}
+
 /** Runs that still occupy the seat: status=running or finished_at IS NULL. */
 export function listOpenRuns(agentId: string): Run[] {
   return listRuns({ agent_id: agentId }).filter(

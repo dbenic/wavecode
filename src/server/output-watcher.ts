@@ -286,6 +286,8 @@ function tickInner(agentId: string, state: WatcherState): void {
   }
 
   closeFinishedRuns(agentId, output, detectedStatus, { closeAllIfIdle });
+  // Idle-close may have stamped FAIL before the agent wrote result.txt.
+  taskDispatcher.pollLatePassWatches?.();
 }
 
 export function detectPermissionMode(output: string): string {
@@ -595,7 +597,8 @@ function closeFinishedRuns(
 
 function finishOneStuckRun(agentId: string, run: { id: string; task_id: string }): void {
   // Idle-close must not imply PASS. finalizeRun writes FAIL unless the
-  // agent already left a parseable RESULT: PASS file.
+  // agent already left a parseable RESULT: PASS file. A later PASS file
+  // is reconciled by pollLatePassWatches — never from this pane text.
   taskDispatcher.finalizeRun(
     run.id,
     agentId,

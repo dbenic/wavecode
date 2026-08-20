@@ -12,7 +12,9 @@
  * leave the file missing.
  *
  * The file is the source of truth. API fields are a convenience.
- * Referee / wavepulse-gate RESULT remains the promote gate.
+ * Idle-close FAIL plus a later parseable RESULT: PASS is reconciled
+ * to done — never from pane text. Referee / wavepulse-gate RESULT
+ * remains the promote gate.
  */
 
 import fs from 'node:fs';
@@ -93,6 +95,12 @@ export function parseRunResultText(text: string): ParsedRunResult | null {
     reason,
     lastLine,
   };
+}
+
+/** Parseable RESULT: PASS only. Missing, unparseable, FAIL, or pane text is null. */
+export function readParseablePass(filePath: string | null | undefined): ParsedRunResult | null {
+  const parsed = readRunResult(filePath);
+  return parsed?.verdict === 'PASS' ? parsed : null;
 }
 
 export function readRunResult(filePath: string | null | undefined): ParsedRunResult | null {

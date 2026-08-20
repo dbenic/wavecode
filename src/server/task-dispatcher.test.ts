@@ -9,6 +9,7 @@ vi.mock('./db.js', () => ({
   finishRun: vi.fn(),
   insertRun: vi.fn(),
   updateRunResultPath: vi.fn(),
+  reconcileFailedRunToPass: vi.fn(),
   getTask: vi.fn(),
   getRun: vi.fn(),
   getAgent: vi.fn(),
@@ -57,6 +58,8 @@ describe('task-dispatcher.ts', () => {
   });
 
   afterEach(async () => {
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.resetLatePassReconcileForTest();
     vi.useRealTimers();
     vi.resetModules();
     vi.restoreAllMocks();
@@ -377,6 +380,158 @@ describe('task-dispatcher.ts', () => {
       'task.retrying',
       'task',
       'task-pass',
+      expect.anything(),
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reconciles idle-close FAIL when a parseable PASS file appears later', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+    const { writeRunResult, RESULT_PASS_LINE } = await import('./run-result.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-late-pass-'));
+    const resultPath = path.join(dir, 'result.txt');
+    const failedRun = {
+      id: 'run-late',
+      task_id: 'task-late',
+      agent_id: 'agent-1',
+      status: 'failed',
+      exit_code: 1,
+      result_path: resultPath,
+      review_status: 'pending',
+    };
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: {
+        ...failedRun,
+        status: 'running',
+        finished_at: null,
+        exit_code: null,
+      },
+    } as never);
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: { id: 'agent-1', workspace: dir, mode: 'spawned' },
+    } as never);
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: { id: 'task-late', status: 'running', prompt: 'Review', agent_id: 'agent-1' },
+    } as never);
+    vi.mocked(db.listOpenRuns).mockReturnValue([]);
+    vi.mocked(db.listRuns).mockReturnValue([{ id: 'run-late' }] as never);
+    vi.mocked(db.getDb).mockReturnValue({
+      prepare: () => ({ all: () => [] }),
+    } as never);
+    vi.mocked(db.finishRun).mockImplementation((id: string, exit: number) => {
+      const data = { ...failedRun, id, status: exit === 0 ? 'done' : 'failed', exit_code: exit };
+      vi.mocked(db.getRun).mockReturnValue({ ok: true, data } as never);
+      return { ok: true, data } as never;
+    });
+    vi.mocked(db.reconcileFailedRunToPass).mockImplementation((id: string) => {
+      const data = { ...failedRun, id, status: 'done', exit_code: 0 };
+      vi.mocked(db.getRun).mockReturnValue({ ok: true, data } as never);
+      return { ok: true, data } as never;
+    });
+    vi.mocked((await import('./config.js')).getConfig).mockReturnValue({
+      autonomy: { auto_dispatch: false, max_task_retries: 2 },
+    } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.finalizeRun(
+      'run-late',
+      'agent-1',
+      0,
+      'Idle close without a parseable RESULT file',
+    );
+    expect(db.finishRun).toHaveBeenCalledWith('run-late', 1);
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe('RESULT: FAIL');
+
+    await Promise.resolve();
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: { id: 'task-late', status: 'failed', prompt: 'Review', agent_id: 'agent-1' },
+    } as never);
+
+    writeRunResult(resultPath, 'PASS', 'Reviewed auth.ts; no issues');
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe(RESULT_PASS_LINE);
+
+    vi.advanceTimersByTime(1000);
+    await Promise.resolve();
+
+    expect(db.reconcileFailedRunToPass).toHaveBeenCalledWith('run-late');
+    expect(db.updateTaskStatus).toHaveBeenCalledWith('task-late', 'done');
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-late', 'pending');
+    expect(events.emit).toHaveBeenCalledWith(
+      'run.finished',
+      'run',
+      'run-late',
+      expect.objectContaining({ exit_code: 0, result: 'PASS', late_pass: true }),
+    );
+    expect(events.emit).toHaveBeenCalledWith(
+      'task.completed',
+      'task',
+      'task-late',
+      expect.objectContaining({ late_pass: true }),
+    );
+    expect(events.emit).not.toHaveBeenCalledWith(
+      'task.retrying',
+      'task',
+      'task-late',
+      expect.anything(),
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reconcileLatePass leaves idle-close FAIL when the file is still missing or unparseable', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-late-miss-'));
+    const resultPath = path.join(dir, 'result.txt');
+    const failedRun = {
+      id: 'run-miss',
+      task_id: 'task-miss',
+      agent_id: 'agent-1',
+      status: 'failed' as const,
+      exit_code: 1,
+      result_path: resultPath,
+      review_status: 'pending' as const,
+    };
+    vi.mocked(db.getRun).mockReturnValue({ ok: true, data: failedRun } as never);
+    vi.mocked(db.getAgent).mockReturnValue({
+      ok: true,
+      data: { id: 'agent-1', workspace: dir, mode: 'spawned' },
+    } as never);
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: { id: 'task-miss', status: 'failed', prompt: 'Review', agent_id: 'agent-1' },
+    } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    const missing = dispatcher.reconcileLatePass('run-miss');
+    expect(missing.ok && missing.data.reconciled).toBe(false);
+    expect(db.reconcileFailedRunToPass).not.toHaveBeenCalled();
+    expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-miss', 'done');
+
+    fs.writeFileSync(
+      resultPath,
+      'Your code was reviewed by another AI model. Here are the issues found.\nRESULT: PASS lint=PASS\n',
+      'utf8',
+    );
+    const fromPane = dispatcher.reconcileLatePass('run-miss');
+    expect(fromPane.ok && fromPane.data.reconciled).toBe(false);
+    expect(db.reconcileFailedRunToPass).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalledWith(
+      'run.finished',
+      'run',
+      'run-miss',
       expect.anything(),
     );
     fs.rmSync(dir, { recursive: true, force: true });
