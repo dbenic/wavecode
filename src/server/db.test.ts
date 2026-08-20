@@ -191,4 +191,46 @@ describe('db.ts — schema migrations', () => {
     });
     expect(eventResult.ok).toBe(true);
   });
+
+  it('finishRun is write-once; reconcileFailedRunToPass can flip idle-close FAIL to done', async () => {
+    const mod = await import('./db.js');
+    mod.initDb(dbPath);
+
+    const agent = mod.insertAgent({
+      name: 'late-pass-agent',
+      runtime: 'claude-code',
+      tmux_session: 'wc-late',
+      workspace: tmpDir,
+      mode: 'spawned',
+      status: 'idle',
+    });
+    expect(agent.ok).toBe(true);
+    if (!agent.ok) return;
+
+    const task = mod.insertTask({ prompt: 'review', agent_id: agent.data.id });
+    expect(task.ok).toBe(true);
+    if (!task.ok) return;
+
+    const run = mod.insertRun({ task_id: task.data.id, agent_id: agent.data.id });
+    expect(run.ok).toBe(true);
+    if (!run.ok) return;
+
+    const failed = mod.finishRun(run.data.id, 1);
+    expect(failed.ok && failed.data.status === 'failed' && failed.data.exit_code === 1).toBe(true);
+    const finishedAt = failed.ok ? failed.data.finished_at : null;
+
+    const ignored = mod.finishRun(run.data.id, 0);
+    expect(ignored.ok && ignored.data.status === 'failed' && ignored.data.exit_code === 1).toBe(true);
+
+    const reconciled = mod.reconcileFailedRunToPass(run.data.id);
+    expect(reconciled.ok).toBe(true);
+    if (reconciled.ok) {
+      expect(reconciled.data.status).toBe('done');
+      expect(reconciled.data.exit_code).toBe(0);
+      expect(reconciled.data.finished_at).toBe(finishedAt);
+    }
+
+    const alreadyDone = mod.reconcileFailedRunToPass(run.data.id);
+    expect(alreadyDone.ok && alreadyDone.data.status === 'done').toBe(true);
+  });
 });

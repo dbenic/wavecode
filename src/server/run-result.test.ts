@@ -12,6 +12,7 @@ import {
   exitCodeForVerdict,
   parseRunResultText,
   presentRunResult,
+  readParseablePass,
   readRunResult,
   resolveRunResultPath,
   runResultRelPath,
@@ -111,6 +112,21 @@ describe('run-result', () => {
     fs.writeFileSync(pane, 'Your code was reviewed by another AI model. Here are the issues found.\n', 'utf8');
     expect(readRunResult(pane)).toBeNull();
     expect(presentRunResult(pane).result).toBeNull();
+    expect(readParseablePass(pane)).toBeNull();
+    expect(readParseablePass(missing)).toBeNull();
+  });
+
+  it('readParseablePass is PASS only when the last line is exactly RESULT: PASS', () => {
+    const filePath = path.join(tmpDir(), 'result.txt');
+    expect(readParseablePass(filePath)).toBeNull();
+    writeRunResult(filePath, 'FAIL', 'Idle close without a parseable RESULT file');
+    expect(readParseablePass(filePath)).toBeNull();
+    writeRunResult(filePath, 'PASS', 'Reviewed auth.ts; no issues');
+    expect(readParseablePass(filePath)).toMatchObject({
+      verdict: 'PASS',
+      reason: 'Reviewed auth.ts; no issues',
+      lastLine: RESULT_PASS_LINE,
+    });
   });
 
   it('settle overwrites FAIL when the file is missing or unparseable, and never invents PASS', () => {

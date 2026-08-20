@@ -17,6 +17,7 @@ All notable changes to WaveCode are documented here.
 - Codex runtime default `effort_flag: -c model_reasoning_effort=` so a pin of `high`/`xhigh` is actually injected.
 
 ### Fixed
+- Idle-close FAIL is reconciled when `result.txt` later becomes a parseable `RESULT: PASS` (agent wrote the file after `finalizeRun` stamped FAIL). Run and task become done / exit 0. Missing or unparseable stays FAIL. No invented PASS from pane text. No spawned auto-retry. Existing PASS at finalize time still wins.
 - Idle-close waits a dispatch grace (~60s after `started_at`) before failing a just-dispatched Codex/Claude run that never showed working (status bar / `›` / splash). After the pane shows working, a later idle close is allowed. After grace, idle + missing result is still FAIL. A parseable `RESULT: PASS` file still PASSes. Claude splash with no open run still goes idle. No invented PASS; no spawned auto-retry.
 - MCP / `POST /api/tasks` `agent_id` accepts the same name `list_agents` / `GET /api/agents/:id` already expose. The name is resolved to the existing agent ULID before queueing; unknown names 400. Does not spawn a new seat.
 - Claude Code's fresh splash (welcome ✻/✶, "Try refactor …" tips, `shift+tab` / `⏵⏵` bar without "esc to interrupt") is `idle`. A sparkle or tip verb no longer sticks the seat on `working`, so the idle override can complete. Real work stays `working` (`esc to interrupt`, action-verb status lines while running).

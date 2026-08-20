@@ -27,6 +27,7 @@ vi.mock('./task-dispatcher.js', () => ({
   dispatchNext: vi.fn(),
   unblockDependentsPublic: vi.fn(),
   finalizeRun: vi.fn(),
+  pollLatePassWatches: vi.fn(),
 }));
 
 vi.mock('./task-verifier.js', () => ({
@@ -130,6 +131,7 @@ describe('output-watcher — idle-complete', () => {
       0,
       'Idle close without a parseable RESULT file',
     );
+    expect(dispatcher.pollLatePassWatches).toHaveBeenCalled();
     expect(db.updateTaskStatus).not.toHaveBeenCalled();
   });
 

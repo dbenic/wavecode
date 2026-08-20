@@ -14,6 +14,7 @@ import {
   insertRun,
   finishRun,
   updateRunResultPath,
+  reconcileFailedRunToPass,
   type Task,
   type Agent,
   type Result,
@@ -28,6 +29,7 @@ import { maybeInvokeProjectGate } from './project-gate.js';
 import {
   appendRunResultBriefing,
   exitCodeForVerdict,
+  readParseablePass,
   readRunResult,
   resultPathForRun,
   settleRunResultFile,
@@ -36,6 +38,112 @@ import {
 import logger from './logger.js';
 
 let dispatchInProgress = false;
+
+/** How long to re-read result.txt after idle-close stamps FAIL. */
+export const LATE_PASS_RECONCILE_MS = 300_000;
+const LATE_PASS_POLL_MS = 1000;
+
+const pendingLatePass = new Map<string, { agentId: string; expiresAt: number }>();
+let latePassTimer: ReturnType<typeof setInterval> | null = null;
+
+export function resetLatePassReconcileForTest(): void {
+  pendingLatePass.clear();
+  if (latePassTimer) {
+    clearInterval(latePassTimer);
+    latePassTimer = null;
+  }
+}
+
+function registerLatePassWatch(runId: string, agentId: string): void {
+  pendingLatePass.set(runId, {
+    agentId,
+    expiresAt: Date.now() + LATE_PASS_RECONCILE_MS,
+  });
+  if (!latePassTimer) {
+    latePassTimer = setInterval(() => pollLatePassWatches(), LATE_PASS_POLL_MS);
+  }
+}
+
+/** Re-read registered idle-close FAIL files. Tests may drive this directly. */
+export function pollLatePassWatches(now = Date.now()): void {
+  for (const [runId, entry] of pendingLatePass) {
+    const result = reconcileLatePass(runId);
+    if ((result.ok && result.data.reconciled) || now >= entry.expiresAt) {
+      pendingLatePass.delete(runId);
+    }
+  }
+  if (pendingLatePass.size === 0 && latePassTimer) {
+    clearInterval(latePassTimer);
+    latePassTimer = null;
+  }
+}
+
+/**
+ * If idle-close already stamped FAIL but result.txt is now a parseable
+ * RESULT: PASS, flip run + task to done / exit 0. Never invents PASS
+ * from pane text. Missing/unparseable/FAIL stay failed. No retry.
+ */
+export function reconcileLatePass(runId: string): Result<{ reconciled: boolean; run: Run }> {
+  const existing = getRun(runId);
+  if (!existing.ok) return existing;
+  const run = existing.data;
+  if (run.status !== 'failed' || run.review_status === 'rejected') {
+    return { ok: true, data: { reconciled: false, run } };
+  }
+
+  const agent = getAgent(run.agent_id);
+  const resultPath = resultPathForRun(run, agent.ok ? agent.data.workspace : null);
+  const parsed = readParseablePass(resultPath);
+  if (!parsed) {
+    return { ok: true, data: { reconciled: false, run } };
+  }
+
+  const updated = reconcileFailedRunToPass(runId);
+  if (!updated.ok) return updated;
+
+  const taskResult = getTask(run.task_id);
+  if (taskResult.ok && (taskResult.data.status === 'failed' || taskResult.data.status === 'running')) {
+    updateTaskStatus(run.task_id, 'done');
+  }
+
+  emit('run.finished', 'run', runId, {
+    agent_id: run.agent_id,
+    exit_code: 0,
+    auto_detected: true,
+    late_pass: true,
+    result: parsed.verdict,
+    result_reason: parsed.reason,
+  });
+
+  emit('task.completed', 'task', run.task_id, {
+    agent_id: run.agent_id,
+    run_id: runId,
+    late_pass: true,
+  });
+
+  unblockDependents(run.task_id);
+
+  if (agent.ok) {
+    void maybeInvokeProjectGate(runId, agent.data).catch((err) =>
+      logger.warn({ runId, error: (err as Error).message }, 'Project referee invoke failed'),
+    );
+  }
+  import('./code-review.js')
+    .then((cr) => cr.maybeAutoReview(runId))
+    .catch((err) => logger.warn({ error: (err as Error).message }, 'Auto-review trigger failed'));
+
+  logger.info(
+    { runId, taskId: run.task_id, agentId: run.agent_id, reason: parsed.reason },
+    'Reconciled idle-close FAIL to PASS after late result file',
+  );
+
+  const config = getConfig();
+  if (config.autonomy.auto_dispatch) {
+    setTimeout(() => dispatchNext(), 1500);
+  }
+
+  return { ok: true, data: { reconciled: true, run: updated.data } };
+}
 
 /**
  * Called when a run completes (success or failure).
@@ -212,6 +320,11 @@ export function finalizeRun(
     result_reason: settled.reason,
   });
   void onRunComplete(runId, agentId);
+  // Idle-close (exit 0 into settle) may stamp FAIL while the agent is
+  // still writing result.txt. Re-read the file; a later PASS wins.
+  if (!forceFail && usedExit !== 0) {
+    registerLatePassWatch(runId, agentId);
+  }
   return finished;
 }
 
@@ -507,6 +620,7 @@ export function addDependency(taskId: string, dependsOnId: string): boolean {
 
 export function resetDispatcherForTest(): void {
   dispatchInProgress = false;
+  resetLatePassReconcileForTest();
 }
 
 /**
