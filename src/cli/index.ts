@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getServerEntryUrl, resolveAppRoot, resolveServerEntry } from './server-entry.js';
 import { queueTask, type QueueTaskResult } from './queue-task.js';
+import { DEFAULT_PROBE_URL, probeUrl } from './probe.js';
 import { registerQaCommands } from '../qa/cli.js';
 import { installStdioEpipeGuard, writeLine } from './stdio-guard.js';
 
@@ -122,6 +123,20 @@ program
       console.log(`    Created:  ${a.created_at}`);
     }
     console.log('');
+  });
+
+// --- probe ---
+program
+  .command('probe [url]')
+  .description('GET a URL and print the HTTP status (default: https://httpbin.org/get)')
+  .action(async (url?: string) => {
+    const result = await probeUrl(url ?? DEFAULT_PROBE_URL);
+    if (!result.ok) {
+      console.error(`probe failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(`status: ${result.data.status}`);
+    console.log(`url: ${result.data.url}`);
   });
 
 // --- send ---
