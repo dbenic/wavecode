@@ -44,7 +44,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       effort: EFFORT.optional().describe('Pinned reasoning effort'),
       repo: z.string().optional().describe('Repo path — a dedicated git worktree is created'),
       branch: z.string().optional().describe('Branch for the worktree (default wc-<name>)'),
-      runner: z.enum(['tmux', 'file']).optional().describe("file = Claude file-runner (claude -p + result.txt). Default tmux."),
+      runner: z.enum(['tmux', 'file']).optional().describe("file = Claude file-runner (claude -p, result.txt wins, cli.log RESULT counts, incomplete if neither). Default tmux."),
     },
     handler: (client, args) => client.post('/agents/spawn', args),
   },
@@ -121,7 +121,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'get_task',
     description:
-      'Get one task plus its runs. Each run includes result_path / result / result_reason from the small per-run RESULT file at runs/<run_id>/result.txt (source of truth; last line RESULT: PASS or RESULT: FAIL). File-runner runs also include phase (queued/starting/running/done/failed), log_path, and last_line from status.json / cli.log. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration.',
+      'Get one task plus its runs. Each run includes result_path / result / result_reason from the small per-run RESULT file at runs/<run_id>/result.txt (source of truth when present; last line RESULT: PASS or RESULT: FAIL). File-runner runs also include phase (queued/starting/running/done/failed/incomplete), log_path, and last_line from status.json / cli.log. File-runner also accepts an exact RESULT line from cli.log; a clean Claude exit with no parseable RESULT is incomplete, not a synthesized product FAIL. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration.',
     schema: {
       task_id: z.string().describe('Task ULID'),
     },
@@ -130,7 +130,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'get_run_result',
     description:
-      'Read the orchestrate result file for a run (GET /api/runs/:id/result). Returns path, exists, result (PASS|FAIL|null), reason, last_line from runs/<run_id>/result.txt, plus phase / log_path for file-runner seats. GET /api/runs/:id includes the cli.log body. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration. This is the run signal, not the promote gate.',
+      'Read the orchestrate result file for a run (GET /api/runs/:id/result). Returns path, exists, result (PASS|FAIL|null), reason, last_line from runs/<run_id>/result.txt, plus phase / log_path for file-runner seats. GET /api/runs/:id includes the cli.log body. File-runner: agent result.txt wins; else an exact RESULT line in cli.log counts; clean Claude exit with no parseable RESULT is incomplete (result stays null), not a synthesized product FAIL. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration. This is the run signal, not the promote gate.',
     schema: {
       run_id: z.string().describe('Run ULID'),
     },
