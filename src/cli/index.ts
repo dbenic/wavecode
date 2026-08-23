@@ -194,7 +194,7 @@ program
     const agent = result.data;
     console.log(`✓ Using workspace: ${agent.workspace ?? 'N/A'}`);
     if (agent.mode === 'file') {
-      console.log(`✓ File-runner seat (no tmux). Tasks write prompt.md and wait on claude -p.`);
+      console.log(`✓ File-runner seat (no tmux). Tasks write prompt.md and wait on claude -p + result.txt (cli.log RESULT counts; missing is incomplete).`);
     } else {
       console.log(`✓ Started tmux session: ${agent.tmux_session}`);
       console.log(`✓ Runner wrapper active. Emitting events.`);

@@ -49,6 +49,13 @@ const STATUS_CONFIG: Record<
     textClass: 'text-red-400',
     bgAccent: 'bg-gradient-to-b from-red-500/5 to-transparent',
   },
+  incomplete: {
+    label: 'INCOMPLETE',
+    borderClass: 'border-amber-500/30 shadow-[0_0_15px_-5px_theme(colors.amber.500/0.15)]',
+    dotClass: 'bg-amber-400',
+    textClass: 'text-amber-400',
+    bgAccent: 'bg-gradient-to-b from-amber-500/5 to-transparent',
+  },
   blocked: {
     label: 'BLOCKED',
     borderClass: 'border-amber-500/30',

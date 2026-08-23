@@ -10,6 +10,7 @@ import {
   appendRunResultBriefing,
   buildRunResultBriefing,
   exitCodeForVerdict,
+  parseResultLineFromOutput,
   parseRunResultText,
   presentRunResult,
   readParseablePass,
@@ -92,6 +93,22 @@ describe('run-result', () => {
     expect(parseRunResultText(`ok\n${RESULT_PASS_LINE}\n\n`)).toMatchObject({
       verdict: 'PASS',
       reason: 'ok',
+    });
+  });
+
+  it('scans CLI output for the last exact RESULT line a human would see', () => {
+    expect(parseResultLineFromOutput('')).toBeNull();
+    expect(parseResultLineFromOutput('I am done, trust the pane\n')).toBeNull();
+    expect(parseResultLineFromOutput('RESULT: PASS lint=PASS\n')).toBeNull();
+    expect(parseResultLineFromOutput('Suite finished\nRESULT: PASS\nmore chatter\n')).toEqual({
+      verdict: 'PASS',
+      reason: 'Suite finished',
+      lastLine: RESULT_PASS_LINE,
+    });
+    expect(parseResultLineFromOutput('ok\nRESULT: PASS\nnope\nRESULT: FAIL\n')).toEqual({
+      verdict: 'FAIL',
+      reason: 'nope',
+      lastLine: RESULT_FAIL_LINE,
     });
   });
 

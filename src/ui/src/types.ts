@@ -16,7 +16,7 @@ export interface Agent {
   watching?: boolean;
 }
 
-export type FileRunnerPhase = 'queued' | 'starting' | 'running' | 'done' | 'failed';
+export type FileRunnerPhase = 'queued' | 'starting' | 'running' | 'done' | 'failed' | 'incomplete';
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'blocked';
 

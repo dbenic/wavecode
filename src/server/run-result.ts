@@ -9,7 +9,9 @@
  * one-line reason above it. Missing or unparseable is not PASS.
  * WaveCode never invents PASS from idle or TUI chrome. If the agent
  * did not write a valid RESULT, WaveCode may overwrite with FAIL or
- * leave the file missing.
+ * leave the file missing. The Claude file-runner must not synthesize
+ * a product RESULT: FAIL after a clean Claude exit — that is
+ * incomplete / runner error, not an agent verdict.
  *
  * The file is the source of truth. API fields are a convenience.
  * Idle-close FAIL plus a later parseable RESULT: PASS is reconciled
@@ -95,6 +97,37 @@ export function parseRunResultText(text: string): ParsedRunResult | null {
     reason,
     lastLine,
   };
+}
+
+/**
+ * Scan printed CLI output for an exact RESULT line, the way a human
+ * reading the transcript would. Last matching line wins. Does not
+ * relax the result-file contract (last line of result.txt).
+ */
+export function parseResultLineFromOutput(text: string): ParsedRunResult | null {
+  if (!text) return null;
+  const lines = text.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const lastLine = lines[i].trim();
+    const match = lastLine.match(EXACT_RESULT_LINE);
+    if (!match) continue;
+
+    let reason = '';
+    for (let j = i - 1; j >= 0; j--) {
+      const trimmed = lines[j].trim();
+      if (trimmed.length > 0) {
+        reason = trimmed.replace(/^REASON:\s*/i, '');
+        break;
+      }
+    }
+
+    return {
+      verdict: match[1] as RunResultVerdict,
+      reason,
+      lastLine,
+    };
+  }
+  return null;
 }
 
 /** Parseable RESULT: PASS only. Missing, unparseable, FAIL, or pane text is null. */

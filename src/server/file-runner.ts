@@ -3,13 +3,16 @@
  *
  * A second execution path for seats with mode=file. The daemon writes
  * prompt.md + status.json, starts `claude -p` in the worktree, and
- * treats runs/<run_id>/result.txt as the only completion signal.
+ * treats runs/<run_id>/result.txt as the source of truth when present,
+ * and also reads an exact RESULT line from cli.log the way a human
+ * reading the CLI would. A clean Claude exit without a parseable
+ * RESULT is incomplete — never a synthesized product RESULT: FAIL.
  *
  * This path never uses tmux send-keys, capture-pane, or idle-close.
  * Existing adopted/spawned seats stay on the tmux runner.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -28,20 +31,24 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import {
   appendRunResultBriefing,
-  exitCodeForVerdict,
+  parseResultLineFromOutput,
   presentRun,
   readRunResult,
   resolveRunResultPath,
   resultPathForRun,
   settleRunResultFile,
+  writeRunResult,
   type PresentedRunResult,
 } from './run-result.js';
 
 export const FILE_RUNNER_HEARTBEAT_MS = 15_000;
 export const FILE_RUNNER_STALE_MS = 120_000;
+/** How long to wait for Claude `-p` descendants after the CLI process exits. */
+export const FILE_RUNNER_PROCESS_TREE_MS = 15 * 60 * 1000;
+export const FILE_RUNNER_PROCESS_TREE_POLL_MS = 250;
 export const FILE_RUNNER_MODE = 'file' as const;
 
-export type FileRunnerPhase = 'queued' | 'starting' | 'running' | 'done' | 'failed';
+export type FileRunnerPhase = 'queued' | 'starting' | 'running' | 'done' | 'failed' | 'incomplete';
 
 export interface FileRunStatus {
   phase: FileRunnerPhase;
@@ -102,6 +109,9 @@ export interface FileRunnerTestHooks {
   heartbeatMs?: number;
   staleMs?: number;
   claudeBin?: string;
+  listProcessGroupPids?: (pgid: number) => number[];
+  processTreePollMs?: number;
+  processTreeTimeoutMs?: number;
 }
 
 let testHooks: FileRunnerTestHooks = {};
@@ -274,7 +284,8 @@ export function buildClaudePrintArgs(opts: {
 
 /**
  * Start a file-runner run. Writes prompt.md + status.json, starts
- * `claude -p` in the agent worktree, and waits on process exit + result.txt.
+ * `claude -p` in the agent worktree, waits for the process tree, then
+ * reads result.txt (wins) or an exact RESULT line from cli.log.
  */
 export async function executeFileRun(
   agentId: string,
@@ -390,6 +401,10 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
     cwd: agent.workspace,
     env: buildClaudeEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Own process group so background children (`npm test &`) stay
+    // waitable after `claude -p` exits. Interactive CLI would have
+    // stayed open for the same tree.
+    detached: true,
   });
 
   writeFileRunStatus(run.id, {
@@ -424,7 +439,7 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
   });
 
   child.on('exit', (code, signal) => {
-    onClaudeExit(run, agent, code, signal);
+    void onClaudeExit(run, agent, code, signal);
   });
 }
 
@@ -460,7 +475,6 @@ function attachLogStream(
 function heartbeatLiveRun(runId: string): void {
   const live = liveRuns.get(runId);
   if (!live) return;
-  if (live.child.exitCode !== null || live.child.signalCode) return;
   const prev = readFileRunStatus(runId);
   if (!prev || (prev.phase !== 'starting' && prev.phase !== 'running')) return;
   writeFileRunStatus(runId, {
@@ -468,46 +482,98 @@ function heartbeatLiveRun(runId: string): void {
     pid: live.child.pid ?? prev.pid,
     last_line: prev.last_line ?? lastLogLine(runId),
     started_at: prev.started_at,
+    reason: prev.reason,
   }, { emitPhase: false });
 }
 
-function onClaudeExit(
+async function onClaudeExit(
+  run: Run,
+  agent: Agent,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): Promise<void> {
+  const resultPath = resultPathForRun(run, agent.workspace);
+  const live = liveRuns.get(run.id);
+  const pgid = live?.child.pid;
+
+  if (!readRunResult(resultPath) && pgid) {
+    const prev = readFileRunStatus(run.id);
+    if (prev && (prev.phase === 'starting' || prev.phase === 'running')) {
+      writeFileRunStatus(run.id, {
+        phase: prev.phase,
+        reason: 'Waiting for Claude descendant processes',
+        last_line: prev.last_line,
+        pid: prev.pid,
+        started_at: prev.started_at,
+      }, { taskId: run.task_id, agentId: agent.id, emitPhase: false });
+    }
+    await waitForProcessGroup(pgid, {
+      excludePids: [pgid],
+      shouldStop: () => !liveRuns.has(run.id) || readRunResult(resultPath) !== null,
+    });
+  }
+
+  if (!liveRuns.has(run.id)) return;
+
+  stopLiveRun(run.id, true);
+  settleFileRunAfterClaude(run, agent, code, signal);
+}
+
+function settleFileRunAfterClaude(
   run: Run,
   agent: Agent,
   code: number | null,
   signal: NodeJS.Signals | null,
 ): void {
-  stopLiveRun(run.id, true);
   const resultPath = resultPathForRun(run, agent.workspace);
-  const parsed = readRunResult(resultPath);
-  if (parsed?.verdict === 'PASS') {
-    completeFileRun(run, agent, 'done', parsed.reason || 'Completed');
+  const fromFile = readRunResult(resultPath);
+  if (fromFile) {
+    completeFileRun(
+      run,
+      agent,
+      fromFile.verdict === 'PASS' ? 'done' : 'failed',
+      fromFile.reason || (fromFile.verdict === 'PASS' ? 'Completed' : 'Claude wrote RESULT: FAIL'),
+    );
     return;
   }
 
-  const reason = parsed?.verdict === 'FAIL'
-    ? (parsed.reason || 'Claude wrote RESULT: FAIL')
-    : signal
-      ? `Claude exited on ${signal} without a parseable RESULT file`
-      : `Claude exited (${code ?? 'unknown'}) without a parseable RESULT file`;
-  settleRunResultFile(resultPath, reason, { forceFail: parsed?.verdict !== 'FAIL' });
-  completeFileRun(run, agent, 'failed', reason);
+  const fromLog = parseResultLineFromOutput(readCliLog(run.id) ?? '');
+  if (fromLog) {
+    writeRunResult(
+      resultPath,
+      fromLog.verdict,
+      fromLog.reason || (fromLog.verdict === 'PASS' ? 'Completed' : 'Claude wrote RESULT: FAIL'),
+    );
+    completeFileRun(
+      run,
+      agent,
+      fromLog.verdict === 'PASS' ? 'done' : 'failed',
+      fromLog.reason || (fromLog.verdict === 'PASS' ? 'Completed' : 'Claude wrote RESULT: FAIL'),
+    );
+    return;
+  }
+
+  const reason = signal
+    ? `Claude exited on ${signal} without a parseable RESULT`
+    : `Claude exited (${code ?? 'unknown'}) without a parseable RESULT`;
+  completeFileRun(run, agent, 'incomplete', reason);
 }
 
 function completeFileRun(
   run: Run,
   agent: Agent,
-  phase: 'done' | 'failed',
+  phase: 'done' | 'failed' | 'incomplete',
   reason: string,
 ): void {
   const resultPath = resultPathForRun(run, agent.workspace);
   const parsed = readRunResult(resultPath);
-  const usedPhase = parsed?.verdict === 'PASS' ? 'done' : 'failed';
-  if (usedPhase === 'failed' && parsed?.verdict !== 'FAIL') {
-    settleRunResultFile(resultPath, reason, { forceFail: true });
-  }
-  const final = readRunResult(resultPath);
-  const usedReason = final?.reason || reason;
+  const usedPhase: FileRunnerPhase = parsed?.verdict === 'PASS'
+    ? 'done'
+    : parsed?.verdict === 'FAIL'
+      ? 'failed'
+      : 'incomplete';
+  void phase;
+  const usedReason = parsed?.reason || reason;
   writeFileRunStatus(run.id, {
     phase: usedPhase,
     reason: usedReason,
@@ -515,14 +581,14 @@ function completeFileRun(
     started_at: readFileRunStatus(run.id)?.started_at,
   }, { taskId: run.task_id, agentId: agent.id });
 
-  const exitCode = usedPhase === 'done' ? 0 : exitCodeForVerdict('FAIL');
+  const exitCode = usedPhase === 'done' ? 0 : 1;
   finishRun(run.id, exitCode);
   emit(usedPhase === 'done' ? 'run.finished' : 'run.failed', 'run', run.id, {
     agent_id: agent.id,
     task_id: run.task_id,
     exit_code: exitCode,
     runner: FILE_RUNNER_MODE,
-    result: usedPhase === 'done' ? 'PASS' : 'FAIL',
+    result: parsed?.verdict ?? null,
     result_reason: usedReason,
     phase: usedPhase,
   });
@@ -599,6 +665,79 @@ function lastNonEmptyLine(text: string): string | undefined {
     if (trimmed) return trimmed.slice(0, 240);
   }
   return undefined;
+}
+
+export function listProcessGroupPids(pgid: number): number[] {
+  if (!Number.isInteger(pgid) || pgid <= 0) return [];
+  const fromProc = listProcessGroupFromProc(pgid);
+  if (fromProc !== null) return fromProc;
+  return listProcessGroupFromPs(pgid);
+}
+
+function listProcessGroupFromProc(pgid: number): number[] | null {
+  try {
+    const entries = fs.readdirSync('/proc');
+    const pids: number[] = [];
+    for (const name of entries) {
+      if (!/^\d+$/.test(name)) continue;
+      try {
+        const stat = fs.readFileSync(path.join('/proc', name, 'stat'), 'utf8');
+        const closeParen = stat.lastIndexOf(')');
+        if (closeParen < 0) continue;
+        const rest = stat.slice(closeParen + 2).split(' ');
+        const pgrp = Number(rest[2]);
+        if (pgrp === pgid) pids.push(Number(name));
+      } catch {
+        // Process vanished between readdir and read.
+      }
+    }
+    return pids;
+  } catch {
+    return null;
+  }
+}
+
+function listProcessGroupFromPs(pgid: number): number[] {
+  try {
+    const out = execFileSync('ps', ['-o', 'pid=', '-g', String(pgid)], {
+      encoding: 'utf8',
+      timeout: 2000,
+    });
+    return out
+      .split(/\s+/)
+      .map((value) => Number(value))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
+  } catch {
+    return [];
+  }
+}
+
+export async function waitForProcessGroup(
+  pgid: number,
+  opts: {
+    excludePids?: number[];
+    shouldStop?: () => boolean;
+    listPids?: (pgid: number) => number[];
+    pollMs?: number;
+    timeoutMs?: number;
+  } = {},
+): Promise<void> {
+  const listPids = opts.listPids ?? testHooks.listProcessGroupPids ?? listProcessGroupPids;
+  const pollMs = opts.pollMs ?? testHooks.processTreePollMs ?? FILE_RUNNER_PROCESS_TREE_POLL_MS;
+  const timeoutMs = opts.timeoutMs ?? testHooks.processTreeTimeoutMs ?? FILE_RUNNER_PROCESS_TREE_MS;
+  const exclude = new Set(opts.excludePids ?? []);
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    if (opts.shouldStop?.()) return;
+    const remaining = listPids(pgid).filter((pid) => !exclude.has(pid));
+    if (remaining.length === 0) return;
+    await delay(pollMs);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function killLiveProcess(live: LiveFileRun): void {

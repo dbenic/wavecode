@@ -70,7 +70,12 @@ transcript scrape. API fields are a convenience; the file is the source
 of truth. Idle, a collapsed TUI ("reviewed by another AI"), short
 duration, or pane scrape is never PASS. If the agent did not write a
 valid RESULT, WaveCode may overwrite `RESULT: FAIL` or leave the file
-missing. A spawned run with no file, an unparseable last line, or
+missing. File-runner seats (`mode: file`) are stricter about that
+overwrite: after `claude -p` exits, WaveCode waits for descendant
+processes, honors an agent `result.txt` when present, otherwise accepts
+an exact RESULT line from `cli.log`, and a clean exit with no parseable
+RESULT is `incomplete` — never a synthesized product `RESULT: FAIL`.
+A spawned run with no file, an unparseable last line, or
 `RESULT: FAIL` is the orchestrate signal — WaveCode does not auto-retry
 or re-queue that work on the same seat. CountixDev failovers to a Cursor
 cloud agent on the same model. WaveCode stays primary. Referee /

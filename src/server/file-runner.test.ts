@@ -142,6 +142,9 @@ describe('file-runner.ts', () => {
       spawn,
       heartbeatMs: 15_000,
       staleMs: 120_000,
+      listProcessGroupPids: () => [],
+      processTreePollMs: 5,
+      processTreeTimeoutMs: 50,
     });
 
     const run = await fileRunner.executeFileRun(
@@ -174,7 +177,7 @@ describe('file-runner.ts', () => {
     expect(args).toContain('--model');
     expect(args).toContain('opus');
     expect(args.at(-1)).toContain('Add /incoming webhook');
-    expect(opts).toEqual(expect.objectContaining({ cwd: workspace }));
+    expect(opts).toEqual(expect.objectContaining({ cwd: workspace, detached: true }));
     expect(opts.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(child.pid).toBe(4242);
   });
@@ -227,19 +230,125 @@ describe('file-runner.ts', () => {
     );
   });
 
-  it('fails and writes RESULT: FAIL when the result file is missing or unparseable', async () => {
+  it('treats missing result.txt after Claude exit 0 as incomplete, not a product FAIL', async () => {
+    const events = await import('./event-bus.js');
     const { RESULT_FAIL_LINE } = await import('./run-result.js');
     const { db, fileRunner, resultPath, child } = await setupRun();
 
     child.stdout.emit('data', Buffer.from('I am done, trust the pane\n'));
     child.exitCode = 0;
     child.emit('exit', 0, null);
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-file', 1);
+    });
 
-    expect(db.finishRun).toHaveBeenCalledWith('run-file', 1);
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('incomplete');
+    expect(fileRunner.readFileRunStatus('run-file')?.reason).toMatch(/without a parseable RESULT/i);
+    expect(fs.existsSync(resultPath)).toBe(false);
+    expect(events.emit).toHaveBeenCalledWith(
+      'run.failed',
+      'run',
+      'run-file',
+      expect.objectContaining({ result: null, phase: 'incomplete' }),
+    );
+    if (fs.existsSync(resultPath)) {
+      expect(fs.readFileSync(resultPath, 'utf8')).not.toContain(RESULT_FAIL_LINE);
+    }
+  });
+
+  it('counts an exact RESULT: PASS printed on cli.log when result.txt is missing', async () => {
+    const events = await import('./event-bus.js');
+    const { RESULT_PASS_LINE } = await import('./run-result.js');
+    const { db, fileRunner, resultPath, child } = await setupRun();
+
+    child.stdout.emit('data', Buffer.from('Suite finished\nRESULT: PASS\nmore chatter\n'));
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await vi.waitFor(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-file', 0);
+    });
+
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('done');
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe(RESULT_PASS_LINE);
+    expect(events.emit).toHaveBeenCalledWith(
+      'run.finished',
+      'run',
+      'run-file',
+      expect.objectContaining({ result: 'PASS', phase: 'done' }),
+    );
+  });
+
+  it('fails the task when Claude prints RESULT: FAIL on cli.log', async () => {
+    const { RESULT_FAIL_LINE } = await import('./run-result.js');
+    const events = await import('./event-bus.js');
+    const { db, fileRunner, resultPath, child } = await setupRun();
+
+    child.stdout.emit('data', Buffer.from('API suite failed\nRESULT: FAIL\n'));
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await vi.waitFor(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-file', 1);
+    });
+
     expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('failed');
     expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe(RESULT_FAIL_LINE);
-    expect(fs.readFileSync(resultPath, 'utf8')).not.toContain('trust the pane');
+    expect(events.emit).toHaveBeenCalledWith(
+      'run.failed',
+      'run',
+      'run-file',
+      expect.objectContaining({ result: 'FAIL', phase: 'failed' }),
+    );
+  });
+
+  it('lets an agent-written result.txt win over a conflicting RESULT line in stdout', async () => {
+    const { writeRunResult, RESULT_FAIL_LINE } = await import('./run-result.js');
+    const events = await import('./event-bus.js');
+    const { db, fileRunner, resultPath, child } = await setupRun();
+
+    child.stdout.emit('data', Buffer.from('Suite finished\nRESULT: PASS\n'));
+    writeRunResult(resultPath, 'FAIL', 'API suite failed');
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await vi.waitFor(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-file', 1);
+    });
+
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('failed');
+    expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe(RESULT_FAIL_LINE);
+    expect(fs.readFileSync(resultPath, 'utf8')).toContain('API suite failed');
+    expect(events.emit).toHaveBeenCalledWith(
+      'run.failed',
+      'run',
+      'run-file',
+      expect.objectContaining({ result: 'FAIL', phase: 'failed' }),
+    );
+  });
+
+  it('does not finalize while Claude descendant processes are still running', async () => {
+    const { writeRunResult } = await import('./run-result.js');
+    const { db, fileRunner, resultPath, child } = await setupRun();
+    let remaining = [9999];
+    fileRunner.setFileRunnerTestHooks({
+      listProcessGroupPids: () => remaining,
+      processTreePollMs: 10,
+      processTreeTimeoutMs: 2_000,
+    });
+
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(db.finishRun).not.toHaveBeenCalled();
+    expect(fileRunner.hasLiveFileRun('run-file')).toBe(true);
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('running');
+    expect(fileRunner.readFileRunStatus('run-file')?.reason).toMatch(/descendant/i);
+
+    writeRunResult(resultPath, 'PASS', 'Background suite finished');
+    remaining = [];
+    await vi.waitFor(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-file', 0);
+    });
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('done');
   });
 
   it('heartbeats updated_at and fails a stale run with a reason, not a pane guess', async () => {
