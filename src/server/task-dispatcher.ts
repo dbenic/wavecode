@@ -23,6 +23,7 @@ import {
 import { getConfig } from './config.js';
 import { emit } from './event-bus.js';
 import { executeRun } from './runner.js';
+import { executeFileRun, isFileRunnerSeat, stopFileRun } from './file-runner.js';
 import * as sessionManager from './session-manager.js';
 import { buildBriefing } from './briefing-builder.js';
 import { maybeInvokeProjectGate } from './project-gate.js';
@@ -263,8 +264,8 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
         agent_id: agentId,
         attempts: attempts.length,
         result: readRunResult(resultPath)?.verdict ?? null,
-        reason: agentResult.ok && agentResult.data.mode === 'spawned'
-          ? 'spawned_result_not_pass'
+        reason: agentResult.ok && (agentResult.data.mode === 'spawned' || isFileRunnerSeat(agentResult.data))
+          ? (isFileRunnerSeat(agentResult.data) ? 'file_result_not_pass' : 'spawned_result_not_pass')
           : undefined,
       });
 
@@ -312,6 +313,7 @@ export function finalizeRun(
   const finished = finishRun(runId, usedExit);
   if (!finished.ok) return finished;
   import('./runner.js').then((r) => r.clearRunnerRun?.(agentId, runId)).catch(() => {});
+  stopFileRun(runId);
   emit(usedExit === 0 ? 'run.finished' : 'run.failed', 'run', runId, {
     agent_id: agentId,
     exit_code: usedExit,
@@ -420,6 +422,30 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
     const current = getTask(task.id);
     if (current.ok && current.data.status === 'running' && current.data.id !== open[0].task_id) {
       updateTaskStatus(task.id, 'pending');
+    }
+    return;
+  }
+
+  if (isFileRunnerSeat(agent)) {
+    const run = await executeFileRun(agent.id, task.id, prompt);
+    if (!run.ok) {
+      if (run.code === 'busy') {
+        const current = getTask(task.id);
+        if (current.ok && current.data.status === 'running') {
+          updateTaskStatus(task.id, 'pending');
+        }
+        return;
+      }
+      const current = getTask(task.id);
+      if (current.ok && current.data.status === 'running') {
+        updateTaskStatus(task.id, 'failed');
+      }
+      updateAgentStatus(agent.id, 'error');
+      emit('task.failed', 'task', task.id, {
+        agent_id: agent.id,
+        error: run.error,
+        runner: 'file',
+      });
     }
     return;
   }

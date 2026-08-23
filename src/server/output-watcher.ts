@@ -7,6 +7,7 @@ import { verifyTaskCompletion } from './task-verifier.js';
 import { onAuthorAgentIdle } from './code-review.js';
 import { projectRequiresReferee } from './project-gate.js';
 import * as runner from './runner.js';
+import { isFileRunnerSeat } from './file-runner.js';
 import logger from './logger.js';
 
 /** Cooldown between unattended Claude first-run dialog dismissals. */
@@ -94,6 +95,8 @@ export const IDLE_CLOSE_GRACE_MS = 60_000;
 const watchers = new Map<string, WatcherState>();
 
 export function startWatching(agentId: string): void {
+  const agentResult = getAgent(agentId);
+  if (agentResult.ok && isFileRunnerSeat(agentResult.data)) return;
   if (watchers.has(agentId)) return;
 
   const state: WatcherState = {
@@ -165,6 +168,10 @@ function tickInner(agentId: string, state: WatcherState): void {
   }
 
   const agent = agentResult.data;
+  if (isFileRunnerSeat(agent)) {
+    stopWatching(agentId);
+    return;
+  }
   const captureResult = capturePane(agent.tmux_session);
   if (!captureResult.ok) return;
 

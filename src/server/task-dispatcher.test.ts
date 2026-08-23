@@ -47,6 +47,12 @@ vi.mock('./runner.js', () => ({
   executeRun: vi.fn(),
 }));
 
+vi.mock('./file-runner.js', () => ({
+  executeFileRun: vi.fn(),
+  isFileRunnerSeat: (agent: { mode?: string }) => agent.mode === 'file',
+  stopFileRun: vi.fn(),
+}));
+
 vi.mock('./session-manager.js', () => ({
   sendKeys: vi.fn(),
 }));
@@ -155,6 +161,54 @@ describe('task-dispatcher.ts', () => {
       'task-1',
       'Implement auth hardening',
     );
+  });
+
+  it('dispatches file-runner seats through executeFileRun, not send-keys', async () => {
+    await setupBaseMocks(true);
+    const db = await import('./db.js');
+    const runner = await import('./runner.js');
+    const fileRunner = await import('./file-runner.js');
+    const sessionManager = await import('./session-manager.js');
+
+    vi.mocked(db.listAgents).mockReturnValue([
+      {
+        id: 'agent-file',
+        name: 'claude-file',
+        runtime: 'claude-code',
+        tmux_session: 'file:claude-file',
+        workspace: '/tmp/claude-file',
+        mode: 'file',
+        status: 'idle',
+        created_at: '2026-04-03T00:00:00Z',
+      },
+    ] as never);
+    vi.mocked(db.listTasks).mockImplementation((filters?: { status?: string }) => {
+      const task = {
+        id: 'task-1',
+        agent_id: 'agent-file',
+        prompt: 'Implement auth hardening',
+        status: 'pending' as const,
+        priority: 1,
+        created_at: '2026-04-03T00:00:00Z',
+        goal_id: null,
+      };
+      return filters?.status === 'pending' ? [task] : [task];
+    });
+    vi.mocked(fileRunner.executeFileRun).mockResolvedValue({ ok: true, data: { id: 'run-file' } } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.resetDispatcherForTest();
+    await dispatcher.dispatchNext({ manual: true });
+    vi.runAllTimers();
+    await Promise.resolve();
+
+    expect(fileRunner.executeFileRun).toHaveBeenCalledWith(
+      'agent-file',
+      'task-1',
+      'Implement auth hardening',
+    );
+    expect(runner.executeRun).not.toHaveBeenCalled();
+    expect(sessionManager.sendKeys).not.toHaveBeenCalled();
   });
 
   it('does not idle the agent when a later run is still running', async () => {

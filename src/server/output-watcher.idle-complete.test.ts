@@ -430,11 +430,28 @@ describe('output-watcher — idle-complete', () => {
       'Idle close without a parseable RESULT file',
     );
   });
+
+  it('never idle-closes a Claude file-runner seat (no capture-pane)', async () => {
+    const db = await import('./db.js');
+    const dispatcher = await import('./task-dispatcher.js');
+
+    const agent = makeAgent({ mode: 'file', status: 'working', runtime: 'claude-code' });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([makeRun()]);
+
+    startWatching(agent.id);
+    for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
+      tickForTest(agent.id);
+    }
+
+    expect(capturePane).not.toHaveBeenCalled();
+    expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
+  });
 });
 
 function makeAgent(overrides: Partial<{
   id: string;
-  mode: 'adopted' | 'spawned';
+  mode: 'adopted' | 'spawned' | 'file';
   status: 'idle' | 'working' | 'error';
   runtime: string;
 }> = {}) {

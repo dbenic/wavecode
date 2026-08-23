@@ -117,7 +117,7 @@ export default function TaskBoard() {
   }, []);
 
   const handleSSE = useCallback((event: SSEEvent) => {
-    if (isTaskEventType(event.type) || event.type === 'goal.created') {
+    if (isTaskEventType(event.type) || event.type === 'goal.created' || event.type === 'run.phase') {
       refreshTasks();
     }
     if (event.type === 'message.created') {

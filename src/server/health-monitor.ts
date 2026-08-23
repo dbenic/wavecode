@@ -6,6 +6,7 @@ import * as sessionManager from './session-manager.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
 import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
+import { isFileRunnerSeat } from './file-runner.js';
 import logger from './logger.js';
 
 interface AgentHealthState {
@@ -53,6 +54,9 @@ async function checkAll(): Promise<void> {
 
 async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
   const config = getConfig();
+
+  // File-runner seats have no pane. Stale heartbeat is owned by file-runner.ts.
+  if (isFileRunnerSeat(agent)) return;
 
   // Check if tmux session is still alive
   const alive = isSessionAlive(agent.tmux_session);

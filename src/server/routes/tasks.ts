@@ -5,6 +5,7 @@ import {
   getDb,
   insertTask,
   getTask,
+  getRun,
   listTasks,
   updateTaskStatus,
   listRuns,
@@ -14,9 +15,13 @@ import { getConfig } from '../config.js';
 import { emit } from '../event-bus.js';
 import * as taskDispatcher from '../task-dispatcher.js';
 import * as validate from '../validate.js';
-import { presentRun } from '../run-result.js';
+import { presentFileRun, readCliLog } from '../file-runner.js';
 import logger from '../logger.js';
 import type { NodeAppEnv } from '../auth.js';
+
+function presentTaskRun(run: { id: string; result_path?: string | null }) {
+  return presentFileRun(run);
+}
 
 function normalizeDependencyIds(dependsOn?: string[]): string[] {
   if (!dependsOn) return [];
@@ -37,11 +42,19 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     const agentId = c.req.query('agent_id');
     const tasks = listTasks({ status: status || undefined, agent_id: agentId || undefined });
 
-    return c.json(tasks.map((task) => ({
-      ...task,
-      dependencies: taskDispatcher.getDependencies(task.id),
-      dependents: taskDispatcher.getDependents(task.id),
-    })));
+    return c.json(tasks.map((task) => {
+      const latest = listRuns({ task_id: task.id })[0];
+      const presented = latest ? presentTaskRun(latest) : null;
+      return {
+        ...task,
+        dependencies: taskDispatcher.getDependencies(task.id),
+        dependents: taskDispatcher.getDependents(task.id),
+        run_phase: presented?.phase ?? null,
+        result: presented?.result ?? null,
+        result_reason: presented?.result_reason ?? null,
+        latest_run: presented,
+      };
+    }));
   });
 
   app.get('/api/tasks/:id', (c) => {
@@ -53,7 +66,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       ...task,
       dependencies: taskDispatcher.getDependencies(task.id),
       dependents: taskDispatcher.getDependents(task.id),
-      runs: listRuns({ task_id: task.id }).map(presentRun),
+      runs: listRuns({ task_id: task.id }).map(presentTaskRun),
     });
   });
 
@@ -232,7 +245,24 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   app.get('/api/tasks/:id/runs', (c) => {
-    return c.json(listRuns({ task_id: c.req.param('id') }).map(presentRun));
+    return c.json(listRuns({ task_id: c.req.param('id') }).map(presentTaskRun));
+  });
+
+  app.get('/api/runs/:id/log', (c) => {
+    const result = getRun(c.req.param('id'));
+    if (!result.ok) return c.json({ error: result.error }, 404);
+    const presented = presentFileRun(result.data, { includeLog: true });
+    return c.json({
+      run_id: result.data.id,
+      path: presented.log_path,
+      log: presented.log ?? readCliLog(result.data.id),
+    });
+  });
+
+  app.get('/api/runs/:id', (c) => {
+    const result = getRun(c.req.param('id'));
+    if (!result.ok) return c.json({ error: result.error }, 404);
+    return c.json(presentFileRun(result.data, { includeLog: true }));
   });
 
   app.post('/api/dispatch', async (c) => {

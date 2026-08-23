@@ -392,6 +392,50 @@ describe('task routes', () => {
     });
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('GET /api/runs/:id exposes phase, result, and cli.log', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { writeRunResult, resolveRunResultPath } = await import('../run-result.js');
+    const fileRunner = await import('../file-runner.js');
+    const db = await import('../db.js');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-run-card-'));
+    const resultPath = path.join(dir, 'result.txt');
+    writeRunResult(resultPath, 'PASS', 'Webhook added');
+    const runId = path.basename(path.dirname(resolveRunResultPath('run-card')));
+    void runId;
+    fs.mkdirSync(path.dirname(fileRunner.statusPathFor('run-card')), { recursive: true });
+    fileRunner.writeFileRunStatus('run-card', {
+      phase: 'done',
+      started_at: '2026-08-23T00:00:00.000Z',
+      reason: 'Webhook added',
+    }, { emitPhase: false });
+    fs.writeFileSync(fileRunner.cliLogPathFor('run-card'), 'claude -p started\n', 'utf8');
+    vi.mocked(db.getRun).mockReturnValue({
+      ok: true,
+      data: {
+        id: 'run-card',
+        task_id: 'task-1',
+        agent_id: 'agent-file',
+        result_path: resultPath,
+      },
+    } as never);
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/runs/run-card', 'GET');
+    expect(response.status).toBe(200);
+    expect(response.json).toMatchObject({
+      id: 'run-card',
+      result: 'PASS',
+      phase: 'done',
+      log: expect.stringContaining('claude -p started'),
+    });
+    const logResponse = await requestJson(app, '/api/runs/run-card/log', 'GET');
+    expect(logResponse.json.log).toContain('claude -p started');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 async function createTaskApp() {

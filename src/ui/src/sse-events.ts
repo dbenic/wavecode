@@ -19,6 +19,7 @@ export const SSE_EVENT_TYPES = [
   'task.unblocked',
   'task.retrying',
   'run.started',
+  'run.phase',
   'run.finished',
   'run.failed',
   'heartbeat',

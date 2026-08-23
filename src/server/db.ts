@@ -21,7 +21,7 @@ export interface Agent {
   runtime: string;  // 'claude-code' | 'codex' | 'aider' | 'aider-qwen' | 'aider-deepseek' | any runtime from config
   tmux_session: string;
   workspace: string | null;
-  mode: 'adopted' | 'spawned';
+  mode: 'adopted' | 'spawned' | 'file';
   status: 'idle' | 'working' | 'error';
   model: string | null;       // pinned LLM model (e.g. 'claude-opus-5', 'grok-4.6'); null = runtime default
   effort: EffortLevel | null; // pinned reasoning effort; null = runtime default

@@ -205,6 +205,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       branch?: string;
       model?: string | null;
       effort?: EffortLevel | null;
+      runner?: 'tmux' | 'file';
     }>();
 
     const spawnValidation = validate.validateSpawnBody(body);
@@ -222,6 +223,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       workspace: agent.workspace,
       model: agent.model,
       effort: agent.effort,
+      runner: agent.mode === 'file' ? 'file' : 'tmux',
     });
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent spawned');

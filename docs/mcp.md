@@ -81,7 +81,7 @@ logs to stderr only.
 | Tool | What it does |
 |---|---|
 | `list_agents` | All agents: runtime, status, pinned model/effort, last output line |
-| `spawn_agent` | Create an agent in tmux. `model`/`effort` pin its LLM (see below) |
+| `spawn_agent` | Create an agent. Default is tmux. `runner=file` is a Claude file-runner seat (no send-keys). `model`/`effort` pin its LLM (see below) |
 | `pin_agent` | Change an agent's model/effort pin (`null` clears; applies on relaunch) |
 | `kill_agent` | Terminate a spawned agent's session and remove it |
 | `stop_all` | **Emergency stop**: kill spawned, interrupt adopted, disable auto-dispatch |
@@ -94,8 +94,8 @@ logs to stderr only.
 |---|---|
 | `create_task` | Queue work; `depends_on` builds the DAG; `agent_id` pins the assignee; optional `goal_id` (ULID or `external_id`) links a child; `hold:true` skips auto-dispatch. After a file share, put the artifact id and `attached_path` in the prompt |
 | `list_tasks` | Tasks by status |
-| `get_task` | One task plus runs, including `result_path` / `result` / `result_reason` from `runs/<run_id>/result.txt` |
-| `get_run_result` | Orchestrate result for one run (`GET /api/runs/:id/result`). Missing or unparseable is not PASS |
+| `get_task` | One task plus runs, including `result_path` / `result` / `result_reason` from `runs/<run_id>/result.txt`, and `phase` / `log_path` for file-runner seats |
+| `get_run_result` | Orchestrate result for one run (`GET /api/runs/:id/result`). Includes `phase` / `log_path` for file-runner seats. Missing or unparseable is not PASS |
 
 ### Goals
 
