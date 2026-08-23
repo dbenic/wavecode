@@ -11,7 +11,9 @@
  * did not write a valid RESULT, WaveCode may overwrite with FAIL or
  * leave the file missing. The Claude file-runner must not synthesize
  * a product RESULT: FAIL after a clean Claude exit — that is
- * incomplete / runner error, not an agent verdict.
+ * incomplete / runner error, not an agent verdict. The file-runner
+ * stays in phase running while leftover tests/work are still in
+ * flight; it still does not invent RESULT: FAIL.
  *
  * The file is the source of truth. API fields are a convenience.
  * Idle-close FAIL plus a later parseable RESULT: PASS is reconciled

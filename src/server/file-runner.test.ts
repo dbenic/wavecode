@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,6 +85,12 @@ describe('file-runner.ts', () => {
     prompt?: string;
     child?: FakeChild;
     resultPath?: string;
+    hooks?: {
+      listProcessGroupPids?: () => number[];
+      listWorktreePids?: () => number[];
+      processTreePollMs?: number;
+      processTreeTimeoutMs?: number;
+    };
   } = {}) {
     const db = await import('./db.js');
     const fileRunner = await import('./file-runner.js');
@@ -143,8 +150,10 @@ describe('file-runner.ts', () => {
       heartbeatMs: 15_000,
       staleMs: 120_000,
       listProcessGroupPids: () => [],
+      listWorktreePids: () => [],
       processTreePollMs: 5,
       processTreeTimeoutMs: 50,
+      ...overrides.hooks,
     });
 
     const run = await fileRunner.executeFileRun(
@@ -330,6 +339,7 @@ describe('file-runner.ts', () => {
     let remaining = [9999];
     fileRunner.setFileRunnerTestHooks({
       listProcessGroupPids: () => remaining,
+      listWorktreePids: () => [],
       processTreePollMs: 10,
       processTreeTimeoutMs: 2_000,
     });
@@ -341,7 +351,7 @@ describe('file-runner.ts', () => {
     expect(db.finishRun).not.toHaveBeenCalled();
     expect(fileRunner.hasLiveFileRun('run-file')).toBe(true);
     expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('running');
-    expect(fileRunner.readFileRunStatus('run-file')?.reason).toMatch(/descendant/i);
+    expect(fileRunner.readFileRunStatus('run-file')?.reason).toBe(fileRunner.FILE_RUNNER_WAITING_FOR_TESTS);
 
     writeRunResult(resultPath, 'PASS', 'Background suite finished');
     remaining = [];
@@ -349,6 +359,92 @@ describe('file-runner.ts', () => {
       expect(db.finishRun).toHaveBeenCalledWith('run-file', 0);
     });
     expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('done');
+  });
+
+  it('does not finalize incomplete while last_line says tests are running; later result.txt PASS wins', async () => {
+    const { writeRunResult } = await import('./run-result.js');
+    const { db, fileRunner, resultPath, child } = await setupRun({
+      hooks: { processTreePollMs: 10, processTreeTimeoutMs: 2_000 },
+    });
+
+    child.stdout.emit('data', Buffer.from(
+      "Integration tests are running against the real Postgres container; I'll pick up the results as soon as the run finishes.\n",
+    ));
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(db.finishRun).not.toHaveBeenCalled();
+    expect(fileRunner.hasLiveFileRun('run-file')).toBe(true);
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('running');
+    expect(fileRunner.readFileRunStatus('run-file')?.reason).toBe(fileRunner.FILE_RUNNER_WAITING_FOR_TESTS);
+    expect(fileRunner.readFileRunStatus('run-file')?.last_line).toMatch(/Integration tests are running/i);
+
+    writeRunResult(resultPath, 'PASS', 'Suite finished after Claude walked away');
+    await vi.waitFor(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-file', 0);
+    });
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('done');
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).not.toBe('incomplete');
+  });
+
+  it('does not finalize while worktree test children remain after leaving the process group', async () => {
+    const { writeRunResult } = await import('./run-result.js');
+    const { db, fileRunner, resultPath, child } = await setupRun();
+    let remaining = [7777];
+    fileRunner.setFileRunnerTestHooks({
+      listProcessGroupPids: () => [],
+      listWorktreePids: () => remaining,
+      processTreePollMs: 10,
+      processTreeTimeoutMs: 2_000,
+    });
+
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(db.finishRun).not.toHaveBeenCalled();
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('running');
+    expect(fileRunner.readFileRunStatus('run-file')?.reason).toBe(fileRunner.FILE_RUNNER_WAITING_FOR_TESTS);
+
+    writeRunResult(resultPath, 'PASS', 'Worktree vitest finished');
+    remaining = [];
+    await vi.waitFor(() => {
+      expect(db.finishRun).toHaveBeenCalledWith('run-file', 0);
+    });
+    expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('done');
+  });
+
+  it('treats last_line that says tests are still running as leftover work', async () => {
+    const { looksLikeInFlightWork } = await import('./file-runner.js');
+    expect(looksLikeInFlightWork(
+      "Integration tests are running against the real Postgres container; I'll pick up the results as soon as the run finishes.",
+    )).toBe(true);
+    expect(looksLikeInFlightWork('The suite is still running')).toBe(true);
+    expect(looksLikeInFlightWork('I am done, trust the pane')).toBe(false);
+    expect(looksLikeInFlightWork('RESULT: PASS')).toBe(false);
+    expect(looksLikeInFlightWork('Reviewed auth.ts; 2 issues remain')).toBe(false);
+  });
+
+  it('lists leftover node processes whose cwd is the worktree', async () => {
+    const { listWorktreePids } = await import('./file-runner.js');
+    const workspace = tmpDir();
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      cwd: workspace,
+      stdio: 'ignore',
+      detached: true,
+    });
+    try {
+      expect(child.pid).toBeTruthy();
+      await vi.waitFor(() => {
+        expect(listWorktreePids(workspace)).toContain(child.pid);
+      });
+      expect(listWorktreePids(path.join(workspace, 'missing-subdir'))).not.toContain(child.pid);
+    } finally {
+      if (child.pid) {
+        try { process.kill(child.pid, 'SIGTERM'); } catch { /* already gone */ }
+      }
+    }
   });
 
   it('heartbeats updated_at and fails a stale run with a reason, not a pane guess', async () => {
