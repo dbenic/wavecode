@@ -17,6 +17,12 @@ import path from 'node:path';
 import { getConfig } from './config.js';
 import { startRunner, stopRunner } from './runner.js';
 import { createWorktree, launchRuntimeInNewSession } from './runtime-launcher.js';
+import {
+  ensureClaudeMd,
+  fileRunnerSessionName,
+  isFileRunnerSeat,
+  stopFileRunsForAgent,
+} from './file-runner.js';
 import * as tmux from './tmux.js';
 
 export interface TmuxSession {
@@ -66,6 +72,11 @@ export interface SpawnOptions {
   model?: string | null;
   /** Pinned reasoning effort level — recorded on the agent */
   effort?: EffortLevel | null;
+  /**
+   * `file` creates a Claude file-runner seat (no tmux, no send-keys).
+   * Default `tmux` keeps the existing spawned/adopted path.
+   */
+  runner?: 'tmux' | 'file';
 }
 
 export function spawnAgent(opts: SpawnOptions): Result<Agent> {
@@ -86,8 +97,8 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
 
   const sessionName = `wc-${opts.name}`;
 
-  // Check session name not taken
-  if (tmux.hasSession(sessionName)) {
+  // File-runner seats do not own a tmux session.
+  if (opts.runner !== 'file' && tmux.hasSession(sessionName)) {
     return { ok: false, error: `tmux session '${sessionName}' already exists` };
   }
 
@@ -127,6 +138,23 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
       ok: false,
       error: 'Spawned agents require a workspace. Configure paths.projects_root or provide a repo/workspace.',
     };
+  }
+
+  if (opts.runner === 'file') {
+    if (opts.runtime !== 'claude-code') {
+      return { ok: false, error: 'File-runner seats require runtime claude-code' };
+    }
+    ensureClaudeMd(workspace);
+    return insertAgent({
+      name: opts.name,
+      runtime: opts.runtime,
+      tmux_session: fileRunnerSessionName(opts.name),
+      workspace,
+      mode: 'file',
+      status: 'idle',
+      model: opts.model ?? null,
+      effort: opts.effort ?? null,
+    });
   }
 
   const launchResult = launchRuntimeInNewSession({
@@ -280,6 +308,11 @@ export function kill(agentId: string): Result<void> {
     return { ok: false, error: 'Cannot kill adopted session. Detach it instead.' };
   }
 
+  if (isFileRunnerSeat(agent)) {
+    stopFileRunsForAgent(agentId, 'File-runner seat killed');
+    return deleteAgent(agentId);
+  }
+
   // Stop runner if active
   stopRunner(agentId);
 
@@ -299,6 +332,9 @@ export function detach(agentId: string): Result<Agent> {
   if (!agentResult.ok) return agentResult;
 
   stopRunner(agentId);
+  if (isFileRunnerSeat(agentResult.data)) {
+    stopFileRunsForAgent(agentId, 'File-runner seat detached');
+  }
 
   const deleted = deleteAgent(agentId);
   if (!deleted.ok) return { ok: false, error: deleted.error };
@@ -323,7 +359,7 @@ export function stopAll(): StopAllSummary {
 
   for (const agent of listAgents()) {
     try {
-      if (agent.mode === 'spawned') {
+      if (agent.mode === 'spawned' || isFileRunnerSeat(agent)) {
         const result = kill(agent.id);
         if (result.ok) summary.killed.push(agent.id);
         else summary.errors.push({ agent: agent.name, error: result.error });
@@ -344,6 +380,9 @@ export function sendKeys(agentId: string, text: string): Result<void> {
   if (!agentResult.ok) return { ok: false, error: agentResult.error };
 
   const agent = agentResult.data;
+  if (isFileRunnerSeat(agent)) {
+    return { ok: false, error: 'File-runner seats do not accept send-keys' };
+  }
   if (!tmux.hasSession(agent.tmux_session)) {
     return { ok: false, error: `tmux session '${agent.tmux_session}' is not running` };
   }
@@ -370,6 +409,9 @@ export function sendRawKeys(agentId: string, key: string): Result<void> {
   if (!agentResult.ok) return { ok: false, error: agentResult.error };
 
   const agent = agentResult.data;
+  if (isFileRunnerSeat(agent)) {
+    return { ok: false, error: 'File-runner seats do not accept send-keys' };
+  }
   if (!tmux.hasSession(agent.tmux_session)) {
     return { ok: false, error: `tmux session '${agent.tmux_session}' is not running` };
   }

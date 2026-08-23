@@ -173,6 +173,7 @@ program
   .requiredOption('--runtime <type>', 'Agent runtime: claude-code, codex, aider')
   .option('--repo <path>', 'Repository path (creates git worktree)')
   .option('--branch <name>', 'Branch name for worktree')
+  .option('--runner <kind>', 'tmux (default) or file (Claude file-runner, no send-keys)')
   .action((opts) => {
     initDb();
     loadInstalledConfig();
@@ -182,6 +183,7 @@ program
       runtime: opts.runtime,
       repo: opts.repo,
       branch: opts.branch,
+      runner: opts.runner === 'file' ? 'file' : undefined,
     });
 
     if (!result.ok) {
@@ -191,8 +193,12 @@ program
 
     const agent = result.data;
     console.log(`✓ Using workspace: ${agent.workspace ?? 'N/A'}`);
-    console.log(`✓ Started tmux session: ${agent.tmux_session}`);
-    console.log(`✓ Runner wrapper active. Emitting events.`);
+    if (agent.mode === 'file') {
+      console.log(`✓ File-runner seat (no tmux). Tasks write prompt.md and wait on claude -p.`);
+    } else {
+      console.log(`✓ Started tmux session: ${agent.tmux_session}`);
+      console.log(`✓ Runner wrapper active. Emitting events.`);
+    }
   });
 
 // --- queue ---

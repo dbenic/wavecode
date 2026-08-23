@@ -4,6 +4,7 @@ import { getRun, getRunArtifacts } from '../db.js';
 import * as reviewQueue from '../review-queue.js';
 import * as codeReview from '../code-review.js';
 import { presentRunResult } from '../run-result.js';
+import { presentFileRun } from '../file-runner.js';
 import type { NodeAppEnv } from '../auth.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
@@ -86,6 +87,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const result = getRun(runId);
     if (!result.ok) return c.json({ error: result.error }, 404);
     const presented = presentRunResult(result.data.result_path);
+    const fileRun = presentFileRun(result.data);
     return c.json({
       run_id: runId,
       path: presented.result_path,
@@ -93,6 +95,9 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
       result: presented.result,
       reason: presented.result_reason,
       last_line: presented.result_last_line,
+      phase: fileRun.phase,
+      log_path: fileRun.log_path,
+      prompt_path: fileRun.prompt_path,
     });
   });
 }

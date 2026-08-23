@@ -67,6 +67,12 @@ describe('validate.ts — input validation', () => {
       expect(validateSpawnBody({ name: '', runtime: 'claude-code' })).not.toBeNull();
       expect(validateSpawnBody({ name: 'a'.repeat(65), runtime: 'claude-code' })).not.toBeNull();
     });
+
+    it('accepts runner=file for claude-code and rejects it for other runtimes', () => {
+      expect(validateSpawnBody({ name: 'opus-file', runtime: 'claude-code', runner: 'file' })).toBeNull();
+      expect(validateSpawnBody({ name: 'opus-file', runtime: 'codex', runner: 'file' })).toMatch(/claude-code/);
+      expect(validateSpawnBody({ name: 'opus-file', runtime: 'claude-code', runner: 'pane' })).toMatch(/tmux/);
+    });
   });
 
   describe('validateTaskBody', () => {

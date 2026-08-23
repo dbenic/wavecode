@@ -194,7 +194,7 @@ export function shouldAutoRetryFailedRun(opts: {
   agentMode?: string | null;
   resultPath?: string | null;
 }): boolean {
-  if (opts.agentMode !== 'spawned') return true;
+  if (opts.agentMode !== 'spawned' && opts.agentMode !== 'file') return true;
   return readRunResult(opts.resultPath)?.verdict === 'PASS';
 }
 

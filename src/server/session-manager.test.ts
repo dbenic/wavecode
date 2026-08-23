@@ -54,6 +54,13 @@ vi.mock('./runner.js', () => ({
   stopRunner: vi.fn(),
 }));
 
+vi.mock('./file-runner.js', () => ({
+  ensureClaudeMd: vi.fn(() => ({ path: '/tmp/CLAUDE.md', created: true, updated: true })),
+  fileRunnerSessionName: (name: string) => `file:${name}`,
+  isFileRunnerSeat: (agent: { mode?: string }) => agent.mode === 'file',
+  stopFileRunsForAgent: vi.fn(),
+}));
+
 vi.mock('./runtime-launcher.js', () => ({
   createWorktree: vi.fn(),
   launchRuntimeInNewSession: vi.fn(() => ({ ok: true, data: undefined })),
@@ -67,8 +74,18 @@ vi.mock('./tmux.js', () => ({
 }));
 
 describe('session-manager.ts', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const config = await import('./config.js');
+    vi.mocked(config.getConfig).mockImplementation(() => ({
+      paths: { projects_root: '/tmp/projects' },
+      runtimes: {
+        codex: {
+          command: 'codex --full-auto',
+          idle_pattern: '^>\\s*$',
+        },
+      },
+    }) as ReturnType<typeof config.getConfig>);
   });
 
   it('persists the projects_root/<agent-name> directory as the agent workspace', async () => {
@@ -116,6 +133,47 @@ describe('session-manager.ts', () => {
       workspace: '/tmp/projects/co-ops-dev',
     }));
     expect(vi.mocked(runner.startRunner)).toHaveBeenCalledWith('agent-1', 'wc-co-ops-dev', 'codex');
+  });
+
+  it('spawns a Claude file-runner seat without tmux or the pane runner', async () => {
+    const db = await import('./db.js');
+    const config = await import('./config.js');
+    const runtimeLauncher = await import('./runtime-launcher.js');
+    const runner = await import('./runner.js');
+    const fileRunner = await import('./file-runner.js');
+    const sessionManager = await import('./session-manager.js');
+
+    vi.mocked(config.getConfig).mockReturnValueOnce({
+      paths: { projects_root: '/tmp/projects' },
+      runtimes: {
+        'claude-code': {
+          command: 'claude --dangerously-skip-permissions',
+          idle_pattern: '\\$\\s*$',
+          model_flag: '--model',
+        },
+      },
+    } as ReturnType<typeof config.getConfig>);
+    existsSyncMock.mockReturnValue(false);
+
+    const result = sessionManager.spawnAgent({
+      name: 'opus-file',
+      runtime: 'claude-code',
+      runner: 'file',
+      model: 'opus',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(vi.mocked(runtimeLauncher.launchRuntimeInNewSession)).not.toHaveBeenCalled();
+    expect(vi.mocked(runner.startRunner)).not.toHaveBeenCalled();
+    expect(fileRunner.ensureClaudeMd).toHaveBeenCalledWith('/tmp/projects/opus-file');
+    expect(vi.mocked(db.insertAgent)).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'opus-file',
+      runtime: 'claude-code',
+      mode: 'file',
+      tmux_session: 'file:opus-file',
+      workspace: '/tmp/projects/opus-file',
+      model: 'opus',
+    }));
   });
 
   it('records and forwards model/effort pins when spawning', async () => {

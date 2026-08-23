@@ -13,6 +13,7 @@ describe('sse-events', () => {
     expect(SSE_EVENT_TYPES).toContain('agent.output_updated');
     expect(SSE_EVENT_TYPES).toContain('task.dispatched');
     expect(SSE_EVENT_TYPES).toContain('review.ai_completed');
+    expect(SSE_EVENT_TYPES).toContain('run.phase');
   });
 
   it('recognizes known SSE event types', () => {

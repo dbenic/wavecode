@@ -38,8 +38,13 @@ Spawn a managed agent and optional git worktree. `model`/`effort` pin the
 agent's LLM: recorded on the agent, injected into the runtime command via the
 runtime's `model_flag`/`effort_flag`. Effort is one of `low|medium|high|xhigh`.
 
+`runner: "file"` (Claude only) creates a file-runner seat (`mode: file`):
+no tmux session, no send-keys, no capture-pane. Tasks on that seat start
+`claude -p` in the worktree and wait on `result.txt`. Default is the existing
+tmux seat.
+
 Body:
-`{ name: string, runtime: string, repo?: string, branch?: string, model?: string, effort?: string }`
+`{ name: string, runtime: string, repo?: string, branch?: string, model?: string, effort?: string, runner?: "tmux" | "file" }`
 
 ### `PATCH /api/agents/:id`
 Update an agent's model/effort pin. `null` clears a pin; omitted fields are
@@ -155,15 +160,26 @@ Query:
 ### `GET /api/tasks/:id`
 Get one task with dependency and run context. Each run includes
 `result_path`, `result` (`PASS` | `FAIL` | `null`), `result_reason`, and
-`result_last_line` from the parseable per-run result file. `null` means
-missing or unparseable — that is not PASS. Do not infer success from idle,
-pane scrape, or duration.
+`result_last_line` from the parseable per-run result file. File-runner runs
+also include `phase` (`queued` | `starting` | `running` | `done` | `failed`),
+`log_path`, `last_line`, and `prompt_path`. `GET /api/tasks` includes
+`run_phase` / `result` from the latest run so the board can show those
+phases without a screenshot. `null` result means missing or unparseable —
+that is not PASS. Do not infer success from idle, pane scrape, or duration.
+
+### `GET /api/runs/:id`
+One run plus file-runner card fields: `phase`, `result`, `log` (`cli.log`),
+`prompt_path`, `status_path`. Tmux runs still return the result-file fields;
+`phase` is null when there is no `status.json`.
+
+### `GET /api/runs/:id/log`
+Return `{ run_id, path, log }` for `runs/<run_id>/cli.log`.
 
 ### `GET /api/runs/:id/result`
 Read the orchestrate result file for a run.
 
 Response:
-`{ run_id, path, exists, result, reason, last_line }`
+`{ run_id, path, exists, result, reason, last_line, phase, log_path, prompt_path }`
 
 `result` is `PASS`, `FAIL`, or `null`. The file is
 `<data-dir>/runs/<run_id>/result.txt` (overwrite once, capped) and the

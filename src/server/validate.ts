@@ -87,6 +87,7 @@ export function validateSpawnBody(body: {
   repo?: string;
   model?: string | null;
   effort?: string | null;
+  runner?: string;
 }): string | null {
   if (!body.name || typeof body.name !== 'string') {
     return 'name is required';
@@ -99,6 +100,12 @@ export function validateSpawnBody(body: {
   }
   if (!body.runtime || typeof body.runtime !== 'string') {
     return 'runtime is required';
+  }
+  if (body.runner !== undefined && body.runner !== 'tmux' && body.runner !== 'file') {
+    return "runner must be 'tmux' or 'file'";
+  }
+  if (body.runner === 'file' && body.runtime !== 'claude-code') {
+    return 'File-runner seats require runtime claude-code';
   }
   return validatePinFields(body);
 }

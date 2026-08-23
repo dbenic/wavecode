@@ -289,4 +289,47 @@ describe('startup-reconcile.ts', () => {
     expect(result.orphanRunningTasksRequeued).toBe(0);
     expect(result.orphanRunningTasksFailed).toBe(1);
   });
+
+  it('resumes file-runner seats without tmux or pane watchers', async () => {
+    const db = await import('./db.js');
+    const tmux = await import('./tmux.js');
+    const sessionManager = await import('./session-manager.js');
+    const outputWatcher = await import('./output-watcher.js');
+
+    vi.mocked(tmux.hasSession).mockClear();
+    vi.mocked(sessionManager.ensureSpawnedAgentSession).mockClear();
+    vi.mocked(outputWatcher.startWatching).mockClear();
+    vi.mocked(db.listAgents).mockReturnValue([
+      {
+        id: 'agent-file',
+        name: 'opus-file',
+        runtime: 'claude-code',
+        tmux_session: 'file:opus-file',
+        workspace: '/tmp/opus-file',
+        mode: 'file',
+        status: 'working',
+        created_at: '2026-04-03T00:00:00Z',
+      },
+    ] as never);
+    vi.mocked(db.listRuns).mockReturnValue([
+      {
+        id: 'run-file',
+        task_id: 'task-file',
+        agent_id: 'agent-file',
+        status: 'running',
+        result_path: null,
+      },
+    ] as never);
+    vi.mocked(db.listTasks).mockReturnValue([]);
+
+    const reconcile = await import('./startup-reconcile.js');
+    const result = await reconcile.reconcileStartupState();
+
+    expect(tmux.hasSession).not.toHaveBeenCalledWith('file:opus-file');
+    expect(sessionManager.ensureSpawnedAgentSession).not.toHaveBeenCalled();
+    expect(outputWatcher.startWatching).not.toHaveBeenCalled();
+    expect(db.finishRun).toHaveBeenCalledWith('run-file', 1);
+    expect(db.updateAgentStatus).toHaveBeenCalledWith('agent-file', 'idle');
+    expect(result.runsRecovered).toBe(1);
+  });
 });

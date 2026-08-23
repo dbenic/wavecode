@@ -18,6 +18,7 @@ import * as outputWatcher from './output-watcher.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
 import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
+import { isFileRunnerSeat } from './file-runner.js';
 import logger from './logger.js';
 
 export interface StartupReconcileResult {
@@ -59,8 +60,18 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
 
   for (const agent of agents) {
     result.agentsChecked += 1;
-    const sessionAlive = tmux.hasSession(agent.tmux_session);
     const inFlightRuns = runsByAgent.get(agent.id) ?? [];
+
+    if (isFileRunnerSeat(agent)) {
+      if (inFlightRuns.length > 0) {
+        recoverRunningRuns(agent, inFlightRuns, 'fail', result);
+      }
+      updateAgentStatus(agent.id, 'idle');
+      logger.info({ agentId: agent.id, name: agent.name }, 'Resumed file-runner seat during startup reconciliation');
+      continue;
+    }
+
+    const sessionAlive = tmux.hasSession(agent.tmux_session);
 
     if (agent.mode === 'spawned') {
       if (sessionAlive && inFlightRuns.length > 0) {
@@ -186,10 +197,14 @@ function recoverRunningRuns(
         agent_id: agent.id,
         run_id: run.id,
         startup_reconciled: true,
-        reason: agent.mode === 'spawned' ? 'spawned_result_not_pass' : 'startup_recovery',
+        reason: isFileRunnerSeat(agent)
+          ? 'file_result_not_pass'
+          : agent.mode === 'spawned'
+            ? 'spawned_result_not_pass'
+            : 'startup_recovery',
       });
-      // Spawned seat stays primary (idle). Adopted missing work stays error.
-      updateAgentStatus(agent.id, agent.mode === 'spawned' ? 'idle' : 'error');
+      // Spawned/file seats stay primary (idle). Adopted missing work stays error.
+      updateAgentStatus(agent.id, agent.mode === 'spawned' || isFileRunnerSeat(agent) ? 'idle' : 'error');
     }
   }
 }
@@ -219,7 +234,7 @@ function reconcileOrphanRunningTask(task: Task, result: StartupReconcileResult):
   const recoverable = !!(
     agentResult &&
     agentResult.ok &&
-    agentResult.data.mode === 'spawned'
+    (agentResult.data.mode === 'spawned' || isFileRunnerSeat(agentResult.data))
   );
 
   const retryOk = recoverable && shouldAutoRetryFailedRun({

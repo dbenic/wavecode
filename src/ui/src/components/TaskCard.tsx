@@ -14,6 +14,20 @@ const STATUS_CONFIG: Record<
     textClass: 'text-slate-500',
     bgAccent: '',
   },
+  queued: {
+    label: 'QUEUED',
+    borderClass: 'border-slate-600/40',
+    dotClass: 'bg-slate-400',
+    textClass: 'text-slate-400',
+    bgAccent: '',
+  },
+  starting: {
+    label: 'STARTING',
+    borderClass: 'border-amber-500/30',
+    dotClass: 'bg-amber-400 animate-pulse',
+    textClass: 'text-amber-400',
+    bgAccent: 'bg-gradient-to-b from-amber-500/5 to-transparent',
+  },
   running: {
     label: 'RUNNING',
     borderClass: 'border-emerald-500/30 shadow-[0_0_15px_-5px_theme(colors.emerald.500/0.15)]',
@@ -56,7 +70,8 @@ export default function TaskCard({
   onRefresh?: () => void;
 }) {
   const navigate = useNavigate();
-  const cfg = STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
+  const phaseOrStatus = task.run_phase ?? task.status;
+  const cfg = STATUS_CONFIG[phaseOrStatus] ?? STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
   const depCount = task.dependencies?.length ?? 0;
   const depOfCount = task.dependents?.length ?? 0;
   const [expanded, setExpanded] = useState(false);
@@ -145,6 +160,12 @@ export default function TaskCard({
             </span>
           </div>
           <div className="flex items-center gap-1.5">
+            {task.result === 'PASS' && (
+              <span className="text-[9px] font-bold text-cyan-400">PASS</span>
+            )}
+            {task.result === 'FAIL' && (
+              <span className="text-[9px] font-bold text-red-400">FAIL</span>
+            )}
             {task.priority > 0 && (
               <span className="text-[9px] font-bold text-amber-500">P{task.priority}</span>
             )}

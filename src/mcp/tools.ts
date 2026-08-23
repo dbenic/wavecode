@@ -36,14 +36,15 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'spawn_agent',
     description:
-      'Spawn a new CLI coding agent in a tmux session. Pin its LLM with model/effort so the pin is enforced at launch and checked at review time.',
+      "Spawn a new CLI coding agent. Default is a tmux seat. runner='file' creates a Claude file-runner seat (no send-keys / capture-pane). Pin its LLM with model/effort so the pin is enforced at launch and checked at review time.",
     schema: {
       name: z.string().describe('Agent name (letters, numbers, dots, hyphens, underscores)'),
       runtime: z.string().describe("Runtime key from config, e.g. 'claude-code', 'codex', 'aider'"),
-      model: z.string().optional().describe("Pinned model, e.g. 'claude-opus-5' or 'grok-4.6'"),
+      model: z.string().optional().describe("Pinned model, e.g. 'opus', 'claude-opus-5' or 'grok-4.6'"),
       effort: EFFORT.optional().describe('Pinned reasoning effort'),
       repo: z.string().optional().describe('Repo path — a dedicated git worktree is created'),
       branch: z.string().optional().describe('Branch for the worktree (default wc-<name>)'),
+      runner: z.enum(['tmux', 'file']).optional().describe("file = Claude file-runner (claude -p + result.txt). Default tmux."),
     },
     handler: (client, args) => client.post('/agents/spawn', args),
   },
@@ -120,7 +121,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'get_task',
     description:
-      'Get one task plus its runs. Each run includes result_path / result / result_reason from the small per-run RESULT file at runs/<run_id>/result.txt (source of truth; last line RESULT: PASS or RESULT: FAIL). Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration.',
+      'Get one task plus its runs. Each run includes result_path / result / result_reason from the small per-run RESULT file at runs/<run_id>/result.txt (source of truth; last line RESULT: PASS or RESULT: FAIL). File-runner runs also include phase (queued/starting/running/done/failed), log_path, and last_line from status.json / cli.log. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration.',
     schema: {
       task_id: z.string().describe('Task ULID'),
     },
@@ -129,7 +130,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'get_run_result',
     description:
-      'Read the orchestrate result file for a run (GET /api/runs/:id/result). Returns path, exists, result (PASS|FAIL|null), reason, last_line from runs/<run_id>/result.txt. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration. This is the run signal, not the promote gate.',
+      'Read the orchestrate result file for a run (GET /api/runs/:id/result). Returns path, exists, result (PASS|FAIL|null), reason, last_line from runs/<run_id>/result.txt, plus phase / log_path for file-runner seats. GET /api/runs/:id includes the cli.log body. Missing or unparseable is not PASS — do not infer success from idle, pane scrape, or duration. This is the run signal, not the promote gate.',
     schema: {
       run_id: z.string().describe('Run ULID'),
     },

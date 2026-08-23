@@ -6,7 +6,7 @@ export interface Agent {
   runtime: string;
   tmux_session: string;
   workspace: string | null;
-  mode: 'adopted' | 'spawned';
+  mode: 'adopted' | 'spawned' | 'file';
   status: 'idle' | 'working' | 'error';
   model: string | null;
   effort: EffortLevel | null;
@@ -15,6 +15,8 @@ export interface Agent {
   outputVersion?: number;
   watching?: boolean;
 }
+
+export type FileRunnerPhase = 'queued' | 'starting' | 'running' | 'done' | 'failed';
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'blocked';
 
@@ -28,6 +30,9 @@ export interface Task {
   goal_id?: string | null;
   dependencies?: string[];
   dependents?: string[];
+  run_phase?: FileRunnerPhase | null;
+  result?: 'PASS' | 'FAIL' | null;
+  result_reason?: string | null;
 }
 
 export interface GoalRollup {
@@ -64,6 +69,11 @@ export interface Run {
   result?: 'PASS' | 'FAIL' | null;
   result_reason?: string | null;
   result_last_line?: string | null;
+  phase?: FileRunnerPhase | null;
+  pid?: number | null;
+  log_path?: string | null;
+  log?: string | null;
+  last_line?: string | null;
 }
 
 export interface Artifact {

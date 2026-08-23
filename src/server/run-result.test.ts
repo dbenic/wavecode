@@ -196,6 +196,9 @@ describe('run-result', () => {
     expect(shouldAutoRetryFailedRun({ agentMode: 'spawned', resultPath: filePath })).toBe(true);
     expect(shouldAutoRetryFailedRun({ agentMode: 'adopted', resultPath: filePath })).toBe(true);
     expect(shouldAutoRetryFailedRun({ agentMode: 'adopted', resultPath: null })).toBe(true);
+    expect(shouldAutoRetryFailedRun({ agentMode: 'file', resultPath: filePath })).toBe(true);
+    writeRunResult(filePath, 'FAIL', 'Claude wrote RESULT: FAIL');
+    expect(shouldAutoRetryFailedRun({ agentMode: 'file', resultPath: filePath })).toBe(false);
   });
 
   it('briefs the agent to write the file once and never mentions echo|nc or a message bus', () => {
