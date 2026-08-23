@@ -91,7 +91,7 @@ interface LiveFileRun {
   child: ChildProcess;
   heartbeat: ReturnType<typeof setInterval>;
   staleCheck: ReturnType<typeof setInterval>;
-  logStream: fs.WriteStream;
+  logPath: string;
 }
 
 const liveRuns = new Map<string, LiveFileRun>();
@@ -384,7 +384,7 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
   const args = buildClaudePrintArgs({ model: agent.model, prompt });
   const logPath = cliLogPathFor(run.id);
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
-  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  fs.writeFileSync(logPath, '', 'utf8');
 
   const child = spawnFn(testHooks.claudeBin ?? 'claude', args, {
     cwd: agent.workspace,
@@ -403,7 +403,7 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
     'Started Claude file runner',
   );
 
-  attachLogStream(child, logStream, run.id, agent.id, run.task_id);
+  attachLogStream(child, logPath, run.id, agent.id, run.task_id);
 
   const heartbeatMs = testHooks.heartbeatMs ?? FILE_RUNNER_HEARTBEAT_MS;
   const staleMs = testHooks.staleMs ?? FILE_RUNNER_STALE_MS;
@@ -416,7 +416,7 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
     child,
     heartbeat,
     staleCheck,
-    logStream,
+    logPath,
   });
 
   child.on('error', (err) => {
@@ -430,14 +430,18 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
 
 function attachLogStream(
   child: ChildProcess,
-  logStream: fs.WriteStream,
+  logPath: string,
   runId: string,
   agentId: string,
   taskId: string,
 ): void {
   const onChunk = (chunk: Buffer | string) => {
     const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-    if (!logStream.destroyed) logStream.write(text);
+    try {
+      fs.appendFileSync(logPath, text);
+    } catch {
+      // Log file may have been removed during cleanup.
+    }
     const last = lastNonEmptyLine(text);
     if (!last) return;
     const prev = readFileRunStatus(runId);
@@ -522,9 +526,11 @@ function completeFileRun(
     result_reason: usedReason,
     phase: usedPhase,
   });
-  import('./task-dispatcher.js').then((td) => td.onRunComplete(run.id, agent.id)).catch((err) => {
-    logger.warn({ runId: run.id, error: (err as Error).message }, 'onRunComplete failed after file run');
-  });
+  void import('./task-dispatcher.js')
+    .then((td) => td.onRunComplete(run.id, agent.id))
+    .catch((err) => {
+      logger.warn({ runId: run.id, error: (err as Error).message }, 'onRunComplete failed after file run');
+    });
 }
 
 function failFileRun(
@@ -605,18 +611,13 @@ function killLiveProcess(live: LiveFileRun): void {
   }
 }
 
-function stopLiveRun(runId: string, endLog: boolean): void {
+function stopLiveRun(runId: string, _endLog: boolean): void {
   const live = liveRuns.get(runId);
   if (!live) return;
   clearInterval(live.heartbeat);
   clearInterval(live.staleCheck);
-  if (endLog) {
-    try {
-      live.logStream.end();
-    } catch {
-      // ignore
-    }
-  }
+  live.child.stdout?.removeAllListeners('data');
+  live.child.stderr?.removeAllListeners('data');
   liveRuns.delete(runId);
 }
 

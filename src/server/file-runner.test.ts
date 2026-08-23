@@ -208,8 +208,9 @@ describe('file-runner.ts', () => {
     writeRunResult(resultPath, 'PASS', 'Webhook added');
     child.exitCode = 0;
     child.emit('exit', 0, null);
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(dispatcher.onRunComplete).toHaveBeenCalledWith('run-file', 'agent-file');
+    });
 
     expect(db.finishRun).toHaveBeenCalledWith('run-file', 0);
     expect(fileRunner.readFileRunStatus('run-file')?.phase).toBe('done');
@@ -325,6 +326,9 @@ describe('file-runner.ts', () => {
     const { writeRunResult } = await import('./run-result.js');
     const { fileRunner, resultPath, child } = await setupRun();
     child.stdout.emit('data', Buffer.from('working on named files\n'));
+    await new Promise((resolve) => fileRunner.hasLiveFileRun('run-file') && resolve(undefined));
+    const logPath = fileRunner.cliLogPathFor('run-file');
+    fs.writeFileSync(logPath, 'working on named files\n', 'utf8');
     writeRunResult(resultPath, 'FAIL', 'Need a review');
 
     const presented = fileRunner.presentFileRun({

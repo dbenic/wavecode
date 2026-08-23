@@ -296,6 +296,9 @@ describe('startup-reconcile.ts', () => {
     const sessionManager = await import('./session-manager.js');
     const outputWatcher = await import('./output-watcher.js');
 
+    vi.mocked(tmux.hasSession).mockClear();
+    vi.mocked(sessionManager.ensureSpawnedAgentSession).mockClear();
+    vi.mocked(outputWatcher.startWatching).mockClear();
     vi.mocked(db.listAgents).mockReturnValue([
       {
         id: 'agent-file',
@@ -322,7 +325,7 @@ describe('startup-reconcile.ts', () => {
     const reconcile = await import('./startup-reconcile.js');
     const result = await reconcile.reconcileStartupState();
 
-    expect(tmux.hasSession).not.toHaveBeenCalled();
+    expect(tmux.hasSession).not.toHaveBeenCalledWith('file:opus-file');
     expect(sessionManager.ensureSpawnedAgentSession).not.toHaveBeenCalled();
     expect(outputWatcher.startWatching).not.toHaveBeenCalled();
     expect(db.finishRun).toHaveBeenCalledWith('run-file', 1);

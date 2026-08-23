@@ -60,7 +60,6 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
 
   for (const agent of agents) {
     result.agentsChecked += 1;
-    const sessionAlive = tmux.hasSession(agent.tmux_session);
     const inFlightRuns = runsByAgent.get(agent.id) ?? [];
 
     if (isFileRunnerSeat(agent)) {
@@ -71,6 +70,8 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
       logger.info({ agentId: agent.id, name: agent.name }, 'Resumed file-runner seat during startup reconciliation');
       continue;
     }
+
+    const sessionAlive = tmux.hasSession(agent.tmux_session);
 
     if (agent.mode === 'spawned') {
       if (sessionAlive && inFlightRuns.length > 0) {

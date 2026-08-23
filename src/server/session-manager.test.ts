@@ -74,8 +74,18 @@ vi.mock('./tmux.js', () => ({
 }));
 
 describe('session-manager.ts', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const config = await import('./config.js');
+    vi.mocked(config.getConfig).mockImplementation(() => ({
+      paths: { projects_root: '/tmp/projects' },
+      runtimes: {
+        codex: {
+          command: 'codex --full-auto',
+          idle_pattern: '^>\\s*$',
+        },
+      },
+    }) as ReturnType<typeof config.getConfig>);
   });
 
   it('persists the projects_root/<agent-name> directory as the agent workspace', async () => {
@@ -133,7 +143,7 @@ describe('session-manager.ts', () => {
     const fileRunner = await import('./file-runner.js');
     const sessionManager = await import('./session-manager.js');
 
-    vi.mocked(config.getConfig).mockReturnValue({
+    vi.mocked(config.getConfig).mockReturnValueOnce({
       paths: { projects_root: '/tmp/projects' },
       runtimes: {
         'claude-code': {
