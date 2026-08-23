@@ -40,10 +40,14 @@ runtime's `model_flag`/`effort_flag`. Effort is one of `low|medium|high|xhigh`.
 
 `runner: "file"` (Claude only) creates a file-runner seat (`mode: file`):
 no tmux session, no send-keys, no capture-pane. Tasks on that seat start
-`claude -p` in the worktree, wait for the process tree, then read
+`claude -p` in the worktree, wait for leftover work (process-group
+descendants, worktree npm/vitest/node/docker/postgres children, or
+`cli.log` / `last_line` saying tests are still running), then read
 `result.txt` (source of truth when present) or an exact RESULT line from
-`cli.log`. A clean Claude exit with no parseable RESULT is `incomplete`,
-not a synthesized product `RESULT: FAIL`. Default is the existing tmux seat.
+`cli.log`. The run stays `running` (`waiting for tests`) while that work
+is in flight. A clean Claude exit with no leftover work and no parseable
+RESULT is `incomplete`, not a synthesized product `RESULT: FAIL`.
+Default is the existing tmux seat.
 
 Body:
 `{ name: string, runtime: string, repo?: string, branch?: string, model?: string, effort?: string, runner?: "tmux" | "file" }`
@@ -167,9 +171,11 @@ also include `phase` (`queued` | `starting` | `running` | `done` | `failed` | `i
 `log_path`, `last_line`, and `prompt_path`. `GET /api/tasks` includes
 `run_phase` / `result` from the latest run so the board can show those
 phases without a screenshot. `null` result means missing or unparseable —
-that is not PASS, and for a file-runner clean exit it is `incomplete`
-(wrapper state) rather than a product `RESULT: FAIL`. Do not infer
-success from idle, pane scrape, or duration.
+that is not PASS, and for a file-runner clean exit with no leftover
+work it is `incomplete` (wrapper state) rather than a product
+`RESULT: FAIL`. File-runner stays `running` (`waiting for tests`)
+while leftover work is in flight. Do not infer success from idle,
+pane scrape, or duration.
 
 ### `GET /api/runs/:id`
 One run plus file-runner card fields: `phase`, `result`, `log` (`cli.log`),
