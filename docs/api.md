@@ -163,6 +163,39 @@ List tasks.
 Query:
 `status`, `agent_id`
 
+**Local status CLI (no LLM poll):** on the daemon host, `wavecode status`
+GETs this list plus `GET /api/agents` and `GET /api/runs/:id` (same
+`presentFileRun` fields, same config.yaml token as `wavecode queue`)
+and prints a compact JSON snapshot of file-runner work: running tasks,
+in-flight or just-finished runs (`phase`, `last_line`, `result.txt`
+last line `RESULT: PASS|FAIL` or missing), and seats such as
+`wavepulse-fable-file` / `wavepulse-opus-file` (`idle`/`working`).
+It does not scrape tmux. Missing `result.txt` is reported as missing —
+WaveCode does not invent `RESULT: FAIL`.
+
+Orchestrators (Grok Bot / CountixDev) should run this locally instead
+of waking an LLM to poll `/api/tasks` and `result.txt`. Cron every
+minute on the VPS:
+
+```bash
+wavecode status --notify-if-changed
+```
+
+That command always exits 0. It writes
+`<data-dir>/status-stamp.json` (sibling of `transcripts_root`, typically
+`~/.wavecode/.wavecode-data/status-stamp.json`) and prints **nothing**
+when the snapshot is unchanged, so cron stays quiet. On a material
+change only it prints a delta JSON and, if ntfy/Telegram/Web Push are
+already configured, emits the same one-line notify. Material changes:
+
+- a parseable `RESULT: PASS` or `RESULT: FAIL` last line appearing
+- phase becoming `done`, `failed`, or `incomplete`
+- in-flight with no `result.txt` for 40 minutes (`STALE`)
+
+Grok Bot should wake only when that stamp reports a RESULT or STALE
+line. `wavecode status --watch` is the same loop in the foreground.
+Use `wavecode agents` for the human-readable seat table.
+
 ### `GET /api/tasks/:id`
 Get one task with dependency and run context. Each run includes
 `result_path`, `result` (`PASS` | `FAIL` | `null`), `result_reason`, and

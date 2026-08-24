@@ -212,6 +212,11 @@ cross-reviewing every finished run, and bounding fix rounds all run inside
 the daemon. The MCP client only makes the decisions machines shouldn't —
 what to build, who does it, and what passes.
 
+Do **not** burn an LLM turn polling `list_tasks` / `get_run_result` on a
+timer. On the daemon host, cron `wavecode status --notify-if-changed`
+(see `docs/api.md` and `docs/operating-model.md`) and wake the
+orchestrator only on a RESULT or STALE line.
+
 ### How agents report back (human-to-human style)
 
 Developer agents are CLI processes in tmux; they reach the wire three ways:
