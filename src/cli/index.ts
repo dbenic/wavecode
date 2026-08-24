@@ -77,24 +77,25 @@ program
 // --- status ---
 program
   .command('status')
-  .description('Show all agents summary')
-  .action(() => {
-    initDb();
+  .description('JSON snapshot of file-runner work via the localhost HTTP API (no tmux scrape)')
+  .option('--notify-if-changed', 'Print delta JSON only on RESULT / phase done|failed|incomplete / STALE; silent otherwise')
+  .option('--watch', 'Poll --notify-if-changed until interrupted (same stamp file)')
+  .option('--interval <sec>', 'Watch interval in seconds', '60')
+  .action(async (opts: { notifyIfChanged?: boolean; watch?: boolean; interval?: string }) => {
     loadInstalledConfig();
-    const agents = listAgents();
-
-    if (agents.length === 0) {
-      console.log('No agents managed. Use `wavecode scan` and `wavecode adopt` to get started.');
-      return;
+    if (opts.notifyIfChanged || opts.watch) {
+      initDb();
     }
-
-    console.log(`\n  ${'NAME'.padEnd(20)} ${'RUNTIME'.padEnd(14)} ${'MODE'.padEnd(10)} ${'STATUS'.padEnd(10)} SESSION`);
-    console.log('  ' + '-'.repeat(74));
-    for (const a of agents) {
-      const status = a.status === 'working' ? '● working' : a.status === 'error' ? '✗ error' : '○ idle';
-      console.log(`  ${a.name.padEnd(20)} ${a.runtime.padEnd(14)} ${a.mode.padEnd(10)} ${status.padEnd(10)} ${a.tmux_session}`);
+    const { runFileRunnerStatus } = await import('./file-runner-status.js');
+    const result = await runFileRunnerStatus({
+      notifyIfChanged: Boolean(opts.notifyIfChanged),
+      watch: Boolean(opts.watch),
+      intervalSec: parseInt(opts.interval ?? '60', 10),
+    });
+    if (!result.ok && !opts.notifyIfChanged && !opts.watch) {
+      console.error('Error:', result.error);
+      process.exit(1);
     }
-    console.log('');
   });
 
 // --- agents ---

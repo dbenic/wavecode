@@ -57,9 +57,23 @@ All checks are periodic and automatic; none rely on the agent's honesty:
 | Session liveness | 30 s | `tmux has-session` | spawned + `auto_restart`: session recreated; in-flight work is FAIL (not re-queued on that seat); adopted: `agent.crashed` + push/ntfy/Telegram notification |
 | Hang detection | 30 s | pane content hash unchanged for `hang_timeout_min` while `working` | spawned: session killed → auto-restart cycle, work left FAIL; adopted: `agent.hung` event |
 | Completion verification | on idle | `verify_completion`: a cheap LLM judges the last 30 terminal lines against the task | adopted `failed` verdicts may re-queue (bounded by `max_task_retries`); spawned missing/FAIL does not |
+| File-runner status (host) | 1 min cron | `wavecode status --notify-if-changed` on the daemon host (localhost REST, config.yaml token). Stamp file under the data dir. Silent on no change. | Prints delta JSON + existing ntfy/Telegram one-liner on RESULT, phase `done`/`failed`/`incomplete`, or STALE (running >40 min with no `result.txt`). Orchestrators must not LLM-poll `GET /api/tasks` / `result.txt` on a timer. |
 
 A run's self-reported "success" is never the end of the story — it only
 moves the work into the review pipeline below.
+
+**Orchestrator check is local, not an LLM wake.** Grok Bot / CountixDev
+must not SSH-poll `GET /api/tasks` or `result.txt` every few minutes
+inside an agent turn. Most of those wakes are NO_CHANGE and burn
+tokens. On the WaveCode machine (ci VPS) run
+`wavecode status --notify-if-changed` from cron (every minute). The
+CLI talks to the daemon's existing REST (`GET /api/tasks`,
+`GET /api/runs/:id`, `presentFileRun`) and compares a stamp
+(`<data-dir>/status-stamp.json`). Cron prints nothing when nothing
+changed. Grok Bot wakes only when the stamp reports a `RESULT` or
+`STALE` line. `result.txt` remains the source of truth; missing is
+missing — do not invent `RESULT: FAIL`. This does not replace SSE or
+the in-daemon file-runner heartbeat.
 
 **Orchestrate signal (not promote):** every run has one small file
 (`<data-dir>/runs/<runId>/result.txt`). Written once at the end
