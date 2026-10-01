@@ -453,7 +453,8 @@ describe('file-runner.ts', () => {
     expect(looksLikeInFlightWork('Reviewed auth.ts; 2 issues remain')).toBe(false);
   });
 
-  it('lists leftover node processes whose cwd is the worktree', async () => {
+  // listWorktreePids reads /proc, which only exists on Linux (the deploy target)
+  it.runIf(process.platform === 'linux')('lists leftover node processes whose cwd is the worktree', async () => {
     const { listWorktreePids } = await import('./file-runner.js');
     const workspace = tmpDir();
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {

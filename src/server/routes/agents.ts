@@ -77,9 +77,14 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!access.ok) return c.json({ error: access.error }, 403);
 
     if (body.raw) {
+      // Raw keys (C-c, Escape, Enter) are how a stuck shell gets fixed — never gated.
       const result = sessionManager.sendRawKeys(agentResult.data.id, body.text);
       if (!result.ok) return c.json({ error: result.error }, 500);
     } else {
+      // T0: a prompt typed into a bare shell executes as commands.
+      if (runtimeLiveness.getRuntimeState(agentResult.data) === 'dead') {
+        return c.json({ error: `${runtimeLiveness.RUNTIME_NOT_RUNNING} — relaunch it (or send raw keys) first` }, 409);
+      }
       const result = sessionManager.sendKeys(agentResult.data.id, body.text);
       if (!result.ok) return c.json({ error: result.error }, 500);
     }

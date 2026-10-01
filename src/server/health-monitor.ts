@@ -9,7 +9,7 @@ import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from 
 import { isFileRunnerSeat } from './file-runner.js';
 import { sweepLeases } from './leases.js';
 import { isLoginSeat, sweepLoginSeats } from './login-seats.js';
-import { getRuntimeState, relaunchRuntime } from './runtime-liveness.js';
+import { getRuntimeState, noteRuntimeAlive, relaunchRuntime } from './runtime-liveness.js';
 import logger from './logger.js';
 
 interface AgentHealthState {
@@ -97,9 +97,25 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
   }
 
   // T0: session alive but the runtime TUI exited (bare shell prompt) →
-  // relaunch it in place. Dispatch waits for it to settle; the tick does not.
+  // relaunch it in place. Only for sessions WaveCode launched itself —
+  // adopted sessions belong to a human and must never be typed into.
+  // Dispatch waits for it to settle; the tick does not.
   try {
-    if (getRuntimeState(agent) === 'dead') relaunchRuntime(agent, 'health_check');
+    const state = getRuntimeState(agent);
+    if (state === 'alive') {
+      noteRuntimeAlive(agent.id);
+    } else if (state === 'dead' && agent.mode === 'spawned') {
+      const relaunch = relaunchRuntime(agent, 'health_check');
+      if (!relaunch.ok && agent.status !== 'error') {
+        updateAgentStatus(agent.id, 'error');
+        emit('agent.runtime_relaunch_exhausted', 'agent', agent.id, {
+          name: agent.name,
+          runtime: agent.runtime,
+          error: relaunch.error,
+        });
+        logger.error({ agentId: agent.id, error: relaunch.error }, 'Runtime could not be relaunched — agent marked error');
+      }
+    }
   } catch (e) {
     logger.error({ agentId: agent.id, error: (e as Error).message }, 'Runtime liveness check failed');
   }

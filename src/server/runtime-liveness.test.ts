@@ -191,5 +191,27 @@ describe('runtime-liveness.ts', () => {
       expect(relaunchRuntime(agent(), 'dispatch')).toEqual({ ok: true, data: { sent: true } });
       expect(tmux.sendTextAndEnter).toHaveBeenCalledTimes(2);
     });
+
+    it('stops after MAX_RELAUNCH_ATTEMPTS until the runtime is seen alive again', async () => {
+      const { MAX_RELAUNCH_ATTEMPTS, noteRuntimeAlive, relaunchAttemptsExhausted } = await import('./runtime-liveness.js');
+
+      for (let i = 0; i < MAX_RELAUNCH_ATTEMPTS; i++) {
+        expect(relaunchRuntime(agent(), 'health_check')).toEqual({ ok: true, data: { sent: true } });
+        vi.advanceTimersByTime(31_000);
+      }
+      expect(tmux.sendTextAndEnter).toHaveBeenCalledTimes(MAX_RELAUNCH_ATTEMPTS);
+
+      // Budget exhausted: a fast-failing runtime command is never retyped forever
+      const refused = relaunchRuntime(agent(), 'health_check');
+      expect(refused.ok).toBe(false);
+      expect(refused.ok ? '' : refused.error).toMatch(/exhausted/);
+      expect(relaunchAttemptsExhausted('agent-1')).toBe(true);
+      expect(tmux.sendTextAndEnter).toHaveBeenCalledTimes(MAX_RELAUNCH_ATTEMPTS);
+
+      // Seen alive (e.g. a human fixed it) → budget resets
+      noteRuntimeAlive('agent-1');
+      expect(relaunchAttemptsExhausted('agent-1')).toBe(false);
+      expect(relaunchRuntime(agent(), 'health_check')).toEqual({ ok: true, data: { sent: true } });
+    });
   });
 });

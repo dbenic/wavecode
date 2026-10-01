@@ -37,7 +37,18 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   app.post('/api/ai-reviews/:reviewId/send-fixes', (c) => {
-    const result = codeReview.sendFixesToAgent(c.req.param('reviewId'));
+    // Sending fixes types a prompt into the run's agent — same ownership
+    // rule as a direct send (spec §2 rule 2).
+    const review = codeReview.getReview(c.req.param('reviewId'));
+    if (!review) return c.json({ error: 'Review not found' }, 404);
+    const run = getRun(review.run_id);
+    if (!run.ok) return c.json({ error: run.error }, 404);
+    const agent = getAgent(run.data.agent_id);
+    if (!agent.ok) return c.json({ error: agent.error }, 404);
+    const access = leases.checkAgentAccess(agent.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
+
+    const result = codeReview.sendFixesToAgent(review.id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json({ ok: true });
   });

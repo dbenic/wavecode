@@ -66,7 +66,7 @@ describe('health-monitor.ts', () => {
     vi.restoreAllMocks();
   });
 
-  async function tickWithPane(paneText: string) {
+  async function tickWithPane(paneText: string, mode: 'spawned' | 'adopted' = 'spawned') {
     const db = await import('./db.js');
     const config = await import('./config.js');
     const sessionManager = await import('./session-manager.js');
@@ -77,7 +77,7 @@ describe('health-monitor.ts', () => {
       runtimes: { 'claude-code': { command: 'claude', idle_pattern: '>', model_flag: '--model' } },
     } as never);
     vi.mocked(db.listAgents).mockReturnValue([
-      makeAgent({ id: 'agent-1', name: 'builder', runtime: 'claude-code', mode: 'adopted', status: 'idle', tmux_session: 'wc-builder', model: 'opus' } as never),
+      makeAgent({ id: 'agent-1', name: 'builder', runtime: 'claude-code', mode, status: 'idle', tmux_session: 'wc-builder', model: 'opus' } as never),
     ]);
     vi.mocked(tmux.hasSession).mockReturnValue(true);
     vi.mocked(tmux.capturePane).mockReturnValue({ ok: true, data: paneText });
@@ -94,6 +94,12 @@ describe('health-monitor.ts', () => {
     expect(events.emit).toHaveBeenCalledWith('agent.runtime_relaunched', 'agent', 'agent-1', expect.objectContaining({
       reason: 'health_check', runtime: 'claude-code',
     }));
+  });
+
+  it('never types a relaunch into an adopted (human-owned) session, even at a bare shell (T0)', async () => {
+    const { tmux, events } = await tickWithPane('Bye!\nci@box:~/repo$ ', 'adopted');
+    expect(tmux.sendTextAndEnter).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalledWith('agent.runtime_relaunched', expect.anything(), expect.anything(), expect.anything());
   });
 
   it('leaves an alive runtime TUI alone (T0)', async () => {

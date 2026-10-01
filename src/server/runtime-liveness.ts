@@ -64,19 +64,43 @@ export function getRuntimeState(agent: Pick<Agent, 'tmux_session'>): RuntimeStat
 /** agent id → epoch ms a relaunch was sent (dispatcher and monitor share it). */
 const relaunchedAt = new Map<string, number>();
 
+/**
+ * Consecutive relaunches sent without the runtime ever settling. A command
+ * that fails fast (binary missing, bad flag) returns the pane to the prompt
+ * every tick; without a cap the monitor would retype it forever.
+ */
+export const MAX_RELAUNCH_ATTEMPTS = 3;
+const relaunchAttempts = new Map<string, number>();
+
 export function resetRuntimeLivenessForTest(): void {
   relaunchedAt.clear();
+  relaunchAttempts.clear();
+}
+
+/** Called whenever the runtime is observed alive — clears the attempt budget. */
+export function noteRuntimeAlive(agentId: string): void {
+  relaunchAttempts.delete(agentId);
+}
+
+export function relaunchAttemptsExhausted(agentId: string): boolean {
+  return (relaunchAttempts.get(agentId) ?? 0) >= MAX_RELAUNCH_ATTEMPTS;
 }
 
 /**
  * Type the agent's configured runtime command (with its model/effort pin)
  * into the existing session. Skips if a relaunch was sent within the settle
- * window, so the monitor tick and a dispatch never double-launch.
+ * window, so the monitor tick and a dispatch never double-launch. Refuses
+ * once MAX_RELAUNCH_ATTEMPTS were sent without the runtime coming back.
  */
 export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check' | 'manual'): Result<{ sent: boolean }> {
   const last = relaunchedAt.get(agent.id);
   if (last !== undefined && Date.now() - last < RUNTIME_SETTLE_TIMEOUT_MS) {
     return { ok: true, data: { sent: false } };
+  }
+
+  const attempts = relaunchAttempts.get(agent.id) ?? 0;
+  if (attempts >= MAX_RELAUNCH_ATTEMPTS) {
+    return { ok: false, error: `runtime relaunch attempts exhausted (${attempts}) — check the runtime command for '${agent.runtime}'` };
   }
 
   // Same command as spawn, including the agent's credential profile env
@@ -89,6 +113,7 @@ export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check
   }
 
   relaunchedAt.set(agent.id, Date.now());
+  relaunchAttempts.set(agent.id, attempts + 1);
   emit('agent.runtime_relaunched', 'agent', agent.id, {
     name: agent.name,
     runtime: agent.runtime,

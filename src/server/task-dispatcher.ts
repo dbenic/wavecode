@@ -490,6 +490,9 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       }
       updateAgentStatus(agent.id, 'error');
       emit('task.failed', 'task', task.id, { agent_id: agent.id, error: live.error });
+      // Same bookkeeping as every other failure path: dependents must not
+      // sit in 'pending' forever waiting on a task that will never finish.
+      blockDependents(task.id);
       logger.warn({ agentId: agent.id, taskId: task.id }, 'Dispatch failed — runtime not running');
       return;
     }

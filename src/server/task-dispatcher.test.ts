@@ -129,6 +129,11 @@ describe('task-dispatcher.ts', () => {
           return { all: () => [] };
         }
 
+        // blockDependents() after a failed dispatch — no dependents in this fixture
+        if (sql.includes('SELECT task_id FROM task_dependencies')) {
+          return { all: () => [] };
+        }
+
         throw new Error(`Unexpected SQL in test: ${sql}`);
       },
     } as unknown as ReturnType<typeof db.getDb>);
