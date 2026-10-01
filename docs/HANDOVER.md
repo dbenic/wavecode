@@ -27,7 +27,8 @@ Read in this order:
 
 | Concern | Files |
 |---|---|
-| Schema + CRUD (SQLite, WAL, migrations v1→v9) | `db.ts` |
+| Schema + CRUD (SQLite, WAL, migrations v1→v12) | `db.ts` |
+| Identity: users, hashed tokens, roles, request actor | `users.ts`, `auth.ts`, `request-context.ts`, `routes/users.ts` |
 | Agent lifecycle: scan/adopt/spawn/kill/detach/stopAll | `session-manager.ts`, `runtime-launcher.ts`, `tmux.ts` |
 | Run execution (spawned agents, ndjson over Unix socket) | `runner.ts` |
 | Terminal polling, idle/working detection, auto-complete | `output-watcher.ts` |

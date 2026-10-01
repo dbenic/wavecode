@@ -2,6 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import type { MiddlewareHandler } from 'hono';
 import { getConfig, type WaveConfig } from './config.js';
+import type { User } from './db.js';
+import { runWithActor } from './request-context.js';
+import { canMutate, OWNER_USER, resolveUserByToken } from './users.js';
 
 export interface NodeAppBindings {
   incoming?: IncomingMessage | Http2ServerRequest | {
@@ -10,9 +13,17 @@ export interface NodeAppBindings {
   outgoing?: ServerResponse | Http2ServerResponse | unknown;
 }
 
+export interface NodeAppVariables {
+  /** Authenticated caller; set by `createAuthMiddleware` on every non-public request. */
+  user: User;
+}
+
 export interface NodeAppEnv {
   Bindings: NodeAppBindings;
+  Variables: NodeAppVariables;
 }
+
+const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export interface PublicAuthStatus {
   method: WaveConfig['auth']['method'];
@@ -130,8 +141,21 @@ function hasForwardingHeaders(headers: Headers): boolean {
     || normalizeIp(headers.get('X-Real-IP')) !== null;
 }
 
+export type UserResolver = (token: string | null, fallbackToken: string | null) => User | null;
+
+/**
+ * Authenticate the request and resolve it to a user (spec §1):
+ * - `auth.fallback_token` → synthetic admin `owner`
+ * - a token from `users` → that user
+ * - no/unknown token → 401 in `token` mode; in `tailscale` mode a tailnet
+ *   client without a user token is the trusted `owner` (today's behavior)
+ *
+ * Observers are read-only on `/api/*`: any non-GET/HEAD/OPTIONS → 403.
+ * MCP (`/mcp`) is JSON-RPC over POST, so its per-tool guards live in T3.
+ */
 export function createAuthMiddleware(
   getConfigFn: () => WaveConfig = getConfig,
+  resolveUser: UserResolver = resolveUserByToken,
 ): MiddlewareHandler<NodeAppEnv> {
   return async (c, next) => {
     if (c.req.path === '/api/auth/status') {
@@ -143,31 +167,43 @@ export function createAuthMiddleware(
     const expectedToken = config.auth.fallback_token;
     const token = resolveRequestToken(c.req.path, c.req.raw.headers, c.req.query('access_token'));
 
-    if (expectedToken && token === expectedToken) {
-      await next();
-      return;
+    let user: User | null = null;
+    try {
+      user = resolveUser(token, expectedToken);
+    } catch {
+      // users table unavailable (DB not initialized) — fall back to token-less rules
+      user = token && expectedToken && token === expectedToken ? OWNER_USER : null;
     }
 
-    if (config.auth.method === 'token') {
-      if (!expectedToken) {
-        return c.json({ error: 'Token auth is enabled but no fallback token is configured' }, 500);
+    if (!user) {
+      if (config.auth.method === 'token') {
+        if (!expectedToken) {
+          return c.json({ error: 'Token auth is enabled but no fallback token is configured' }, 500);
+        }
+        return c.json({ error: 'Unauthorized' }, 401);
       }
-      return c.json({ error: 'Unauthorized' }, 401);
+
+      const socketIp = resolveSocketIp(c.env);
+      const proxyTrusted = isTrustedProxyIp(socketIp, config.auth.trusted_proxies);
+      if (!proxyTrusted && hasForwardingHeaders(c.req.raw.headers)) {
+        return c.json({ error: 'Unauthorized: untrusted proxy' }, 401);
+      }
+
+      const clientIp = proxyTrusted
+        ? resolveClientIp(c.env, c.req.raw.headers, config.auth.trusted_proxies)
+        : socketIp;
+      if (!isPrivateOrTailnetIp(clientIp)) {
+        return c.json({ error: 'Unauthorized: not on tailnet' }, 401);
+      }
+
+      user = OWNER_USER;
     }
 
-    const socketIp = resolveSocketIp(c.env);
-    const proxyTrusted = isTrustedProxyIp(socketIp, config.auth.trusted_proxies);
-    if (!proxyTrusted && hasForwardingHeaders(c.req.raw.headers)) {
-      return c.json({ error: 'Unauthorized: untrusted proxy' }, 401);
+    if (!canMutate(user) && c.req.path.startsWith('/api/') && !READ_ONLY_METHODS.has(c.req.method)) {
+      return c.json({ error: `Forbidden: '${user.name}' is an observer (read-only)` }, 403);
     }
 
-    const clientIp = proxyTrusted
-      ? resolveClientIp(c.env, c.req.raw.headers, config.auth.trusted_proxies)
-      : socketIp;
-    if (!isPrivateOrTailnetIp(clientIp)) {
-      return c.json({ error: 'Unauthorized: not on tailnet' }, 401);
-    }
-
-    await next();
+    c.set('user', user);
+    await runWithActor(user.id, () => next());
   };
 }

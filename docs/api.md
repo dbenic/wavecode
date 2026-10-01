@@ -16,6 +16,33 @@ Protected endpoint that returns `{ ok: true }` when the current request is authe
 - `token`: requests must provide `Authorization: Bearer <token>`.
 - `fallback_token`: when configured, the bearer token also works in `tailscale` mode.
 
+### Users and roles
+
+Every authenticated request resolves to a user (see `docs/multi-orchestrator-spec.md` §1):
+
+- `auth.fallback_token` → the synthetic admin `owner` (not stored in `users`).
+- A token created via `POST /api/users` or `wavecode user add` → that user. Only the sha256 of the token is stored.
+- In `tailscale` mode, a tailnet client without a user token is `owner`.
+- Unknown token in `token` mode → `401`.
+
+Roles: `admin` (everything), `developer` (act on agents), `observer` (read-only: any non-GET `/api/*` request → `403`).
+
+Events written while a request is in flight record the caller as `actor_id` (null = system); `/api/events/log` and SSE payloads (`actorId`) include it.
+
+### `GET /api/me`
+Current user: `{ id, name, role, color }`.
+
+### `GET /api/users`
+All users (synthetic `owner` first) as `{ id, name, role, color, created_at }`. Token hashes are never returned.
+
+### `POST /api/users` (admin)
+Body `{ name, role?, color? }` — `name` is `[a-z0-9_-]{1,32}` (`owner`, `system`, `all` are reserved), `role` defaults to `developer`, `color` is `#rrggbb` (derived from the name if omitted). Returns `201` with the user plus `token` — the plaintext bearer token, shown **once**. `409` on a duplicate name.
+
+CLI equivalent (local, no daemon needed): `wavecode user add <name> [--role admin|developer|observer] [--color #rrggbb]`.
+
+### `DELETE /api/users/:id` (admin)
+Revokes the user (deletes the row; its token stops working). `owner` and your own user cannot be revoked.
+
 ## Agents
 
 ### `GET /api/agents`

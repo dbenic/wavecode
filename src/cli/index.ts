@@ -482,6 +482,27 @@ program
     console.log(`Message ${result.data.id} sent to ${to === 'all' ? 'all (broadcast)' : to}`);
   });
 
+// --- user ---
+const userCmd = program
+  .command('user')
+  .description('Manage WaveCode users (bearer tokens)');
+
+userCmd
+  .command('add <name>')
+  .description('Create a user and print its bearer token once')
+  .option('--role <role>', 'admin | developer | observer', 'developer')
+  .option('--color <hex>', 'UI color, e.g. #2563eb (default: derived from name)')
+  .action(async (name: string, opts: { role: string; color?: string }) => {
+    initDb();
+    const { addUserCommand, formatCreatedUser } = await import('./user-command.js');
+    const result = addUserCommand(name, opts);
+    if (!result.ok) {
+      console.error(`Failed to add user: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(formatCreatedUser(result.data));
+  });
+
 // --- mcp ---
 program
   .command('mcp')

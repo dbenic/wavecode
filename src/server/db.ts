@@ -98,6 +98,23 @@ export interface WaveEvent {
   entity_type: string;
   entity_id: string;
   payload_json: string | null;
+  actor_id: string | null;  // user who caused the event; null = system
+  created_at: string;
+}
+
+export const USER_ROLES = ['admin', 'developer', 'observer'] as const;
+export type UserRole = (typeof USER_ROLES)[number];
+
+export function isUserRole(value: unknown): value is UserRole {
+  return typeof value === 'string' && (USER_ROLES as readonly string[]).includes(value);
+}
+
+/** Public user shape — never carries the token hash. */
+export interface User {
+  id: string;
+  name: string;
+  role: UserRole;
+  color: string;
   created_at: string;
 }
 
@@ -196,7 +213,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -289,6 +306,16 @@ const SCHEMA_SQL = `
     entity_type TEXT NOT NULL,
     entity_id TEXT NOT NULL,
     payload_json TEXT,
+    actor_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL DEFAULT 'developer',
+    color TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -593,6 +620,19 @@ const MIGRATIONS: Record<number, string> = {
   // v10 → v11: Per-run orchestrate result file path
   10: `
     ALTER TABLE runs ADD COLUMN result_path TEXT;
+  `,
+  // v11 → v12: Identity (multi-orchestrator spec §1) — users with hashed
+  // bearer tokens, and event attribution
+  11: `
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL DEFAULT 'developer',
+      color TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    ALTER TABLE events ADD COLUMN actor_id TEXT;
   `,
 };
 
@@ -1001,13 +1041,14 @@ export function insertEvent(event: {
   entity_type: string;
   entity_id: string;
   payload?: Record<string, unknown>;
+  actor_id?: string | null;
 }): Result<WaveEvent> {
   try {
     const payloadJson = event.payload ? JSON.stringify(event.payload) : null;
     const info = getDb().prepare(`
-      INSERT INTO events (type, entity_type, entity_id, payload_json)
-      VALUES (?, ?, ?, ?)
-    `).run(event.type, event.entity_type, event.entity_id, payloadJson);
+      INSERT INTO events (type, entity_type, entity_id, payload_json, actor_id)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(event.type, event.entity_type, event.entity_id, payloadJson, event.actor_id ?? null);
     const row = getDb().prepare('SELECT * FROM events WHERE id = ?').get(info.lastInsertRowid) as WaveEvent;
     return { ok: true, data: row };
   } catch (e) {
@@ -1034,6 +1075,50 @@ export function listEvents(filters?: {
   if (filters?.limit) { sql += ' LIMIT ?'; params.push(filters.limit); }
 
   return getDb().prepare(sql).all(...params) as WaveEvent[];
+}
+
+// --- User helpers ---
+
+const USER_COLUMNS = 'id, name, role, color, created_at';
+
+/** Insert a user. `token_hash` is the sha256 of the bearer token — never the plaintext. */
+export function insertUser(user: {
+  name: string;
+  role: UserRole;
+  color: string;
+  token_hash: string;
+}): Result<User> {
+  const id = generateId();
+  try {
+    getDb().prepare(`
+      INSERT INTO users (id, name, role, color, token_hash)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, user.name, user.role, user.color, user.token_hash);
+    return getUser(id);
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (msg.includes('UNIQUE') && msg.includes('users.name')) {
+      return { ok: false, error: `User '${user.name}' already exists` };
+    }
+    return { ok: false, error: msg };
+  }
+}
+
+export function getUser(id: string): Result<User> {
+  const row = getDb().prepare(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`).get(id) as User | undefined;
+  return row ? { ok: true, data: row } : { ok: false, error: `User ${id} not found` };
+}
+
+export function getUserByTokenHash(tokenHash: string): User | null {
+  return (getDb().prepare(`SELECT ${USER_COLUMNS} FROM users WHERE token_hash = ?`).get(tokenHash) as User | undefined) ?? null;
+}
+
+export function listUsers(): User[] {
+  return getDb().prepare(`SELECT ${USER_COLUMNS} FROM users ORDER BY created_at ASC, id ASC`).all() as User[];
+}
+
+export function deleteUser(id: string): boolean {
+  return getDb().prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
 }
 
 // --- Artifact helpers ---

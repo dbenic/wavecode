@@ -198,6 +198,7 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
             entity_type: e.entity_type,
             entity_id: e.entity_id,
             payload: e.payload_json ? JSON.parse(e.payload_json) : null,
+            actor_id: e.actor_id ?? null,
             created_at: e.created_at,
           })),
           last_id: lastId,
