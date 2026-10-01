@@ -349,6 +349,36 @@ Reference behaviour (from the Grok seat the team uses today):
 - Codex and Grok seats produce replies with their chrome stripped.
 - A reply never contains the echoed prompt.
 
+## 5c. Aliases, @mentions, #commands
+
+Agents get a short human alias; the composer gets a tiny deterministic
+grammar so the common moves are one line, with the orchestrator seat as the
+fallback for everything else.
+
+- `agents.alias TEXT UNIQUE` (`^[a-z][a-z0-9_-]{1,23}$`), set via
+  `PATCH /api/agents/:id {alias}` and a "rename" action on the roster card.
+  Resolution order everywhere (routes, MCP, CLI, composer): alias → name → id.
+- Composer grammar (parsed client-side, executed through existing routes):
+  `@x text` prompt; `@x @y text` fan-out; `#reserve @x [Nh]`; `#release @x`;
+  `#kill @x`; `#task @x text [deps:#n,#m]`; `#promote #n`; `#file @x path`;
+  `#status` (prompt to the orchestrator seat); `@all text` broadcast.
+  No `@`/`#` or unparseable → prompt to the orchestrator seat (Ask).
+  Every executed command appears in the thread as the user's item.
+- Autocomplete: `@` → roster (color dot, status, current task), `#` →
+  commands, `#` followed by digits → open tasks. Tab/Enter accepts.
+- Groups: `agent_tags(agent_id, tag)`; `#tag @x frontend`; `@frontend text`
+  fans out to the group; roster filter by tag.
+- Personas: `agents.persona TEXT` (one line, e.g. "frontend lead"), shown on
+  roster cards and reply bubbles, and prepended to prompts as
+  `[you are @toni — frontend lead]` so narrative status can name agents.
+- People: `@<user>` in `wavecode msg` or the composer addresses a person;
+  the message lands in their Attention filter and Telegram/ntfy mirror.
+
+Acceptance: `#reserve @toni 2h` reserves within one request and shows the
+lease on the card; `@toni @mia review each other's lane` creates two prompt
+items and two pane sends; an unknown `#foo` goes to the orchestrator seat
+unchanged; `@frontend` with two tagged agents sends to both.
+
 ## 6. Build order (one task each; each lands with tests)
 
 | # | Task | Depends on |
@@ -361,6 +391,7 @@ Reference behaviour (from the Grok seat the team uses today):
 | T4 | §4.1 `GET /api/thread`: merged, typed, cursor-paged feed with per-user `actions`; `needs_attention` rules; reply injection into tmux | T2 |
 | T5 | §4.2–4.3 Command Center UI: roster, thread, composer, board, presence, attention filter, mobile tabs, users + profiles settings pages (login button per runtime) | T4, T6 |
 | T7 | §5b reply capture: pending-reply tracking on every prompt path, per-runtime pane extractors, `reply` messages in the thread, composer defaults to the orchestrator seat, `docs/orchestrator-seat.md` operating prompt + `agents.role`, quick-reply chips | T5 |
+| T8 | §5c aliases (`agents.alias`), persona, tags/groups, composer grammar + autocomplete, people addressing | T7 |
 
 ## 7. Acceptance
 
