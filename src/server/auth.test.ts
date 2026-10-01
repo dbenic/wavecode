@@ -240,6 +240,25 @@ describe('auth.ts — user resolution (spec §1)', () => {
     expect(await res.json()).toMatchObject({ id: 'owner', role: 'admin' });
   });
 
+  it('rejects an unknown or revoked token in tailscale mode instead of falling back to owner', async () => {
+    const app = makeUserApp(makeConfig({ method: 'tailscale', fallback_token: 'secret' }));
+    const tailnet = { incoming: { socket: { remoteAddress: '100.64.0.5' } } };
+
+    const bogus = await app.request('/api/whoami', { headers: { Authorization: 'Bearer revoked-token' } }, tailnet);
+    expect(bogus.status).toBe(401);
+    expect(await bogus.json()).toEqual({ error: 'Unauthorized' });
+
+    // SSE query-string tokens follow the same rule
+    const sse = await app.request('/api/events?access_token=revoked-token', {}, tailnet);
+    expect(sse.status).toBe(401);
+
+    // Same tailnet client: no token → owner, a valid user token → that user
+    const none = await app.request('/api/whoami', {}, tailnet);
+    expect((await none.json()).name).toBe('owner');
+    const valid = await app.request('/api/whoami', { headers: { Authorization: 'Bearer ana-token' } }, tailnet);
+    expect((await valid.json()).name).toBe('ana');
+  });
+
   it('blocks observers from mutating /api routes but allows reads', async () => {
     const app = makeUserApp(makeConfig({ method: 'token', fallback_token: 'secret' }));
     const read = await app.request('/api/whoami', { headers: { Authorization: 'Bearer obs-token' } });

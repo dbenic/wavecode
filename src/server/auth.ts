@@ -156,8 +156,11 @@ export type UserResolver = (token: string | null, fallbackToken: string | null) 
  * Authenticate the request and resolve it to a user (spec §1):
  * - `auth.fallback_token` → synthetic admin `owner`
  * - a token from `users` → that user
- * - no/unknown token → 401 in `token` mode; in `tailscale` mode a tailnet
- *   client without a user token is the trusted `owner` (today's behavior)
+ * - a token that resolves to nobody → 401 in every mode. It must never fall
+ *   through to the tailnet rule: a revoked or mistyped token would
+ *   otherwise be upgraded to admin `owner`.
+ * - no token → 401 in `token` mode; in `tailscale` mode a tailnet client
+ *   without any token is the trusted `owner` (today's behavior)
  *
  * Observers are read-only on `/api/*`: any non-GET/HEAD/OPTIONS → 403.
  * MCP (`/mcp`) is JSON-RPC over POST, so its per-tool guards live in T3.
@@ -182,6 +185,10 @@ export function createAuthMiddleware(
     } catch {
       // users table unavailable (DB not initialized) — fall back to token-less rules
       user = token && expectedToken && token === expectedToken ? OWNER_USER : null;
+    }
+
+    if (!user && token) {
+      return c.json({ error: 'Unauthorized' }, 401);
     }
 
     if (!user) {
