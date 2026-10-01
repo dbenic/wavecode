@@ -101,6 +101,10 @@ An agent is **free** (`owner_id: null`) or **owned** by one user. `GET /api/agen
 - The health monitor (30s) releases expired reservations on idle agents (`agent.lease_expired`); working agents keep the lease until idle.
 - Revoking a user releases their leases.
 
+`GET /api/agents` and `/api/agents/:id` also return `lease` (`{owner, owner_id, reason, expires_at}` or null) and `can_act` — whether the *caller* may act on the agent. `POST /api/agents/spawn` accepts `reserve_hours` (MCP `spawn_agent` sends 4) to reserve the new agent for the caller.
+
+`POST /api/reviews/:runId/promote` with `overrideReason` is admin-only (`403` otherwise).
+
 ### `POST /api/agents/:id/reserve`
 Body `{ hours? }` — default 4, max 24. Reserving your own agent extends it; an agent owned by someone else → `409`. Emits `agent.reserved {owner, until}`.
 

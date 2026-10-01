@@ -12,18 +12,19 @@ import * as outputWatcher from '../output-watcher.js';
 import * as validate from '../validate.js';
 import logger from '../logger.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
+import type { User } from '../db.js';
 import * as leases from '../leases.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
     const agents = listAgents();
-    return c.json(agents.map(enrichAgent));
+    return c.json(agents.map((a) => enrichAgent(a, getActingUser(c))));
   });
 
   app.get('/api/agents/:id', (c) => {
     const result = sessionManager.get(c.req.param('id'));
     if (!result.ok) return c.json({ error: result.error }, 404);
-    return c.json(enrichAgent(result.data));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
   app.post('/api/agents/scan', (c) => {
@@ -180,7 +181,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     const result = leases.reserveAgent(agentResult.data.id, getActingUser(c), body?.hours);
     if (!result.ok) return c.json({ error: result.error }, leases.leaseErrorStatus(result.code));
-    return c.json(enrichAgent(result.data));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
   app.post('/api/agents/:id/release', (c) => {
@@ -189,7 +190,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     const result = leases.releaseAgent(agentResult.data.id, getActingUser(c));
     if (!result.ok) return c.json({ error: result.error }, leases.leaseErrorStatus(result.code));
-    return c.json(enrichAgent(result.data));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
   app.patch('/api/agents/:id', async (c) => {
@@ -220,7 +221,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       { agentId: result.data.id, model: result.data.model, effort: result.data.effort },
       'Agent pin updated',
     );
-    return c.json(enrichAgent(result.data));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
   app.post('/api/agents/spawn', async (c) => {
@@ -232,10 +233,17 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       model?: string | null;
       effort?: EffortLevel | null;
       runner?: 'tmux' | 'file';
+      /** Reserve the new agent for the caller (spec §3: MCP spawn_agent sends 4). */
+      reserve_hours?: number;
     }>();
 
     const spawnValidation = validate.validateSpawnBody(body);
     if (spawnValidation) return c.json({ error: spawnValidation }, 400);
+    const reserveHours = body.reserve_hours;
+    if (reserveHours !== undefined && (typeof reserveHours !== 'number' || !Number.isFinite(reserveHours)
+      || reserveHours <= 0 || reserveHours > leases.MAX_RESERVE_HOURS)) {
+      return c.json({ error: `reserve_hours must be a number in (0, ${leases.MAX_RESERVE_HOURS}]` }, 400);
+    }
 
     const result = sessionManager.spawnAgent(body);
     if (!result.ok) return c.json({ error: result.error }, 400);
@@ -253,14 +261,31 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     });
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent spawned');
+
+    if (reserveHours !== undefined) {
+      const user = getActingUser(c);
+      const reserved = leases.reserveAgent(agent.id, user, reserveHours);
+      if (!reserved.ok) {
+        logger.warn({ agentId: agent.id, error: reserved.error }, 'Spawned agent could not be reserved');
+        return c.json({ ...enrichAgent(agent, user), reserve_error: reserved.error }, 201);
+      }
+      return c.json(enrichAgent(reserved.data, user), 201);
+    }
     return c.json(agent, 201);
   });
 }
 
-function enrichAgent(agent: Agent) {
+function enrichAgent(agent: Agent, viewer: User) {
+  const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
   return {
     ...agent,
-    owner: agent.owner_id ? leases.userName(agent.owner_id) : null,
+    owner,
+    // Spec §3: lease state for orchestrators, plus whether *this* caller may
+    // act on the agent (rule 2) so MCP seats never have to guess.
+    lease: agent.owner_id
+      ? { owner, owner_id: agent.owner_id, reason: agent.lease_reason ?? null, expires_at: agent.lease_expires_at ?? null }
+      : null,
+    can_act: leases.checkAgentAccess(agent, viewer).ok,
     lastOutputLine: outputWatcher.getLastOutputLine(agent.id),
     outputVersion: outputWatcher.getOutputVersion(agent.id),
     watching: outputWatcher.isWatching(agent.id),

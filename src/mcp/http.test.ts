@@ -239,6 +239,72 @@ describe('HTTP MCP /mcp', () => {
     expect(String(fetchImpl.mock.calls[0][0])).toBe('http://127.0.0.1:3777/api/agents');
   });
 
+  describe('acts as the caller (spec §3)', () => {
+    const DEV_TOKEN = 'dev-seat-token';
+    let userApp: Hono<NodeAppEnv>;
+
+    beforeEach(() => {
+      const resolver = (token: string | null, fallback: string | null) => {
+        if (token && token === fallback) return { id: 'owner', name: 'owner', role: 'admin' as const, color: '#000000', created_at: '' };
+        if (token === DEV_TOKEN) return { id: 'u-ana', name: 'ana', role: 'developer' as const, color: '#2563eb', created_at: '' };
+        return null;
+      };
+      userApp = new Hono<NodeAppEnv>();
+      userApp.use(MCP_HTTP_PATH, createAuthMiddleware(() => makeAuthConfig(), resolver));
+      userApp.on(['POST', 'GET', 'DELETE'], MCP_HTTP_PATH, handler);
+    });
+
+    async function openSession(token: string): Promise<{ sessionId: string; protocol: string }> {
+      const init = await userApp.fetch(new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: mcpHeaders({ Authorization: `Bearer ${token}` }),
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'initialize',
+          params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 't', version: '0' } },
+        }),
+      }));
+      const body = (await parseMcpBody(init)) as { result?: { protocolVersion?: string } };
+      const sessionId = init.headers.get(MCP_SESSION_HEADER)!;
+      const protocol = body.result?.protocolVersion ?? LATEST_PROTOCOL_VERSION;
+      await userApp.fetch(new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: mcpHeaders({ Authorization: `Bearer ${token}`, [MCP_SESSION_HEADER]: sessionId, 'mcp-protocol-version': protocol }),
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+      }));
+      return { sessionId, protocol };
+    }
+
+    function callTool(token: string, session: { sessionId: string; protocol: string }) {
+      return userApp.fetch(new Request('http://localhost/mcp', {
+        method: 'POST',
+        headers: mcpHeaders({
+          Authorization: `Bearer ${token}`,
+          [MCP_SESSION_HEADER]: session.sessionId,
+          'mcp-protocol-version': session.protocol,
+        }),
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_agents', arguments: {} } }),
+      }));
+    }
+
+    it("forwards the caller's bearer to the REST API instead of the daemon token", async () => {
+      const session = await openSession(DEV_TOKEN);
+      const res = await callTool(DEV_TOKEN, session);
+      expect(res.status).toBe(200);
+
+      const [, init] = fetchImpl.mock.calls.at(-1)! as [string, RequestInit];
+      expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${DEV_TOKEN}`);
+    });
+
+    it('refuses to let a different token ride on an existing session', async () => {
+      const session = await openSession(DEV_TOKEN);
+      const hijack = await callTool(TEST_TOKEN, session);
+      expect(hijack.status).toBe(403);
+      const body = (await hijack.json()) as { error?: { message?: string } };
+      expect(body.error?.message).toBe('Session belongs to a different token');
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+  });
+
   it('stdio helpers remain available', () => {
     expect(typeof runStdioMcpServer).toBe('function');
     const server = buildMcpServer({

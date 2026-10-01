@@ -7,6 +7,7 @@ import { presentRunResult } from '../run-result.js';
 import { presentFileRun } from '../file-runner.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
+import { isAdmin } from '../users.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/reviews/:runId/ai-review', async (c) => {
@@ -53,6 +54,13 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   app.post('/api/reviews/:runId/promote', async (c) => {
     const body = await c.req.json<{ overrideReason?: string }>().catch(() => ({} as { overrideReason?: string }));
+    // Override-promote bypasses the review gate — admin only (spec §2/§3)
+    const user = getActingUser(c);
+    if (typeof body.overrideReason === 'string' && body.overrideReason.trim() && !isAdmin(user)) {
+      return c.json({
+        error: `Forbidden: override-promote is admin only (you are ${user.name}, ${user.role}). Promote without override_reason, or ask an admin.`,
+      }, 403);
+    }
     const result = reviewQueue.promote(c.req.param('runId'), {
       overrideReason: typeof body.overrideReason === 'string' ? body.overrideReason : undefined,
     });

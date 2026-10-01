@@ -10,7 +10,7 @@
  * remote connectors speak the same protocol. Stdio `wavecode mcp` is unchanged.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { cors } from 'hono/cors';
 import type { Context, Hono } from 'hono';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
@@ -35,6 +35,23 @@ const MCP_CORS_HEADERS = [
 interface HttpMcpSession {
   transport: WebStandardStreamableHTTPServerTransport;
   server: McpServer;
+  /** sha256 of the bearer that opened the session ('' = none, tailnet owner). */
+  tokenHash: string;
+}
+
+function bearerOf(c: Context<NodeAppEnv>): string | null {
+  const header = c.req.header('Authorization');
+  return header?.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() || null : null;
+}
+
+function hashBearer(token: string | null): string {
+  return token ? createHash('sha256').update(token).digest('hex') : '';
+}
+
+function sameHash(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
 }
 
 export interface McpHttpHandler {
@@ -95,16 +112,29 @@ export function createMcpHttpHandler(opts: McpServerOptions = {}): McpHttpHandle
             404,
           );
         }
+        // A session acts as the user that opened it — another token may not ride on it.
+        if (!sameHash(existing.tokenHash, hashBearer(bearerOf(c)))) {
+          return c.json(
+            { jsonrpc: '2.0', error: { code: -32003, message: 'Session belongs to a different token' }, id: null },
+            403,
+          );
+        }
         return await existing.transport.handleRequest(c.req.raw, { parsedBody });
       }
 
       if (c.req.method === 'POST' && includesInitialize(parsedBody)) {
-        const server = buildMcpServer(opts);
+        // Spec §3: the MCP seat acts as the caller. Forward the caller's
+        // bearer to the REST client instead of the daemon's own token, so
+        // every tool call is authorized and attributed as that user. A
+        // token-less tailnet caller (already 'owner') keeps opts.token.
+        const callerToken = bearerOf(c);
+        const tokenHash = hashBearer(callerToken);
+        const server = buildMcpServer(callerToken ? { ...opts, token: callerToken } : opts);
         const transport = new WebStandardStreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: true,
           onsessioninitialized: (id) => {
-            sessions.set(id, { transport, server });
+            sessions.set(id, { transport, server, tokenHash });
           },
           onsessionclosed: (id) => {
             const slot = sessions.get(id);
@@ -126,7 +156,7 @@ export function createMcpHttpHandler(opts: McpServerOptions = {}): McpHttpHandle
         await server.connect(transport);
         const response = await transport.handleRequest(c.req.raw, { parsedBody });
         if (!transport.sessionId) {
-          await safeClose({ transport, server });
+          await safeClose({ transport, server, tokenHash });
         }
         return response;
       }

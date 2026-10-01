@@ -135,7 +135,10 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
    */
   app.post('/api/system/stop-all', (c) => {
     // Emergency brake for everyone — admin only (spec §2 rule 7)
-    if (!isAdmin(getActingUser(c))) return c.json({ error: 'Forbidden: stop-all is admin only' }, 403);
+    const user = getActingUser(c);
+    if (!isAdmin(user)) {
+      return c.json({ error: `Forbidden: stop-all is admin only (you are ${user.name}, ${user.role})` }, 403);
+    }
     const summary = sessionManager.stopAll();
 
     for (const agentId of summary.killed) {
