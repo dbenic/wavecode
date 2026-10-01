@@ -267,6 +267,88 @@ trusted team and is exactly the gap per-Linux-user isolation (spec F2)
 closes later — when it does, a profile maps to a Unix user and the env
 prefix becomes `sudo -u`, with nothing else changing.
 
+## 5b. Reply capture — agents answer in the thread, not only in their pane
+
+Problem (first live test): the thread shows events *about* agents but never
+what an agent *said* — its answer stays in the terminal pane, so asking the
+PM seat "what is chatgpt-countix doing?" produces nothing in the thread,
+and every reply has to be read by opening the agent. The conversation must
+feel like chat: you ask, the agent's answer appears as its message.
+
+### Server: `reply-capture.ts`
+
+- When a prompt is sent to a tmux agent (`POST /api/agents/:id/send`
+  non-raw, MCP `send_prompt`, reply injection from `/api/messages`), record a
+  **pending reply** `{agent_id, actor_id, prompt_excerpt, sent_at,
+  pane_marker}` where `pane_marker` is the pane's line count / last line at
+  send time.
+- On the agent's next *working → idle* transition (output-watcher), extract
+  the answer: the text produced after `pane_marker`, with the runtime's TUI
+  chrome stripped (Claude: tool-call blocks `● Running…`/`⎿`, spinner lines
+  `✻ … done`, the prompt box `❯`, status bar; Codex: `›` composer, status
+  line; Grok: equivalent). Keep the final assistant prose (max 4 000 chars,
+  head+tail if longer). Per-runtime extractors live in one table with tests
+  on real pane captures.
+- Persist it as an `agent_messages` row: `from_agent_id = agent`,
+  `to_agent_id = null`, `message_type = 'reply'`, `ref_prompt_actor =
+  actor_id`, `ref_task_id` when the prompt was a task dispatch; emit
+  `message.created`. The thread renders it as kind `reply` with the agent's
+  name and color, directly under the prompt it answers.
+- If no idle transition arrives within 10 min, post a `reply` with
+  `truncated: true` containing whatever was captured so far — never silence.
+- Task runs: the final RESULT line/reason is already captured; the run's
+  prose summary (same extractor at `run.finished`) is attached to the `run`
+  thread item so "what did it do" is answerable without the pane.
+
+### UI
+
+- Composer default target = the **orchestrator seat** (config
+  `orchestrator_agent: pm`, or the first agent named `pm`/`orchestrator`;
+  a chip shows who will receive it). No selection needed to just type.
+  `@name` in the text retargets.
+- Thread shows `reply` items as chat bubbles (agent color, name, time);
+  the terminal stays folded. The Attention filter includes replies that end
+  with a question.
+- "Ask" is the composer's default mode name (same as Prompt); Task / Reply /
+  File unchanged.
+
+### The orchestrator seat behaves like a PM, by default
+
+Reference behaviour (from the Grok seat the team uses today):
+
+> Codex2 finished all the email and eSLOG fixes, and they're ready for
+> review. … Everything is tested but not deployed. Elsewhere, live is still
+> 0.440.29 … I've lined up Fable to review Codex2's fixes after those.
+> Deploy Codex2's email and eSLOG fixes once Fable's review passes?
+> [Deploy on pass] [Hold]
+
+- `docs/orchestrator-seat.md` is a standing operating prompt, sent to a seat
+  when it is spawned or adopted with `role: orchestrator` (agents gain a
+  nullable `role` column; `config.orchestrator_agent` names the default
+  seat). It instructs the seat to: answer questions with a prose status
+  synthesized from `list_agents`/`list_tasks`/`get_agent_output`/the wire,
+  in plain language, naming agents and what they are on; end a message
+  that needs a human decision with ONE question and 2–4 short options on
+  their own lines prefixed `[ ]`; after a decision, carry it out with the
+  tools and report each step as it lands; never claim an agent's result
+  without a RESULT/verdict behind it.
+- The thread renders a reply whose tail is a question + `[ ] option` lines
+  as a bubble with **quick-reply chips**; tapping a chip sends that option
+  text back to the same seat (the existing "RESPOND" chip code in AgentView
+  is the starting point).
+
+### Acceptance
+
+- Send "what is chatgpt-countix doing?" to `pm` from the composer with no
+  target selected → within one idle cycle a `reply` bubble from `pm` with
+  the prose answer appears under the prompt; the pane was not opened.
+- A reply ending with a question and `[ ]` options renders chips; tapping
+  one sends the option to the seat and shows it as the user's prompt.
+- A prompt to `builder` that triggers tool calls yields a reply with the
+  final prose only (no `● Running…` / `⎿` lines).
+- Codex and Grok seats produce replies with their chrome stripped.
+- A reply never contains the echoed prompt.
+
 ## 6. Build order (one task each; each lands with tests)
 
 | # | Task | Depends on |
@@ -278,6 +360,7 @@ prefix becomes `sudo -u`, with nothing else changing.
 | T3 | §3 MCP: user-aware tool results, `reserve_agent`/`release_agent`/`whoami`, admin-only guards; `spawn_agent` honors profiles | T6 |
 | T4 | §4.1 `GET /api/thread`: merged, typed, cursor-paged feed with per-user `actions`; `needs_attention` rules; reply injection into tmux | T2 |
 | T5 | §4.2–4.3 Command Center UI: roster, thread, composer, board, presence, attention filter, mobile tabs, users + profiles settings pages (login button per runtime) | T4, T6 |
+| T7 | §5b reply capture: pending-reply tracking on every prompt path, per-runtime pane extractors, `reply` messages in the thread, composer defaults to the orchestrator seat, `docs/orchestrator-seat.md` operating prompt + `agents.role`, quick-reply chips | T5 |
 
 ## 7. Acceptance
 
