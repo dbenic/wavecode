@@ -20,6 +20,7 @@ const AGENTS = [
   agent({ name: 'grok-fe' }),
   agent({ name: 'opus-fe', owner: 'bob', can_act: false }),
   agent({ name: 'pinned', model: 'opus' }),
+  agent({ name: 'pm', orchestrator: true }),
 ];
 
 function Harness(props: { onSend: (s: ComposerSend) => Promise<true | string>; initialTarget?: string; initialMode?: ComposerMode; replyTaskId?: string | null }) {
@@ -102,6 +103,29 @@ describe('Composer', () => {
     await userEvent.type(box, '/deploy{Enter}');
     expect(screen.getByRole('alert')).toHaveTextContent('Unknown command /deploy');
     expect(onSend).toHaveBeenCalledTimes(2);
+  });
+
+  it('Ask is the default mode name; the seat is marked in the target chip', () => {
+    render(<Harness onSend={vi.fn()} initialTarget="pm" />);
+    expect(screen.getByRole('radio', { name: 'Ask' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByRole('radio', { name: 'Prompt' })).toBeNull();
+    expect(screen.getByRole('combobox', { name: 'Target' })).toHaveDisplayValue('@pm · seat');
+  });
+
+  it('@name in the text retargets the send and the chip', async () => {
+    const onSend = vi.fn(async () => true as const);
+    render(<Harness onSend={onSend} initialTarget="pm" />);
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), '@grok-fe what are you on?{Enter}');
+    expect(onSend).toHaveBeenCalledWith({ kind: 'prompt', agentId: 'grok-fe', text: 'what are you on?' });
+    expect(screen.getByRole('combobox', { name: 'Target' })).toHaveValue('grok-fe');
+  });
+
+  it('@name to an agent you may not use is refused before sending', async () => {
+    const onSend = vi.fn(async () => true as const);
+    render(<Harness onSend={onSend} initialTarget="pm" />);
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), '@opus-fe hi{Enter}');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('opus-fe is owned by bob');
   });
 
   it('shows the owner lock and disables sending to an agent you may not use', () => {

@@ -8,6 +8,7 @@ import * as tmux from './tmux.js';
 import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
 import { isFileRunnerSeat } from './file-runner.js';
 import { sweepLeases } from './leases.js';
+import { sweepExpiredReplies } from './reply-capture.js';
 import { isLoginSeat, sweepLoginSeats } from './login-seats.js';
 import { getRuntimeState, noteRuntimeAlive, relaunchRuntime } from './runtime-liveness.js';
 import logger from './logger.js';
@@ -50,6 +51,13 @@ export async function checkAll(): Promise<void> {
     if (released.length > 0) setTimeout(() => void taskDispatcher.dispatchNext(), 0);
   } catch (e) {
     logger.error({ error: (e as Error).message }, 'Lease sweep error');
+  }
+
+  // Spec §5b: a prompt never goes unanswered in the thread for more than 10 minutes.
+  try {
+    sweepExpiredReplies();
+  } catch (e) {
+    logger.error({ error: (e as Error).message }, 'Reply sweep error');
   }
 
   const agents = listAgents();

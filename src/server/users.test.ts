@@ -185,6 +185,8 @@ describe('migration v11 → current', () => {
       CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, runtime TEXT NOT NULL, tmux_session TEXT NOT NULL, workspace TEXT, mode TEXT NOT NULL DEFAULT 'adopted', status TEXT NOT NULL DEFAULT 'idle', model TEXT, effort TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
       CREATE TABLE goals (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', workspace TEXT, external_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
       CREATE TABLE tasks (id TEXT PRIMARY KEY, agent_id TEXT, prompt TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')), goal_id TEXT);
+      CREATE TABLE runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, agent_id TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'running', started_at TEXT NOT NULL DEFAULT (datetime('now')), finished_at TEXT, exit_code INTEGER, transcript_path TEXT, review_status TEXT NOT NULL DEFAULT 'pending', changed_files TEXT, result_path TEXT);
+      CREATE TABLE agent_messages (id TEXT PRIMARY KEY, from_agent_id TEXT, to_agent_id TEXT, workspace TEXT, message TEXT NOT NULL, message_type TEXT NOT NULL DEFAULT 'info', ref_task_id TEXT, ref_run_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
     `);
     raw.pragma('user_version = 11');
     raw.close();
@@ -203,6 +205,10 @@ describe('migration v11 → current', () => {
     expect(cols('goals')).toContain('created_by');
     expect(cols('users')).toContain('profile');
     expect(cols('agents')).toContain('profile');
+    // v15 (spec §5b): reply capture + orchestrator seat
+    expect(cols('agents')).toContain('role');
+    expect(cols('runs')).toContain('summary');
+    expect(cols('agent_messages')).toEqual(expect.arrayContaining(['ref_prompt_actor', 'ref_prompt_event_id', 'truncated']));
 
     const events = mod.listEvents();
     expect(events).toHaveLength(1);

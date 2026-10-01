@@ -27,6 +27,7 @@ import { executeFileRun, isFileRunnerSeat, stopFileRun } from './file-runner.js'
 import * as sessionManager from './session-manager.js';
 import { buildBriefing } from './briefing-builder.js';
 import { maybeInvokeProjectGate } from './project-gate.js';
+import { clearPendingForDispatch } from './reply-capture.js';
 import {
   appendRunResultBriefing,
   exitCodeForVerdict,
@@ -39,6 +40,7 @@ import {
 import * as leases from './leases.js';
 import { ensureRuntimeAlive } from './runtime-liveness.js';
 import { isLoginSeat } from './login-seats.js';
+import { captureRunSummary } from './reply-capture.js';
 import logger from './logger.js';
 
 let dispatchInProgress = false;
@@ -166,6 +168,8 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
 
   const task = taskResult.data;
   const config = getConfig();
+  // Spec §5b: keep what the agent said about this run (pane prose) on the run.
+  captureRunSummary(runId, agentId);
   const seatStillBusy = listOpenRuns(agentId).some((r) => r.id !== runId);
 
   if (run.review_status === 'rejected') {
@@ -521,6 +525,10 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
     }
     return;
   }
+
+  // A chat reply still pending on this agent can no longer be told apart
+  // from the task's output — close it out before the task prompt goes in.
+  clearPendingForDispatch(agent);
 
   if (agent.mode === 'spawned') {
     const run = await executeRun(agent.id, task.id, prompt);

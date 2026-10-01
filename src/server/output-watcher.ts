@@ -9,6 +9,7 @@ import { projectRequiresReferee } from './project-gate.js';
 import * as runner from './runner.js';
 import { isFileRunnerSeat } from './file-runner.js';
 import logger from './logger.js';
+import * as replyCapture from './reply-capture.js';
 
 /** Cooldown between unattended Claude first-run dialog dismissals. */
 export const CLAUDE_BYPASS_DIALOG_COOLDOWN_MS = 8000;
@@ -202,8 +203,11 @@ function tickInner(agentId: string, state: WatcherState): void {
   const dbStatus = agent.status;
 
   let closeAllIfIdle = false;
+  /** null = not idle; false = already idle; true = this tick is the working → idle edge. */
+  let idleEdge: boolean | null = null;
 
   if (detectedStatus === dbStatus) {
+    if (detectedStatus === 'idle') idleEdge = false;
     state.idleOverrideCounter = 0;
     // Already idle with a stuck running run (Grok RESULT + echo|nc, no
     // working→idle edge). Sweep on this tick — no daemon restart needed.
@@ -261,6 +265,7 @@ function tickInner(agentId: string, state: WatcherState): void {
           // Adopted and spawned both auto-close stuck runs. Spawned TUI seats
           // (Grok/Claude/Codex chat) never emit runner-socket run.finished.
           closeAllIfIdle = true;
+          idleEdge = true;
           notifyReviewLoopAgentIdle(agentId);
         }
       }
@@ -279,6 +284,7 @@ function tickInner(agentId: string, state: WatcherState): void {
       outputUpdatedAt: new Date().toISOString(),
     });
 
+    if (detectedStatus === 'idle') idleEdge = wasWorking;
     if (wasWorking && detectedStatus === 'idle') {
       closeAllIfIdle = true;
       notifyReviewLoopAgentIdle(agentId);
@@ -290,6 +296,15 @@ function tickInner(agentId: string, state: WatcherState): void {
       outputVersion: state.outputVersion,
       outputUpdatedAt: new Date().toISOString(),
     });
+  }
+
+  // Spec §5b: the agent answered — capture the reply before runs are closed.
+  if (idleEdge !== null) {
+    try {
+      replyCapture.onAgentIdle(agentId, { transitioned: idleEdge, outputChanged });
+    } catch (e) {
+      logger.debug({ agentId, error: (e as Error).message }, 'Reply capture failed');
+    }
   }
 
   closeFinishedRuns(agentId, output, detectedStatus, { closeAllIfIdle });

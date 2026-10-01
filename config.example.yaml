@@ -53,6 +53,10 @@ runtimes:
   # codex CODEX_HOME={profile_dir}/codex, grok HOME={profile_dir}/grok-home.
   # Override with `env:`, `login_command:` and `credential_files:` per runtime.
 
+# Orchestrator (PM) seat: the Command Center composer sends here by default.
+# Falls back to the first agent with role orchestrator, then one named pm.
+# orchestrator_agent: pm
+
 # Credential profiles: one CLI subscription per developer. Each user's agents
 # run with their profile's credential dir (users.profile, default = user name).
 # Log a profile in with `wavecode profile login <name> <runtime>` on the box,

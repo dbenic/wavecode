@@ -1,0 +1,5 @@
+Grok CLI — type a message
+> say hi to the team
+Hello team! The board is green and nothing needs a decision right now.
+Responded for 2s
+>

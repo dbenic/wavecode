@@ -106,6 +106,51 @@ export function swimlanes(tasks: Task[], users: Map<string, User>): Swimlane[] {
   return [...lanes.values()].sort((a, b) => (a.ownerId === null ? 1 : b.ownerId === null ? -1 : a.label.localeCompare(b.label)));
 }
 
+// --- Thread order & agent identity ---
+
+/**
+ * Feed order with each captured reply moved directly under the prompt it
+ * answers (spec §5b) when that prompt is in the list; everything else stays
+ * in event order.
+ */
+export function orderThread<T extends { event_id: number; kind: string; refs: { prompt_event_id?: number } }>(items: T[]): T[] {
+  const present = new Set(items.map((i) => i.event_id));
+  const anchored = new Map<number, T[]>();
+  const rest: T[] = [];
+  for (const item of items) {
+    const anchor = item.kind === 'reply' ? item.refs.prompt_event_id : undefined;
+    if (anchor !== undefined && present.has(anchor) && anchor !== item.event_id) {
+      anchored.set(anchor, [...(anchored.get(anchor) ?? []), item]);
+    } else {
+      rest.push(item);
+    }
+  }
+  const out: T[] = [];
+  for (const item of rest) {
+    out.push(item);
+    const replies = anchored.get(item.event_id);
+    if (replies) out.push(...replies);
+  }
+  return out;
+}
+
+const AGENT_PALETTE = ['#38bdf8', '#a78bfa', '#34d399', '#fbbf24', '#f472b6', '#fb923c', '#22d3ee', '#a3e635'];
+
+/** A stable color per agent name for its chat bubbles. */
+export function agentColor(name: string): string {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return AGENT_PALETTE[h % AGENT_PALETTE.length];
+}
+
+/** `@name rest of text` → that agent and the rest; otherwise null. */
+export function parseMention<A extends { name: string }>(text: string, agents: A[]): { agent: A; text: string } | null {
+  const m = /^@([\w.-]+)\s+([\s\S]*)$/.exec(text.trim());
+  if (!m) return null;
+  const agent = agents.find((a) => a.name.toLowerCase() === m[1].toLowerCase());
+  return agent ? { agent, text: m[2].trim() } : null;
+}
+
 // --- Thread merge ---
 
 /**

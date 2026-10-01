@@ -87,6 +87,8 @@ export interface WaveConfig {
   profiles_root: string;
   /** Configured credential profiles. Empty = feature off (agents use the home-dir login). */
   profiles: Record<string, ProfileConfig>;
+  /** Default Command Center target: the orchestrator (PM) seat by agent name (spec §5b). */
+  orchestrator_agent: string | null;
   auth: {
     method: 'tailscale' | 'token';
     fallback_token: string | null;
@@ -329,6 +331,7 @@ function buildDefaults(baseDir: string): WaveConfig {
     projects: {},
     profiles_root: path.join(dataRoot, 'profiles'),
     profiles: {},
+    orchestrator_agent: null,
     auth: { method: 'token', fallback_token: null, trusted_proxies: [] },
     notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
     artifacts: { storage: path.join(dataRoot, 'artifacts'), retention_days: 30 },

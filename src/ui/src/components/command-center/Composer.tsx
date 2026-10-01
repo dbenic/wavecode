@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { Agent, EffortLevel } from '../../types';
-import { parseSlashCommand, type ComposerMode, type SlashCommand } from '../../utils/command-center';
+import { parseMention, parseSlashCommand, type ComposerMode, type SlashCommand } from '../../utils/command-center';
 
 export type ComposerSend =
   | { kind: 'prompt'; agentId: string; text: string }
@@ -23,7 +23,8 @@ interface ComposerProps {
 }
 
 const MODES: { id: ComposerMode; label: string }[] = [
-  { id: 'prompt', label: 'Prompt' },
+  // "Ask" = type into the agent's terminal; its answer comes back as a reply (spec §5b)
+  { id: 'prompt', label: 'Ask' },
   { id: 'task', label: 'Task' },
   { id: 'reply', label: 'Reply' },
   { id: 'file', label: 'File' },
@@ -39,13 +40,23 @@ export default function Composer(props: ComposerProps) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const agent = props.agents.find((a) => a.id === props.target) ?? null;
+  const currentAgent = props.agents.find((a) => a.id === props.target) ?? null;
+  const agent = currentAgent;
   const locked = !!agent && agent.can_act === false;
   const needsAgent = props.mode !== 'task';
   const showPin = props.mode === 'task' && (!agent || (!agent.model && !agent.effort));
 
   function build(): ComposerSend | string {
-    const trimmed = text.trim();
+    let trimmed = text.trim();
+    let agent = currentAgent;
+    // `@name …` sends to that agent and moves the chip there
+    const mention = parseMention(trimmed, props.agents);
+    if (mention) {
+      agent = mention.agent;
+      trimmed = mention.text;
+      if (mention.agent.id !== props.target) props.onTargetChange(mention.agent.id);
+      if (mention.agent.can_act === false) return `${mention.agent.name} is owned by ${mention.agent.owner ?? 'someone else'}`;
+    }
     const slash = parseSlashCommand(trimmed);
     if (slash) {
       if (!slash.ok) return slash.error;
@@ -114,7 +125,7 @@ export default function Composer(props: ComposerProps) {
           <option value="">@all</option>
           {props.agents.map((a) => (
             <option key={a.id} value={a.id}>
-              @{a.name}{a.can_act === false ? ` 🔒 ${a.owner ?? ''}` : ''}
+              @{a.name}{a.orchestrator ? ' · seat' : ''}{a.can_act === false ? ` 🔒 ${a.owner ?? ''}` : ''}
             </option>
           ))}
         </select>
@@ -174,7 +185,9 @@ export default function Composer(props: ComposerProps) {
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={props.mode === 'task' ? 'Describe the task… (/reserve 4h, /release, /kill, /review, /promote, /retry)' : 'Type a message…'}
+            placeholder={props.mode === 'task'
+              ? 'Describe the task… (/reserve 4h, /release, /kill, /review, /promote, /retry)'
+              : `Ask ${agent ? agent.name : 'an agent'}… (@name to send elsewhere)`}
             className="min-h-[2.25rem] flex-1 resize-none rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-100 placeholder:text-slate-600"
           />
         )}

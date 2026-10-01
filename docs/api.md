@@ -578,6 +578,13 @@ Without `since`: the newest `limit` items. With `since`: items after that cursor
 ### `POST /api/agents/:id/restart`
 Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
 
+## Reply capture + orchestrator seat (spec §5b)
+
+- Every prompt typed into a tmux agent (`POST /api/agents/:id/send` non-raw, MCP `send_prompt`, a human reply via `POST /api/messages`) is answered in the thread: when the agent next goes idle, its pane is captured, the runtime's TUI chrome is stripped (Claude Code, Codex, Grok extractors; tool-call blocks, spinners, prompt box, status bar) and the final prose (≤4 000 chars, head+tail) is stored as an `agent_messages` row with `message_type: 'reply'`, `ref_prompt_actor`, `ref_prompt_event_id` (and `ref_task_id` when the agent had an open run), emitted as `message.created`. No idle within 10 minutes → a `reply` with `truncated: 1`. Clients cannot post `message_type: 'reply'` (`400`).
+- `GET /api/thread` kind `reply`: `refs.prompt_event_id` links it to the prompt; `needs_attention` when it ends with a question; a closing question followed by 2–4 `[ ] option` lines (or a `[A] [B]` line) yields `quick_reply` actions (`POST /api/agents/:id/send {text: option}`) for viewers who may act on the agent.
+- `run` items include the run's captured prose summary (`runs.summary`) in `body`.
+- Agents have `role` (`'orchestrator'` or null). `POST /api/agents/spawn` / `adopt` accept `role`; `PATCH /api/agents/:id {role}` sets it (owner/admin). Becoming the orchestrator sends `docs/orchestrator-seat.md` (flattened to one line) once the runtime is up. `GET /api/agents` marks the default seat with `orchestrator: true`: `config.orchestrator_agent` by name, else the first agent with role orchestrator, else one named `pm`/`orchestrator`.
+
 ## Credential profiles (spec §5)
 
 Agents run on a **profile**: a credential directory `<profiles_root>/<profile>` that the runtime is pointed at via env (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HOME` for grok), launched as `env K=V … <command>` on spawn, restart, upgrade, runtime relaunch and file-runner runs. Env values are validated (paths/plain tokens only) and an unresolvable profile fails the launch instead of falling back to another login.

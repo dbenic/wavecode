@@ -33,6 +33,7 @@
     "src/ui/dist",
     "scripts",
     "config.example.yaml",
+    "docs/orchestrator-seat.md",
     "README.md",
     "LICENSE"
   ],

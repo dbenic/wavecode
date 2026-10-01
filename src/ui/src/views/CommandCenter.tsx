@@ -23,6 +23,7 @@ import {
   fillAction,
   invalidatesThreadActions,
   mergeThreadItems,
+  orderThread,
   type ComposerMode,
   type SlashCommand,
 } from '../utils/command-center';
@@ -53,6 +54,8 @@ export default function CommandCenter() {
 
   const [meError, setMeError] = useState(false);
 
+  /** Until the user picks a target, the composer follows the orchestrator seat (spec §5b). */
+  const targetTouchedRef = useRef(false);
   const cursorRef = useRef<number | null>(null);
   const threadBusyRef = useRef(false);
   const threadPendingRef = useRef(false);
@@ -147,12 +150,24 @@ export default function CommandCenter() {
     }
   });
 
+  // Default target: the orchestrator seat, so you can just type a question.
+  const seatId = agents.find((a) => a.orchestrator)?.id ?? null;
+  useEffect(() => {
+    if (!targetTouchedRef.current && seatId) setTarget(seatId);
+  }, [seatId]);
+
+  function chooseTarget(agentId: string) {
+    targetTouchedRef.current = true;
+    setTarget(agentId);
+  }
+
   // --- derived ------------------------------------------------------------------
 
   const userMap = useMemo(() => new Map(users.map((u) => [u.id, u])), [users]);
   const agentNames = useMemo(() => new Map(agents.map((a) => [a.id, a.name])), [agents]);
+  // Replies sit directly under the prompt they answer.
   const visibleItems = useMemo(
-    () => (focused ? items.filter((i) => i.agent_id === focused) : items),
+    () => orderThread(focused ? items.filter((i) => i.agent_id === focused) : items),
     [items, focused],
   );
   // The inbox spans every agent, whatever is focused.
@@ -162,7 +177,7 @@ export default function CommandCenter() {
 
   function focus(agentId: string | null) {
     setFocused(agentId);
-    if (agentId) setTarget(agentId);
+    if (agentId) chooseTarget(agentId);
     setTab('thread');
   }
 
@@ -177,14 +192,14 @@ export default function CommandCenter() {
   async function runAction(item: ThreadItem, action: ThreadAction) {
     if (action.id === 'reply') {
       setMode('reply');
-      setTarget(String(action.body?.to ?? item.agent_id ?? ''));
+      chooseTarget(String(action.body?.to ?? item.agent_id ?? ''));
       setReplyTaskId(typeof action.body?.ref_task_id === 'string' ? action.body.ref_task_id : null);
       setTab('thread');
       return;
     }
     if (action.id === 'send_file') {
       setMode('file');
-      setTarget(item.agent_id ?? '');
+      chooseTarget(item.agent_id ?? '');
       setTab('thread');
       return;
     }
@@ -384,7 +399,7 @@ export default function CommandCenter() {
             <Composer
               agents={agents}
               target={target}
-              onTargetChange={setTarget}
+              onTargetChange={chooseTarget}
               mode={mode}
               onModeChange={(m) => {
                 setMode(m);

@@ -76,6 +76,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       runner: z.enum(['tmux', 'file']).optional().describe("file = Claude file-runner (claude -p, result.txt wins, cli.log RESULT counts, incomplete if neither). Default tmux."),
       reserve_hours: z.number().positive().max(24).optional().describe(`The new agent is reserved for you (default ${SPAWN_RESERVE_HOURS}h) so teammates cannot grab it`),
       profile: z.string().nullable().optional().describe("Credential profile (whose CLI subscription runs it). Default: your own. Admin only; null = the service user's home login"),
+      role: z.enum(['orchestrator']).optional().describe('orchestrator = the PM seat: it receives docs/orchestrator-seat.md once up and becomes the Command Center default target'),
     },
     handler: (client, args) =>
       client.post('/agents/spawn', { ...args, reserve_hours: args.reserve_hours ?? SPAWN_RESERVE_HOURS }),
@@ -108,7 +109,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   },
   {
     name: 'send_prompt',
-    description: "Send a prompt (or instruction) directly into an agent's terminal session. Refused (403, names the owner) if someone else owns the agent.",
+    description: "Send a prompt (or instruction) directly into an agent's terminal session. Refused (403, names the owner) if someone else owns the agent. The agent's answer is captured from its pane when it goes idle and appears in the thread (and list_messages) as a message of type 'reply'.",
     schema: {
       agent_id: z.string().describe('Agent ID or name'),
       text: z.string().describe('The prompt text to send'),
