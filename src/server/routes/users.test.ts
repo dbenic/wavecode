@@ -101,6 +101,26 @@ describe('user routes', () => {
     expect((await call(app, 'POST', '/api/users', FALLBACK, { name: 'bob', role: 'root' })).status).toBe(400);
   });
 
+  it('POST /api/users answers malformed or non-object JSON with 400, not 500', async () => {
+    const app = await makeApp();
+    const malformed = await app.request('/api/users', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FALLBACK}`, 'Content-Type': 'application/json' },
+      body: '{"name": "ana",',
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: 'Malformed JSON body' });
+
+    for (const body of ['[]', 'null', '"ana"']) {
+      const res = await app.request('/api/users', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${FALLBACK}`, 'Content-Type': 'application/json' },
+        body,
+      });
+      expect(res.status, body).toBe(400);
+    }
+  });
+
   it('only admins may create or revoke users', async () => {
     const app = await makeApp();
     const dev = await call(app, 'POST', '/api/users', FALLBACK, { name: 'dev', role: 'developer' });

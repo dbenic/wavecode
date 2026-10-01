@@ -25,7 +25,17 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
     const actor = c.get('user');
     if (!isAdmin(actor)) return c.json({ error: 'Forbidden: admin only' }, 403);
 
-    const body = await c.req.json<{ name?: unknown; role?: unknown; color?: unknown; profile?: unknown }>();
+    type CreateBody = { name?: unknown; role?: unknown; color?: unknown; profile?: unknown };
+    // Malformed JSON is the caller's error (400), never an unhandled 500
+    let body: CreateBody;
+    try {
+      body = await c.req.json<CreateBody>();
+    } catch {
+      return c.json({ error: 'Malformed JSON body' }, 400);
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return c.json({ error: 'Body must be a JSON object' }, 400);
+    }
     const result = createUser({ name: body?.name, role: body?.role, color: body?.color, profile: body?.profile });
     if (!result.ok) {
       const status = result.error.includes('already exists') ? 409 : 400;
