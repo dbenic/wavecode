@@ -38,6 +38,7 @@ import {
   type Run,
 } from './db.js';
 import { emit } from './event-bus.js';
+import { resolveProfileEnv } from './profiles.js';
 import logger from './logger.js';
 import {
   appendRunResultBriefing,
@@ -413,9 +414,14 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   fs.writeFileSync(logPath, '', 'utf8');
 
+  // Credential profile (spec §5): CLAUDE_CONFIG_DIR etc. Throws into the
+  // caller's start_failed path rather than running on the wrong login.
+  const profileEnv = resolveProfileEnv(agent.runtime, agent.profile);
+  if (!profileEnv.ok) throw new Error(profileEnv.error);
+
   const child = spawnFn(testHooks.claudeBin ?? 'claude', args, {
     cwd: agent.workspace,
-    env: buildClaudeEnv(),
+    env: { ...buildClaudeEnv(), ...profileEnv.data },
     stdio: ['ignore', 'pipe', 'pipe'],
     // Own process group so background children (`npm test &`) stay
     // waitable after `claude -p` exits. Interactive CLI would have

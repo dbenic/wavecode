@@ -8,6 +8,7 @@ import * as tmux from './tmux.js';
 import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
 import { isFileRunnerSeat } from './file-runner.js';
 import { sweepLeases } from './leases.js';
+import { isLoginSeat, sweepLoginSeats } from './login-seats.js';
 import { getRuntimeState, relaunchRuntime } from './runtime-liveness.js';
 import logger from './logger.js';
 
@@ -52,6 +53,11 @@ export async function checkAll(): Promise<void> {
   }
 
   const agents = listAgents();
+  try {
+    sweepLoginSeats(agents);
+  } catch (e) {
+    logger.error({ error: (e as Error).message }, 'Login seat sweep error');
+  }
   const config = getConfig();
   const hangTimeoutMs = config.autonomy.hang_timeout_min * 60 * 1000;
 
@@ -69,6 +75,8 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
 
   // File-runner seats have no pane. Stale heartbeat is owned by file-runner.ts.
   if (isFileRunnerSeat(agent)) return;
+  // Login seats exit on purpose and run a login command, not the runtime TUI.
+  if (isLoginSeat(agent)) return;
 
   // Check if tmux session is still alive
   const alive = isSessionAlive(agent.tmux_session);

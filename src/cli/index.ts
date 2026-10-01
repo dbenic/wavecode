@@ -492,7 +492,8 @@ userCmd
   .description('Create a user and print its bearer token once')
   .option('--role <role>', 'admin | developer | observer', 'developer')
   .option('--color <hex>', 'UI color, e.g. #2563eb (default: derived from name)')
-  .action(async (name: string, opts: { role: string; color?: string }) => {
+  .option('--profile <profile>', 'Credential profile for this user\'s agents (default: the user name)')
+  .action(async (name: string, opts: { role: string; color?: string; profile?: string }) => {
     initDb();
     const { addUserCommand, formatCreatedUser } = await import('./user-command.js');
     const result = addUserCommand(name, opts);
@@ -501,6 +502,36 @@ userCmd
       process.exit(1);
     }
     console.log(formatCreatedUser(result.data));
+  });
+
+// --- profile ---
+const profileCmd = program
+  .command('profile')
+  .description('Credential profiles (one CLI subscription per developer)');
+
+profileCmd
+  .command('login <name> <runtime>')
+  .description("Log a profile in: runs the runtime's login command here with the profile's env")
+  .action(async (name: string, runtime: string) => {
+    const cfg = loadConfig(CONFIG_FILE);
+    const { buildLoginInvocation } = await import('./profile-command.js');
+    const { ensureProfileDirs } = await import('../server/profiles.js');
+    const { spawnSync } = await import('node:child_process');
+
+    const invocation = buildLoginInvocation(name, runtime, cfg);
+    if (!invocation.ok) {
+      console.error(invocation.error);
+      process.exit(1);
+    }
+    const { command, args, env, cwd, profile } = invocation.data;
+    ensureProfileDirs(profile, env, cfg);
+    console.log(`Logging in profile '${profile}' for ${runtime}…`);
+    const result = spawnSync(command, args, { cwd, env: { ...process.env, ...env }, stdio: 'inherit' });
+    if (result.error) {
+      console.error(`Failed to run '${command}': ${result.error.message}`);
+      process.exit(1);
+    }
+    process.exit(result.status ?? 0);
   });
 
 // --- mcp ---

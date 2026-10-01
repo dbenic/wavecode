@@ -3,6 +3,8 @@ import path from 'node:path';
 import { getConfig, type RuntimeConfig } from './config.js';
 import { isEffortLevel, type Result } from './db.js';
 import * as tmux from './tmux.js';
+import { isSafeEnvKey, isSafeEnvValue } from './profile-validation.js';
+import { resolveProfileEnv } from './profiles.js';
 
 /**
  * Model names end up embedded in a shell command sent to tmux, so the
@@ -13,6 +15,12 @@ const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,99}$/;
 export interface RuntimePin {
   model?: string | null;
   effort?: EffortPin;
+  /**
+   * Launch env (credential profile, spec §5), rendered as an `env K=V …`
+   * prefix. Pass the output of resolveProfileEnv(); a pair that fails the
+   * strict key/value alphabet is never shell-embedded.
+   */
+  env?: Record<string, string>;
 }
 type EffortPin = string | null | undefined;
 
@@ -37,7 +45,29 @@ export function buildRuntimeCommand(runtimeConfig: RuntimeConfig, pin: RuntimePi
       : ` ${runtimeConfig.effort_flag} ${pin.effort}`;
   }
 
+  const envPairs = Object.entries(pin.env ?? {}).filter(([k, v]) => isSafeEnvKey(k) && isSafeEnvValue(v));
+  if (envPairs.length > 0) {
+    // `env` scopes the vars to this process only and keeps PATH (grok's HOME override relies on it)
+    command = `env ${envPairs.map(([k, v]) => `${k}=${v}`).join(' ')} ${command}`;
+  }
+
   return command;
+}
+
+/**
+ * Full launch command for an agent: runtime command + model/effort pin +
+ * its credential profile env. Errors (unknown runtime, unconfigured or
+ * unsafe profile) are returned, never launched without the profile.
+ */
+export function buildLaunchCommand(
+  runtime: string,
+  opts: { model?: string | null; effort?: string | null; profile?: string | null },
+): Result<string> {
+  const runtimeConfig = getConfig().runtimes[runtime];
+  if (!runtimeConfig) return { ok: false, error: `Unknown runtime '${runtime}'` };
+  const env = resolveProfileEnv(runtime, opts.profile);
+  if (!env.ok) return env;
+  return { ok: true, data: buildRuntimeCommand(runtimeConfig, { model: opts.model, effort: opts.effort, env: env.data }) };
 }
 
 export function getWorktreesRoot(): string {
@@ -74,16 +104,15 @@ export function launchRuntimeInNewSession(opts: {
   runtime: string;
   model?: string | null;
   effort?: string | null;
+  profile?: string | null;
 }): Result<void> {
-  const runtimeConfig = getConfig().runtimes[opts.runtime];
-  if (!runtimeConfig) {
-    return { ok: false, error: `Unknown runtime '${opts.runtime}'` };
-  }
+  const command = buildLaunchCommand(opts.runtime, opts);
+  if (!command.ok) return command;
 
   try {
     // newSession creates a shell first, then sends the command as keystrokes
     // so the session survives even if the command fails
-    tmux.newSession(opts.sessionName, opts.workDir, buildRuntimeCommand(runtimeConfig, opts));
+    tmux.newSession(opts.sessionName, opts.workDir, command.data);
 
     return { ok: true, data: undefined };
   } catch (e) {

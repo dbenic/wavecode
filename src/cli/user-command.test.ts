@@ -29,9 +29,17 @@ describe('wavecode user add', () => {
     expect(resolveUserByToken(result.data.token, null)?.name).toBe('ana');
 
     const out = formatCreatedUser(result.data);
-    expect(out).toContain('ana (admin)');
+    expect(out).toContain('ana (admin, profile ana)');
     expect(out).toContain(result.data.token);
     expect(out).not.toContain(hashToken(result.data.token));
+  });
+
+  it('sets the credential profile (default: the user name)', () => {
+    const dflt = addUserCommand('ana');
+    expect(dflt.ok && dflt.data.user.profile).toBe('ana');
+    const custom = addUserCommand('bob', { profile: 'bob-max' });
+    expect(custom.ok && custom.data.user.profile).toBe('bob-max');
+    expect(addUserCommand('eve', { profile: 'Bad Name' }).ok).toBe(false);
   });
 
   it('defaults to developer and reports invalid roles', () => {

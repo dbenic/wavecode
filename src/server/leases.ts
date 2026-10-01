@@ -23,6 +23,7 @@ import {
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { OWNER_USER, OWNER_USER_ID } from './users.js';
+import { isProfileCompatible, lookupActor } from './profiles.js';
 
 export const DEFAULT_RESERVE_HOURS = 4;
 export const MAX_RESERVE_HOURS = 24;
@@ -122,9 +123,21 @@ export function releaseAgent(agentId: string, user: Pick<User, 'id' | 'role'>): 
  * may assign to any agent (rule 2), so the dispatcher honors it.
  */
 export function canDispatchTaskToAgent(task: Task, agent: Agent): boolean {
-  if (!agent.owner_id) return true;
-  if (task.created_by && task.created_by === agent.owner_id) return true;
-  return task.agent_id === agent.id && !!task.created_by && isAdminUserId(task.created_by);
+  return waitReason(task, agent) === null;
+}
+
+/**
+ * Why `task` may not run on `agent` right now, or null if it may.
+ * - 'profile' (spec §5): the agent runs on another subscription — nobody's
+ *   task may burn someone else's quota, admins included (except `shared`).
+ * - 'owner' (§2 rule 6): someone else holds the lease.
+ */
+export function waitReason(task: Task, agent: Agent): 'profile' | 'owner' | null {
+  if (agent.profile && !isProfileCompatible(agent.profile, lookupActor(task.created_by))) return 'profile';
+  if (!agent.owner_id) return null;
+  if (task.created_by && task.created_by === agent.owner_id) return null;
+  if (task.agent_id === agent.id && !!task.created_by && isAdminUserId(task.created_by)) return null;
+  return 'owner';
 }
 
 /** Rule 3: dispatching a task to a free agent leases it to the task's creator. */

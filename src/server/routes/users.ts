@@ -6,8 +6,8 @@ import logger from '../logger.js';
 import { createUser, isAdmin, OWNER_USER, revokeUser } from '../users.js';
 import { releaseLeasesOf } from '../leases.js';
 
-function publicUser(user: { id: string; name: string; role: string; color: string }) {
-  return { id: user.id, name: user.name, role: user.role, color: user.color };
+function publicUser(user: { id: string; name: string; role: string; color: string; profile: string | null }) {
+  return { id: user.id, name: user.name, role: user.role, color: user.color, profile: user.profile };
 }
 
 export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
@@ -25,8 +25,8 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
     const actor = c.get('user');
     if (!isAdmin(actor)) return c.json({ error: 'Forbidden: admin only' }, 403);
 
-    const body = await c.req.json<{ name?: unknown; role?: unknown; color?: unknown }>();
-    const result = createUser({ name: body?.name, role: body?.role, color: body?.color });
+    const body = await c.req.json<{ name?: unknown; role?: unknown; color?: unknown; profile?: unknown }>();
+    const result = createUser({ name: body?.name, role: body?.role, color: body?.color, profile: body?.profile });
     if (!result.ok) {
       const status = result.error.includes('already exists') ? 409 : 400;
       return c.json({ error: result.error }, status);

@@ -15,6 +15,7 @@ import { getActingUser, type NodeAppEnv } from '../auth.js';
 import type { User } from '../db.js';
 import * as leases from '../leases.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
+import { isProfileCompatible, resolveSpawnProfile } from '../profiles.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
@@ -271,6 +272,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       runner?: 'tmux' | 'file';
       /** Reserve the new agent for the caller (spec §3: MCP spawn_agent sends 4). */
       reserve_hours?: number;
+      /** Credential profile (spec §5) — admin only; default is the caller's own. */
+      profile?: string | null;
     }>();
 
     const spawnValidation = validate.validateSpawnBody(body);
@@ -281,7 +284,10 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       return c.json({ error: `reserve_hours must be a number in (0, ${leases.MAX_RESERVE_HOURS}]` }, 400);
     }
 
-    const result = sessionManager.spawnAgent(body);
+    const profile = resolveSpawnProfile(getActingUser(c), body.profile);
+    if (!profile.ok) return c.json({ error: profile.error }, profile.code === 'forbidden' ? 403 : 400);
+
+    const result = sessionManager.spawnAgent({ ...body, profile: profile.data });
     if (!result.ok) return c.json({ error: result.error }, 400);
 
     const agent = result.data;
@@ -294,6 +300,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       model: agent.model,
       effort: agent.effort,
       runner: agent.mode === 'file' ? 'file' : 'tmux',
+      profile: agent.profile ?? null,
     });
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent spawned');
@@ -322,6 +329,8 @@ function enrichAgent(agent: Agent, viewer: User) {
       ? { owner, owner_id: agent.owner_id, reason: agent.lease_reason ?? null, expires_at: agent.lease_expires_at ?? null }
       : null,
     can_act: leases.checkAgentAccess(agent, viewer).ok,
+    // Spec §5: a free agent on another subscription is "free (other subscription)" — never yours to use.
+    profile_compatible: !agent.profile || isProfileCompatible(agent.profile, viewer),
     lastOutputLine: outputWatcher.getLastOutputLine(agent.id),
     outputVersion: outputWatcher.getOutputVersion(agent.id),
     watching: outputWatcher.isWatching(agent.id),

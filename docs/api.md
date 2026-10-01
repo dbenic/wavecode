@@ -578,6 +578,22 @@ Without `since`: the newest `limit` items. With `since`: items after that cursor
 ### `POST /api/agents/:id/restart`
 Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
 
+## Credential profiles (spec §5)
+
+Agents run on a **profile**: a credential directory `<profiles_root>/<profile>` that the runtime is pointed at via env (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HOME` for grok), launched as `env K=V … <command>` on spawn, restart, upgrade, runtime relaunch and file-runner runs. Env values are validated (paths/plain tokens only) and an unresolvable profile fails the launch instead of falling back to another login.
+
+- `users.profile` defaults to the user name; the fallback-token `owner` has none (home-dir login).
+- `POST /api/agents/spawn` uses the caller's profile; `profile` (name or `null`) is admin-only (`403` otherwise). Shared profiles are admin-only.
+- Dispatch: an agent on profile P only takes tasks created by users on P; a `shared` profile takes admin/system tasks; an agent without a profile takes anyone's. A task assigned to an incompatible agent waits with `task.waiting_for_agent {reason: 'profile', profile}`. `GET /api/agents` adds `profile_compatible` for the caller (free but `false` = "free (other subscription)").
+
+### `GET /api/profiles`
+`[{ name, shared, mine, runtimes: { <runtime>: { logged_in } } }]` — whether a credential file exists. Never contents or paths.
+
+### `POST /api/profiles/:name/login`
+Body `{ runtime }`. Profile owner or admin (shared: admin). Opens tmux seat `wc-login-<profile>-<runtime>` running the runtime's `login_command` with the profile env, registered as an adopted agent `login-<profile>-<runtime>` (reserved for you, never dispatched to) so you can read the device-code URL in AgentView. The seat is removed when the login exits or after 15 minutes (`profile.login_started` / `profile.login_finished {reason, logged_in}`). `409` if one is already open.
+
+CLI equivalent on the box: `wavecode profile login <name> <runtime>` (runs the login in your terminal).
+
 ## Events
 
 ### `GET /api/events`

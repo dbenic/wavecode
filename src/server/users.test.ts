@@ -201,6 +201,8 @@ describe('migration v11 → current', () => {
     expect(cols('agents')).toEqual(expect.arrayContaining(['owner_id', 'lease_expires_at', 'lease_reason']));
     expect(cols('tasks')).toContain('created_by');
     expect(cols('goals')).toContain('created_by');
+    expect(cols('users')).toContain('profile');
+    expect(cols('agents')).toContain('profile');
 
     const events = mod.listEvents();
     expect(events).toHaveLength(1);

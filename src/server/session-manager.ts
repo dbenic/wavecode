@@ -17,6 +17,7 @@ import path from 'node:path';
 import { getConfig } from './config.js';
 import { startRunner, stopRunner } from './runner.js';
 import { createWorktree, launchRuntimeInNewSession } from './runtime-launcher.js';
+import { resolveProfileEnv } from './profiles.js';
 import {
   ensureClaudeMd,
   fileRunnerSessionName,
@@ -77,6 +78,11 @@ export interface SpawnOptions {
    * Default `tmux` keeps the existing spawned/adopted path.
    */
   runner?: 'tmux' | 'file';
+  /**
+   * Credential profile (spec §5) — already resolved by the caller via
+   * resolveSpawnProfile(); null/undefined = home-dir login.
+   */
+  profile?: string | null;
 }
 
 export function spawnAgent(opts: SpawnOptions): Result<Agent> {
@@ -94,6 +100,10 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
   if (opts.effort && !isEffortLevel(opts.effort)) {
     return { ok: false, error: `Invalid effort level '${opts.effort}'` };
   }
+
+  // Fail before creating anything if the profile cannot be launched safely
+  const profileEnv = resolveProfileEnv(opts.runtime, opts.profile);
+  if (!profileEnv.ok) return profileEnv;
 
   const sessionName = `wc-${opts.name}`;
 
@@ -154,6 +164,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
       status: 'idle',
       model: opts.model ?? null,
       effort: opts.effort ?? null,
+      profile: opts.profile ?? null,
     });
   }
 
@@ -163,6 +174,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     runtime: opts.runtime,
     model: opts.model ?? null,
     effort: opts.effort ?? null,
+    profile: opts.profile ?? null,
   });
   if (!launchResult.ok) return launchResult;
 
@@ -176,6 +188,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     status: 'idle',
     model: opts.model ?? null,
     effort: opts.effort ?? null,
+    profile: opts.profile ?? null,
   });
 
   if (!agentResult.ok) {
@@ -227,6 +240,7 @@ export function upgrade(agentId: string, repo?: string): Result<Agent> {
     runtime: agent.runtime,
     model: agent.model,
     effort: agent.effort,
+    profile: agent.profile ?? null,
   });
   if (!launchResult.ok) return launchResult;
 
@@ -264,6 +278,7 @@ export function ensureSpawnedAgentSession(agentId: string): Result<{ agent: Agen
       runtime: agent.runtime,
       model: agent.model,
       effort: agent.effort,
+      profile: agent.profile ?? null,
     });
     if (!launchResult.ok) {
       return { ok: false, error: launchResult.error };

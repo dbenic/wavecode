@@ -27,7 +27,7 @@ Read in this order:
 
 | Concern | Files |
 |---|---|
-| Schema + CRUD (SQLite, WAL, migrations v1→v13) | `db.ts` |
+| Schema + CRUD (SQLite, WAL, migrations v1→v14) | `db.ts` |
 | Agent leases: reserve/release, rule-2 guards, auto-lease, expiry sweep | `leases.ts` (+ dispatcher, health-monitor, routes) |
 | Identity: users, hashed tokens, roles, request actor | `users.ts`, `auth.ts`, `request-context.ts`, `routes/users.ts` |
 | Agent lifecycle: scan/adopt/spawn/kill/detach/stopAll | `session-manager.ts`, `runtime-launcher.ts`, `tmux.ts` |
@@ -42,6 +42,7 @@ Read in this order:
 | MCP control plane | `../mcp/tools.ts` (stdio `wavecode mcp` + HTTP `/mcp`) |
 | Health / crash / hang | `health-monitor.ts` |
 | Runtime liveness (TUI exited → bare shell): relaunch before dispatch + on tick | `runtime-liveness.ts` |
+| Credential profiles: env per runtime, spawn profile, free rule, login seats | `profiles.ts`, `profile-validation.ts`, `login-seats.ts`, `routes/profiles.ts`, CLI `profile login` |
 | NL command chat (reactive LLM PM) | `command-chat.ts`, `llm-provider.ts` |
 
 ## Recently landed (see git log for detail)

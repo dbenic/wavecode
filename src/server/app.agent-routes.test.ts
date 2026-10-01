@@ -139,6 +139,7 @@ describe('app agent lifecycle routes', () => {
     expect(sessionManager.spawnAgent).toHaveBeenCalledWith({
       name: 'builder',
       runtime: 'codex',
+      profile: null, // spec §5: the synthetic owner spawns on the home-dir login
     });
     expect(outputWatcher.startWatching).toHaveBeenCalledWith('agent-1');
     expect(events.emit).toHaveBeenCalledWith(

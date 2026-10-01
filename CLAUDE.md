@@ -107,6 +107,7 @@ CREATE TABLE agents (
   owner_id TEXT,                  -- v13 lease holder (user id, or 'owner'); null = free. No FK (synthetic owner)
   lease_expires_at TEXT,          -- ISO; null = no expiry while owned
   lease_reason TEXT,              -- 'reserved' | 'task' | null
+  profile TEXT,                   -- v14 credential profile (spec §5); null = home-dir login
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -191,6 +192,7 @@ CREATE TABLE users (            -- v12; auth.fallback_token = synthetic admin 'o
   role TEXT NOT NULL DEFAULT 'developer',  -- 'admin' | 'developer' | 'observer'
   color TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,         -- sha256 of the bearer token; never plaintext
+  profile TEXT,                            -- v14 credential profile, default = name
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```

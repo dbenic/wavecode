@@ -11,15 +11,16 @@ import { createUser, type CreatedUser } from '../server/users.js';
 export interface AddUserOptions {
   role?: string;
   color?: string;
+  profile?: string;
 }
 
 export function addUserCommand(name: string, opts: AddUserOptions = {}): Result<CreatedUser> {
-  return createUser({ name, role: opts.role, color: opts.color });
+  return createUser({ name, role: opts.role, color: opts.color, profile: opts.profile });
 }
 
 export function formatCreatedUser({ user, token }: CreatedUser): string {
   return [
-    `User ${user.name} (${user.role}) created — id ${user.id}`,
+    `User ${user.name} (${user.role}, profile ${user.profile ?? 'none'}) created — id ${user.id}`,
     `Token (shown once, store it now): ${token}`,
     'Use it as: Authorization: Bearer <token>  (or WAVECODE_TOKEN=<token>)',
   ].join('\n');

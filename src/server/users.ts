@@ -26,6 +26,8 @@ export const OWNER_USER: User = Object.freeze({
   name: 'owner',
   role: 'admin',
   color: '#64748b',
+  // The fallback token runs agents on the service user's own (home-dir) login.
+  profile: null,
   created_at: '1970-01-01 00:00:00',
 });
 
@@ -76,6 +78,8 @@ export interface CreateUserInput {
   name: unknown;
   role?: unknown;
   color?: unknown;
+  /** Credential profile (spec §5); defaults to the user name. */
+  profile?: unknown;
 }
 
 export interface CreatedUser {
@@ -107,8 +111,16 @@ export function createUser(input: CreateUserInput): Result<CreatedUser> {
     return { ok: false, error: 'color must be a hex color like #2563eb' };
   }
 
+  let profile = name;
+  if (input.profile !== undefined && input.profile !== null && input.profile !== '') {
+    if (typeof input.profile !== 'string' || !USER_NAME_RE.test(input.profile)) {
+      return { ok: false, error: 'profile must be 1-32 chars of [a-z0-9_-]' };
+    }
+    profile = input.profile;
+  }
+
   const token = generateToken();
-  const inserted = insertUser({ name, role, color, token_hash: hashToken(token) });
+  const inserted = insertUser({ name, role, color, token_hash: hashToken(token), profile });
   if (!inserted.ok) return inserted;
   return { ok: true, data: { user: inserted.data, token } };
 }

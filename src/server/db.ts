@@ -29,6 +29,8 @@ export interface Agent {
   owner_id?: string | null;          // lease holder (user id); null = free
   lease_expires_at?: string | null;  // ISO; null = no expiry while owned
   lease_reason?: LeaseReason | null;
+  /** Credential profile the runtime runs on (spec §5); null = the service user's home-dir login. */
+  profile?: string | null;
   created_at: string;
 }
 
@@ -123,6 +125,8 @@ export interface User {
   name: string;
   role: UserRole;
   color: string;
+  /** Credential profile this user's agents run on; null = home-dir login (the synthetic owner). */
+  profile: string | null;
   created_at: string;
 }
 
@@ -221,7 +225,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -240,6 +244,7 @@ const SCHEMA_SQL = `
     owner_id TEXT,
     lease_expires_at TEXT,
     lease_reason TEXT,
+    profile TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -329,6 +334,7 @@ const SCHEMA_SQL = `
     role TEXT NOT NULL DEFAULT 'developer',
     color TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
+    profile TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -657,6 +663,14 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE tasks ADD COLUMN created_by TEXT;
     ALTER TABLE goals ADD COLUMN created_by TEXT;
   `,
+  // v13 → v14: Credential profiles (spec §5). Existing users default to a
+  // profile named after them; existing agents stay on the home-dir login
+  // (profile NULL) so nothing changes until profiles are configured.
+  13: `
+    ALTER TABLE users ADD COLUMN profile TEXT;
+    UPDATE users SET profile = name WHERE profile IS NULL;
+    ALTER TABLE agents ADD COLUMN profile TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -717,11 +731,11 @@ export function insertAgent(
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status, model, effort)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status, model, effort, profile)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, agent.name, agent.runtime, agent.tmux_session, agent.workspace,
-      agent.mode, agent.status, agent.model ?? null, agent.effort ?? null,
+      agent.mode, agent.status, agent.model ?? null, agent.effort ?? null, agent.profile ?? null,
     );
     const row = getDb().prepare('SELECT * FROM agents WHERE id = ?').get(id) as Agent;
     return { ok: true, data: row };
@@ -1141,7 +1155,7 @@ export function listAgentsOwnedBy(userId: string): Agent[] {
 
 // --- User helpers ---
 
-const USER_COLUMNS = 'id, name, role, color, created_at';
+const USER_COLUMNS = 'id, name, role, color, profile, created_at';
 
 /** Insert a user. `token_hash` is the sha256 of the bearer token — never the plaintext. */
 export function insertUser(user: {
@@ -1149,13 +1163,14 @@ export function insertUser(user: {
   role: UserRole;
   color: string;
   token_hash: string;
+  profile?: string | null;
 }): Result<User> {
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO users (id, name, role, color, token_hash)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, user.name, user.role, user.color, user.token_hash);
+      INSERT INTO users (id, name, role, color, token_hash, profile)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, user.name, user.role, user.color, user.token_hash, user.profile === undefined ? user.name : user.profile);
     return getUser(id);
   } catch (e) {
     const msg = (e as Error).message;

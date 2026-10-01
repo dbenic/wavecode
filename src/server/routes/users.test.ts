@@ -56,7 +56,7 @@ describe('user routes', () => {
     const app = await makeApp();
     const res = await call(app, 'GET', '/api/me', FALLBACK);
     expect(res.status).toBe(200);
-    expect(res.json).toEqual({ id: 'owner', name: 'owner', role: 'admin', color: expect.any(String) });
+    expect(res.json).toEqual({ id: 'owner', name: 'owner', role: 'admin', color: expect.any(String), profile: null });
   });
 
   it('rejects unknown tokens with 401', async () => {
@@ -73,7 +73,7 @@ describe('user routes', () => {
     expect(created.json.token).toMatch(/^wc_/);
 
     const me = await call(app, 'GET', '/api/me', created.json.token);
-    expect(me.json).toEqual({ id: created.json.id, name: 'ana', role: 'developer', color: '#2563eb' });
+    expect(me.json).toEqual({ id: created.json.id, name: 'ana', role: 'developer', color: '#2563eb', profile: 'ana' });
 
     const list = await call(app, 'GET', '/api/users', created.json.token);
     expect(list.status).toBe(200);

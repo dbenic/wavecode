@@ -13,7 +13,7 @@ import { getConfig } from './config.js';
 import type { Agent, Result } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
-import { buildRuntimeCommand } from './runtime-launcher.js';
+import { buildLaunchCommand } from './runtime-launcher.js';
 import * as tmux from './tmux.js';
 
 export const RUNTIME_SETTLE_TIMEOUT_MS = 30_000;
@@ -79,12 +79,11 @@ export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check
     return { ok: true, data: { sent: false } };
   }
 
-  const runtimeConfig = getConfig().runtimes[agent.runtime];
-  if (!runtimeConfig) return { ok: false, error: `Unknown runtime '${agent.runtime}'` };
-
-  const command = buildRuntimeCommand(runtimeConfig, { model: agent.model, effort: agent.effort });
+  // Same command as spawn, including the agent's credential profile env
+  const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile });
+  if (!command.ok) return command;
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, command);
+    tmux.sendTextAndEnter(agent.tmux_session, command.data);
   } catch (e) {
     return { ok: false, error: `Failed to relaunch runtime: ${(e as Error).message}` };
   }

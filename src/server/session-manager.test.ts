@@ -128,6 +128,7 @@ describe('session-manager.ts', () => {
       runtime: 'codex',
       model: null,
       effort: null,
+      profile: null, // spec §5: no profile → home-dir login, as before
     });
     expect(vi.mocked(db.insertAgent)).toHaveBeenCalledWith(expect.objectContaining({
       workspace: '/tmp/projects/co-ops-dev',
