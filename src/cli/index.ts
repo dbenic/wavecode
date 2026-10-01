@@ -488,7 +488,8 @@ program
       try {
         loadInstalledConfig();
         const { notify } = await import('../server/notifications.js');
-        await notify({ title: `Message for @${target.data.name}`, body: messageWords.join(' ').slice(0, 280), url: '/', tag: `message-${ids[0]}` });
+        // Channels are per-install, not per-user: never put the body in the notification
+        await notify({ title: `New WaveCode message for @${target.data.name}`, body: 'Open the Command Center to read it', url: '/', tag: `message-${ids[0]}` });
       } catch {
         // notifications are optional
       }

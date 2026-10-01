@@ -1,7 +1,8 @@
 import type { Hono } from 'hono';
 import { getRun, insertRunArtifact, listArtifacts, getArtifact, resolveAgent } from '../db.js';
 import * as artifactManager from '../artifact-manager.js';
-import type { NodeAppEnv } from '../auth.js';
+import * as leases from '../leases.js';
+import { getActingUser, type NodeAppEnv } from '../auth.js';
 import type { Artifact, Result } from '../db.js';
 
 /** alias → name → id (spec §5c); unknown refs pass through for the manager to reject. */
@@ -191,7 +192,14 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
     const target = body.targetAgentId?.trim() || body.agent_id?.trim();
     if (!target) return c.json({ error: 'targetAgentId or agent_id is required' }, 400);
 
-    const result = artifactManager.shareArtifact(c.req.param('id'), target);
+    // Sharing copies into the agent's worktree and types a prompt into its
+    // pane — same ownership rule as a direct send (spec §2 rule 2).
+    const resolved = resolveAgent(target);
+    if (!resolved.ok) return c.json({ error: resolved.error }, 404);
+    const access = leases.checkAgentAccess(resolved.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
+
+    const result = artifactManager.shareArtifact(c.req.param('id'), resolved.data.id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json({
       ok: true,

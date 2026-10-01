@@ -830,9 +830,18 @@ export function getAgentByAlias(alias: string): Result<Agent> {
  * The one agent lookup for anything a person or tool typed (spec §5c):
  * alias → name → id. A leading `@` is ignored.
  */
+/** Crockford-base32 ULID, as generateId() produces. */
+export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
 export function resolveAgent(ref: string): Result<Agent> {
   const key = ref.trim().replace(/^@/, '');
   if (!key) return { ok: false, error: 'Agent reference is empty' };
+  // An id is what the UI, MCP and dispatcher pass; it must never be shadowed
+  // by an agent whose *name* happens to look like someone else's ULID.
+  if (ULID_RE.test(key)) {
+    const byId = getAgent(key);
+    if (byId.ok) return byId;
+  }
   const byAlias = getAgentByAlias(key);
   if (byAlias.ok) return byAlias;
   const byName = getAgentByName(key);
@@ -840,6 +849,11 @@ export function resolveAgent(ref: string): Result<Agent> {
   const byId = getAgent(key);
   if (byId.ok) return byId;
   return { ok: false, error: `Agent '${ref}' not found` };
+}
+
+/** True when `name` would collide with an existing agent's id or alias (spawn/adopt guard). */
+export function agentNameShadowsIdentity(name: string): boolean {
+  return listAgents().some((a) => a.id === name || (a.alias !== null && a.alias === name));
 }
 
 export function updateAgentIdentity(id: string, fields: { alias?: string | null; persona?: string | null }): Result<Agent> {

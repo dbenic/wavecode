@@ -274,7 +274,10 @@ describe('aliases, personas, groups, people (spec §5c)', () => {
       const res = await call('POST', '/api/messages', { to_user: '@bob', message: 'can you approve T7?' });
       expect(res.status).toBe(201);
       expect(res.json.to_user_id).toBe(bob.id);
-      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ title: 'ana → @bob', body: 'can you approve T7?' }));
+      // Notification channels are per-install, not per-user: the mirror must never carry the body
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ title: 'New WaveCode message for @bob' }));
+      const mirrored = vi.mocked(notify).mock.calls.at(-1)?.[0] as { body?: string };
+      expect(mirrored.body ?? '').not.toContain('can you approve T7?');
       expect(harness.typed).toEqual([]); // a person, not a pane
 
       const forBob = (await call('GET', '/api/thread', undefined, bob.token)).json.items.find((i: { title: string }) => i.title === 'Message for @bob');
