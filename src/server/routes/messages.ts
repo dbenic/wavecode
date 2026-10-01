@@ -14,6 +14,7 @@ import * as leases from '../leases.js';
 import logger from '../logger.js';
 import { getRuntimeState } from '../runtime-liveness.js';
 import * as sessionManager from '../session-manager.js';
+import * as replyCapture from '../reply-capture.js';
 
 /** Text typed into the recipient's pane for a human reply (spec §4.2). */
 export function formatInjectedReply(userName: string, message: string): string {
@@ -56,6 +57,10 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
     if (!body.message?.trim()) {
       return c.json({ error: 'message is required' }, 400);
     }
+    // Replies are captured from the agent's pane by the server (spec §5b), never posted by clients
+    if (body.message_type === 'reply') {
+      return c.json({ error: "message_type 'reply' is reserved for captured agent replies" }, 400);
+    }
 
     let toAgentId = body.to_agent_id ?? null;
     if (body.to && !toAgentId) {
@@ -86,7 +91,7 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
 
     if (!result.ok) return c.json({ error: result.error }, 500);
 
-    emit('message.created', 'agent_message', result.data.id, {
+    const created = emit('message.created', 'agent_message', result.data.id, {
       from_agent_id: result.data.from_agent_id,
       to_agent_id: result.data.to_agent_id,
       workspace: result.data.workspace,
@@ -94,7 +99,12 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
     });
 
     if (!recipient?.ok) return c.json(result.data, 201);
-    const injection = injectReply(recipient.data, formatInjectedReply(user.name, result.data.message));
+    const injectedText = formatInjectedReply(user.name, result.data.message);
+    const injection = injectReply(recipient.data, injectedText);
+    if (injection.ok) {
+      // Spec §5b: the agent's answer appears in the thread under this message
+      replyCapture.trackPrompt({ agent: recipient.data, actorId: user.id, prompt: injectedText, promptEventId: created?.id ?? null });
+    }
     return c.json({ ...result.data, injected: injection.ok, ...(injection.ok ? {} : { inject_error: injection.error }) }, 201);
   });
 

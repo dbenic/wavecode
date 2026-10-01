@@ -3,7 +3,9 @@ import {
   listAgents,
   getAgent,
   updateAgentPin,
+  updateAgentRole,
   type Agent,
+  type AgentRole,
   type EffortLevel,
 } from '../db.js';
 import { emit } from '../event-bus.js';
@@ -15,12 +17,15 @@ import { getActingUser, type NodeAppEnv } from '../auth.js';
 import type { User } from '../db.js';
 import * as leases from '../leases.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
+import * as replyCapture from '../reply-capture.js';
+import { briefOrchestratorSeat, parseAgentRole, resolveOrchestratorAgent } from '../orchestrator.js';
 import { isProfileCompatible, resolveSpawnProfile } from '../profiles.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
     const agents = listAgents();
-    return c.json(agents.map((a) => enrichAgent(a, getActingUser(c))));
+    const orchestratorId = resolveOrchestratorAgent(agents)?.id ?? null;
+    return c.json(agents.map((a) => enrichAgent(a, getActingUser(c), orchestratorId)));
   });
 
   app.get('/api/agents/:id', (c) => {
@@ -45,10 +50,14 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       sessionName: string;
       runtime: Agent['runtime'];
       name?: string;
+      /** 'orchestrator' = the PM seat; it is sent docs/orchestrator-seat.md (spec §5b). */
+      role?: string | null;
     }>();
 
     const validationError = validate.validateAdoptBody(body);
     if (validationError) return c.json({ error: validationError }, 400);
+    const role = parseAgentRole(body.role);
+    if (!role.ok) return c.json({ error: role.error }, 400);
 
     const result = sessionManager.adopt(body.sessionName, body.runtime, body.name);
     if (!result.ok) return c.json({ error: result.error }, 400);
@@ -63,6 +72,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     });
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent adopted');
+    if (role.role) return c.json(assignRole(agent, role.role, getActingUser(c).id), 201);
     return c.json(agent, 201);
   });
 
@@ -89,9 +99,19 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       if (!result.ok) return c.json({ error: result.error }, 500);
     }
 
-    emit('agent.prompt_sent', 'agent', agentResult.data.id, {
-      text: body.text.substring(0, 200),
+    const sent = emit('agent.prompt_sent', 'agent', agentResult.data.id, {
+      text: body.text.substring(0, 2000),
     });
+
+    // Spec §5b: the agent's answer to this prompt is captured into the thread
+    if (!body.raw) {
+      replyCapture.trackPrompt({
+        agent: agentResult.data,
+        actorId: getActingUser(c).id,
+        prompt: body.text,
+        promptEventId: sent?.id ?? null,
+      });
+    }
 
     return c.json({ ok: true });
   });
@@ -239,13 +259,25 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{
       model?: string | null;
       effort?: EffortLevel | null;
+      role?: string | null;
     }>();
 
-    const validationError = validate.validateAgentPinBody(body);
-    if (validationError) return c.json({ error: validationError }, 400);
+    const role = parseAgentRole(body.role);
+    if (!role.ok) return c.json({ error: role.error }, 400);
 
     const agentResult = sessionManager.get(c.req.param('id'));
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+
+    // Role-only update (spec §5b): make / unmake the orchestrator seat
+    if (role.role !== undefined && body.model === undefined && body.effort === undefined) {
+      const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+      if (!access.ok) return c.json({ error: access.error }, 403);
+      const updated = assignRole(agentResult.data, role.role, getActingUser(c).id);
+      return c.json(enrichAgent(updated, getActingUser(c)));
+    }
+
+    const validationError = validate.validateAgentPinBody(body);
+    if (validationError) return c.json({ error: validationError }, 400);
 
     const result = updateAgentPin(agentResult.data.id, {
       model: body.model,
@@ -279,10 +311,15 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       reserve_hours?: number;
       /** Credential profile (spec §5) — admin only; default is the caller's own. */
       profile?: string | null;
+      /** 'orchestrator' = the PM seat; it is sent docs/orchestrator-seat.md once up (spec §5b). */
+      role?: string | null;
     }>();
 
     const spawnValidation = validate.validateSpawnBody(body);
     if (spawnValidation) return c.json({ error: spawnValidation }, 400);
+    const role = parseAgentRole(body.role);
+    if (!role.ok) return c.json({ error: role.error }, 400);
+    if (role.role && body.runner === 'file') return c.json({ error: 'File-runner seats cannot hold the orchestrator role' }, 400);
     const reserveHours = body.reserve_hours;
     if (reserveHours !== undefined && (typeof reserveHours !== 'number' || !Number.isFinite(reserveHours)
       || reserveHours <= 0 || reserveHours > leases.MAX_RESERVE_HOURS)) {
@@ -295,7 +332,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const result = sessionManager.spawnAgent({ ...body, profile: profile.data });
     if (!result.ok) return c.json({ error: result.error }, 400);
 
-    const agent = result.data;
+    const agent = role.role ? assignRole(result.data, role.role, getActingUser(c).id) : result.data;
     outputWatcher.startWatching(agent.id);
     emit('agent.spawned', 'agent', agent.id, {
       name: agent.name,
@@ -323,11 +360,30 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   });
 }
 
-function enrichAgent(agent: Agent, viewer: User) {
+/**
+ * Store the role; becoming the orchestrator sends the standing operating
+ * prompt once the runtime is up (async — the response does not wait).
+ */
+function assignRole(agent: Agent, role: AgentRole | null, actorId: string): Agent {
+  const updated = updateAgentRole(agent.id, role);
+  if (!updated.ok) return agent;
+  emit('agent.updated', 'agent', agent.id, { name: agent.name, role });
+  if (role === 'orchestrator' && agent.role !== 'orchestrator') {
+    void briefOrchestratorSeat(agent.id, actorId).catch((err) =>
+      logger.warn({ agentId: agent.id, error: (err as Error).message }, 'Orchestrator brief failed'),
+    );
+  }
+  return updated.data;
+}
+
+function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null) {
   const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
+  const defaultSeat = orchestratorId === undefined ? resolveOrchestratorAgent(listAgents())?.id ?? null : orchestratorId;
   return {
     ...agent,
     owner,
+    /** The Command Center's default recipient (spec §5b). */
+    orchestrator: defaultSeat === agent.id,
     // Spec §3: lease state for orchestrators, plus whether *this* caller may
     // act on the agent (rule 2) so MCP seats never have to guess.
     lease: agent.owner_id

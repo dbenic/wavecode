@@ -47,6 +47,7 @@ async function setup(me: User = ana) {
     if (path === '/agents') return [
       agent({ name: 'grok-fe', owner_id: 'u-ana', owner: 'ana' }),
       agent({ name: 'codex-rev' }),
+      agent({ name: 'pm', orchestrator: true, role: 'orchestrator' }),
     ] as never;
     if (path === '/tasks') return [{ id: 'task-1', agent_id: null, prompt: 'T5 UI', status: 'pending', priority: 0, created_at: new Date().toISOString(), created_by: 'u-ana' }] as never;
     if (path === '/reviews') return [{}, {}] as never;
@@ -79,6 +80,44 @@ describe('CommandCenter', () => {
           ] }),
       ],
     }];
+  });
+
+  it('with no target selected, a question goes to the orchestrator seat (Ask mode)', async () => {
+    const api = await setup();
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Target' })).toHaveValue('pm'));
+    expect(screen.getByRole('radio', { name: 'Ask' })).toHaveAttribute('aria-checked', 'true');
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), 'what is chatgpt-countix doing?{Enter}');
+    expect(api.apiPost).toHaveBeenCalledWith('/agents/pm/send', { text: 'what is chatgpt-countix doing?' });
+  });
+
+  it('a target the user picked is kept when agents reload', async () => {
+    await setup();
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Target' }), 'codex-rev');
+    await act(async () => {
+      sseHandler?.({ id: 50, type: 'agent.updated', entityType: 'agent', entityId: 'pm', payload: {}, createdAt: '' });
+    });
+    expect(screen.getByRole('combobox', { name: 'Target' })).toHaveValue('codex-rev');
+  });
+
+  it('a reply bubble sits directly under its prompt; tapping a chip sends the option to the seat', async () => {
+    threadPages = [{ cursor: 30, items: [
+      item({ event_id: 1, title: 'Report one' }),
+      item({ event_id: 20, kind: 'prompt', title: 'Prompt sent', agent_id: 'pm', actor_id: 'u-ana', body: 'what is chatgpt-countix doing?' }),
+      item({ event_id: 21, kind: 'run', title: 'Run started', agent_id: 'codex-rev' }),
+      item({ event_id: 22, kind: 'reply', title: 'Reply', agent_id: 'pm', needs_attention: true, refs: { prompt_event_id: 20 },
+        body: 'It is running invoices.\nReview Codex2 now?\n[ ] Review now\n[ ] Hold',
+        actions: [
+          { id: 'quick_reply', label: 'Review now', method: 'POST', path: '/api/agents/pm/send', body: { text: 'Review now' } },
+          { id: 'quick_reply', label: 'Hold', method: 'POST', path: '/api/agents/pm/send', body: { text: 'Hold' } },
+        ] }),
+    ] }];
+    const api = await setup();
+    const order = screen.getAllByTestId(/^thread-item-/).map((el) => el.getAttribute('data-testid'));
+    expect(order).toEqual(['thread-item-1', 'thread-item-20', 'thread-item-22', 'thread-item-21']);
+
+    await userEvent.click(within(screen.getByTestId('thread-item-22')).getByRole('button', { name: 'Hold' }));
+    await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/pm/send', { text: 'Hold' }));
+    expect(screen.getByRole('button', { name: /Attention/ })).toHaveTextContent('●1');
   });
 
   it('loads roster, thread, board and presence', async () => {

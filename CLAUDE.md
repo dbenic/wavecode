@@ -108,6 +108,7 @@ CREATE TABLE agents (
   lease_expires_at TEXT,          -- ISO; null = no expiry while owned
   lease_reason TEXT,              -- 'reserved' | 'task' | null
   profile TEXT,                   -- v14 credential profile (spec §5); null = home-dir login
+  role TEXT,                      -- v15 'orchestrator' = the PM seat (spec §5b)
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -147,7 +148,8 @@ CREATE TABLE runs (
   exit_code INTEGER,
   transcript_path TEXT,
   review_status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'approved' | 'rejected'
-  result_path TEXT  -- <data-dir>/runs/<id>/result.txt; last line RESULT: PASS|FAIL
+  result_path TEXT, -- <data-dir>/runs/<id>/result.txt; last line RESULT: PASS|FAIL
+  summary TEXT      -- v15 final prose captured from the pane at completion (spec §5b)
 );
 
 CREATE TABLE artifacts (

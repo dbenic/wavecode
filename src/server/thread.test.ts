@@ -145,6 +145,39 @@ describe('thread.ts', () => {
       expect(toThreadItem(ev('run.phase', 'run', run.id, { phase: 'running' }), new ThreadContext(ana))).toBeNull();
     });
 
+    it('run items carry the run\'s captured prose summary (spec §5b)', () => {
+      const run = makeRun(free.id);
+      db.updateRunSummary(run.id, 'Fixed the eSLOG export; 41 tests pass.');
+      const finished = item(ev('run.finished', 'run', run.id, { agent_id: free.id, exit_code: 0, result: 'PASS', result_reason: 'all green' }));
+      expect(finished.body).toBe('all green\n\nFixed the eSLOG export; 41 tests pass.');
+      expect(item(ev('run.started', 'run', run.id, { agent_id: free.id })).body).toBeNull();
+    });
+
+    it('reply ← message.created type reply: prompt link, attention on a question, chips only for who may act', () => {
+      const r = db.insertAgentMessage({
+        from_agent_id: seat.id,
+        message: 'Codex2 is done.\nReview it now?\n[ ] Review now\n[ ] Hold',
+        message_type: 'reply',
+        ref_prompt_actor: ana.id,
+        ref_prompt_event_id: 7,
+      });
+      if (!r.ok) throw new Error(r.error);
+      const e = ev('message.created', 'agent_message', r.data.id, { from_agent_id: seat.id, message_type: 'reply', ref_prompt_event_id: 7 });
+      const asAna = item(e);
+      expect(asAna).toMatchObject({ kind: 'reply', title: 'Reply', agent_id: seat.id, needs_attention: true, refs: { prompt_event_id: 7 } });
+      expect(asAna.actions).toEqual([
+        { id: 'quick_reply', label: 'Review now', method: 'POST', path: `/api/agents/${seat.id}/send`, body: { text: 'Review now' } },
+        { id: 'quick_reply', label: 'Hold', method: 'POST', path: `/api/agents/${seat.id}/send`, body: { text: 'Hold' } },
+      ]);
+      expect(item(e, bob).actions).toEqual([]);      // ana holds the seat
+      expect(item(e, watcher).actions).toEqual([]);  // observers never
+
+      const t = db.insertAgentMessage({ from_agent_id: free.id, message: 'partial', message_type: 'reply', truncated: true });
+      if (!t.ok) throw new Error(t.error);
+      expect(item(ev('message.created', 'agent_message', t.data.id, { from_agent_id: free.id, message_type: 'reply' })))
+        .toMatchObject({ title: 'Reply (partial — no idle after 10 min)', needs_attention: false });
+    });
+
     it('verdict ← review.ai_completed; agent is the run author', () => {
       const run = makeRun(seat.id);
       const pass = item(ev('review.ai_completed', 'run', run.id, { review_id: 'rv-1', verdict: 'pass', issues_found: 0, fix_round: 0 }));

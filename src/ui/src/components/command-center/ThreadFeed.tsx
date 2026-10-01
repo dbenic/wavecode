@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { ThreadAction, ThreadItem, ThreadKind, User } from '../../types';
-import { userColor } from '../../utils/command-center';
+import { agentColor, userColor } from '../../utils/command-center';
 
 interface ThreadFeedProps {
   items: ThreadItem[];
@@ -19,6 +19,7 @@ interface ThreadFeedProps {
 
 const KIND_CLASS: Record<ThreadKind, string> = {
   prompt: 'text-sky-400',
+  reply: 'text-emerald-300',
   report: 'text-slate-300',
   request: 'text-amber-300',
   run: 'text-emerald-400',
@@ -60,7 +61,14 @@ export default function ThreadFeed(props: ThreadFeedProps) {
         {visible.length === 0 && (
           <li className="py-6 text-center text-xs text-slate-600">{props.attentionOnly ? 'Nothing needs you right now.' : 'No activity yet.'}</li>
         )}
-        {visible.map((item) => (
+        {visible.map((item) => item.kind === 'reply' ? (
+          <ReplyBubble
+            key={item.id}
+            item={item}
+            agentName={item.agent_id ? props.agentNames.get(item.agent_id) ?? item.agent_id : 'agent'}
+            onAction={props.onAction}
+          />
+        ) : (
           <li
             key={item.id}
             data-testid={`thread-item-${item.event_id}`}
@@ -113,5 +121,63 @@ export default function ThreadFeed(props: ThreadFeedProps) {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * A captured agent reply as a chat bubble (spec §5b): agent name and color,
+ * time, the prose, and quick-reply chips when it ends with a question and
+ * `[ ] option` lines. Tapping a chip sends that option back to the seat.
+ */
+function ReplyBubble({ item, agentName, onAction }: {
+  item: ThreadItem;
+  agentName: string;
+  onAction: (item: ThreadItem, action: ThreadAction) => void;
+}) {
+  const color = agentColor(agentName);
+  const chips = item.actions.filter((a) => a.id === 'quick_reply');
+  const other = item.actions.filter((a) => a.id !== 'quick_reply');
+  // The options are shown as chips; drop their `[ ]` lines from the prose.
+  const body = chips.length > 0
+    ? (item.body ?? '').split('\n').filter((l) => !/^\s*(?:[-*]\s+)?\[\s?\]\s+/.test(l) && !/^\s*(?:\[[^\]]+\]\s*){2,4}$/.test(l)).join('\n').trimEnd()
+    : item.body;
+  return (
+    <li data-testid={`thread-item-${item.event_id}`} className="flex flex-col items-start">
+      <div
+        className={`max-w-[92%] rounded-2xl rounded-tl-sm border-l-4 bg-slate-900 px-3 py-2 ${item.needs_attention ? 'ring-1 ring-amber-500/40' : ''}`}
+        style={{ borderLeftColor: color }}
+      >
+        <div className="mb-0.5 flex items-baseline gap-2 text-xs">
+          <span className="font-semibold" style={{ color }}>{agentName}</span>
+          <span className="tabular-nums text-slate-600">{time(item.at)}</span>
+          {item.title !== 'Reply' && <span className="text-amber-400">{item.title.replace(/^Reply\s*/, '')}</span>}
+        </div>
+        {body && <p className="whitespace-pre-wrap break-words text-sm text-slate-100">{body}</p>}
+      </div>
+      {chips.length > 0 && (
+        <div role="group" aria-label="Quick replies" className="mt-1 flex flex-wrap gap-1.5 pl-1">
+          {chips.map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={() => onAction(item, chip)}
+              className="rounded-full border px-2.5 py-0.5 text-xs text-slate-100 hover:bg-slate-800"
+              style={{ borderColor: color }}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {other.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1.5 pl-1">
+          {other.map((action) => (
+            <button key={action.id} type="button" onClick={() => onAction(item, action)} className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300">
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </li>
   );
 }

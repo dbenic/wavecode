@@ -25,8 +25,9 @@ import {
 } from './db.js';
 import { checkAgentAccess } from './leases.js';
 import { canMutate, isAdmin } from './users.js';
+import { parseReplyQuestion } from './reply-capture.js';
 
-export const THREAD_KINDS = ['prompt', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
+export const THREAD_KINDS = ['prompt', 'reply', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
 export type ThreadKind = (typeof THREAD_KINDS)[number];
 
 export function isThreadKind(value: string): value is ThreadKind {
@@ -51,7 +52,15 @@ export interface ThreadItem {
   actor_id: string | null;
   title: string;
   body: string | null;
-  refs: { task_id?: string; run_id?: string; review_id?: string; artifact_id?: string; message_id?: string };
+  refs: {
+    task_id?: string;
+    run_id?: string;
+    review_id?: string;
+    artifact_id?: string;
+    message_id?: string;
+    /** reply: the prompt event this answers, so the UI can place it directly under it */
+    prompt_event_id?: number;
+  };
   needs_attention: boolean;
   actions: ThreadAction[];
 }
@@ -159,6 +168,34 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
   // --- report / request: the agent wire
   if (t === 'message.created') {
     const msg = ctx.message(event.entity_id);
+    // --- reply: what the agent answered, captured from its pane (spec §5b)
+    if ((msg?.message_type ?? p.message_type) === 'reply') {
+      const agentId = msg?.from_agent_id ?? str(p.from_agent_id);
+      const truncated = !!msg?.truncated || p.truncated === true;
+      const item = base(event, 'reply', agentId, truncated ? 'Reply (partial — no idle after 10 min)' : 'Reply');
+      item.body = msg?.message ?? null;
+      const promptEventId = msg?.ref_prompt_event_id ?? (typeof p.ref_prompt_event_id === 'number' ? p.ref_prompt_event_id : null);
+      item.refs = {
+        message_id: event.entity_id,
+        ...(msg?.ref_task_id ? { task_id: msg.ref_task_id } : {}),
+        ...(promptEventId ? { prompt_event_id: promptEventId } : {}),
+      };
+      const question = parseReplyQuestion(item.body ?? '');
+      item.needs_attention = question.asks;
+      if (agentId && ctx.canAct(agentId)) {
+        // Quick-reply chips: tapping one types the option back into the same seat.
+        for (const option of question.options) {
+          item.actions.push({
+            id: 'quick_reply',
+            label: option,
+            method: 'POST',
+            path: `/api/agents/${agentId}/send`,
+            body: { text: option },
+          });
+        }
+      }
+      return item;
+    }
     const type = (msg?.message_type ?? str(p.message_type) ?? 'info') as AgentMessage['message_type'];
     if (type === 'error') {
       const agentId = msg?.from_agent_id ?? str(p.from_agent_id);
@@ -222,7 +259,10 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         ? `Run ${phase === 'incomplete' ? 'incomplete' : 'failed'}${result ? ` · RESULT: ${result}` : ''}`
         : `Run finished · exit ${p.exit_code ?? 0}${result ? ` · RESULT: ${result}` : ''}`;
     const item = base(event, 'run', agentId, title);
-    item.body = str(p.result_reason) ?? str(p.reason) ?? str(p.error) ?? str(p.prompt);
+    const reason = str(p.result_reason) ?? str(p.reason) ?? str(p.error) ?? str(p.prompt);
+    // Spec §5b: what the agent said it did (pane prose captured at completion)
+    const summary = t !== 'run.started' ? run?.summary ?? null : null;
+    item.body = [reason, summary].filter(Boolean).join('\n\n') || null;
     const taskId = str(p.task_id) ?? run?.task_id ?? null;
     item.refs = { run_id: event.entity_id, ...(taskId ? { task_id: taskId } : {}) };
     item.needs_attention = failed;

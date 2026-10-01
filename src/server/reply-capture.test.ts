@@ -1,0 +1,173 @@
+/**
+ * Reply capture lifecycle (spec §5b) against a real SQLite file; only the
+ * pane (session-manager.capturePane) is simulated.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const paneHarness = vi.hoisted(() => ({ text: '', calls: 0 }));
+
+vi.mock('./session-manager.js', () => ({
+  capturePane: vi.fn(() => {
+    paneHarness.calls++;
+    return { ok: true, data: paneHarness.text };
+  }),
+}));
+
+vi.mock('./logger.js', () => ({
+  default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
+
+const ANSWER = '> what is chatgpt-countix doing?\n\n● It is running the invoices suite for T12.\n\n❯ \n  ⏵⏵ bypass permissions on';
+
+describe('reply-capture.ts', () => {
+  let tmpDir: string;
+  let db: typeof import('./db.js');
+  let rc: typeof import('./reply-capture.js');
+  let pm: import('./db.js').Agent;
+
+  beforeEach(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-reply-'));
+    db = await import('./db.js');
+    db.resetDbForTest();
+    db.initDb(path.join(tmpDir, 'test.db'));
+    rc = await import('./reply-capture.js');
+    rc.resetReplyCaptureForTest();
+    paneHarness.text = '';
+    paneHarness.calls = 0;
+    const a = db.insertAgent({ name: 'pm', runtime: 'claude-code', tmux_session: 'wc-pm', workspace: '/w/pm', mode: 'spawned', status: 'idle' });
+    if (!a.ok) throw new Error(a.error);
+    pm = a.data;
+  });
+
+  afterEach(() => {
+    db.resetDbForTest();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const replies = () => db.listAgentMessages({}).filter((m) => m.message_type === 'reply');
+
+  it('on the working → idle edge stores the reply with the prompt actor and emits message.created', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', promptEventId: 42, now: 1000 });
+    paneHarness.text = ANSWER;
+    expect(rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true, now: 2000 })).toBe(true);
+
+    expect(replies()).toEqual([expect.objectContaining({
+      from_agent_id: pm.id,
+      to_agent_id: null,
+      workspace: '/w/pm',
+      message: 'It is running the invoices suite for T12.',
+      message_type: 'reply',
+      ref_prompt_actor: 'u-ana',
+      ref_prompt_event_id: 42,
+      truncated: 0,
+    })]);
+    const ev = db.listEvents().find((e) => e.type === 'message.created');
+    expect(JSON.parse(ev!.payload_json!)).toMatchObject({ message_type: 'reply', ref_prompt_actor: 'u-ana', ref_prompt_event_id: 42 });
+    expect(rc.getPendingReply(pm.id)).toBeUndefined();
+  });
+
+  it('links ref_task_id when the prompt went to an agent with an open run', () => {
+    const task = db.insertTask({ prompt: 'T12', created_by: 'u-ana' });
+    if (!task.ok) throw new Error(task.error);
+    db.insertRun({ task_id: task.data.id, agent_id: pm.id });
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?' });
+    paneHarness.text = ANSWER;
+    rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: false });
+    expect(replies()[0].ref_task_id).toBe(task.data.id);
+  });
+
+  it('no answer yet (only the echo) keeps waiting', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?' });
+    paneHarness.text = '> what is chatgpt-countix doing?\n\n❯ ';
+    expect(rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: false })).toBe(false);
+    expect(rc.getPendingReply(pm.id)).toBeDefined();
+  });
+
+  it('quiet idle (no working edge) resolves only after 6s, on a stable pane, with the echo found', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', now: 0 });
+    paneHarness.text = ANSWER;
+    expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: false, now: 3_000 })).toBe(false); // too soon
+    expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: true, now: 7_000 })).toBe(false);  // still streaming
+    paneHarness.text = '● Something unrelated.'; // echo not visible → not trusted without an idle edge
+    expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: false, now: 7_000 })).toBe(false);
+    paneHarness.text = ANSWER;
+    expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: false, now: 7_000 })).toBe(true);
+    expect(replies()).toHaveLength(1);
+  });
+
+  it('without a pending prompt the pane is not even captured', () => {
+    expect(rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true })).toBe(false);
+    expect(paneHarness.calls).toBe(0);
+  });
+
+  it('a newer prompt supersedes the pending one', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'first?', promptEventId: 1 });
+    rc.trackPrompt({ agent: pm, actorId: 'u-bob', prompt: 'what is chatgpt-countix doing?', promptEventId: 2 });
+    paneHarness.text = ANSWER;
+    rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: false });
+    expect(replies()).toEqual([expect.objectContaining({ ref_prompt_actor: 'u-bob', ref_prompt_event_id: 2 })]);
+  });
+
+  it('after 10 minutes without idle, posts what is there as truncated — never silence', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', now: 0 });
+    paneHarness.text = '> what is chatgpt-countix doing?\n\n● Still checking the invoices suite, partial so far';
+    expect(rc.sweepExpiredReplies(rc.REPLY_TIMEOUT_MS - 1)).toEqual([]);
+    expect(rc.sweepExpiredReplies(rc.REPLY_TIMEOUT_MS)).toEqual([pm.id]);
+    expect(replies()).toEqual([expect.objectContaining({ truncated: 1, message: 'Still checking the invoices suite, partial so far' })]);
+
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'anything?', now: 0 });
+    paneHarness.text = '';
+    rc.sweepExpiredReplies(rc.REPLY_TIMEOUT_MS);
+    expect(replies()[1].message).toMatch(/no reply captured within 10 minutes/);
+  });
+
+  it('file-runner and login seats are never tracked', () => {
+    const file = db.insertAgent({ name: 'f', runtime: 'claude-code', tmux_session: 'file:f', workspace: '/w', mode: 'file', status: 'idle' });
+    const login = db.insertAgent({ name: 'l', runtime: 'claude-code', tmux_session: 'wc-login-ana-claude-code', workspace: '/w', mode: 'adopted', status: 'idle' });
+    if (!file.ok || !login.ok) throw new Error('agents');
+    rc.trackPrompt({ agent: file.data, actorId: 'u', prompt: 'x' });
+    rc.trackPrompt({ agent: login.data, actorId: 'u', prompt: 'x' });
+    expect(rc.getPendingReply(file.data.id)).toBeUndefined();
+    expect(rc.getPendingReply(login.data.id)).toBeUndefined();
+  });
+
+  it('captureRunSummary stores the run prose on the run', () => {
+    const task = db.insertTask({ prompt: 'fix the eSLOG export', created_by: 'u-ana' });
+    if (!task.ok) throw new Error(task.error);
+    const run = db.insertRun({ task_id: task.data.id, agent_id: pm.id });
+    if (!run.ok) throw new Error(run.error);
+    paneHarness.text = '> fix the eSLOG export\n\n● Bash(npm test)\n  ⎿  ok\n\n● Fixed the eSLOG export: VAT rows now round per line. 41 tests pass.\n';
+    expect(rc.captureRunSummary(run.data.id, pm.id)).toBe('Fixed the eSLOG export: VAT rows now round per line. 41 tests pass.');
+    const stored = db.getRun(run.data.id);
+    expect(stored.ok && stored.data.summary).toBe('Fixed the eSLOG export: VAT rows now round per line. 41 tests pass.');
+  });
+
+  it('captureRunSummary never throws', () => {
+    expect(rc.captureRunSummary('missing-run', pm.id)).toBeNull();
+    expect(rc.captureRunSummary('missing-run', 'missing-agent')).toBeNull();
+  });
+
+  describe('parseReplyQuestion', () => {
+    it('question + [ ] options → chips', () => {
+      expect(rc.parseReplyQuestion('Status…\n\nDeploy once review passes?\n[ ] Deploy on pass\n[ ] Hold')).toEqual({
+        asks: true, options: ['Deploy on pass', 'Hold'],
+      });
+      expect(rc.parseReplyQuestion('Pick one?\n- [ ] A\n- [ ] B\n- [ ] C')).toEqual({ asks: true, options: ['A', 'B', 'C'] });
+    });
+
+    it('a single chip line [A] [B] also counts', () => {
+      expect(rc.parseReplyQuestion('Deploy now?\n[Deploy on pass] [Hold]')).toEqual({ asks: true, options: ['Deploy on pass', 'Hold'] });
+    });
+
+    it('a question without options asks, but has no chips; options without a question are ignored', () => {
+      expect(rc.parseReplyQuestion('Should I continue?')).toEqual({ asks: true, options: [] });
+      expect(rc.parseReplyQuestion('Done.\n[ ] A\n[ ] B')).toEqual({ asks: false, options: [] });
+      expect(rc.parseReplyQuestion('All green.')).toEqual({ asks: false, options: [] });
+      expect(rc.parseReplyQuestion('Which?\n[ ] only one')).toEqual({ asks: true, options: [] }); // needs 2–4
+    });
+  });
+});

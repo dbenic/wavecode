@@ -9,6 +9,9 @@ import {
   invalidatesThreadActions,
   leaseCountdown,
   mergeThreadItems,
+  orderThread,
+  agentColor,
+  parseMention,
   parseSlashCommand,
   presence,
   swimlanes,
@@ -108,6 +111,21 @@ describe('command-center utils', () => {
     for (const t of ['run.finished', 'agent.prompt_sent', 'message.created']) {
       expect(invalidatesThreadActions(t), t).toBe(false);
     }
+  });
+
+  it('orderThread puts each reply directly under its prompt', () => {
+    const it = (event_id: number, kind: string, prompt?: number) => ({ id: `ev-${event_id}`, event_id, kind, refs: prompt ? { prompt_event_id: prompt } : {} });
+    const ordered = orderThread([it(1, 'prompt'), it(2, 'run'), it(3, 'task'), it(4, 'reply', 1), it(5, 'reply', 99)]);
+    expect(ordered.map((i) => i.event_id)).toEqual([1, 4, 2, 3, 5]); // 5's prompt is not loaded → stays in order
+  });
+
+  it('agentColor is stable per name; parseMention retargets only known agents', () => {
+    expect(agentColor('pm')).toBe(agentColor('pm'));
+    expect(agentColor('pm')).toMatch(/^#[0-9a-f]{6}$/);
+    const agents = [{ name: 'pm' }, { name: 'builder' }];
+    expect(parseMention('@Builder run the tests', agents)).toEqual({ agent: { name: 'builder' }, text: 'run the tests' });
+    expect(parseMention('@nobody hi', agents)).toBeNull();
+    expect(parseMention('hi @pm', agents)).toBeNull();
   });
 
   it('parseSlashCommand', () => {

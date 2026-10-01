@@ -78,6 +78,31 @@ describe('ThreadFeed', () => {
     expect(within(screen.getByTestId('thread-item-4')).getByText(/553 passed/)).toBeInTheDocument();
   });
 
+  it('replies render as chat bubbles with quick-reply chips; option lines become chips', async () => {
+    const reply = item({
+      event_id: 9, kind: 'reply', title: 'Reply', agent_id: 'a1', needs_attention: true,
+      body: 'Codex2 finished the email fixes.\nReview them now?\n[ ] Review now\n[ ] Hold',
+      actions: [
+        { id: 'quick_reply', label: 'Review now', method: 'POST', path: '/api/agents/a1/send', body: { text: 'Review now' } },
+        { id: 'quick_reply', label: 'Hold', method: 'POST', path: '/api/agents/a1/send', body: { text: 'Hold' } },
+      ],
+    });
+    const props = renderFeed({ items: [reply] });
+    const bubble = within(screen.getByTestId('thread-item-9'));
+    expect(bubble.getByText('grok-fe')).toBeInTheDocument();
+    expect(bubble.getByText(/Review them now\?/)).toBeInTheDocument();
+    expect(bubble.queryByText(/\[ \]/)).toBeNull();
+    const chips = within(bubble.getByRole('group', { name: 'Quick replies' })).getAllByRole('button');
+    expect(chips.map((c) => c.textContent)).toEqual(['Review now', 'Hold']);
+    await userEvent.click(chips[1]);
+    expect(props.onAction).toHaveBeenCalledWith(reply, reply.actions[1]);
+  });
+
+  it('a partial (10-minute) reply says so', () => {
+    renderFeed({ items: [item({ event_id: 10, kind: 'reply', title: 'Reply (partial — no idle after 10 min)', body: 'so far…' })] });
+    expect(screen.getByText('(partial — no idle after 10 min)')).toBeInTheDocument();
+  });
+
   it('the terminal tail is folded until opened', async () => {
     const onToggle = vi.fn();
     const { rerender } = render(<div />);

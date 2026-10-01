@@ -25,6 +25,10 @@ export interface Agent {
   /** Credential profile (spec §5) and whether it is the current user's subscription. */
   profile?: string | null;
   profile_compatible?: boolean;
+  /** 'orchestrator' = the PM seat (spec §5b). */
+  role?: 'orchestrator' | null;
+  /** True for the one agent the composer targets by default. */
+  orchestrator?: boolean;
 }
 
 export type UserRole = 'admin' | 'developer' | 'observer';
@@ -38,7 +42,7 @@ export interface User {
   created_at?: string;
 }
 
-export const THREAD_KINDS = ['prompt', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
+export const THREAD_KINDS = ['prompt', 'reply', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
 export type ThreadKind = (typeof THREAD_KINDS)[number];
 
 export interface ThreadAction {
@@ -59,7 +63,7 @@ export interface ThreadItem {
   actor_id: string | null;
   title: string;
   body: string | null;
-  refs: { task_id?: string; run_id?: string; review_id?: string; artifact_id?: string; message_id?: string };
+  refs: { task_id?: string; run_id?: string; review_id?: string; artifact_id?: string; message_id?: string; prompt_event_id?: number };
   needs_attention: boolean;
   actions: ThreadAction[];
 }

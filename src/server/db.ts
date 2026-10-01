@@ -31,8 +31,13 @@ export interface Agent {
   lease_reason?: LeaseReason | null;
   /** Credential profile the runtime runs on (spec §5); null = the service user's home-dir login. */
   profile?: string | null;
+  /** 'orchestrator' = the PM seat that gets the standing operating prompt (spec §5b). */
+  role?: AgentRole | null;
   created_at: string;
 }
+
+export const AGENT_ROLES = ['orchestrator'] as const;
+export type AgentRole = (typeof AGENT_ROLES)[number];
 
 export type LeaseReason = 'reserved' | 'task';
 
@@ -86,6 +91,8 @@ export interface Run {
   review_status: 'pending' | 'approved' | 'rejected';
   changed_files: string | null;  // JSON array of file paths
   result_path: string | null;
+  /** Final prose the agent wrote for this run (spec §5b), pane-extracted at completion. */
+  summary?: string | null;
 }
 
 export interface Artifact {
@@ -200,9 +207,14 @@ export interface AgentMessage {
   to_agent_id: string | null;      // null = broadcast to workspace
   workspace: string | null;
   message: string;
-  message_type: 'info' | 'request' | 'handoff' | 'result' | 'error';
+  message_type: 'info' | 'request' | 'handoff' | 'result' | 'error' | 'reply';
   ref_task_id: string | null;      // optional link to a task
   ref_run_id: string | null;       // optional link to a run
+  /** reply only: who sent the prompt this answers, and that prompt's event id */
+  ref_prompt_actor?: string | null;
+  ref_prompt_event_id?: number | null;
+  /** reply only: 1 = posted by the 10-minute fallback, not on idle */
+  truncated?: number;
   created_at: string;
 }
 
@@ -225,7 +237,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -245,6 +257,7 @@ const SCHEMA_SQL = `
     lease_expires_at TEXT,
     lease_reason TEXT,
     profile TEXT,
+    role TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -289,7 +302,8 @@ const SCHEMA_SQL = `
     transcript_path TEXT,
     review_status TEXT NOT NULL DEFAULT 'pending',
     changed_files TEXT,
-    result_path TEXT
+    result_path TEXT,
+    summary TEXT
   );
 
   CREATE TABLE IF NOT EXISTS artifacts (
@@ -460,6 +474,9 @@ const SCHEMA_SQL = `
     message_type TEXT NOT NULL DEFAULT 'info',
     ref_task_id TEXT,
     ref_run_id TEXT,
+    ref_prompt_actor TEXT,
+    ref_prompt_event_id INTEGER,
+    truncated INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_agent_messages_workspace ON agent_messages(workspace, created_at DESC);
@@ -671,6 +688,16 @@ const MIGRATIONS: Record<number, string> = {
     UPDATE users SET profile = name WHERE profile IS NULL;
     ALTER TABLE agents ADD COLUMN profile TEXT;
   `,
+  // v14 → v15: Reply capture + orchestrator seat (spec §5b): captured agent
+  // replies link back to the prompt that asked, runs keep a prose summary,
+  // agents may carry a role ('orchestrator').
+  14: `
+    ALTER TABLE agent_messages ADD COLUMN ref_prompt_actor TEXT;
+    ALTER TABLE agent_messages ADD COLUMN ref_prompt_event_id INTEGER;
+    ALTER TABLE agent_messages ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE runs ADD COLUMN summary TEXT;
+    ALTER TABLE agents ADD COLUMN role TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -731,11 +758,11 @@ export function insertAgent(
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status, model, effort, profile)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status, model, effort, profile, role)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, agent.name, agent.runtime, agent.tmux_session, agent.workspace,
-      agent.mode, agent.status, agent.model ?? null, agent.effort ?? null, agent.profile ?? null,
+      agent.mode, agent.status, agent.model ?? null, agent.effort ?? null, agent.profile ?? null, agent.role ?? null,
     );
     const row = getDb().prepare('SELECT * FROM agents WHERE id = ?').get(id) as Agent;
     return { ok: true, data: row };
@@ -1118,6 +1145,15 @@ export function listEvents(filters?: {
   if (filters?.limit) { sql += ' LIMIT ?'; params.push(filters.limit); }
 
   return getDb().prepare(sql).all(...params) as WaveEvent[];
+}
+
+export function updateRunSummary(runId: string, summary: string): void {
+  getDb().prepare('UPDATE runs SET summary = ? WHERE id = ?').run(summary, runId);
+}
+
+export function updateAgentRole(id: string, role: AgentRole | null): Result<Agent> {
+  getDb().prepare('UPDATE agents SET role = ? WHERE id = ?').run(role, id);
+  return getAgent(id);
 }
 
 // --- Lease helpers (spec §2) ---
@@ -1692,12 +1728,16 @@ export function insertAgentMessage(msg: {
   message_type?: AgentMessage['message_type'];
   ref_task_id?: string | null;
   ref_run_id?: string | null;
+  ref_prompt_actor?: string | null;
+  ref_prompt_event_id?: number | null;
+  truncated?: boolean;
 }): Result<AgentMessage> {
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO agent_messages (id, from_agent_id, to_agent_id, workspace, message, message_type, ref_task_id, ref_run_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agent_messages (id, from_agent_id, to_agent_id, workspace, message, message_type, ref_task_id, ref_run_id,
+        ref_prompt_actor, ref_prompt_event_id, truncated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       msg.from_agent_id ?? null,
@@ -1707,6 +1747,9 @@ export function insertAgentMessage(msg: {
       msg.message_type ?? 'info',
       msg.ref_task_id ?? null,
       msg.ref_run_id ?? null,
+      msg.ref_prompt_actor ?? null,
+      msg.ref_prompt_event_id ?? null,
+      msg.truncated ? 1 : 0,
     );
     const row = getDb().prepare('SELECT * FROM agent_messages WHERE id = ?').get(id) as AgentMessage;
     return { ok: true, data: row };

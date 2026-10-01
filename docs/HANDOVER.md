@@ -27,7 +27,7 @@ Read in this order:
 
 | Concern | Files |
 |---|---|
-| Schema + CRUD (SQLite, WAL, migrations v1→v14) | `db.ts` |
+| Schema + CRUD (SQLite, WAL, migrations v1→v15) | `db.ts` |
 | Agent leases: reserve/release, rule-2 guards, auto-lease, expiry sweep | `leases.ts` (+ dispatcher, health-monitor, routes) |
 | Identity: users, hashed tokens, roles, request actor | `users.ts`, `auth.ts`, `request-context.ts`, `routes/users.ts` |
 | Agent lifecycle: scan/adopt/spawn/kill/detach/stopAll | `session-manager.ts`, `runtime-launcher.ts`, `tmux.ts` |
@@ -38,6 +38,7 @@ Read in this order:
 | Human review queue (promote/retry/handoff/reject) | `review-queue.ts` |
 | Event log + SSE + long-poll | `event-bus.ts`, `routes/system.ts` (`/api/events/log`) |
 | Command Center feed: typed items, per-viewer actions, reply injection | `thread.ts`, `routes/thread.ts`, `routes/messages.ts` |
+| Reply capture (pane → `reply` messages, run summaries) + orchestrator seat | `reply-capture.ts`, `reply-extractors.ts` (+ `__fixtures__/panes`), `orchestrator.ts`, `docs/orchestrator-seat.md` |
 | Command Center UI (default route `/`): roster, thread, composer, board, presence, Users page | `ui/src/views/CommandCenter.tsx`, `ui/src/components/command-center/*`, `ui/src/utils/command-center.ts`, `ui/src/views/Users.tsx` |
 | Agent wire (messages) | `routes/messages.ts`, CLI `wavecode msg` |
 | MCP control plane | `../mcp/tools.ts` (stdio `wavecode mcp` + HTTP `/mcp`) |
