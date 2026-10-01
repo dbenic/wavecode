@@ -376,5 +376,40 @@ describe('code-review.ts', () => {
         'Changed files (no unified diff available):\n- src/auth.ts\n- src/db.ts',
       );
     });
+
+    it('reviews the whole lane since it forked from main, not only the last commit', async () => {
+      const { execFileSync } = await import('node:child_process');
+      const codeReview = await import('./code-review.js');
+      const tmux = await import('./tmux.js');
+
+      const repo = path.join(tmpDir, 'lane-repo');
+      fs.mkdirSync(repo);
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8' });
+      git('init', '-b', 'main');
+      git('config', 'user.email', 'test@example.com');
+      git('config', 'user.name', 'Test');
+      fs.writeFileSync(path.join(repo, 'base.ts'), 'export const base = 1;\n');
+      git('add', 'base.ts');
+      git('commit', '-m', 'init');
+
+      // On main itself there is no lane base → nothing to review beyond HEAD
+      expect(codeReview.resolveLaneBase(repo)).toBeNull();
+
+      git('checkout', '-q', '-b', 'wc-lane');
+      fs.writeFileSync(path.join(repo, 'first.ts'), 'export const first = 1;\n');
+      git('add', 'first.ts');
+      git('commit', '-m', 'lane commit 1');
+      fs.writeFileSync(path.join(repo, 'second.ts'), 'export const second = 2;\n');
+      git('add', 'second.ts');
+      git('commit', '-m', 'lane commit 2');
+
+      vi.mocked(tmux.getPaneDir).mockReturnValue(null);
+      const diff = codeReview.captureGitDiff({ tmuxSession: 'wc-missing', workspace: repo });
+
+      // Both lane commits are in the review unit — `git show HEAD` alone would miss first.ts
+      expect(diff).toMatch(/first = 1/);
+      expect(diff).toMatch(/second = 2/);
+      expect(diff).not.toMatch(/base = 1/);
+    });
   });
 });

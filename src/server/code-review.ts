@@ -154,6 +154,17 @@ export function captureGitDiff(opts: {
       .filter((dir): dir is string => typeof dir === 'string' && dir.trim().length > 0),
   )];
 
+  // Lane branches commit as they go, so the unit of review is everything the
+  // lane changed relative to where it forked from the shared branch —
+  // committed and uncommitted alike. Fall back to the old behaviour when no
+  // shared branch can be resolved (detached checkouts, non-branch workspaces).
+  for (const dir of dirs) {
+    const base = resolveLaneBase(dir);
+    if (!base) continue;
+    const lane = gitOutput(dir, ['diff', base]);
+    if (lane) return lane;
+  }
+
   for (const dir of dirs) {
     const working = gitOutput(dir, ['diff', 'HEAD']) ?? gitOutput(dir, ['diff']);
     if (working) return working;
@@ -165,6 +176,23 @@ export function captureGitDiff(opts: {
   }
 
   return formatChangedFiles(opts.changedFiles);
+}
+
+const LANE_BASE_CANDIDATES = ['origin/main', 'main', 'origin/master', 'master'];
+
+/**
+ * The merge-base between the workspace's HEAD and the first shared branch
+ * that exists, or null when none resolves or HEAD *is* the shared branch.
+ */
+export function resolveLaneBase(dir: string): string | null {
+  const head = gitOutput(dir, ['rev-parse', 'HEAD']);
+  if (!head) return null;
+
+  for (const candidate of LANE_BASE_CANDIDATES) {
+    const base = gitOutput(dir, ['merge-base', candidate, 'HEAD']);
+    if (base && base !== head) return base;
+  }
+  return null;
 }
 
 // --- Self-Review ---
