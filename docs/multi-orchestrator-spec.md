@@ -204,6 +204,15 @@ storage), Tailwind only, existing `useSSE`/`useApi` hooks, keep the current
 views reachable until the Command Center replaces them as the default
 route.
 
+### 4.4 Board is collapsible
+
+The right-hand Board (task swimlanes by owner, review-queue count, goal
+rollups) collapses to a 40px rail showing only badges (open tasks, pending
+reviews, attention count); a click expands it. Default: collapsed when the
+viewer owns no running tasks, expanded otherwise. The state is React state
+for the session (no browser storage). The thread takes the freed width.
+Same for the Roster on narrow desktops (≤1100px): collapse to avatars.
+
 ## 5. Credential profiles — one subscription per developer
 
 Problem: every CLI stores its login in the home directory, so all agents
@@ -392,6 +401,7 @@ unchanged; `@frontend` with two tagged agents sends to both.
 | T5 | §4.2–4.3 Command Center UI: roster, thread, composer, board, presence, attention filter, mobile tabs, users + profiles settings pages (login button per runtime) | T4, T6 |
 | T7 | §5b reply capture: pending-reply tracking on every prompt path, per-runtime pane extractors, `reply` messages in the thread, composer defaults to the orchestrator seat, `docs/orchestrator-seat.md` operating prompt + `agents.role`, quick-reply chips | T5 |
 | T8 | §5c aliases (`agents.alias`), persona, tags/groups, composer grammar + autocomplete, people addressing | T7 |
+| T9 | §4.4 collapsible Board + Roster rails with badges, thread takes the width | T8 |
 
 ## 7. Acceptance
 
