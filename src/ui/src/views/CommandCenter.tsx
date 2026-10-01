@@ -21,6 +21,8 @@ import {
   actionPlaceholders,
   apiRelativePath,
   fillAction,
+  invalidatesThreadActions,
+  mergeThreadItems,
   type ComposerMode,
   type SlashCommand,
 } from '../utils/command-center';
@@ -49,9 +51,12 @@ export default function CommandCenter() {
   const [terminalOutput, setTerminalOutput] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
+  const [meError, setMeError] = useState(false);
+
   const cursorRef = useRef<number | null>(null);
   const threadBusyRef = useRef(false);
   const threadPendingRef = useRef(false);
+  const threadPendingFullRef = useRef(false);
 
   // --- loaders ---------------------------------------------------------------
 
@@ -63,8 +68,14 @@ export default function CommandCenter() {
     [],
   );
 
-  /** Pull new feed items after the cursor (or the newest page on first load). Coalesces bursts of events. */
-  const refreshThread = useCallback(async () => {
+  /**
+   * Pull new feed items after the cursor. `full` re-reads the newest page
+   * (first load, or after ownership changed) so the server recomputes
+   * `actions` for items already on screen; those replace the stale copies.
+   * Bursts of events are coalesced into one follow-up fetch.
+   */
+  const refreshThread = useCallback(async (opts: { full?: boolean } = {}) => {
+    if (opts.full) threadPendingFullRef.current = true;
     if (threadBusyRef.current) {
       threadPendingRef.current = true;
       return;
@@ -73,18 +84,13 @@ export default function CommandCenter() {
     try {
       do {
         threadPendingRef.current = false;
-        const since = cursorRef.current;
+        const full = threadPendingFullRef.current || cursorRef.current === null;
+        threadPendingFullRef.current = false;
         const page = await apiGet<ThreadPage>(
-          since === null ? `/thread?limit=${THREAD_PAGE}` : `/thread?since=${since}&limit=${THREAD_PAGE}`,
+          full ? `/thread?limit=${THREAD_PAGE}` : `/thread?since=${cursorRef.current}&limit=${THREAD_PAGE}`,
         );
-        cursorRef.current = page.cursor;
-        if (page.items.length > 0) {
-          setItems((prev) => {
-            const seen = new Set(prev.map((i) => i.id));
-            const merged = since === null ? page.items : [...prev, ...page.items.filter((i) => !seen.has(i.id))];
-            return merged.length > MAX_ITEMS ? merged.slice(-MAX_ITEMS) : merged;
-          });
-        }
+        cursorRef.current = Math.max(cursorRef.current ?? 0, page.cursor);
+        setItems((prev) => mergeThreadItems(prev, page.items, MAX_ITEMS));
       } while (threadPendingRef.current);
     } catch {
       // ErrorBanner already shows API failures
@@ -103,7 +109,7 @@ export default function CommandCenter() {
   }, []);
 
   useEffect(() => {
-    apiGet<User>('/me').then(setMe).catch(() => {});
+    apiGet<User>('/me').then(setMe).catch(() => setMeError(true));
     void loadUsers();
     void loadAgents();
     void loadTasks();
@@ -126,7 +132,7 @@ export default function CommandCenter() {
 
   useSSE((event: SSEEvent) => {
     if (event.type === 'heartbeat') return;
-    void refreshThread();
+    void refreshThread({ full: invalidatesThreadActions(event.type) });
     if (event.type.startsWith('agent.') || event.type === 'system.stop_all' || event.type === 'profile.login_started') {
       if (event.type !== 'agent.output_updated') void loadAgents();
     }
@@ -182,6 +188,9 @@ export default function CommandCenter() {
       setTab('thread');
       return;
     }
+    if (action.id === 'kill' && !window.confirm(`Kill ${agentNames.get(item.agent_id ?? '') ?? 'this agent'}? Its session is terminated.`)) {
+      return;
+    }
     try {
       if (action.method === 'GET') {
         const data = await apiGet<Record<string, unknown>>(apiRelativePath(action.path));
@@ -227,7 +236,12 @@ export default function CommandCenter() {
     switch (command.cmd) {
       case 'reserve': await apiPost(`/agents/${agentId}/reserve`, { hours: command.hours }); return;
       case 'release': await apiPost(`/agents/${agentId}/release`); return;
-      case 'kill': await apiPost(`/agents/${agentId}/kill`); return;
+      case 'kill':
+        if (!window.confirm(`Kill ${agentNames.get(agentId) ?? 'this agent'}? Its session is terminated.`)) {
+          throw new Error('Kill cancelled');
+        }
+        await apiPost(`/agents/${agentId}/kill`);
+        return;
       default: {
         const runId = latestRunFor(agentId);
         if (!runId) throw new Error(`No run for ${agentNames.get(agentId) ?? 'this agent'} in the thread yet`);
@@ -361,6 +375,11 @@ export default function CommandCenter() {
               ? { open: terminalOpen, output: terminalOutput, onToggle: () => setTerminalOpen((v) => !v) }
               : null}
           />
+          {meError && (
+            <p role="alert" className="border-t border-slate-800/60 px-3 py-2 text-xs text-amber-400">
+              Couldn't load your identity (/api/me) — sending is disabled. Reload to retry.
+            </p>
+          )}
           {canMutate && (
             <Composer
               agents={agents}

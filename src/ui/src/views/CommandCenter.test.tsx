@@ -100,6 +100,72 @@ describe('CommandCenter', () => {
     expect(api.apiGet).toHaveBeenCalledWith('/thread?since=10&limit=200');
   });
 
+  it('after an ownership change the visible window is re-read and stale actions are replaced', async () => {
+    const api = await setup();
+    expect(within(screen.getByTestId('thread-item-2')).getByRole('button', { name: 'Reply' })).toBeInTheDocument();
+
+    // Server now computes no Reply for item 2 (e.g. the agent was reserved by someone else)
+    threadPages.push({ cursor: 12, items: [item({ event_id: 2, kind: 'request', title: 'Question', needs_attention: true, actions: [] })] });
+    await act(async () => {
+      sseHandler?.({ id: 12, type: 'agent.reserved', entityType: 'agent', entityId: 'grok-fe', payload: {}, createdAt: '' });
+    });
+    await waitFor(() => expect(within(screen.getByTestId('thread-item-2')).queryByRole('button', { name: 'Reply' })).toBeNull());
+    // /thread without `since` = the newest page, re-read (initial load was the first such call)
+    expect(vi.mocked(api.apiGet).mock.calls.filter(([p]) => p === '/thread?limit=200')).toHaveLength(2);
+    // Older items not in the re-read page are kept, not dropped
+    expect(screen.getByText('Report one')).toBeInTheDocument();
+    expect(screen.getByText('Run failed')).toBeInTheDocument();
+
+    // and the cursor still moves forward afterwards
+    await act(async () => {
+      sseHandler?.({ id: 13, type: 'run.started', entityType: 'run', entityId: 'r', payload: {}, createdAt: '' });
+    });
+    await waitFor(() => expect(api.apiGet).toHaveBeenCalledWith('/thread?since=12&limit=200'));
+  });
+
+  it('kill asks for confirmation (slash command and thread action)', async () => {
+    const api = await setup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Target' }), 'grok-fe');
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), '/kill{Enter}');
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Kill grok-fe'));
+    expect(api.apiPost).not.toHaveBeenCalledWith('/agents/grok-fe/kill');
+    expect(screen.getByRole('alert')).toHaveTextContent('Kill cancelled');
+
+    confirm.mockReturnValueOnce(true);
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), '{Enter}');
+    expect(api.apiPost).toHaveBeenCalledWith('/agents/grok-fe/kill');
+  });
+
+  it('a kill action button also confirms', async () => {
+    threadPages = [{ cursor: 5, items: [
+      item({ event_id: 1, title: 'Report one' }),
+      item({ event_id: 4, kind: 'alert', title: 'Agent crashed', needs_attention: true,
+        actions: [{ id: 'kill', label: 'Kill', method: 'POST', path: '/api/agents/grok-fe/kill' }] }),
+    ] }];
+    const api = await setup();
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
+    await userEvent.click(within(screen.getByTestId('thread-item-4')).getByRole('button', { name: 'Kill' }));
+    expect(api.apiPost).not.toHaveBeenCalled();
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(true);
+    await userEvent.click(within(screen.getByTestId('thread-item-4')).getByRole('button', { name: 'Kill' }));
+    await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/grok-fe/kill', undefined));
+  });
+
+  it('if /me fails the composer is disabled with a visible reason', async () => {
+    const api = await import('../hooks/useApi');
+    const base = vi.mocked(api.apiGet).getMockImplementation();
+    await setup();
+    // re-render with /me failing
+    vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/me') throw new Error('Unauthorized');
+      return base ? base(path) : (null as never);
+    });
+    threadPages = [{ cursor: 1, items: [item({ event_id: 1, title: 'Report one' })] }];
+    render(<MemoryRouter><CommandCenter /></MemoryRouter>);
+    expect(await screen.findByText(/Couldn't load your identity/)).toBeInTheDocument();
+  });
+
   it('focusing an agent filters the thread and targets the composer; the terminal tail opens on demand', async () => {
     await setup();
     await userEvent.click(screen.getByRole('button', { name: /codex-rev/ }));

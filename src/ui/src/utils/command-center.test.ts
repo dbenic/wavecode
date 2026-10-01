@@ -6,7 +6,9 @@ import {
   currentTaskTitle,
   fillAction,
   groupRoster,
+  invalidatesThreadActions,
   leaseCountdown,
+  mergeThreadItems,
   parseSlashCommand,
   presence,
   swimlanes,
@@ -88,6 +90,24 @@ describe('command-center utils', () => {
     expect(actionPlaceholders({ id: 'f', label: 'f', method: 'POST', path: '/api/artifacts/{artifact_id}/share' })).toEqual(['artifact_id']);
     expect(apiRelativePath('/api/runs/r1/log')).toBe('/runs/r1/log');
     expect(apiRelativePath('/other')).toBe('/other');
+  });
+
+  it('mergeThreadItems replaces known items by id, appends new ones in event order, caps', () => {
+    const a = { id: 'ev-1', event_id: 1, v: 'old' };
+    const b = { id: 'ev-2', event_id: 2, v: 'old' };
+    const merged = mergeThreadItems([a, b], [{ id: 'ev-3', event_id: 3, v: 'new' }, { id: 'ev-1', event_id: 1, v: 'fresh' }], 10);
+    expect(merged.map((i) => `${i.id}:${i.v}`)).toEqual(['ev-1:fresh', 'ev-2:old', 'ev-3:new']);
+    expect(mergeThreadItems([a, b], [], 10)).toEqual([a, b]);
+    expect(mergeThreadItems([a, b], [{ id: 'ev-3', event_id: 3, v: 'x' }], 2).map((i) => i.id)).toEqual(['ev-2', 'ev-3']);
+  });
+
+  it('ownership changes invalidate actions already on screen', () => {
+    for (const t of ['agent.reserved', 'agent.released', 'agent.lease_expired', 'agent.killed', 'user.revoked']) {
+      expect(invalidatesThreadActions(t), t).toBe(true);
+    }
+    for (const t of ['run.finished', 'agent.prompt_sent', 'message.created']) {
+      expect(invalidatesThreadActions(t), t).toBe(false);
+    }
   });
 
   it('parseSlashCommand', () => {

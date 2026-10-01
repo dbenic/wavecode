@@ -106,6 +106,35 @@ export function swimlanes(tasks: Task[], users: Map<string, User>): Swimlane[] {
   return [...lanes.values()].sort((a, b) => (a.ownerId === null ? 1 : b.ownerId === null ? -1 : a.label.localeCompare(b.label)));
 }
 
+// --- Thread merge ---
+
+/**
+ * Merge a page into the feed. Items are keyed by id and the incoming copy
+ * wins: `actions` / `needs_attention` are computed at read time from current
+ * ownership, so a re-read of a known event (after a reserve/release) must
+ * replace what is on screen. Ordered by event id, newest last, capped.
+ */
+export function mergeThreadItems<T extends { id: string; event_id: number }>(prev: T[], incoming: T[], max: number): T[] {
+  if (incoming.length === 0) return prev;
+  const byId = new Map(prev.map((i) => [i.id, i]));
+  for (const item of incoming) byId.set(item.id, item);
+  const merged = [...byId.values()].sort((a, b) => a.event_id - b.event_id);
+  return merged.length > max ? merged.slice(-max) : merged;
+}
+
+/**
+ * Events after which the actions on already-shown items may differ (who may
+ * act on which agent changed), so the visible window is re-read.
+ */
+export function invalidatesThreadActions(type: string): boolean {
+  return type === 'agent.reserved'
+    || type === 'agent.released'
+    || type === 'agent.lease_expired'
+    || type === 'agent.killed'
+    || type === 'agent.detached'
+    || type === 'user.revoked';
+}
+
 // --- Thread actions ---
 
 /** Placeholders a server action leaves for the UI (`{text}`, `{agent_id}`, …). */
