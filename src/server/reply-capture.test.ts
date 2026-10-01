@@ -70,14 +70,27 @@ describe('reply-capture.ts', () => {
     expect(rc.getPendingReply(pm.id)).toBeUndefined();
   });
 
-  it('links ref_task_id when the prompt went to an agent with an open run', () => {
+  it('ref_task_id is set only when dispatch passes it — a chat prompt during an open run is still a chat prompt', () => {
     const task = db.insertTask({ prompt: 'T12', created_by: 'u-ana' });
     if (!task.ok) throw new Error(task.error);
     db.insertRun({ task_id: task.data.id, agent_id: pm.id });
+
     rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?' });
     paneHarness.text = ANSWER;
     rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: false });
-    expect(replies()[0].ref_task_id).toBe(task.data.id);
+    expect(replies()[0].ref_task_id).toBeNull();
+
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', taskId: task.data.id });
+    rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: false });
+    expect(replies()[1].ref_task_id).toBe(task.data.id);
+  });
+
+  it('a task dispatch closes out a pending chat prompt as truncated instead of stealing the run output', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is the deploy status?', promptEventId: 9 });
+    paneHarness.text = '❯ ';
+    rc.clearPendingForDispatch(pm);
+    expect(rc.getPendingReply(pm.id)).toBeUndefined();
+    expect(replies()).toEqual([expect.objectContaining({ ref_prompt_event_id: 9, truncated: 1 })]);
   });
 
   it('no answer yet (only the echo) keeps waiting', () => {
@@ -104,12 +117,23 @@ describe('reply-capture.ts', () => {
     expect(paneHarness.calls).toBe(0);
   });
 
-  it('a newer prompt supersedes the pending one', () => {
+  it('a newer prompt supersedes the pending one — the first still gets a (truncated) reply, never silence', () => {
     rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'first?', promptEventId: 1 });
     rc.trackPrompt({ agent: pm, actorId: 'u-bob', prompt: 'what is chatgpt-countix doing?', promptEventId: 2 });
     paneHarness.text = ANSWER;
     rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: false });
-    expect(replies()).toEqual([expect.objectContaining({ ref_prompt_actor: 'u-bob', ref_prompt_event_id: 2 })]);
+    expect(replies()).toEqual([
+      expect.objectContaining({ ref_prompt_actor: 'u-ana', ref_prompt_event_id: 1, truncated: 1 }),
+      expect.objectContaining({ ref_prompt_actor: 'u-bob', ref_prompt_event_id: 2 }),
+    ]);
+  });
+
+  it('on the idle edge an answer without the prompt echo is NOT trusted (could be a previous answer)', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is the deploy status?', promptEventId: 3, now: 1000 });
+    paneHarness.text = '● Three agents are idle and nothing is blocked.'; // old answer, no echo of the new prompt
+    expect(rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true, now: 2000 })).toBe(false);
+    expect(replies()).toEqual([]);
+    expect(rc.getPendingReply(pm.id)).toBeTruthy(); // left for the 10-minute fallback
   });
 
   it('after 10 minutes without idle, posts what is there as truncated — never silence', () => {

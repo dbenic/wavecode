@@ -51,6 +51,7 @@ vi.mock('./output-watcher.js', () => ({
   getLastOutputLine: vi.fn(() => null),
   getOutputVersion: vi.fn(() => 0),
   isWatching: vi.fn(() => false),
+  isClaudeBypassAcceptDialog: vi.fn((pane: string) => /Yes, I accept/.test(pane)),
 }));
 
 vi.mock('./logger.js', () => ({
