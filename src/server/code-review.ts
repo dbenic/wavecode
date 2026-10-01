@@ -543,44 +543,66 @@ export async function onAuthorAgentIdle(agentId: string): Promise<void> {
 
 // --- Poll agent terminal for review output ---
 
+const REVIEW_POLL_INTERVAL_MS = 5000;
+const REVIEW_POLL_TIMEOUT_MIN = 10;
+
+/** A real verdict line — the template `VERDICT: [PASS / NEEDS FIXES / REJECT]` never matches. */
+const GENUINE_VERDICT_LINE = /^\s*(?:[>│|]\s*)?VERDICT:\s*\[?\s*(PASS|NEEDS[ _-]?FIXES|REJECT)\s*\]?\s*$/im;
+
+/**
+ * Pull the reviewer's answer out of a pane capture, or null if it has not
+ * answered yet. TUIs echo the review prompt (which contains the marker
+ * words), so the presence of `REVIEW SUMMARY:`/`VERDICT:` is not enough:
+ * completion requires a genuine verdict line or a `REVIEW PASS:` marker,
+ * and the text is taken from the LAST `REVIEW SUMMARY:` so an echoed
+ * template above the real answer is skipped. Exported for tests.
+ */
+export function extractReviewFromPane(output: string): string | null {
+  const answered = GENUINE_VERDICT_LINE.test(output) || /REVIEW PASS:/i.test(output);
+  if (!answered) return null;
+
+  const lines = output.split('\n');
+  let start = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/REVIEW SUMMARY:|REVIEW PASS:|^\s*(?:[>│|]\s*)?REVIEW:/i.test(lines[i])) {
+      start = i;
+      break;
+    }
+  }
+
+  const text = (start >= 0 ? lines.slice(start) : lines.slice(-40)).join('\n').trim();
+  // If the only "summary" we found is the echoed template, the answer is
+  // further down without a summary line — hand back the genuine tail.
+  return GENUINE_VERDICT_LINE.test(text) || /REVIEW PASS:/i.test(text)
+    ? text
+    : lines.slice(-40).join('\n').trim();
+}
+
 function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
   let attempts = 0;
-  const maxAttempts = 24; // 24 * 5s = 2 minutes
+  const maxAttempts = (REVIEW_POLL_TIMEOUT_MIN * 60_000) / REVIEW_POLL_INTERVAL_MS;
 
   const timer = setInterval(() => {
     attempts++;
     if (attempts > maxAttempts) {
       clearInterval(timer);
-      finalizeReview(reviewId, systemReviewFeedback('reviewer poll timed out after 2 minutes'), {
-        allowFixLoop: false,
-      });
+      finalizeReview(
+        reviewId,
+        systemReviewFeedback(`reviewer poll timed out after ${REVIEW_POLL_TIMEOUT_MIN} minutes`),
+        { allowFixLoop: false },
+      );
       return;
     }
 
-    const captureResult = sessionManager.capturePane(tmuxSession, 50);
+    const captureResult = sessionManager.capturePane(tmuxSession, 80);
     if (!captureResult.ok) return;
 
-    const output = captureResult.data;
+    const review = extractReviewFromPane(captureResult.data);
+    if (review === null) return;
 
-    // Look for review markers in the output
-    if (output.includes('REVIEW SUMMARY:') || output.includes('REVIEW PASS:') || output.includes('VERDICT:')) {
-      clearInterval(timer);
-
-      // Extract the review text
-      const lines = output.split('\n');
-      const reviewStart = lines.findIndex((l) =>
-        l.includes('REVIEW SUMMARY:') || l.includes('REVIEW PASS:') || l.includes('REVIEW:')
-      );
-
-      if (reviewStart >= 0) {
-        finalizeReview(reviewId, lines.slice(reviewStart).join('\n').trim());
-      } else {
-        // No recognizable review block — keep the tail for the human, and
-        // let finalizeReview apply the safe non-pass verdict default.
-        finalizeReview(reviewId, output.substring(output.length - 2000));
-      }
-    }
-  }, 5000);
+    clearInterval(timer);
+    finalizeReview(reviewId, review);
+  }, REVIEW_POLL_INTERVAL_MS);
 }
 
 // --- Send fixes back to original agent ---

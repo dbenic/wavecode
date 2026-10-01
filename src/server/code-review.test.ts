@@ -130,6 +130,45 @@ describe('code-review.ts', () => {
     });
   });
 
+  describe('extractReviewFromPane', () => {
+    const echoedPrompt = [
+      '> Format your response as:',
+      '> REVIEW SUMMARY: [one line overall assessment]',
+      '> ISSUES:',
+      '> - [severity: HIGH/MED/LOW] [description]',
+      '> VERDICT: [PASS / NEEDS FIXES / REJECT]',
+      '›',
+    ].join('\n');
+
+    it('does not complete on the echoed prompt template', async () => {
+      const { extractReviewFromPane } = await import('./code-review.js');
+      expect(extractReviewFromPane(echoedPrompt)).toBeNull();
+      expect(extractReviewFromPane('some unrelated terminal output')).toBeNull();
+    });
+
+    it('returns the real answer below an echoed template', async () => {
+      const { extractReviewFromPane } = await import('./code-review.js');
+      const pane = [
+        echoedPrompt,
+        '• Working (12s)',
+        'REVIEW SUMMARY: solid identity layer, one gap',
+        'ISSUES:',
+        '- [severity: MED] token hash not constant-time compared',
+        'VERDICT: NEEDS FIXES',
+      ].join('\n');
+      const review = extractReviewFromPane(pane);
+      expect(review).not.toBeNull();
+      expect(review).toMatch(/^REVIEW SUMMARY: solid identity layer/);
+      expect(review).not.toMatch(/\[one line overall assessment\]/);
+    });
+
+    it('accepts a self-review REVIEW PASS marker and quoted verdict lines', async () => {
+      const { extractReviewFromPane } = await import('./code-review.js');
+      expect(extractReviewFromPane('REVIEW PASS: no issues found.')).toMatch(/REVIEW PASS/);
+      expect(extractReviewFromPane('│ REVIEW SUMMARY: ok\n│ VERDICT: PASS')).toMatch(/VERDICT: PASS/);
+    });
+  });
+
   describe('countIssues', () => {
     it('counts both the documented and shorthand severity formats', async () => {
       const { countIssues } = await import('./code-review.js');
