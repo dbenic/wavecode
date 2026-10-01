@@ -12,6 +12,8 @@ import { Link } from 'react-router-dom';
 import { apiGet, apiPatch, apiPost, apiPut, apiUpload } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import Board from '../components/command-center/Board';
+import BoardRail from '../components/command-center/BoardRail';
+import RosterAvatars from '../components/command-center/RosterAvatars';
 import Composer, { type ComposerSend } from '../components/command-center/Composer';
 import PresenceStrip from '../components/command-center/PresenceStrip';
 import Roster from '../components/command-center/Roster';
@@ -22,7 +24,9 @@ import {
   actionPlaceholders,
   apiRelativePath,
   fillAction,
+  boardDefaultCollapsed,
   invalidatesThreadActions,
+  openTaskCount,
   mergeThreadItems,
   orderThread,
   type ComposerMode,
@@ -52,6 +56,8 @@ export default function CommandCenter() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalOutput, setTerminalOutput] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  /** null = follow the default rule (spec §4.4) until the viewer toggles; session-only React state. */
+  const [boardCollapsedChoice, setBoardCollapsedChoice] = useState<boolean | null>(null);
 
   const [meError, setMeError] = useState(false);
 
@@ -176,6 +182,7 @@ export default function CommandCenter() {
   // The inbox spans every agent, whatever is focused.
   const attentionCount = useMemo(() => items.filter((i) => i.needs_attention).length, [items]);
   const focusedAgent = agents.find((a) => a.id === focused) ?? null;
+  const boardCollapsed = boardCollapsedChoice ?? boardDefaultCollapsed(tasks, me?.id ?? null);
   const canMutate = !!me && me.role !== 'observer';
 
   function focus(agentId: string | null) {
@@ -430,8 +437,18 @@ export default function CommandCenter() {
         ))}
       </div>
 
-      <div className="grid min-h-0 flex-1 sm:grid-cols-[16rem_minmax(0,1fr)_18rem]">
+      {/* Spec §4.4: the Board collapses to a 40px rail and the Roster to avatars at ≤1100px — the thread takes the width. */}
+      <div
+        data-testid="command-center-grid"
+        className={`grid min-h-0 flex-1 ${boardCollapsed
+          ? 'sm:grid-cols-[3.5rem_minmax(0,1fr)_40px] min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_40px]'
+          : 'sm:grid-cols-[3.5rem_minmax(0,1fr)_18rem] min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_18rem]'}`}
+      >
         <aside className={`${tab === 'roster' ? 'block' : 'hidden'} min-h-0 overflow-y-auto border-slate-800/60 sm:block sm:border-r`}>
+          <div className="hidden sm:block min-[1101px]:hidden" data-testid="roster-avatars">
+            <RosterAvatars agents={agents} users={userMap} focusedAgentId={focused} onFocus={focus} />
+          </div>
+          <div className="sm:hidden min-[1101px]:block" data-testid="roster-full">
           <Roster
             agents={agents}
             tasks={tasks}
@@ -445,6 +462,7 @@ export default function CommandCenter() {
             onAssign={(taskId, a) => void quiet(() => apiPut(`/tasks/${taskId}`, { agent_id: a.id }))}
             onRename={canMutate ? (a) => void renameAgent(a) : undefined}
           />
+          </div>
         </aside>
 
         <main className={`${tab === 'thread' ? 'flex' : 'hidden'} min-h-0 flex-col sm:flex`}>
@@ -487,7 +505,20 @@ export default function CommandCenter() {
         </main>
 
         <aside className={`${tab === 'board' ? 'block' : 'hidden'} min-h-0 overflow-y-auto border-slate-800/60 sm:block sm:border-l`}>
-          <Board tasks={tasks} users={userMap} reviewCount={reviewCount} canAssign={canMutate} />
+          {/* Phones always get the full board in their Board tab; the rail is a desktop affordance. */}
+          <div className={boardCollapsed ? 'sm:hidden' : ''} data-testid="board-full">
+            <Board tasks={tasks} users={userMap} reviewCount={reviewCount} canAssign={canMutate} onCollapse={() => setBoardCollapsedChoice(true)} />
+          </div>
+          {boardCollapsed && (
+            <div className="hidden h-full sm:block" data-testid="board-rail">
+              <BoardRail
+                openTasks={openTaskCount(tasks)}
+                pendingReviews={reviewCount}
+                attention={attentionCount}
+                onExpand={() => setBoardCollapsedChoice(false)}
+              />
+            </div>
+          )}
         </aside>
       </div>
     </div>

@@ -5,6 +5,8 @@ import {
   apiRelativePath,
   currentTaskTitle,
   fillAction,
+  boardDefaultCollapsed,
+  openTaskCount,
   groupRoster,
   invalidatesThreadActions,
   leaseCountdown,
@@ -126,6 +128,15 @@ describe('command-center utils', () => {
     expect(parseMention('@Builder run the tests', agents)).toEqual({ agent: { name: 'builder' }, text: 'run the tests' });
     expect(parseMention('@nobody hi', agents)).toBeNull();
     expect(parseMention('hi @pm', agents)).toBeNull();
+  });
+
+  it('board default (spec §4.4): collapsed unless the viewer owns a running task', () => {
+    expect(boardDefaultCollapsed([], 'u-ana')).toBe(true);
+    expect(boardDefaultCollapsed([task({ status: 'running', created_by: 'u-bob' })], 'u-ana')).toBe(true);
+    expect(boardDefaultCollapsed([task({ status: 'pending', created_by: 'u-ana' })], 'u-ana')).toBe(true);
+    expect(boardDefaultCollapsed([task({ status: 'running', created_by: 'u-ana' })], 'u-ana')).toBe(false);
+    expect(boardDefaultCollapsed([task({ status: 'running', created_by: null })], null)).toBe(true);
+    expect(openTaskCount([task({ status: 'pending' }), task({ status: 'running' }), task({ status: 'blocked' }), task({ status: 'done' }), task({ status: 'failed' })])).toBe(3);
   });
 
   it('parseSlashCommand', () => {
