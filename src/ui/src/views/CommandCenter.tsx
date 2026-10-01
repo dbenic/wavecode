@@ -17,6 +17,7 @@ import PresenceStrip from '../components/command-center/PresenceStrip';
 import Roster from '../components/command-center/Roster';
 import ThreadFeed from '../components/command-center/ThreadFeed';
 import type { Agent, Task, ThreadAction, ThreadItem, ThreadPage, User } from '../types';
+import { handleOf, STATUS_PROMPT, type Plan } from '../utils/composer-grammar';
 import {
   actionPlaceholders,
   apiRelativePath,
@@ -164,7 +165,9 @@ export default function CommandCenter() {
   // --- derived ------------------------------------------------------------------
 
   const userMap = useMemo(() => new Map(users.map((u) => [u.id, u])), [users]);
-  const agentNames = useMemo(() => new Map(agents.map((a) => [a.id, a.name])), [agents]);
+  // Agents are shown by alias when they have one (spec §5c)
+  const agentNames = useMemo(() => new Map(agents.map((a) => [a.id, handleOf(a)])), [agents]);
+  const personas = useMemo(() => new Map(agents.filter((a) => a.persona).map((a) => [a.id, a.persona!])), [agents]);
   // Replies sit directly under the prompt they answer.
   const visibleItems = useMemo(
     () => orderThread(focused ? items.filter((i) => i.agent_id === focused) : items),
@@ -293,12 +296,81 @@ export default function CommandCenter() {
         case 'slash':
           await runSlash(s.agentId, s.command);
           break;
+        case 'plan':
+          await runPlan(s.plan);
+          break;
       }
       refreshAll();
       return true;
     } catch (e) {
       return (e as Error).message || 'Failed to send';
     }
+  }
+
+  /**
+   * Execute a §5c grammar plan through the existing routes. Each step's
+   * server event is what shows in the thread as the user's item.
+   */
+  async function runPlan(plan: Plan): Promise<void> {
+    switch (plan.kind) {
+      case 'prompt':
+        for (const a of plan.agents) await apiPost(`/agents/${a.id}/send`, { text: plan.text });
+        return;
+      case 'broadcast':
+        await apiPost('/messages', { message: plan.text, message_type: 'info' });
+        return;
+      case 'message':
+        for (const u of plan.users) await apiPost('/messages', { to_user: u.name, message: plan.text });
+        return;
+      case 'reserve':
+        await apiPost(`/agents/${plan.agent.id}/reserve`, { hours: plan.hours });
+        return;
+      case 'release':
+        await apiPost(`/agents/${plan.agent.id}/release`);
+        return;
+      case 'kill':
+        if (!window.confirm(`Kill ${handleOf(plan.agent)}? Its session is terminated.`)) throw new Error('Kill cancelled');
+        await apiPost(`/agents/${plan.agent.id}/kill`);
+        return;
+      case 'tag':
+        await apiPost(`/agents/${plan.agent.id}/tags`, { tag: plan.tag });
+        return;
+      case 'task':
+        await apiPost('/tasks', {
+          prompt: plan.text,
+          ...(plan.agent ? { agent_id: plan.agent.id } : {}),
+          ...(plan.deps.length > 0 ? { depends_on: plan.deps.map((t) => t.id) } : {}),
+        });
+        return;
+      case 'promote': {
+        const runId = plan.task.latest_run?.id;
+        if (!runId) throw new Error(`Task #${plan.task.num} has no run to promote yet`);
+        if (!window.confirm(`Promote task #${plan.task.num}? This approves its latest run.`)) throw new Error('Promote cancelled');
+        await apiPost(`/reviews/${runId}/promote`);
+        return;
+      }
+      case 'file': {
+        const files = await apiGet<Array<{ id: string; filename: string }>>('/artifacts');
+        const match = files.find((f) => f.id === plan.name) ?? [...files].reverse().find((f) => f.filename === plan.name);
+        if (!match) throw new Error(`No uploaded file named "${plan.name}" — use File mode to upload it first`);
+        await apiPost(`/artifacts/${match.id}/share`, { targetAgentId: plan.agent.id });
+        return;
+      }
+      case 'status':
+        await apiPost(`/agents/${plan.seat.id}/send`, { text: STATUS_PROMPT });
+        return;
+      default:
+        throw new Error(plan.reason);
+    }
+  }
+
+  /** Roster "rename": alias + one-line persona (spec §5c). Cancel keeps the current value. */
+  async function renameAgent(agent: Agent) {
+    const alias = window.prompt(`Alias for ${agent.name} (2–24 chars, a-z 0-9 _ -; empty clears)`, agent.alias ?? '');
+    if (alias === null) return;
+    const persona = window.prompt(`One-line persona for @${alias.trim() || agent.name} (e.g. "frontend lead"; empty clears)`, agent.persona ?? '');
+    if (persona === null) return;
+    await quiet(() => apiPatch(`/agents/${agent.id}`, { alias: alias.trim() || null, persona: persona.trim() || null }));
   }
 
   async function stopAll() {
@@ -372,6 +444,7 @@ export default function CommandCenter() {
             onReserve={(a) => void quiet(() => apiPost(`/agents/${a.id}/reserve`, {}))}
             onRelease={(a) => void quiet(() => apiPost(`/agents/${a.id}/release`))}
             onAssign={(taskId, a) => void quiet(() => apiPut(`/tasks/${taskId}`, { agent_id: a.id }))}
+            onRename={canMutate ? (a) => void renameAgent(a) : undefined}
           />
         </aside>
 
@@ -380,6 +453,7 @@ export default function CommandCenter() {
             items={visibleItems}
             users={userMap}
             agentNames={agentNames}
+            personas={personas}
             attentionOnly={attentionOnly}
             onToggleAttention={() => setAttentionOnly((v) => !v)}
             attentionCount={attentionCount}
@@ -406,6 +480,8 @@ export default function CommandCenter() {
                 if (m !== 'reply') setReplyTaskId(null);
               }}
               replyTaskId={replyTaskId}
+              users={users}
+              tasks={tasks}
               onSend={send}
             />
           )}

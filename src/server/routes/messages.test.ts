@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../db.js', () => ({
   getAgent: vi.fn(),
+  // to_agent_id now goes through alias/name/id resolution; identity pass-through here
+  resolveAgent: vi.fn((ref: string) => ({ ok: true, data: { id: ref, name: ref } })),
   insertAgentMessage: vi.fn(),
   listAgentMessages: vi.fn(),
 }));
@@ -66,6 +68,7 @@ describe('message routes', () => {
       message_type: 'handoff',
       ref_task_id: null,
       ref_run_id: null,
+      to_user_id: null,
     });
     expect(events.emit).toHaveBeenCalledWith(
       'message.created',

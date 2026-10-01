@@ -20,6 +20,7 @@ vi.mock('node:fs', () => ({
 vi.mock('./db.js', () => ({
   getDb: vi.fn(),
   isEffortLevel: vi.fn((v) => ['low', 'medium', 'high', 'xhigh'].includes(v)),
+  agentNameShadowsIdentity: vi.fn(() => false),
   insertAgent: vi.fn((agent) => ({
     ok: true,
     data: {

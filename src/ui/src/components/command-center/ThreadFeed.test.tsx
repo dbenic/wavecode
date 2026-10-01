@@ -98,6 +98,11 @@ describe('ThreadFeed', () => {
     expect(props.onAction).toHaveBeenCalledWith(reply, reply.actions[1]);
   });
 
+  it('reply bubbles show the agent persona', () => {
+    renderFeed({ items: [item({ event_id: 11, kind: 'reply', title: 'Reply', body: 'done' })], personas: new Map([['a1', 'frontend lead']]) });
+    expect(within(screen.getByTestId('thread-item-11')).getByText('frontend lead')).toBeInTheDocument();
+  });
+
   it('a partial (10-minute) reply says so', () => {
     renderFeed({ items: [item({ event_id: 10, kind: 'reply', title: 'Reply (partial — no idle after 10 min)', body: 'so far…' })] });
     expect(screen.getByText('(partial — no idle after 10 min)')).toBeInTheDocument();

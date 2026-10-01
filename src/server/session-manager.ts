@@ -2,7 +2,9 @@ import {
   getDb,
   insertAgent,
   getAgent,
+  agentNameShadowsIdentity,
   getAgentByName,
+  resolveAgent,
   listAgents,
   deleteAgent,
   updateAgentStatus,
@@ -50,6 +52,9 @@ export function adopt(
   const existing = listAgents().find((a) => a.tmux_session === sessionName);
   if (existing) {
     return { ok: false, error: `Session '${sessionName}' already adopted as agent '${existing.name}'` };
+  }
+  if (agentNameShadowsIdentity(name ?? sessionName)) {
+    return { ok: false, error: `Agent name '${name ?? sessionName}' collides with another agent's id or alias` };
   }
 
   return insertAgent({
@@ -112,10 +117,13 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     return { ok: false, error: `tmux session '${sessionName}' already exists` };
   }
 
-  // Check agent name not taken
+  // Check agent name not taken — nor usable to impersonate another agent's id/alias
   const existing = listAgents().find((a) => a.name === opts.name);
   if (existing) {
     return { ok: false, error: `Agent name '${opts.name}' already in use` };
+  }
+  if (agentNameShadowsIdentity(opts.name)) {
+    return { ok: false, error: `Agent name '${opts.name}' collides with another agent's id or alias` };
   }
 
   // Create git worktree if repo provided
@@ -308,10 +316,9 @@ export function list(): Agent[] {
   return listAgents();
 }
 
-export function get(idOrName: string): Result<Agent> {
-  const byId = getAgent(idOrName);
-  if (byId.ok) return byId;
-  return getAgentByName(idOrName);
+/** alias → name → id (spec §5c) — every route resolves agents through here. */
+export function get(ref: string): Result<Agent> {
+  return resolveAgent(ref);
 }
 
 export function kill(agentId: string): Result<void> {

@@ -209,6 +209,11 @@ describe('migration v11 → current', () => {
     expect(cols('agents')).toContain('role');
     expect(cols('runs')).toContain('summary');
     expect(cols('agent_messages')).toEqual(expect.arrayContaining(['ref_prompt_actor', 'ref_prompt_event_id', 'truncated']));
+    // v16 (spec §5c): aliases, personas, tag groups, task numbers, messages to people
+    expect(cols('agents')).toEqual(expect.arrayContaining(['alias', 'persona']));
+    expect(cols('agent_tags')).toEqual(['agent_id', 'tag']);
+    expect(cols('tasks')).toContain('num');
+    expect(cols('agent_messages')).toContain('to_user_id');
 
     const events = mod.listEvents();
     expect(events).toHaveLength(1);

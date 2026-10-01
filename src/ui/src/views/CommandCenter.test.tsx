@@ -43,10 +43,13 @@ async function setup(me: User = ana) {
   const api = await import('../hooks/useApi');
   vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
     if (path === '/me') return me as never;
-    if (path === '/users') return [ana] as never;
+    if (path === '/users') return [ana, { id: 'u-bob', name: 'bob', role: 'developer', color: '#16a34a' }] as never;
+    if (path === '/artifacts') return [{ id: 'art-7', filename: 'mockup.png' }] as never;
     if (path === '/agents') return [
       agent({ name: 'grok-fe', owner_id: 'u-ana', owner: 'ana' }),
       agent({ name: 'codex-rev' }),
+      agent({ name: 'claude-fe-1', alias: 'toni', tags: ['frontend'] }),
+      agent({ name: 'grok-fe-2', alias: 'mia', tags: ['frontend'] }),
       agent({ name: 'pm', orchestrator: true, role: 'orchestrator' }),
     ] as never;
     if (path === '/tasks') return [{ id: 'task-1', agent_id: null, prompt: 'T5 UI', status: 'pending', priority: 0, created_at: new Date().toISOString(), created_by: 'u-ana' }] as never;
@@ -118,6 +121,70 @@ describe('CommandCenter', () => {
     await userEvent.click(within(screen.getByTestId('thread-item-22')).getByRole('button', { name: 'Hold' }));
     await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/pm/send', { text: 'Hold' }));
     expect(screen.getByRole('button', { name: /Attention/ })).toHaveTextContent('●1');
+  });
+
+  describe('§5c grammar end to end (each line → existing routes)', () => {
+    async function say(text: string) {
+      const box = screen.getByRole('textbox', { name: 'Message' });
+      await userEvent.type(box, `${text}{Escape}{Enter}`);
+    }
+
+    it('#reserve @toni 2h reserves in one request', async () => {
+      const api = await setup();
+      await say('#reserve @toni 2h');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/claude-fe-1/reserve', { hours: 2 }));
+      expect(vi.mocked(api.apiPost).mock.calls.filter(([p]) => String(p).includes('/reserve'))).toHaveLength(1);
+    });
+
+    it("@toni @mia review each other's lane → two pane sends", async () => {
+      const api = await setup();
+      await say("@toni @mia review each other's lane");
+      await waitFor(() => expect(vi.mocked(api.apiPost).mock.calls.filter(([p]) => String(p).endsWith('/send'))).toEqual([
+        ['/agents/claude-fe-1/send', { text: "review each other's lane" }],
+        ['/agents/grok-fe-2/send', { text: "review each other's lane" }],
+      ]));
+    });
+
+    it('an unknown #foo goes to the orchestrator seat unchanged', async () => {
+      const api = await setup();
+      await say('#foo bar');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/pm/send', { text: '#foo bar' }));
+    });
+
+    it('@frontend sends to both tagged agents', async () => {
+      const api = await setup();
+      await say('@frontend ship it');
+      await waitFor(() => expect(vi.mocked(api.apiPost).mock.calls.filter(([p]) => String(p).endsWith('/send')).map(([p]) => p))
+        .toEqual(['/agents/claude-fe-1/send', '/agents/grok-fe-2/send']));
+    });
+
+    it('#status, @all, @person, #task, #promote, #file, #tag, #release', async () => {
+      const api = await setup();
+      await say('#status');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/pm/send', { text: expect.stringMatching(/status/i) }));
+      await say('@all standup in 5');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/messages', { message: 'standup in 5', message_type: 'info' }));
+      await say('@bob please approve T7');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/messages', { to_user: 'bob', message: 'please approve T7' }));
+      await say('#task @mia polish the header');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/tasks', { prompt: 'polish the header', agent_id: 'grok-fe-2' }));
+      await say('#file @toni mockup.png');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/artifacts/art-7/share', { targetAgentId: 'claude-fe-1' }));
+      await say('#tag @toni frontend');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/claude-fe-1/tags', { tag: 'frontend' }));
+      await say('#release @toni');
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/claude-fe-1/release'));
+      await say('#promote #3');
+      // task #3 is not known → unparseable → seat, unchanged
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/agents/pm/send', { text: '#promote #3' }));
+    });
+
+    it('roster Rename sets alias and persona', async () => {
+      const api = await setup();
+      vi.spyOn(window, 'prompt').mockReturnValueOnce('rex').mockReturnValueOnce('backend lead');
+      await userEvent.click(within(screen.getByTestId('roster-codex-rev')).getByRole('button', { name: 'Rename' }));
+      await waitFor(() => expect(api.apiPatch).toHaveBeenCalledWith('/agents/codex-rev', { alias: 'rex', persona: 'backend lead' }));
+    });
   });
 
   it('loads roster, thread, board and presence', async () => {
@@ -212,7 +279,7 @@ describe('CommandCenter', () => {
     expect(screen.getByText('Run failed')).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Target' })).toHaveValue('codex-rev');
 
-    await userEvent.click(screen.getByRole('button', { name: /grok-fe/ }));
+    await userEvent.click(screen.getByRole('button', { name: /^grok-fe/ }));
     await userEvent.click(screen.getByRole('button', { name: /terminal tail/ }));
     expect(await screen.findByTestId('terminal-tail')).toHaveTextContent('✓ ok');
   });

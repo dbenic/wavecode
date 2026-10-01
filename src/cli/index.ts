@@ -419,30 +419,26 @@ registerQaCommands(program);
 // --- msg ---
 program
   .command('msg <to> <message...>')
-  .description('Post a message on the agent wire (to: agent name/id, or "all" to broadcast)')
+  .description('Post a message on the agent wire (to: agent alias/name/id, @group, @person, or "all" to broadcast)')
   .option('--type <type>', 'info | request | handoff | result | error', 'info')
   .option('--from <agent>', 'Sending agent name/id (omit for system/human)')
   .option('--task <taskId>', 'Reference a task')
   .option('--run <runId>', 'Reference a run')
   .action(async (to: string, messageWords: string[], opts: { type: string; from?: string; task?: string; run?: string }) => {
     initDb();
-    const { insertAgentMessage, getAgentByName, getAgent } = await import('../server/db.js');
+    const { insertAgentMessage, resolveAgent } = await import('../server/db.js');
     const { emit } = await import('../server/event-bus.js');
+    const { resolveMsgTarget } = await import('./msg-command.js');
 
-    const resolve = (idOrName: string): string | null => {
-      const byId = getAgent(idOrName);
-      if (byId.ok) return byId.data.id;
-      const byName = getAgentByName(idOrName);
-      return byName.ok ? byName.data.id : null;
+    const resolve = (ref: string): string | null => {
+      const agent = resolveAgent(ref);
+      return agent.ok ? agent.data.id : null;
     };
 
-    let toAgentId: string | null = null;
-    if (to !== 'all') {
-      toAgentId = resolve(to);
-      if (!toAgentId) {
-        console.error(`Unknown agent '${to}' (use an agent name/id, or 'all' to broadcast)`);
-        process.exit(1);
-      }
+    const target = resolveMsgTarget(to);
+    if (!target.ok) {
+      console.error(target.error);
+      process.exit(1);
     }
 
     const fromAgentId = opts.from ? resolve(opts.from) : null;
@@ -457,29 +453,50 @@ program
       process.exit(1);
     }
 
-    const result = insertAgentMessage({
-      from_agent_id: fromAgentId ?? undefined,
-      to_agent_id: toAgentId ?? undefined,
-      message: messageWords.join(' '),
-      message_type: opts.type as 'info' | 'request' | 'handoff' | 'result' | 'error',
-      ref_task_id: opts.task,
-      ref_run_id: opts.run,
-    });
+    const recipients: Array<string | null> = target.data.kind === 'agents' ? target.data.agentIds : [null];
+    const toUserId = target.data.kind === 'user' ? target.data.userId : null;
+    const ids: string[] = [];
+    for (const toAgentId of recipients) {
+      const result = insertAgentMessage({
+        from_agent_id: fromAgentId ?? undefined,
+        to_agent_id: toAgentId ?? undefined,
+        to_user_id: toUserId,
+        message: messageWords.join(' '),
+        message_type: opts.type as 'info' | 'request' | 'handoff' | 'result' | 'error',
+        ref_task_id: opts.task,
+        ref_run_id: opts.run,
+      });
 
-    if (!result.ok) {
-      console.error(`Failed to send: ${result.error}`);
-      process.exit(1);
+      if (!result.ok) {
+        console.error(`Failed to send: ${result.error}`);
+        process.exit(1);
+      }
+
+      emit('message.created', 'agent_message', result.data.id, {
+        from_agent_id: fromAgentId,
+        to_agent_id: toAgentId,
+        message_type: opts.type,
+        ref_task_id: opts.task ?? null,
+        ref_run_id: opts.run ?? null,
+        ...(toUserId ? { to_user_id: toUserId } : {}),
+      });
+      ids.push(result.data.id);
     }
 
-    emit('message.created', 'agent_message', result.data.id, {
-      from_agent_id: fromAgentId,
-      to_agent_id: toAgentId,
-      message_type: opts.type,
-      ref_task_id: opts.task ?? null,
-      ref_run_id: opts.run ?? null,
-    });
+    if (target.data.kind === 'user') {
+      // Mirror to the person's phone (push / ntfy / Telegram); best effort
+      try {
+        loadInstalledConfig();
+        const { notify } = await import('../server/notifications.js');
+        // Channels are per-install, not per-user: never put the body in the notification
+        await notify({ title: `New WaveCode message for @${target.data.name}`, body: 'Open the Command Center to read it', url: '/', tag: `message-${ids[0]}` });
+      } catch {
+        // notifications are optional
+      }
+    }
 
-    console.log(`Message ${result.data.id} sent to ${to === 'all' ? 'all (broadcast)' : to}`);
+    const label = target.data.kind === 'all' ? 'all (broadcast)' : target.data.kind === 'user' ? `@${target.data.name}` : target.data.label;
+    console.log(`Message ${ids.join(', ')} sent to ${label}`);
   });
 
 // --- user ---

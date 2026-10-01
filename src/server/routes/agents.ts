@@ -4,6 +4,10 @@ import {
   getAgent,
   updateAgentPin,
   updateAgentRole,
+  updateAgentIdentity,
+  addAgentTag,
+  removeAgentTag,
+  listAllAgentTags,
   type Agent,
   type AgentRole,
   type EffortLevel,
@@ -19,13 +23,15 @@ import * as leases from '../leases.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
 import * as replyCapture from '../reply-capture.js';
 import { briefOrchestratorSeat, parseAgentRole, resolveOrchestratorAgent } from '../orchestrator.js';
+import { validateAlias, validatePersona, validateTag, withPersona } from '../agent-identity.js';
 import { isProfileCompatible, resolveSpawnProfile } from '../profiles.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
     const agents = listAgents();
     const orchestratorId = resolveOrchestratorAgent(agents)?.id ?? null;
-    return c.json(agents.map((a) => enrichAgent(a, getActingUser(c), orchestratorId)));
+    const tags = safeAllTags();
+    return c.json(agents.map((a) => enrichAgent(a, getActingUser(c), orchestratorId, tags?.get(a.id) ?? [])));
   });
 
   app.get('/api/agents/:id', (c) => {
@@ -86,6 +92,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
     if (!access.ok) return c.json({ error: access.error }, 403);
 
+    let typed = body.text;
     if (body.raw) {
       // Raw keys (C-c, Escape, Enter) are how a stuck shell gets fixed — never gated.
       const result = sessionManager.sendRawKeys(agentResult.data.id, body.text);
@@ -95,10 +102,13 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       if (runtimeLiveness.getRuntimeState(agentResult.data) === 'dead') {
         return c.json({ error: `${runtimeLiveness.RUNTIME_NOT_RUNNING} — relaunch it (or send raw keys) first` }, 409);
       }
-      const result = sessionManager.sendKeys(agentResult.data.id, body.text);
+      // Spec §5c: `[you are @toni — frontend lead] …` when the agent has a persona
+      typed = withPersona(agentResult.data, body.text);
+      const result = sessionManager.sendKeys(agentResult.data.id, typed);
       if (!result.ok) return c.json({ error: result.error }, 500);
     }
 
+    // The thread shows what the person wrote; the pane got the persona-prefixed text.
     const sent = emit('agent.prompt_sent', 'agent', agentResult.data.id, {
       text: body.text.substring(0, 2000),
     });
@@ -108,7 +118,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       replyCapture.trackPrompt({
         agent: agentResult.data,
         actorId: getActingUser(c).id,
-        prompt: body.text,
+        prompt: typed,
         promptEventId: sent?.id ?? null,
       });
     }
@@ -236,6 +246,30 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     return c.json({ ok: true, action: 'already_running' });
   });
 
+  // --- Tag groups (spec §5c): `#tag @x frontend`, `@frontend text` fans out ---
+  app.post('/api/agents/:id/tags', async (c) => {
+    const body = await c.req.json<{ tag?: unknown }>().catch(() => ({} as { tag?: unknown }));
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
+    const tag = validateTag(body?.tag);
+    if (!tag.ok) return c.json({ error: tag.error }, 400);
+    addAgentTag(agentResult.data.id, tag.data);
+    emit('agent.tagged', 'agent', agentResult.data.id, { tag: tag.data, name: agentResult.data.name });
+    return c.json(enrichAgent(agentResult.data, getActingUser(c)));
+  });
+
+  app.delete('/api/agents/:id/tags/:tag', (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
+    if (!removeAgentTag(agentResult.data.id, c.req.param('tag'))) return c.json({ error: 'Tag not set on this agent' }, 404);
+    emit('agent.untagged', 'agent', agentResult.data.id, { tag: c.req.param('tag'), name: agentResult.data.name });
+    return c.json(enrichAgent(agentResult.data, getActingUser(c)));
+  });
+
   app.post('/api/agents/:id/reserve', async (c) => {
     const body = await c.req.json<{ hours?: unknown }>().catch(() => ({} as { hours?: unknown }));
     const agentResult = sessionManager.get(c.req.param('id'));
@@ -260,6 +294,10 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       model?: string | null;
       effort?: EffortLevel | null;
       role?: string | null;
+      /** Short unique handle, e.g. 'toni' (spec §5c); null clears it. */
+      alias?: string | null;
+      /** One line, e.g. 'frontend lead'; null clears it. */
+      persona?: string | null;
     }>();
 
     const role = parseAgentRole(body.role);
@@ -267,19 +305,45 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     const agentResult = sessionManager.get(c.req.param('id'));
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    let agent = agentResult.data;
+    const user = getActingUser(c);
 
-    // Role-only update (spec §5b): make / unmake the orchestrator seat
-    if (role.role !== undefined && body.model === undefined && body.effort === undefined) {
-      const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+    // Identity / role changes (spec §5b, §5c) are the owner's or an admin's
+    const hasIdentity = body.alias !== undefined || body.persona !== undefined;
+    if (hasIdentity || role.role !== undefined) {
+      const access = leases.checkAgentAccess(agent, user);
       if (!access.ok) return c.json({ error: access.error }, 403);
-      const updated = assignRole(agentResult.data, role.role, getActingUser(c).id);
-      return c.json(enrichAgent(updated, getActingUser(c)));
+    }
+    if (hasIdentity) {
+      const alias = body.alias === undefined ? undefined : validateAlias(body.alias, agent.id);
+      if (alias && !alias.ok) return c.json({ error: alias.error }, alias.error.includes('already') || alias.error.includes('is a') ? 409 : 400);
+      const persona = body.persona === undefined ? undefined : validatePersona(body.persona);
+      if (persona && !persona.ok) return c.json({ error: persona.error }, 400);
+      const updated = updateAgentIdentity(agent.id, {
+        ...(alias ? { alias: alias.data } : {}),
+        ...(persona ? { persona: persona.data } : {}),
+      });
+      if (!updated.ok) return c.json({ error: updated.error }, updated.error.includes('taken') ? 409 : 500);
+      emit('agent.renamed', 'agent', agent.id, {
+        name: agent.name,
+        alias: updated.data.alias ?? null,
+        previous_alias: agent.alias ?? null,
+        persona: updated.data.persona ?? null,
+      });
+      agent = updated.data;
+    }
+    if (role.role !== undefined) agent = assignRole(agent, role.role, user.id);
+    if (body.model === undefined && body.effort === undefined) {
+      if (!hasIdentity && role.role === undefined) {
+        return c.json({ error: 'Provide alias, persona, role, model and/or effort' }, 400);
+      }
+      return c.json(enrichAgent(agent, user));
     }
 
     const validationError = validate.validateAgentPinBody(body);
     if (validationError) return c.json({ error: validationError }, 400);
 
-    const result = updateAgentPin(agentResult.data.id, {
+    const result = updateAgentPin(agent.id, {
       model: body.model,
       effort: body.effort,
     });
@@ -376,12 +440,23 @@ function assignRole(agent: Agent, role: AgentRole | null, actorId: string): Agen
   return updated.data;
 }
 
-function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null) {
+/** Tags for every agent; tolerant of a DB without the table (embedded/test mocks). */
+function safeAllTags(): Map<string, string[]> | null {
+  try {
+    return listAllAgentTags();
+  } catch {
+    return null;
+  }
+}
+
+function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null, tags?: string[]) {
   const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
   const defaultSeat = orchestratorId === undefined ? resolveOrchestratorAgent(listAgents())?.id ?? null : orchestratorId;
   return {
     ...agent,
     owner,
+    /** Group tags (spec §5c) */
+    tags: tags ?? safeAllTags()?.get(agent.id) ?? [],
     /** The Command Center's default recipient (spec §5b). */
     orchestrator: defaultSeat === agent.id,
     // Spec §3: lease state for orchestrators, plus whether *this* caller may

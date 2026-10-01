@@ -93,6 +93,33 @@ describe('Roster', () => {
     expect(props.onFocus).toHaveBeenLastCalledWith(null);
   });
 
+  it('shows alias, persona and tags; filters by tag; offers Rename where you may act', async () => {
+    const onRename = vi.fn();
+    renderRoster({
+      onRename,
+      agents: [
+        agent({ name: 'claude-fe-1', alias: 'toni', persona: 'frontend lead', tags: ['frontend'] }),
+        agent({ name: 'codex-be', tags: ['backend'] }),
+        agent({ name: 'opus-fe', owner_id: 'u-bob', owner: 'bob', tags: ['frontend'] }),
+      ],
+    });
+    const toni = within(screen.getByTestId('roster-claude-fe-1'));
+    expect(toni.getByText('@toni')).toBeInTheDocument();
+    expect(toni.getByText('frontend lead')).toBeInTheDocument();
+    expect(toni.getByText('#frontend')).toBeInTheDocument();
+
+    await userEvent.click(toni.getByRole('button', { name: 'Rename' }));
+    expect(onRename).toHaveBeenCalledWith(expect.objectContaining({ alias: 'toni' }));
+    expect(within(screen.getByTestId('roster-opus-fe')).queryByRole('button', { name: 'Rename' })).toBeNull();
+
+    const filter = within(screen.getByRole('group', { name: 'Filter by tag' }));
+    await userEvent.click(filter.getByRole('button', { name: '#backend' }));
+    expect(screen.queryByTestId('roster-claude-fe-1')).toBeNull();
+    expect(screen.getByTestId('roster-codex-be')).toBeInTheDocument();
+    await userEvent.click(filter.getByRole('button', { name: 'all tags' }));
+    expect(screen.getByTestId('roster-claude-fe-1')).toBeInTheDocument();
+  });
+
   it('dropping a board task onto an agent assigns it; never onto a locked agent', () => {
     const props = renderRoster();
     const dataTransfer = { types: [TASK_DRAG_TYPE], getData: (t: string) => (t === TASK_DRAG_TYPE ? 'task-9' : '') };

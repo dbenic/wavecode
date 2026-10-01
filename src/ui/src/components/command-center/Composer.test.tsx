@@ -3,7 +3,7 @@
 import '../../../test-setup';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Composer, { type ComposerSend } from './Composer';
 import type { Agent } from '../../types';
@@ -105,6 +105,38 @@ describe('Composer', () => {
     expect(onSend).toHaveBeenCalledTimes(2);
   });
 
+  it('autocomplete: @ lists agents, Tab accepts; Enter accepts instead of sending while the list is open', async () => {
+    const onSend = vi.fn(async () => true as const);
+    render(<Harness onSend={onSend} initialTarget="pm" />);
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await userEvent.type(box, '@gr');
+    const list = screen.getByRole('listbox', { name: 'Suggestions' });
+    expect(within(list).getAllByRole('option').map((o) => o.textContent)).toEqual([expect.stringContaining('@grok-fe')]);
+    await userEvent.keyboard('{Tab}');
+    expect(box).toHaveValue('@grok-fe ');
+    expect(screen.queryByRole('listbox')).toBeNull();
+
+    await userEvent.type(box, 'hi #');
+    expect(within(screen.getByRole('listbox')).getAllByRole('option')[0]).toHaveTextContent('#reserve');
+    await userEvent.keyboard('{ArrowDown}{Enter}');
+    expect(box).toHaveValue('@grok-fe hi #release ');
+    expect(onSend).not.toHaveBeenCalled();
+
+    await userEvent.type(box, '@pi');
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('Ask mode sends fan-out and #commands as a grammar plan', async () => {
+    const onSend = vi.fn(async () => true as const);
+    render(<Harness onSend={onSend} initialTarget="pm" />);
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await userEvent.type(box, '@grok-fe @pinned compare notes{Escape}{Enter}');
+    expect(onSend).toHaveBeenLastCalledWith({ kind: 'plan', plan: expect.objectContaining({ kind: 'prompt', text: 'compare notes' }) });
+    await userEvent.type(box, '#reserve @grok-fe 2h{Escape}{Enter}');
+    expect(onSend).toHaveBeenLastCalledWith({ kind: 'plan', plan: expect.objectContaining({ kind: 'reserve', hours: 2 }) });
+  });
+
   it('Ask is the default mode name; the seat is marked in the target chip', () => {
     render(<Harness onSend={vi.fn()} initialTarget="pm" />);
     expect(screen.getByRole('radio', { name: 'Ask' })).toHaveAttribute('aria-checked', 'true');
@@ -134,13 +166,12 @@ describe('Composer', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
   });
 
-  it('prompt mode needs an agent; server errors are shown and the text is kept', async () => {
+  it('with no target, plain text goes to the orchestrator seat (spec §5c); server errors are shown and the text is kept', async () => {
     const onSend = vi.fn(async () => 'Agent grok-fe is owned by ana');
     render(<Harness onSend={onSend} initialTarget="" />);
     const box = screen.getByRole('textbox', { name: 'Message' });
     await userEvent.type(box, 'hi{Enter}');
-    expect(screen.getByRole('alert')).toHaveTextContent('Pick an agent');
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenLastCalledWith({ kind: 'prompt', agentId: 'pm', text: 'hi' });
 
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Target' }), 'grok-fe');
     await userEvent.type(box, '{Enter}');

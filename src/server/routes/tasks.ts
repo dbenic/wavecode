@@ -1,8 +1,9 @@
 import type { Hono } from 'hono';
 import {
   getAgent,
-  getAgentByName,
   getDb,
+  getTaskByNum,
+  resolveAgent,
   insertTask,
   getTask,
   getRun,
@@ -89,10 +90,9 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     let resolvedAgentId: string | undefined;
     let waitingFor: string | null = null;
     if (body.agent_id) {
-      // Same as GET /api/agents/:id — ULID or the name list_agents exposes.
+      // alias → name → id (spec §5c), same as every agent route.
       // Resolve to the existing seat; never spawn a new one here.
-      const byId = getAgent(body.agent_id);
-      const agentResult = byId.ok ? byId : getAgentByName(body.agent_id);
+      const agentResult = resolveAgent(body.agent_id);
       if (!agentResult.ok) return c.json({ error: agentResult.error }, 400);
       // Queuing for an agent someone else owns is allowed (spec §6): the
       // dispatcher never runs it there until the lease ends and emits
@@ -111,11 +111,15 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       resolvedGoalId = goalResult.data.id;
     }
 
-    for (const depId of dependencyIds) {
-      const dependencyResult = getTask(depId);
+    // `#12` / `12` refer to task numbers (spec §5c); anything else is a task id
+    for (let i = 0; i < dependencyIds.length; i++) {
+      const depRef = dependencyIds[i];
+      const num = /^#?(\d+)$/.exec(depRef);
+      const dependencyResult = num ? getTaskByNum(Number(num[1])) : getTask(depRef);
       if (!dependencyResult.ok) {
-        return c.json({ error: `Dependency task not found: ${depId}` }, 400);
+        return c.json({ error: `Dependency task not found: ${depRef}` }, 400);
       }
+      dependencyIds[i] = dependencyResult.data.id;
     }
 
     let task;

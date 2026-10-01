@@ -41,7 +41,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     description:
       'Reserve an agent for yourself so nobody else can prompt, assign to, or kill it (default 4h, max 24h). Re-reserving your own agent extends it. Fails if someone else owns it.',
     schema: {
-      agent: z.string().describe('Agent ID or name'),
+      agent: z.string().describe('Agent alias, name or ID'),
       hours: z.number().positive().max(24).optional().describe('Reservation length in hours (default 4)'),
     },
     handler: (client, args) =>
@@ -50,7 +50,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'release_agent',
     description: 'Release your lease on an agent so it is free for anyone (admins may release any agent).',
-    schema: { agent: z.string().describe('Agent ID or name') },
+    schema: { agent: z.string().describe('Agent alias, name or ID') },
     handler: (client, args) => client.post(`/agents/${encodeURIComponent(String(args.agent))}/release`),
   },
 
@@ -86,7 +86,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     description:
       "Update an agent's pinned model and/or effort level. Pass null to clear a pin. Applies on the agent's next (re)launch.",
     schema: {
-      agent_id: z.string().describe('Agent ID or name'),
+      agent_id: z.string().describe('Agent alias, name or ID'),
       model: z.string().nullable().optional(),
       effort: EFFORT.nullable().optional(),
     },
@@ -97,7 +97,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     name: 'kill_agent',
     description:
       "Kill a spawned agent: terminate its tmux session and remove it. Adopted agents can't be killed — detach them from the UI instead. Refused (403) if someone else owns the agent.",
-    schema: { agent_id: z.string().describe('Agent ID or name') },
+    schema: { agent_id: z.string().describe('Agent alias, name or ID') },
     handler: (client, args) => client.post(`/agents/${args.agent_id}/kill`),
   },
   {
@@ -111,7 +111,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     name: 'send_prompt',
     description: "Send a prompt (or instruction) directly into an agent's terminal session. Refused (403, names the owner) if someone else owns the agent. The agent's answer is captured from its pane when it goes idle and appears in the thread (and list_messages) as a message of type 'reply'.",
     schema: {
-      agent_id: z.string().describe('Agent ID or name'),
+      agent_id: z.string().describe('Agent alias, name or ID'),
       text: z.string().describe('The prompt text to send'),
     },
     handler: (client, args) => client.post(`/agents/${args.agent_id}/send`, { text: args.text }),
@@ -120,7 +120,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     name: 'get_agent_output',
     description: "Read the last N lines of an agent's terminal output (default 50, max 500).",
     schema: {
-      agent_id: z.string().describe('Agent ID or name'),
+      agent_id: z.string().describe('Agent alias, name or ID'),
       lines: z.number().int().min(1).max(500).optional(),
     },
     handler: (client, args) =>
@@ -402,10 +402,11 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'send_message',
     description:
-      'Post a message on the agent wire (persisted + broadcast on SSE). Omit to_agent_id to broadcast to a workspace.',
+      'Post a message on the agent wire (persisted + broadcast on SSE). Omit to_agent_id to broadcast to a workspace. Use to_user to address a person (lands in their Attention inbox and phone notifications), e.g. when a decision needs a specific human.',
     schema: {
       message: z.string(),
-      to_agent_id: z.string().optional(),
+      to_agent_id: z.string().optional().describe('Agent alias, name or id'),
+      to_user: z.string().optional().describe('A person by user name, e.g. "ana" — not an agent'),
       workspace: z.string().optional(),
       message_type: z.enum(['info', 'request', 'handoff', 'result', 'error']).optional(),
       ref_task_id: z.string().optional(),

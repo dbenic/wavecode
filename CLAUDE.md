@@ -109,6 +109,8 @@ CREATE TABLE agents (
   lease_reason TEXT,              -- 'reserved' | 'task' | null
   profile TEXT,                   -- v14 credential profile (spec §5); null = home-dir login
   role TEXT,                      -- v15 'orchestrator' = the PM seat (spec §5b)
+  alias TEXT UNIQUE,              -- v16 short handle (@toni); resolution: alias → name → id (spec §5c)
+  persona TEXT,                   -- v16 one line, prepended to prompts as [you are @alias — persona]
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -186,6 +188,12 @@ CREATE TABLE events (
   payload_json TEXT,
   actor_id TEXT,                -- user who caused it (null = system); see request-context.ts
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE agent_tags (       -- v16 groups: @frontend fans out (spec §5c)
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (agent_id, tag)
 );
 
 CREATE TABLE users (            -- v12; auth.fallback_token = synthetic admin 'owner' (no row)

@@ -33,6 +33,10 @@ export interface Agent {
   profile?: string | null;
   /** 'orchestrator' = the PM seat that gets the standing operating prompt (spec §5b). */
   role?: AgentRole | null;
+  /** Short unique handle (`@toni`); resolution everywhere is alias → name → id (spec §5c). */
+  alias?: string | null;
+  /** One line ("frontend lead"), shown in the UI and prepended to prompts. */
+  persona?: string | null;
   created_at: string;
 }
 
@@ -50,6 +54,8 @@ export interface Task {
   created_at: string;
   goal_id: string | null;
   created_by?: string | null;  // user id of the creator; null = system/legacy
+  /** Short sequential number for `#12` in the composer (spec §5c). */
+  num?: number | null;
 }
 
 export const GOAL_STATUSES = ['active', 'done', 'failed', 'cancelled'] as const;
@@ -215,6 +221,8 @@ export interface AgentMessage {
   ref_prompt_event_id?: number | null;
   /** reply only: 1 = posted by the 10-minute fallback, not on idle */
   truncated?: number;
+  /** A message addressed to a person (`@ana`), not an agent (spec §5c). */
+  to_user_id?: string | null;
   created_at: string;
 }
 
@@ -237,7 +245,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -258,8 +266,18 @@ const SCHEMA_SQL = `
     lease_reason TEXT,
     profile TEXT,
     role TEXT,
+    alias TEXT,
+    persona TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_alias ON agents(alias) WHERE alias IS NOT NULL;
+
+  CREATE TABLE IF NOT EXISTS agent_tags (
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (agent_id, tag)
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_tags_tag ON agent_tags(tag);
 
   CREATE TABLE IF NOT EXISTS goals (
     id TEXT PRIMARY KEY,
@@ -281,8 +299,10 @@ const SCHEMA_SQL = `
     priority INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     goal_id TEXT REFERENCES goals(id),
-    created_by TEXT
+    created_by TEXT,
+    num INTEGER
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_num ON tasks(num) WHERE num IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS task_dependencies (
     task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -477,6 +497,7 @@ const SCHEMA_SQL = `
     ref_prompt_actor TEXT,
     ref_prompt_event_id INTEGER,
     truncated INTEGER NOT NULL DEFAULT 0,
+    to_user_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_agent_messages_workspace ON agent_messages(workspace, created_at DESC);
@@ -698,6 +719,22 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE runs ADD COLUMN summary TEXT;
     ALTER TABLE agents ADD COLUMN role TEXT;
   `,
+  // v15 → v16: Aliases, personas, tags, task numbers, messages to people (spec §5c)
+  15: `
+    ALTER TABLE agents ADD COLUMN alias TEXT;
+    ALTER TABLE agents ADD COLUMN persona TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_alias ON agents(alias) WHERE alias IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS agent_tags (
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      tag TEXT NOT NULL,
+      PRIMARY KEY (agent_id, tag)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_tags_tag ON agent_tags(tag);
+    ALTER TABLE tasks ADD COLUMN num INTEGER;
+    UPDATE tasks SET num = (SELECT COUNT(*) FROM tasks t2 WHERE t2.rowid <= tasks.rowid);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_num ON tasks(num) WHERE num IS NOT NULL;
+    ALTER TABLE agent_messages ADD COLUMN to_user_id TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -783,6 +820,86 @@ export function getAgentByName(name: string): Result<Agent> {
   return { ok: true, data: row };
 }
 
+export function getAgentByAlias(alias: string): Result<Agent> {
+  const row = getDb().prepare('SELECT * FROM agents WHERE alias = ?').get(alias) as Agent | undefined;
+  if (!row) return { ok: false, error: `Agent '@${alias}' not found` };
+  return { ok: true, data: row };
+}
+
+/**
+ * The one agent lookup for anything a person or tool typed (spec §5c):
+ * alias → name → id. A leading `@` is ignored.
+ */
+/** Crockford-base32 ULID, as generateId() produces. */
+export const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+export function resolveAgent(ref: string): Result<Agent> {
+  const key = ref.trim().replace(/^@/, '');
+  if (!key) return { ok: false, error: 'Agent reference is empty' };
+  // An id is what the UI, MCP and dispatcher pass; it must never be shadowed
+  // by an agent whose *name* happens to look like someone else's ULID.
+  if (ULID_RE.test(key)) {
+    const byId = getAgent(key);
+    if (byId.ok) return byId;
+  }
+  const byAlias = getAgentByAlias(key);
+  if (byAlias.ok) return byAlias;
+  const byName = getAgentByName(key);
+  if (byName.ok) return byName;
+  const byId = getAgent(key);
+  if (byId.ok) return byId;
+  return { ok: false, error: `Agent '${ref}' not found` };
+}
+
+/** True when `name` would collide with an existing agent's id or alias (spawn/adopt guard). */
+export function agentNameShadowsIdentity(name: string): boolean {
+  return listAgents().some((a) => a.id === name || (a.alias !== null && a.alias === name));
+}
+
+export function updateAgentIdentity(id: string, fields: { alias?: string | null; persona?: string | null }): Result<Agent> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if (fields.alias !== undefined) { sets.push('alias = ?'); params.push(fields.alias); }
+  if (fields.persona !== undefined) { sets.push('persona = ?'); params.push(fields.persona); }
+  if (sets.length === 0) return getAgent(id);
+  try {
+    getDb().prepare(`UPDATE agents SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (msg.includes('UNIQUE')) return { ok: false, error: `Alias '${fields.alias}' is already taken` };
+    return { ok: false, error: msg };
+  }
+  return getAgent(id);
+}
+
+// --- Agent tags (spec §5c groups) ---
+
+export function listAgentTags(agentId: string): string[] {
+  return (getDb().prepare('SELECT tag FROM agent_tags WHERE agent_id = ? ORDER BY tag').all(agentId) as { tag: string }[]).map((r) => r.tag);
+}
+
+/** agent id → tags, for listing every agent at once. */
+export function listAllAgentTags(): Map<string, string[]> {
+  const rows = getDb().prepare('SELECT agent_id, tag FROM agent_tags ORDER BY tag').all() as { agent_id: string; tag: string }[];
+  const map = new Map<string, string[]>();
+  for (const r of rows) map.set(r.agent_id, [...(map.get(r.agent_id) ?? []), r.tag]);
+  return map;
+}
+
+export function addAgentTag(agentId: string, tag: string): void {
+  getDb().prepare('INSERT OR IGNORE INTO agent_tags (agent_id, tag) VALUES (?, ?)').run(agentId, tag);
+}
+
+export function removeAgentTag(agentId: string, tag: string): boolean {
+  return getDb().prepare('DELETE FROM agent_tags WHERE agent_id = ? AND tag = ?').run(agentId, tag).changes > 0;
+}
+
+export function listAgentsByTag(tag: string): Agent[] {
+  return getDb().prepare(`
+    SELECT a.* FROM agents a JOIN agent_tags t ON t.agent_id = a.id WHERE t.tag = ? ORDER BY a.name
+  `).all(tag) as Agent[];
+}
+
 export function listAgents(): Agent[] {
   return getDb().prepare('SELECT * FROM agents ORDER BY created_at DESC').all() as Agent[];
 }
@@ -826,6 +943,7 @@ export function updateAgentWorkspace(id: string, workspace: string): Result<Agen
 }
 
 export function deleteAgent(id: string): Result<void> {
+  getDb().prepare('DELETE FROM agent_tags WHERE agent_id = ?').run(id);
   const result = getDb().prepare('DELETE FROM agents WHERE id = ?').run(id);
   if (result.changes === 0) return { ok: false, error: `Agent ${id} not found` };
   return { ok: true, data: undefined };
@@ -845,8 +963,8 @@ export function insertTask(task: {
   const createdBy = task.created_by === undefined ? currentActorId() : task.created_by;
   try {
     getDb().prepare(`
-      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num)
+      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks))
     `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy);
     const row = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task;
     return { ok: true, data: row };
@@ -1224,6 +1342,17 @@ export function getUser(id: string): Result<User> {
 
 export function getUserByTokenHash(tokenHash: string): User | null {
   return (getDb().prepare(`SELECT ${USER_COLUMNS} FROM users WHERE token_hash = ?`).get(tokenHash) as User | undefined) ?? null;
+}
+
+export function getUserByName(name: string): Result<User> {
+  const row = getDb().prepare(`SELECT ${USER_COLUMNS} FROM users WHERE name = ?`).get(name) as User | undefined;
+  return row ? { ok: true, data: row } : { ok: false, error: `User '${name}' not found` };
+}
+
+/** Task by its short `#n` number (spec §5c). */
+export function getTaskByNum(num: number): Result<Task> {
+  const row = getDb().prepare('SELECT * FROM tasks WHERE num = ?').get(num) as Task | undefined;
+  return row ? { ok: true, data: row } : { ok: false, error: `Task #${num} not found` };
 }
 
 export function listUsers(): User[] {
@@ -1731,13 +1860,14 @@ export function insertAgentMessage(msg: {
   ref_prompt_actor?: string | null;
   ref_prompt_event_id?: number | null;
   truncated?: boolean;
+  to_user_id?: string | null;
 }): Result<AgentMessage> {
   const id = generateId();
   try {
     getDb().prepare(`
       INSERT INTO agent_messages (id, from_agent_id, to_agent_id, workspace, message, message_type, ref_task_id, ref_run_id,
-        ref_prompt_actor, ref_prompt_event_id, truncated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ref_prompt_actor, ref_prompt_event_id, truncated, to_user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       msg.from_agent_id ?? null,
@@ -1750,6 +1880,7 @@ export function insertAgentMessage(msg: {
       msg.ref_prompt_actor ?? null,
       msg.ref_prompt_event_id ?? null,
       msg.truncated ? 1 : 0,
+      msg.to_user_id ?? null,
     );
     const row = getDb().prepare('SELECT * FROM agent_messages WHERE id = ?').get(id) as AgentMessage;
     return { ok: true, data: row };
