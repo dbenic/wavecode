@@ -64,7 +64,7 @@ describe('AgentView', () => {
         return { available: false } as never;
       }
 
-      if (path === '/agents/agent-1/output?lines=100&ansi=true') {
+      if (path === '/agents/agent-1/output?lines=250&ansi=true') {
         outputFetchCount += 1;
         return {
           output: outputFetchCount === 1 ? 'Initial output line' : 'Updated output line',
@@ -128,7 +128,7 @@ describe('AgentView', () => {
         return { available: false } as never;
       }
 
-      if (path === '/agents/agent-1/output?lines=100&ansi=true') {
+      if (path === '/agents/agent-1/output?lines=250&ansi=true') {
         return {
           output: 'Initial output line',
           html: '',
