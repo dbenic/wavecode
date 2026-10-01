@@ -54,7 +54,7 @@ export default function AgentView() {
     outputRequestInFlightRef.current = true;
 
     try {
-      const data = await apiGet<{ output: string; html?: string }>(`/agents/${id}/output?lines=100&ansi=true`);
+      const data = await apiGet<{ output: string; html?: string }>(`/agents/${id}/output?lines=250&ansi=true`);
       setOutput(data.output);
       setOutputHtml(data.html ?? '');
       outputVersionRef.current = Math.max(outputVersionRef.current, pendingOutputVersionRef.current);
@@ -504,7 +504,7 @@ export default function AgentView() {
           <div
             ref={outputRef as React.RefObject<HTMLDivElement | null>}
             onScroll={handleOutputScroll}
-            className="p-3 lg:p-4 text-[11px] lg:text-[14px] leading-[1.6] text-slate-300 font-mono overflow-x-auto overflow-y-auto max-h-[70vh] lg:max-h-[78vh] min-h-[300px] lg:min-h-[60vh] whitespace-pre-wrap break-words terminal-output"
+            className="p-3 lg:px-4 lg:py-2 text-[11px] lg:text-[12px] leading-[1.6] lg:leading-[1.35] text-slate-300 font-mono overflow-x-auto overflow-y-auto max-h-[70vh] lg:max-h-[82vh] min-h-[300px] lg:min-h-[70vh] whitespace-pre-wrap break-words terminal-output"
           >
             {/* Loading more indicator */}
             {loadingMore && (
