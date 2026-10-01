@@ -204,17 +204,82 @@ storage), Tailwind only, existing `useSSE`/`useApi` hooks, keep the current
 views reachable until the Command Center replaces them as the default
 route.
 
-## 5. Build order (one task each; each lands with tests)
+## 5. Credential profiles — one subscription per developer
+
+Problem: every CLI stores its login in the home directory, so all agents
+under one Unix user share one subscription (rate limits hit together, and
+vendors treat one login driving N concurrent agents as abuse). Separate
+Linux users would fix it but cost sudo plumbing and cross-user tmux. The
+CLIs expose relocation knobs instead, so WaveCode gets **profiles**: a named
+credential directory per developer that an agent's runtime process is
+pointed at.
+
+### Config
+
+```yaml
+profiles_root: /home/ci/profiles          # <root>/<profile>/{claude,codex,grok-home}
+profiles:
+  denis: { }                               # dirs are created on first login
+  ana:   { }
+  service: { shared: true }                # referee-style seats; admin-only
+```
+
+Per-runtime env injected at launch (template vars `{profile_dir}`):
+
+| runtime | env |
+|---|---|
+| claude-code | `CLAUDE_CONFIG_DIR={profile_dir}/claude` |
+| codex | `CODEX_HOME={profile_dir}/codex` |
+| grok | `HOME={profile_dir}/grok-home` (no profile flag; HOME override for that process only, PATH preserved) |
+
+Runtime config gains `env: { KEY: "template" }`; `buildRuntimeCommand`
+prefixes `env KEY=value … <command>` using the same strict value alphabet as
+model pins (profile names `^[a-z0-9][a-z0-9_-]{0,31}$`). Applies to spawn,
+restart, upgrade, and file-runner seats.
+
+### Schema / binding
+
+- `users.profile TEXT` (default = user name), `agents.profile TEXT NOT NULL`.
+- `spawn_agent` / `POST /api/agents/spawn` use the caller's profile unless
+  admin passes `profile` explicitly; the agent record keeps it for restarts.
+- **Free means profile-compatible**: a free agent on profile P is
+  dispatchable only for tasks created by users whose profile is P (or by
+  admin targeting a `shared` profile). Otherwise it is listed as
+  *free (other subscription)* and skipped — nobody's task may burn
+  someone else's quota. §2 rule 6 gains this predicate.
+
+### Login without SSH
+
+`POST /api/profiles/:name/login {runtime}` (owner of the profile or admin)
+opens a throwaway tmux seat `wc-login-<profile>-<runtime>` with the
+profile env running the runtime's login command (`claude /login`,
+`codex login`, `grok`). It is registered as a normal adopted agent so the
+developer opens it in AgentView, reads the device-code URL, and finishes
+OAuth on their phone; the seat is killed on exit or after 15 minutes.
+`GET /api/profiles` reports, per profile and runtime, whether a credential
+file exists (never its contents).
+
+### Not security, by design
+
+Profiles separate *subscriptions*, not *access*: any process under the
+service user can read any profile directory. That is acceptable for a
+trusted team and is exactly the gap per-Linux-user isolation (spec F2)
+closes later — when it does, a profile maps to a Unix user and the env
+prefix becomes `sudo -u`, with nothing else changing.
+
+## 6. Build order (one task each; each lands with tests)
 
 | # | Task | Depends on |
 |---|---|---|
+| T0 | **Runtime liveness** (bug found in dogfooding): the dispatcher must not send-keys into a session whose runtime TUI has exited (a bare shell executes prompt lines as commands). Detect a shell prompt on the pane before dispatch and in the health-monitor tick; relaunch the runtime command first, with a `agent.runtime_relaunched` event; fail the dispatch with `task.failed {error:'runtime not running'}` if relaunch does not settle within 30s. Tests with simulated pane output. | — |
 | T1 | §1 identity: `users` table + migration v10, token hashing, auth middleware resolves user, `/api/me`, `/api/users`, CLI `user add`, `actor_id` on events | — |
 | T2 | §2 leases: columns, reserve/release routes, rule 2 guards on send/kill/handoff/assign, auto-lease + release in dispatcher, expiry in health monitor, events | T1 |
-| T3 | §3 MCP: user-aware tool results, `reserve_agent`/`release_agent`/`whoami`, admin-only guards | T2 |
+| T6 | §5 credential profiles: config + env injection in `buildRuntimeCommand` (all launch paths), `users.profile`/`agents.profile`, profile-compatible "free" in the dispatcher, `/api/profiles` + login seats, CLI `wavecode profile login <name> <runtime>` | T2 |
+| T3 | §3 MCP: user-aware tool results, `reserve_agent`/`release_agent`/`whoami`, admin-only guards; `spawn_agent` honors profiles | T6 |
 | T4 | §4.1 `GET /api/thread`: merged, typed, cursor-paged feed with per-user `actions`; `needs_attention` rules; reply injection into tmux | T2 |
-| T5 | §4.2–4.3 Command Center UI: roster, thread, composer, board, presence, attention filter, mobile tabs, users settings page | T4 |
+| T5 | §4.2–4.3 Command Center UI: roster, thread, composer, board, presence, attention filter, mobile tabs, users + profiles settings pages (login button per runtime) | T4, T6 |
 
-## 6. Acceptance
+## 7. Acceptance
 
 - Two tokens, two users: user B gets 403 sending a prompt to an agent
   dispatched for user A's task; B can still read its output.
