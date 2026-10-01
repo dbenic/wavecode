@@ -1,7 +1,8 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 
 const NAV_ITEMS = [
-  { path: '/', label: 'Chat', icon: '▶' },
+  { path: '/', label: 'Center', icon: '◎' },
+  { path: '/chat', label: 'Chat', icon: '▶' },
   { path: '/dashboard', label: 'Agents', icon: '◉' },
   { path: '/tasks', label: 'Tasks', icon: '☰' },
   { path: '/review', label: 'Review', icon: '✓' },
@@ -27,7 +28,6 @@ export default function DesktopNav() {
         </span>
         {NAV_ITEMS.map((item) => {
           const active = location.pathname === item.path
-            || (item.path === '/' && location.pathname === '/chat')
             || (item.path === '/dashboard' && location.pathname.startsWith('/agent/'));
           return (
             <button

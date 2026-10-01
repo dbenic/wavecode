@@ -9,6 +9,8 @@ import Settings from './views/Settings';
 import Docs from './views/Docs';
 import Library from './views/Library';
 import Specs from './views/Specs';
+import CommandCenter from './views/CommandCenter';
+import Users from './views/Users';
 import BottomNav from './components/BottomNav';
 import DesktopNav from './components/DesktopNav';
 import ErrorBanner from './components/ErrorBanner';
@@ -45,7 +47,8 @@ export default function App() {
         <>
           <DesktopNav />
           <Routes>
-            <Route path="/" element={<CommandChat />} />
+            {/* Command Center is the default; the classic views stay reachable */}
+            <Route path="/" element={<CommandCenter />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/agent/:id" element={<AgentView />} />
             <Route path="/tasks" element={<TaskBoard />} />
@@ -59,6 +62,7 @@ export default function App() {
             <Route path="/library/guides/:guideId" element={<Library />} />
             <Route path="/specs" element={<Specs />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/settings/users" element={<Users />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           <BottomNav />
