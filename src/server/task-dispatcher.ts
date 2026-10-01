@@ -37,6 +37,7 @@ import {
   shouldAutoRetryFailedRun,
 } from './run-result.js';
 import * as leases from './leases.js';
+import { ensureRuntimeAlive } from './runtime-liveness.js';
 import logger from './logger.js';
 
 let dispatchInProgress = false;
@@ -468,6 +469,23 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       updateTaskStatus(task.id, 'pending');
     }
     return;
+  }
+
+  // T0: never send-keys into a pane whose runtime TUI has exited — bash
+  // would execute the prompt. Relaunch first; fail the dispatch if it
+  // does not come back.
+  if (!isFileRunnerSeat(agent)) {
+    const live = await ensureRuntimeAlive(agent);
+    if (!live.ok) {
+      const current = getTask(task.id);
+      if (current.ok && current.data.status === 'running') {
+        updateTaskStatus(task.id, 'failed');
+      }
+      updateAgentStatus(agent.id, 'error');
+      emit('task.failed', 'task', task.id, { agent_id: agent.id, error: live.error });
+      logger.warn({ agentId: agent.id, taskId: task.id }, 'Dispatch failed — runtime not running');
+      return;
+    }
   }
 
   if (isFileRunnerSeat(agent)) {

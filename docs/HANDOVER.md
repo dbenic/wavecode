@@ -40,6 +40,7 @@ Read in this order:
 | Agent wire (messages) | `routes/messages.ts`, CLI `wavecode msg` |
 | MCP control plane | `../mcp/tools.ts` (stdio `wavecode mcp` + HTTP `/mcp`) |
 | Health / crash / hang | `health-monitor.ts` |
+| Runtime liveness (TUI exited → bare shell): relaunch before dispatch + on tick | `runtime-liveness.ts` |
 | NL command chat (reactive LLM PM) | `command-chat.ts`, `llm-provider.ts` |
 
 ## Recently landed (see git log for detail)

@@ -38,6 +38,9 @@ vi.mock('./output-watcher.js', () => ({
 
 vi.mock('./tmux.js', () => ({
   hasSession: vi.fn(() => true),
+  // A live runtime TUI, so the T0 liveness gate lets dispatch through
+  capturePane: vi.fn(() => ({ ok: true, data: '╭──────╮\n│ > │\n╰──────╯\n  ? for shortcuts' })),
+  sendTextAndEnter: vi.fn(),
 }));
 
 vi.mock('./logger.js', () => ({

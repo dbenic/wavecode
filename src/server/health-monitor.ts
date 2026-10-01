@@ -8,6 +8,7 @@ import * as tmux from './tmux.js';
 import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
 import { isFileRunnerSeat } from './file-runner.js';
 import { sweepLeases } from './leases.js';
+import { getRuntimeState, relaunchRuntime } from './runtime-liveness.js';
 import logger from './logger.js';
 
 interface AgentHealthState {
@@ -85,6 +86,14 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
       }
     }
     return;
+  }
+
+  // T0: session alive but the runtime TUI exited (bare shell prompt) →
+  // relaunch it in place. Dispatch waits for it to settle; the tick does not.
+  try {
+    if (getRuntimeState(agent) === 'dead') relaunchRuntime(agent, 'health_check');
+  } catch (e) {
+    logger.error({ agentId: agent.id, error: (e as Error).message }, 'Runtime liveness check failed');
   }
 
   // Check for hang (no output change for hang_timeout_min)

@@ -53,6 +53,10 @@ vi.mock('./file-runner.js', () => ({
   stopFileRun: vi.fn(),
 }));
 
+vi.mock('./runtime-liveness.js', () => ({
+  ensureRuntimeAlive: vi.fn(async () => ({ ok: true, data: { relaunched: false } })),
+}));
+
 vi.mock('./session-manager.js', () => ({
   sendKeys: vi.fn(),
 }));
@@ -161,6 +165,51 @@ describe('task-dispatcher.ts', () => {
       'task-1',
       'Implement auth hardening',
     );
+  });
+
+  it('fails the dispatch with runtime not running when the TUI cannot be brought back (T0)', async () => {
+    await setupBaseMocks(false);
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+    const runner = await import('./runner.js');
+    const liveness = await import('./runtime-liveness.js');
+    vi.mocked(liveness.ensureRuntimeAlive).mockResolvedValueOnce({ ok: false, error: 'runtime not running' });
+    vi.mocked(db.getTask).mockReturnValue({ ok: true, data: { id: 'task-1', status: 'running' } } as never);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.resetDispatcherForTest();
+    await dispatcher.dispatchNext({ manual: true });
+    await vi.runAllTimersAsync();
+
+    expect(vi.mocked(runner.executeRun)).not.toHaveBeenCalled();
+    expect(vi.mocked(db.updateTaskStatus)).toHaveBeenCalledWith('task-1', 'failed');
+    expect(vi.mocked(db.updateAgentStatus)).toHaveBeenCalledWith('agent-1', 'error');
+    expect(vi.mocked(events.emit)).toHaveBeenCalledWith('task.failed', 'task', 'task-1', {
+      agent_id: 'agent-1',
+      error: 'runtime not running',
+    });
+  });
+
+  it('checks runtime liveness before sending the prompt (T0)', async () => {
+    await setupBaseMocks(false);
+    const runner = await import('./runner.js');
+    const liveness = await import('./runtime-liveness.js');
+    const order: string[] = [];
+    vi.mocked(liveness.ensureRuntimeAlive).mockImplementationOnce(async () => {
+      order.push('liveness');
+      return { ok: true, data: { relaunched: true } };
+    });
+    vi.mocked(runner.executeRun).mockImplementationOnce(async () => {
+      order.push('executeRun');
+      return { ok: true, data: { id: 'run-1' } } as never;
+    });
+
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.resetDispatcherForTest();
+    await dispatcher.dispatchNext({ manual: true });
+    await vi.runAllTimersAsync();
+
+    expect(order).toEqual(['liveness', 'executeRun']);
   });
 
   it('dispatches file-runner seats through executeFileRun, not send-keys', async () => {
