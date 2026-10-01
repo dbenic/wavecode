@@ -80,6 +80,24 @@ Read in this order:
 5. **The wire** — `wavecode msg <to|all> "<text>" --type result --task <id>`
    for agents to report back; mirrors to `/api/messages` + `message.created`
    events.
+6. **Multi-orchestrator** (docs/multi-orchestrator-spec.md, built by the
+   builder agent as a T0–T6 DAG and cross-reviewed before merge):
+   - *Identity*: `users` (sha256-hashed bearer tokens, roles
+     admin/developer/observer), `wavecode user add`, `/api/me`, `actor_id`
+     on every event. `auth.fallback_token` = synthetic admin `owner`.
+   - *Leases*: `agents.owner_id/lease_reason/lease_expires_at`; owner-or-admin
+     guards on send/kill/detach/handoff/send-fixes; auto-lease on dispatch;
+     expiry sweep never yanks a working agent; stop-all and override-promote
+     admin-only. Command chat is **admin-only** until its tools enforce this.
+   - *Profiles*: `profiles_root` + `profiles:` in config; per-runtime env
+     (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `HOME` for grok) injected via a
+     strictly validated `env` prefix; "free" agents are profile-compatible
+     only; `wavecode profile login <name> <runtime>` or dashboard login seats.
+   - *Thread + Command Center*: `GET /api/thread` (typed, cursor-paged,
+     per-viewer `actions`, long-poll) and the 3-pane UI as default route.
+   - *Runtime liveness (T0)*: dispatch and manual send refuse a bare-shell
+     pane; the monitor relaunches **spawned** sessions only, capped at
+     `MAX_RELAUNCH_ATTEMPTS`, then marks the agent `error`.
 
 ## Working on this codebase
 
@@ -119,9 +137,17 @@ Test-suite gotchas that will bite you:
 
 ## Known gaps — the next work, in priority order
 
-1. **Token roles** — one bearer token holds all authority. Split into
-   orchestrator / observer / human-only (override-promote, stop-all stays
-   human+orchestrator). Prereq for letting a cloud bot hold a seat safely.
+1. **Ownership-aware command chat** — `command-chat.ts` tools (`send_prompt`,
+   `send_instruction`, `handoff_file`, `spawn_agent`) bypass leases and
+   profiles, so `/api/chat/send` is admin-gated. Pass the acting user into
+   `commandChat.chat()` and guard each agent-targeting tool, then lift the
+   gate.
+1b. **Daemon restart must re-queue in-flight runs** — today the startup
+   reconcile fails orphaned running tasks (two dogfood tasks needed manual
+   retries after deploys). Re-queue when the agent session is still alive.
+1c. **Headless reviewer seats** — the Codex TUI does not accept a pasted
+   multi-line review prompt via tmux; reviews via Codex need `codex exec
+   -s read-only` (file-runner style). Claude TUI reviewers work.
 2. **Escalation timers (spec F6)** — agent silent N hours on an active task
    → notify orchestrator; orchestrator silent M hours → notify human.
    `health-monitor.ts` only covers crash/hang of `working` agents today.
