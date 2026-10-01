@@ -570,12 +570,12 @@ export function extractReviewFromPane(output: string): string | null {
     }
   }
 
-  const text = (start >= 0 ? lines.slice(start) : lines.slice(-40)).join('\n').trim();
+  const text = (start >= 0 ? lines.slice(start) : lines.slice(-120)).join('\n').trim();
   // If the only "summary" we found is the echoed template, the answer is
   // further down without a summary line — hand back the genuine tail.
   return GENUINE_VERDICT_LINE.test(text) || /REVIEW PASS:/i.test(text)
     ? text
-    : lines.slice(-40).join('\n').trim();
+    : lines.slice(-120).join('\n').trim();
 }
 
 function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
@@ -594,7 +594,7 @@ function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
       return;
     }
 
-    const captureResult = sessionManager.capturePane(tmuxSession, 80);
+    const captureResult = sessionManager.capturePane(tmuxSession, 300);
     if (!captureResult.ok) return;
 
     const review = extractReviewFromPane(captureResult.data);
