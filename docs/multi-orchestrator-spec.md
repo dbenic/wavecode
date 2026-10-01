@@ -103,21 +103,106 @@ ALTER TABLE agents ADD COLUMN lease_reason TEXT;       -- 'reserved' | 'task' | 
 - `stop_all` and `promote_run` with `override_reason` are refused for
   non-admin tokens with a clear error.
 
-## 4. UI
+## 4. UI — the Command Center
 
-- **Presence strip** (Dashboard header): one chip per user with their color,
-  online dot (an SSE connection authenticated as them within 60s), and
-  count of agents they own.
-- **Agent card**: owner badge in the owner's color; `RESERVE` on free
-  agents, `RELEASE` on your own, lock icon with owner name on others'.
-  Cards of others' agents remain clickable (read-only terminal; send box
-  disabled with "reserved by Ana").
-- **Filter bar**: *Mine · Free · Team* (persisted in React state only).
-- **Task board**: swimlanes by owner; "delegate" picker lists only agents
-  the current user may dispatch to (free or own).
-- **Review queue**: shows owner; a developer sees promote enabled only on
-  their own lane's runs; admin sees all.
+Design principle: **the message is the one primitive.** Everything an agent
+produces that a person must see is normalized into one typed feed, and one
+composer sends to anyone. No separate chat / terminal / task / review
+screens to hop between — those become *filters* on the same feed.
+
+### 4.1 Interpretation layer (server): `GET /api/thread`
+
+A new read endpoint merges the existing tables into one ordered feed so the
+UI never stitches five endpoints:
+
+```
+GET /api/thread?agent=<id|all>&owner=<id>&kinds=...&since=<cursor>&wait_ms=
+→ { items: ThreadItem[], cursor }
+```
+
+`ThreadItem { id, at, kind, agent_id, actor_id, title, body, refs:{task_id?, run_id?, review_id?, artifact_id?}, needs_attention: bool, actions: Action[] }`
+
+Kinds and their deterministic sources (no LLM involved):
+
+| kind | source | needs_attention | actions |
+|---|---|---|---|
+| `prompt` | agent.prompt_sent (what a person sent) | no | — |
+| `report` | `wavecode msg` / POST /api/messages type `result`/`info` | no | reply |
+| `request` | messages type `request`, or agent output matching a question prompt (`?` + idle) | **yes** | reply, send file |
+| `run` | run.started/phase/finished/failed + per-run RESULT line | failed/incomplete | retry, hand off, open log |
+| `verdict` | review.ai_completed (verdict, issues, fix_round) | not pass | promote, override-promote (reason), send fixes, reject |
+| `task` | task.created/dispatched/completed/blocked/waiting_for_agent | blocked/waiting | reassign, release agent |
+| `alert` | agent.crashed/hung/lease_expired, system.stop_all | **yes** | restart, kill |
+| `artifact` | artifact.created/shared | no | open, forward |
+
+`actions` are the exact REST calls the UI may offer for that item (method,
+path, body template) — the server decides what the current user is allowed
+to do (owner/admin rules of §2), so the UI has zero permission logic.
+
+Optional later: a cheap summarizer (Haiku/local) that adds a one-line
+`summary` to long `report`/`run` bodies and sets `needs_attention` on
+ambiguous output. Deterministic rules above ship first and remain the
+source of truth.
+
+### 4.2 Composer (one form, every destination)
+
+```
+[@target ▾] [mode: Prompt | Task | Reply | File] [model/effort ▾ when Task] [ text … ]  ⏎
+```
+
+- **Target**: an agent, `all`, a person, or a task thread. Resolved from the
+  roster; shows the owner lock if you may not send (§2 rule 2).
+- **Prompt** → `POST /api/agents/:id/send` (goes into the tmux session).
+- **Task** → `POST /api/tasks` with `agent_id` (or unassigned = first free
+  agent), optional `depends_on` picked from the board, model/effort pin if
+  the agent has none.
+- **Reply** → `POST /api/messages` with `to`, `ref_task_id` of the item
+  being replied to — the message lands in the agent's thread *and* is
+  injected into its tmux as `[from <user>] …` so adopted/CLI agents see it.
+- **File** → artifact upload + share to the target (`handoff_file`).
+- Slash commands in the text box map to the same actions: `/reserve 4h`,
+  `/release`, `/kill`, `/review`, `/promote`, `/retry`.
+- Enter sends; the composed item appears in the feed immediately as kind
+  `prompt`/`task`/… with the actor's color.
+
+### 4.3 Layout (desktop 3-pane; mobile = tabs over the same state)
+
+```
+┌ Presence: ● denis(3) ● ana(1) ○ marko ─────────────────────── [Stop all] ┐
+│ ROSTER            │ THREAD  (agent: grok-fe ▾ | all)   [Attention ●4]  │ BOARD      │
+│ Mine              │ 10:41 verdict  NEEDS FIXES (2 HIGH) [promote][fixes]│ swimlanes  │
+│  ● grok-fe  work  │ 10:40 run      finished exit 0 · RESULT: PASS       │ by owner   │
+│  ● claude-be idle │ 10:33 report   "auth middleware done, 14 tests"      │ ┌denis──┐  │
+│ Free              │ 10:20 request  "which DB file for tokens?" [reply]   │ │T1 ✓   │  │
+│  ○ codex-rev idle │ 10:02 prompt   you: "start T1 from the spec"         │ │T2 ▶   │  │
+│ Team              │ ▸ terminal tail (folded, live)                       │ └───────┘  │
+│  🔒 opus-fe (ana) │                                                      │ reviews: 2 │
+│                   ├──────────────────────────────────────────────────────┤            │
+│ [+ spawn]         │ [@grok-fe ▾][Prompt ▾][ type a message…         ] ⏎  │            │
+└───────────────────┴──────────────────────────────────────────────────────┴────────────┘
+```
+
+- **Roster** (left): agents grouped *Mine · Free · Team*, owner color dot,
+  status, current task title, lease countdown; `RESERVE`/`RELEASE` inline;
+  click focuses the thread. Others' agents are readable, never writable.
+- **Thread** (center): the merged feed for the focused agent or `all`,
+  newest at the bottom, SSE-live via `/api/thread` cursor. Each item is a
+  card with its `actions` as buttons. The **Attention** toggle filters to
+  `needs_attention` items across all agents — this is the inbox.
+  The terminal tail is a folded card at the bottom of the thread, not a
+  separate screen.
+- **Board** (right): task swimlanes by owner with dependency arrows,
+  review-queue count, goal rollups. Drag a task onto a roster agent =
+  assign (server validates ownership).
+- **Mobile**: three tabs (Roster · Thread · Board) over the same state;
+  the composer is sticky at the bottom of Thread. Attention count is a
+  badge on the tab bar.
 - **Settings → Users** (admin): list, add (shows the token once), revoke.
+
+Implementation constraints: React state + SSE only (no polling, no browser
+storage), Tailwind only, existing `useSSE`/`useApi` hooks, keep the current
+views reachable until the Command Center replaces them as the default
+route.
 
 ## 5. Build order (one task each; each lands with tests)
 
@@ -126,7 +211,8 @@ ALTER TABLE agents ADD COLUMN lease_reason TEXT;       -- 'reserved' | 'task' | 
 | T1 | §1 identity: `users` table + migration v10, token hashing, auth middleware resolves user, `/api/me`, `/api/users`, CLI `user add`, `actor_id` on events | — |
 | T2 | §2 leases: columns, reserve/release routes, rule 2 guards on send/kill/handoff/assign, auto-lease + release in dispatcher, expiry in health monitor, events | T1 |
 | T3 | §3 MCP: user-aware tool results, `reserve_agent`/`release_agent`/`whoami`, admin-only guards | T2 |
-| T4 | §4 UI: presence strip, owner badges, reserve/release, filter bar, swimlanes, users settings page | T2 |
+| T4 | §4.1 `GET /api/thread`: merged, typed, cursor-paged feed with per-user `actions`; `needs_attention` rules; reply injection into tmux | T2 |
+| T5 | §4.2–4.3 Command Center UI: roster, thread, composer, board, presence, attention filter, mobile tabs, users settings page | T4 |
 
 ## 6. Acceptance
 
