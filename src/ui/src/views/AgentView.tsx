@@ -428,7 +428,7 @@ export default function AgentView() {
     >
       {/* Header */}
       <header className="sticky top-0 z-40 border-b border-slate-800/60 bg-slate-950/90 backdrop-blur-xl">
-        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+        <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => navigate('/')}
@@ -467,7 +467,7 @@ export default function AgentView() {
 
       {/* Agent info bar */}
       <div className="border-b border-slate-800/30 bg-slate-900/30">
-        <div className="max-w-3xl mx-auto px-4 py-2 flex items-center gap-4 text-[10px] text-slate-600 tracking-wider">
+        <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-2 flex items-center gap-4 text-[10px] text-slate-600 tracking-wider">
           <span>
             MODE:{' '}
             <span className="text-slate-400 uppercase">{agent.mode}</span>
@@ -490,7 +490,7 @@ export default function AgentView() {
       </div>
 
       {/* Output */}
-      <main className="flex-1 max-w-3xl mx-auto w-full px-4 py-4">
+      <main className="flex-1 max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto w-full px-4 py-4">
         <div className="rounded-lg border border-slate-800/50 bg-black/40 overflow-hidden">
           <div className="px-3 py-1.5 border-b border-slate-800/30 flex items-center justify-between">
             <span className="text-[9px] text-slate-600 tracking-[0.2em] uppercase">
@@ -504,7 +504,7 @@ export default function AgentView() {
           <div
             ref={outputRef as React.RefObject<HTMLDivElement | null>}
             onScroll={handleOutputScroll}
-            className="p-3 text-[11px] leading-[1.6] text-slate-400 font-mono overflow-x-auto overflow-y-auto max-h-[70vh] min-h-[300px] whitespace-pre-wrap break-words terminal-output"
+            className="p-3 lg:p-4 text-[11px] lg:text-[14px] leading-[1.6] text-slate-300 font-mono overflow-x-auto overflow-y-auto max-h-[70vh] lg:max-h-[78vh] min-h-[300px] lg:min-h-[60vh] whitespace-pre-wrap break-words terminal-output"
           >
             {/* Loading more indicator */}
             {loadingMore && (
@@ -546,7 +546,7 @@ export default function AgentView() {
       {/* ═══ ARTIFACTS — files attached to this agent ═══ */}
       {agentArtifacts.length > 0 && (
         <div className="border-t border-violet-500/20 bg-violet-950/10">
-          <div className="max-w-3xl mx-auto px-4 py-2">
+          <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-2">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[9px] text-violet-500/70 font-bold tracking-wider">ARTIFACTS</span>
               <span className="text-[9px] text-slate-600">{agentArtifacts.length}</span>
@@ -615,7 +615,7 @@ export default function AgentView() {
 
         return (
           <div className="border-t border-cyan-500/20 bg-cyan-950/20">
-            <div className="max-w-3xl mx-auto px-4 py-2">
+            <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-2">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[9px] text-cyan-500/70 font-bold tracking-wider">FILES</span>
                 {files.map((file) => {
@@ -680,7 +680,7 @@ export default function AgentView() {
       {/* ═══ REVIEW ACTIONS — inline in agent view ═══ */}
       {agent.status === 'idle' && output.length > 100 && (
         <div className="border-t border-slate-700/50 bg-slate-900/80">
-          <div className="max-w-3xl mx-auto px-4 py-2 flex items-center gap-2">
+          <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-2 flex items-center gap-2">
             <span className="text-[9px] text-slate-500 font-bold tracking-wider mr-1">REVIEW</span>
             <button
               onClick={async () => {
@@ -760,7 +760,7 @@ export default function AgentView() {
 
         return (
           <div className="border-t-2 border-amber-500/40 bg-amber-950/30 px-4 py-2">
-            <div className="max-w-3xl mx-auto">
+            <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto">
               {promptQuestion && (
                 <p className="text-[10px] text-amber-300 font-mono mb-1.5 truncate">{promptQuestion}</p>
               )}
@@ -802,7 +802,7 @@ export default function AgentView() {
 
       {/* ═══ COMMAND CONSOLE ═══ */}
       <div className="sticky bottom-0 border-t-2 border-slate-700/80 bg-slate-900 shadow-[0_-4px_20px_rgba(0,0,0,0.5)]">
-        <div className="max-w-3xl mx-auto px-4 py-2 space-y-1.5">
+        <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-2 space-y-1.5">
 
           {/* Quick commands — single compact row with controls */}
           <div className="flex items-center gap-1 overflow-x-auto">
@@ -886,7 +886,7 @@ export default function AgentView() {
           {/* AI response (when in AI mode) */}
           {aiResponse && (
             <div className="border-t border-violet-500/20 bg-violet-950/10 px-4 py-2 max-h-[200px] overflow-y-auto">
-              <div className="max-w-3xl mx-auto">
+              <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto">
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-[9px] text-violet-400 font-bold tracking-wider">AI RESPONSE</span>
                   <button onClick={() => setAiResponse('')} className="text-[9px] text-slate-600 hover:text-slate-400">&times;</button>
