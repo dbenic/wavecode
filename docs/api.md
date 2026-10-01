@@ -550,6 +550,34 @@ Delete a push subscription.
 Body:
 `{ endpoint: string }`
 
+## Thread (Command Center feed)
+
+### `GET /api/thread`
+Merged, typed, cursor-paged feed built from the event log (spec §4.1). Query: `agent=<id|all>`, `owner=<user id>` (items on agents that user owns, or that the user caused), `kinds=prompt,report,request,run,verdict,task,alert,artifact`, `attention=1`, `since=<cursor>`, `limit` (≤500), `wait_ms` (≤60000, long-poll; only with `since`).
+
+Without `since`: the newest `limit` items. With `since`: items after that cursor. Response `{ items, cursor }`, items oldest → newest; pass `cursor` back as `since`.
+
+`ThreadItem { id, event_id, at, kind, type, agent_id, actor_id, title, body, refs: {task_id?, run_id?, review_id?, artifact_id?, message_id?}, needs_attention, actions }`
+
+| kind | source events | needs_attention | actions (when the viewer may) |
+|---|---|---|---|
+| `prompt` | `agent.prompt_sent` | no | — |
+| `report` | `message.created` type result/info/handoff (human message = "Reply") | no | reply |
+| `request` | `message.created` type request; `agent.status_changed` idle with a last line ending in `?` | yes | reply, send file |
+| `run` | `run.started/finished/failed`, `run.phase` failed/incomplete | failed/incomplete | open log, retry, hand off |
+| `verdict` | `review.ai_completed` | verdict ≠ pass | promote (pass), override promote (admin, non-pass), send fixes, reject |
+| `task` | `task.created/dispatched/completed/blocked/waiting_for_agent/failed` | blocked/waiting | reassign, release agent (lease holder/admin) |
+| `alert` | `agent.crashed/hung/lease_expired/runtime_relaunched`, `system.stop_all`, error messages | yes | restart, kill |
+| `artifact` | `artifact.created/shared` | no | open, forward |
+
+`actions` are `{ id, label, method, path, body? }`, computed server-side from the viewer's role and agent ownership (observers get only read actions). Body values like `{text}`, `{agent_id}`, `{reason}`, `{artifact_id}` (also in `path`) are placeholders for the UI to fill.
+
+### `POST /api/messages` — replies
+`to` (agent id or name) is an alias of `to_agent_id`. A message to an agent **without** `from_agent_id` is a human reply: rule 2 applies (`403` naming the owner), and after it is stored it is typed into the agent's tmux as `[from <user>] <message>`. The response adds `injected: true`, or `injected: false, inject_error` when it could not be typed (file-runner seat, runtime not running, no session). It is never typed into a bare shell.
+
+### `POST /api/agents/:id/restart`
+Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
+
 ## Events
 
 ### `GET /api/events`

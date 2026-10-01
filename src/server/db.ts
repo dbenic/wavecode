@@ -1183,6 +1183,24 @@ export function deleteUser(id: string): boolean {
   return getDb().prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
 }
 
+/** Newest-first page of events strictly before `before_id` (or the newest overall). */
+export function listEventsBefore(beforeId: number | null, limit: number): WaveEvent[] {
+  if (beforeId) {
+    return getDb().prepare('SELECT * FROM events WHERE id < ? ORDER BY id DESC LIMIT ?').all(beforeId, limit) as WaveEvent[];
+  }
+  return getDb().prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?').all(limit) as WaveEvent[];
+}
+
+export function getLatestEventId(): number {
+  const row = getDb().prepare('SELECT MAX(id) AS id FROM events').get() as { id: number | null };
+  return row.id ?? 0;
+}
+
+export function getAgentMessage(id: string): Result<AgentMessage> {
+  const row = getDb().prepare('SELECT * FROM agent_messages WHERE id = ?').get(id) as AgentMessage | undefined;
+  return row ? { ok: true, data: row } : { ok: false, error: `Message ${id} not found` };
+}
+
 // --- Artifact helpers ---
 
 export function insertArtifact(artifact: Omit<Artifact, 'id' | 'created_at'>): Result<Artifact> {

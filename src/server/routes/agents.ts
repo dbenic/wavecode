@@ -14,6 +14,7 @@ import logger from '../logger.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import type { User } from '../db.js';
 import * as leases from '../leases.js';
+import * as runtimeLiveness from '../runtime-liveness.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
@@ -172,6 +173,41 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent killed');
     return c.json({ ok: true });
+  });
+
+  /**
+   * Restart (thread `alert` action): a spawned agent whose session died gets
+   * a fresh session; a live session whose runtime TUI exited gets the
+   * runtime relaunched in place (T0). Adopted agents with a dead session
+   * cannot be restarted — WaveCode never owned their launch command.
+   */
+  app.post('/api/agents/:id/restart', (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const agent = agentResult.data;
+    const access = leases.checkAgentAccess(agent, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
+
+    if (agent.mode === 'spawned') {
+      const ensured = sessionManager.ensureSpawnedAgentSession(agent.id);
+      if (!ensured.ok) return c.json({ error: ensured.error }, 400);
+      if (ensured.data.createdSession) {
+        outputWatcher.startWatching(agent.id);
+        emit('agent.restarted', 'agent', agent.id, { name: agent.name });
+        return c.json({ ok: true, action: 'session_recreated' });
+      }
+    }
+
+    const state = runtimeLiveness.getRuntimeState(agent);
+    if (state === 'dead') {
+      const relaunched = runtimeLiveness.relaunchRuntime(agent, 'manual');
+      if (!relaunched.ok) return c.json({ error: relaunched.error }, 400);
+      return c.json({ ok: true, action: relaunched.data.sent ? 'runtime_relaunched' : 'relaunch_in_progress' });
+    }
+    if (state === 'unknown') {
+      return c.json({ error: `Session '${agent.tmux_session}' is not running and cannot be restarted` }, 400);
+    }
+    return c.json({ ok: true, action: 'already_running' });
   });
 
   app.post('/api/agents/:id/reserve', async (c) => {

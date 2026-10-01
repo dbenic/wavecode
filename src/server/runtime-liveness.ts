@@ -73,7 +73,7 @@ export function resetRuntimeLivenessForTest(): void {
  * into the existing session. Skips if a relaunch was sent within the settle
  * window, so the monitor tick and a dispatch never double-launch.
  */
-export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check'): Result<{ sent: boolean }> {
+export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check' | 'manual'): Result<{ sent: boolean }> {
   const last = relaunchedAt.get(agent.id);
   if (last !== undefined && Date.now() - last < RUNTIME_SETTLE_TIMEOUT_MS) {
     return { ok: true, data: { sent: false } };

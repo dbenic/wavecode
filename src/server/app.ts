@@ -18,6 +18,7 @@ import { registerDecisionRoutes } from './routes/decisions.js';
 import { registerGoalRoutes } from './routes/goals.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerUserRoutes } from './routes/users.js';
+import { registerThreadRoutes } from './routes/thread.js';
 import { registerMcpHttpRoutes } from '../mcp/http.js';
 
 export function createApp(): Hono<NodeAppEnv> {
@@ -59,6 +60,7 @@ export function createApp(): Hono<NodeAppEnv> {
   registerGoalRoutes(app);
   registerMessageRoutes(app);
   registerUserRoutes(app);
+  registerThreadRoutes(app);
   registerMcpHttpRoutes(app);
 
   app.use('/*', serveStatic({ root: './src/ui/dist' }));

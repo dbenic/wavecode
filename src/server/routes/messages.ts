@@ -1,12 +1,24 @@
 import type { Hono } from 'hono';
-import type { NodeAppEnv } from '../auth.js';
+import { getActingUser, type NodeAppEnv } from '../auth.js';
 import {
   getAgent,
+  getAgentByName,
   insertAgentMessage,
   listAgentMessages,
+  type Agent,
   type AgentMessage,
 } from '../db.js';
 import { emit } from '../event-bus.js';
+import { isFileRunnerSeat } from '../file-runner.js';
+import * as leases from '../leases.js';
+import logger from '../logger.js';
+import { getRuntimeState } from '../runtime-liveness.js';
+import * as sessionManager from '../session-manager.js';
+
+/** Text typed into the recipient's pane for a human reply (spec §4.2). */
+export function formatInjectedReply(userName: string, message: string): string {
+  return `[from ${userName}] ${message}`;
+}
 
 export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
   // List messages — optionally filtered by workspace, to/from agent
@@ -32,6 +44,8 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{
       from_agent_id?: string | null;
       to_agent_id?: string | null;
+      /** Recipient agent id or name (alias of to_agent_id, used by the composer's Reply). */
+      to?: string | null;
       workspace?: string | null;
       message: string;
       message_type?: AgentMessage['message_type'];
@@ -43,9 +57,26 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
       return c.json({ error: 'message is required' }, 400);
     }
 
+    let toAgentId = body.to_agent_id ?? null;
+    if (body.to && !toAgentId) {
+      const byId = getAgent(body.to);
+      const resolved = byId.ok ? byId : getAgentByName(body.to);
+      if (!resolved.ok) return c.json({ error: `Unknown agent '${body.to}'` }, 400);
+      toAgentId = resolved.data.id;
+    }
+
+    // A human message to an agent (no from_agent_id) is a reply: it is also
+    // typed into the agent's tmux, so the §2 rule-2 ownership guard applies.
+    const user = getActingUser(c);
+    const recipient = toAgentId && !body.from_agent_id ? getAgent(toAgentId) : null;
+    if (recipient?.ok) {
+      const access = leases.checkAgentAccess(recipient.data, user);
+      if (!access.ok) return c.json({ error: access.error }, 403);
+    }
+
     const result = insertAgentMessage({
       from_agent_id: body.from_agent_id ?? null,
-      to_agent_id: body.to_agent_id ?? null,
+      to_agent_id: toAgentId,
       workspace: body.workspace ?? null,
       message: body.message.trim(),
       message_type: body.message_type,
@@ -62,7 +93,9 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
       message_type: result.data.message_type,
     });
 
-    return c.json(result.data, 201);
+    if (!recipient?.ok) return c.json(result.data, 201);
+    const injection = injectReply(recipient.data, formatInjectedReply(user.name, result.data.message));
+    return c.json({ ...result.data, injected: injection.ok, ...(injection.ok ? {} : { inject_error: injection.error }) }, 201);
   });
 
   // Messages for a specific agent (sent to them or broadcast)
@@ -84,4 +117,21 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
 
     return c.json(messages);
   });
+}
+
+/**
+ * Type a reply into the agent's pane. The message is already persisted, so a
+ * failure is reported to the caller rather than failing the request. Never
+ * types into a bare shell (T0) or a file-runner seat (no pane).
+ */
+function injectReply(agent: Agent, text: string): { ok: true } | { ok: false; error: string } {
+  if (isFileRunnerSeat(agent)) return { ok: false, error: 'File-runner seats have no terminal' };
+  if (getRuntimeState(agent) === 'dead') return { ok: false, error: 'runtime not running' };
+  const sent = sessionManager.sendKeys(agent.id, text);
+  if (!sent.ok) {
+    logger.warn({ agentId: agent.id, error: sent.error }, 'Reply injection failed');
+    return { ok: false, error: sent.error };
+  }
+  // No agent.prompt_sent here: message.created already puts the reply in the thread.
+  return { ok: true };
 }

@@ -37,6 +37,7 @@ Read in this order:
 | Cross-agent review loop (verdicts, fix rounds) | `code-review.ts` |
 | Human review queue (promote/retry/handoff/reject) | `review-queue.ts` |
 | Event log + SSE + long-poll | `event-bus.ts`, `routes/system.ts` (`/api/events/log`) |
+| Command Center feed: typed items, per-viewer actions, reply injection | `thread.ts`, `routes/thread.ts`, `routes/messages.ts` |
 | Agent wire (messages) | `routes/messages.ts`, CLI `wavecode msg` |
 | MCP control plane | `../mcp/tools.ts` (stdio `wavecode mcp` + HTTP `/mcp`) |
 | Health / crash / hang | `health-monitor.ts` |
