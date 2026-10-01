@@ -100,6 +100,23 @@ Read in this order:
    - *Runtime liveness (T0)*: dispatch and manual send refuse a bare-shell
      pane; the monitor relaunches **spawned** sessions only, capped at
      `MAX_RELAUNCH_ATTEMPTS`, then marks the agent `error`.
+7. **Agents answer in the thread (T7, spec §5b)** — `reply-capture.ts` tracks
+   every prompt sent to a pane and, on the next idle, lifts the answer out
+   with per-runtime extractors (`reply-extractors.ts`, fixtures in
+   `__fixtures__/panes/`) into an `agent_messages` row of type `reply`.
+   Replies are only trusted when anchored to the prompt echo (or Claude's
+   `[Pasted text #N]` placeholder); otherwise the 10-minute fallback posts
+   them as `truncated`. A superseded prompt still gets a truncated reply —
+   never silence. The orchestrator seat (`agents.role`,
+   `config.orchestrator_agent`, brief in `docs/orchestrator-seat.md`) is the
+   composer's default target and answers like a PM with `[ ]` option chips.
+8. **Aliases, personas, groups, grammar (T8, spec §5c)** — `agents.alias`
+   (unique, `^[a-z][a-z0-9_-]{1,23}$`), resolution is **id-first for
+   ULID-shaped refs**, then alias → name; spawn/adopt refuse names that
+   collide with an id or alias. `#reserve/#release/#kill/#task/#promote/
+   #file/#status`, `@x @y` fan-out, `@group`, `@person`; `#kill`/`#promote`
+   confirm. `@person` notification mirrors carry no body (channels are
+   per-install, not per-user).
 
 ## Working on this codebase
 
@@ -144,9 +161,19 @@ Test-suite gotchas that will bite you:
    profiles, so `/api/chat/send` is admin-gated. Pass the acting user into
    `commandChat.chat()` and guard each agent-targeting tool, then lift the
    gate.
-1b. **Daemon restart must re-queue in-flight runs** — today the startup
-   reconcile fails orphaned running tasks (two dogfood tasks needed manual
-   retries after deploys). Re-queue when the agent session is still alive.
+1b. **Daemon restart must be safe for in-flight work** — the startup
+   reconcile fails orphaned running tasks AND sends an interrupt into the
+   agent's session ("Interrupted · What should Claude do instead?"), so a
+   deploy mid-task both mis-closes the run and stops the agent. Observed
+   twice while dogfooding. Required: never signal a live session on
+   restart; re-attach to the open run (pane still changing → keep it
+   `running`), and reconcile `result.txt` PASS back to `done` *and* unblock
+   dependents (today only `result` flips, status stays `failed`). Until
+   then: pause `auto_dispatch`, deploy only when agents are idle.
+1d. **False idle-close** — a run was auto-closed FAIL while the agent paused
+   between steps (no `result.txt` yet); the agent later wrote PASS. The
+   idle-close should wait for a RESULT file or a long quiet period, not the
+   first idle tick.
 1c. **Headless reviewer seats** — the Codex TUI does not accept a pasted
    multi-line review prompt via tmux; reviews via Codex need `codex exec
    -s read-only` (file-runner style). Claude TUI reviewers work.
