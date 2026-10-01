@@ -3,6 +3,7 @@ import {
   insertAgent,
   getAgent,
   getAgentByName,
+  resolveAgent,
   listAgents,
   deleteAgent,
   updateAgentStatus,
@@ -308,10 +309,9 @@ export function list(): Agent[] {
   return listAgents();
 }
 
-export function get(idOrName: string): Result<Agent> {
-  const byId = getAgent(idOrName);
-  if (byId.ok) return byId;
-  return getAgentByName(idOrName);
+/** alias → name → id (spec §5c) — every route resolves agents through here. */
+export function get(ref: string): Result<Agent> {
+  return resolveAgent(ref);
 }
 
 export function kill(agentId: string): Result<void> {

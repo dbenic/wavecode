@@ -1,6 +1,6 @@
 import type { Hono } from 'hono';
 import fs from 'node:fs';
-import { getAgent, getRun, getRunArtifacts } from '../db.js';
+import { getAgent, getRun, getRunArtifacts, resolveAgent } from '../db.js';
 import * as reviewQueue from '../review-queue.js';
 import * as codeReview from '../code-review.js';
 import { presentRunResult } from '../run-result.js';
@@ -87,12 +87,12 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   app.post('/api/reviews/:runId/handoff', async (c) => {
     const body = await c.req.json<{ targetAgentId: string }>();
-    const target = getAgent(body.targetAgentId);
+    const target = resolveAgent(String(body.targetAgentId ?? ''));
     if (target.ok) {
       const access = leases.checkAgentAccess(target.data, getActingUser(c));
       if (!access.ok) return c.json({ error: access.error }, 403);
     }
-    const result = reviewQueue.handOff(c.req.param('runId'), body.targetAgentId);
+    const result = reviewQueue.handOff(c.req.param('runId'), target.ok ? target.data.id : body.targetAgentId);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
   });

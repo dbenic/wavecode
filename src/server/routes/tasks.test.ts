@@ -1,10 +1,21 @@
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../db.js', () => ({
+vi.mock('../db.js', () => {
+  const getAgent = vi.fn();
+  const getAgentByName = vi.fn();
+  return {
   getDb: vi.fn(),
-  getAgent: vi.fn(),
-  getAgentByName: vi.fn(),
+  getAgent,
+  getAgentByName,
+  // Spec §5c resolution order (aliases are not mocked here): name → id
+  resolveAgent: vi.fn((ref: string) => {
+    const byName = getAgentByName(ref);
+    if (byName?.ok) return byName;
+    const byId = getAgent(ref);
+    return byId?.ok ? byId : { ok: false, error: `Agent '${ref}' not found` };
+  }),
+  getTaskByNum: vi.fn(() => ({ ok: false, error: 'not found' })),
   getTask: vi.fn(),
   getRun: vi.fn(),
   getRunArtifacts: vi.fn(() => []),
@@ -13,7 +24,8 @@ vi.mock('../db.js', () => ({
   listRuns: vi.fn(() => []),
   listTasks: vi.fn(() => []),
   updateTaskStatus: vi.fn(),
-}));
+};
+});
 
 vi.mock('../config.js', () => ({
   getConfig: vi.fn(() => ({
@@ -98,8 +110,9 @@ describe('task routes', () => {
     });
 
     expect(response.status).toBe(201);
-    expect(db.getAgent).toHaveBeenCalledWith('wavepulse-codex-sol');
+    // alias → name → id (spec §5c): the name matches, the id lookup is never needed
     expect(db.getAgentByName).toHaveBeenCalledWith('wavepulse-codex-sol');
+    expect(db.getAgent).not.toHaveBeenCalledWith('wavepulse-codex-sol');
     expect(db.insertTask).toHaveBeenCalledWith({
       prompt: 'PLAN the gate',
       agent_id: existing.id,
@@ -160,7 +173,8 @@ describe('task routes', () => {
     });
 
     expect(response.status).toBe(201);
-    expect(db.getAgentByName).not.toHaveBeenCalled();
+    // alias → name → id: the ULID resolves on the id step
+    expect(db.getAgent).toHaveBeenCalledWith(existing.id);
     expect(db.insertTask).toHaveBeenCalledWith({
       prompt: 'Implement',
       agent_id: existing.id,

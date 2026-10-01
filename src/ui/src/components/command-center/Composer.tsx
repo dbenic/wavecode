@@ -1,13 +1,16 @@
-import { useState, type FormEvent, type KeyboardEvent } from 'react';
-import type { Agent, EffortLevel } from '../../types';
-import { parseMention, parseSlashCommand, type ComposerMode, type SlashCommand } from '../../utils/command-center';
+import { useMemo, useState, type FormEvent, type KeyboardEvent } from 'react';
+import type { Agent, EffortLevel, Task, User } from '../../types';
+import { agentColor, currentTaskTitle, parseMention, parseSlashCommand, type ComposerMode, type SlashCommand } from '../../utils/command-center';
+import { handleOf, parseComposer, suggestionsFor, tokenAt, type Plan, type Suggestion } from '../../utils/composer-grammar';
 
 export type ComposerSend =
   | { kind: 'prompt'; agentId: string; text: string }
   | { kind: 'task'; agentId: string | null; prompt: string; model?: string; effort?: EffortLevel }
   | { kind: 'reply'; agentId: string; text: string; refTaskId?: string }
   | { kind: 'file'; agentId: string; file: File }
-  | { kind: 'slash'; agentId: string; command: SlashCommand };
+  | { kind: 'slash'; agentId: string; command: SlashCommand }
+  /** Ask mode with the §5c grammar: fan-out, #commands, @all, @person */
+  | { kind: 'plan'; plan: Plan };
 
 interface ComposerProps {
   agents: Agent[];
@@ -18,6 +21,10 @@ interface ComposerProps {
   onModeChange: (mode: ComposerMode) => void;
   replyTaskId: string | null;
   disabled?: boolean;
+  /** For `@person` and autocomplete (spec §5c). */
+  users?: User[];
+  /** For `#n` task references and autocomplete. */
+  tasks?: Task[];
   /** Resolves true on success, or an error message to show under the box. */
   onSend: (send: ComposerSend) => Promise<true | string>;
 }
@@ -39,6 +46,30 @@ export default function Composer(props: ComposerProps) {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [cursor, setCursor] = useState(0);
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [dismissedAt, setDismissedAt] = useState<string | null>(null);
+
+  const users = useMemo(() => props.users ?? [], [props.users]);
+  const tasks = useMemo(() => props.tasks ?? [], [props.tasks]);
+  const token = props.mode !== 'file' ? tokenAt(text, cursor) : null;
+  const suggestions: Suggestion[] = token && dismissedAt !== text
+    ? suggestionsFor(token.token, {
+      agents: props.agents,
+      users,
+      tasks,
+      colorFor: (a) => agentColor(a.name),
+      currentTask: (a) => currentTaskTitle(a, tasks),
+    })
+    : [];
+
+  function accept(s: Suggestion) {
+    if (!token) return;
+    const next = `${text.slice(0, token.start)}${s.insert} ${text.slice(cursor)}`;
+    setText(next);
+    setCursor(token.start + s.insert.length + 1);
+    setActiveSuggestion(0);
+  }
 
   const currentAgent = props.agents.find((a) => a.id === props.target) ?? null;
   const agent = currentAgent;
@@ -49,6 +80,24 @@ export default function Composer(props: ComposerProps) {
   function build(): ComposerSend | string {
     let trimmed = text.trim();
     let agent = currentAgent;
+
+    // Ask mode speaks the §5c grammar (slash commands keep working)
+    if (props.mode === 'prompt' && !trimmed.startsWith('/')) {
+      const seat = props.agents.find((a) => a.orchestrator) ?? null;
+      const plan = parseComposer(trimmed, { agents: props.agents, users, tasks, seat, chip: currentAgent });
+      if (plan.kind === 'none') return plan.reason;
+      if (plan.kind === 'prompt') {
+        const locked = plan.agents.filter((a) => a.can_act === false);
+        if (locked.length > 0) return locked.map((a) => `${handleOf(a)} is owned by ${a.owner ?? 'someone else'}`).join('; ');
+        // `@x …` moves the chip to x
+        if (trimmed.startsWith('@') && plan.agents.length === 1 && plan.agents[0].id !== props.target) {
+          props.onTargetChange(plan.agents[0].id);
+        }
+        if (plan.agents.length === 1) return { kind: 'prompt', agentId: plan.agents[0].id, text: plan.text };
+      }
+      return { kind: 'plan', plan };
+    }
+
     // `@name …` sends to that agent and moves the chip there
     const mention = parseMention(trimmed, props.agents);
     if (mention) {
@@ -106,6 +155,24 @@ export default function Composer(props: ComposerProps) {
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (suggestions.length > 0) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        setActiveSuggestion((i) => (i + step + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault();
+        accept(suggestions[Math.min(activeSuggestion, suggestions.length - 1)]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setDismissedAt(text);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void submit();
@@ -125,7 +192,7 @@ export default function Composer(props: ComposerProps) {
           <option value="">@all</option>
           {props.agents.map((a) => (
             <option key={a.id} value={a.id}>
-              @{a.name}{a.orchestrator ? ' · seat' : ''}{a.can_act === false ? ` 🔒 ${a.owner ?? ''}` : ''}
+              @{handleOf(a)}{a.orchestrator ? ' · seat' : ''}{a.can_act === false ? ` 🔒 ${a.owner ?? ''}` : ''}
             </option>
           ))}
         </select>
@@ -170,6 +237,26 @@ export default function Composer(props: ComposerProps) {
       {locked && (
         <p role="note" className="text-[11px] text-amber-400">🔒 {agent!.name} is owned by {agent!.owner ?? 'someone else'} — read-only for you.</p>
       )}
+      {suggestions.length > 0 && (
+        <ul id="composer-suggestions" role="listbox" aria-label="Suggestions" className="max-h-48 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 py-1">
+          {suggestions.map((sugg, i) => (
+            <li
+              key={sugg.insert}
+              role="option"
+              aria-selected={i === activeSuggestion}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                accept(sugg);
+              }}
+              className={`flex cursor-pointer items-center gap-2 px-2 py-1 text-xs ${i === activeSuggestion ? 'bg-slate-800 text-white' : 'text-slate-300'}`}
+            >
+              {sugg.color && <span aria-hidden className="block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: sugg.color }} />}
+              <span className="font-medium">{sugg.label}</span>
+              <span className="truncate text-slate-500">{sugg.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="flex items-end gap-2">
         {props.mode === 'file' ? (
           <input
@@ -183,11 +270,18 @@ export default function Composer(props: ComposerProps) {
             aria-label="Message"
             rows={1}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              setCursor(e.target.selectionStart ?? e.target.value.length);
+              setActiveSuggestion(0);
+            }}
+            onSelect={(e) => setCursor(e.currentTarget.selectionStart ?? text.length)}
             onKeyDown={onKeyDown}
+            aria-autocomplete="list"
+            aria-controls={suggestions.length > 0 ? 'composer-suggestions' : undefined}
             placeholder={props.mode === 'task'
               ? 'Describe the task… (/reserve 4h, /release, /kill, /review, /promote, /retry)'
-              : `Ask ${agent ? agent.name : 'an agent'}… (@name to send elsewhere)`}
+              : `Ask ${agent ? handleOf(agent) : 'an agent'}… (@name, #command)`}
             className="min-h-[2.25rem] flex-1 resize-none rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-100 placeholder:text-slate-600"
           />
         )}

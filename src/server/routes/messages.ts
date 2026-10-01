@@ -2,8 +2,10 @@ import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import {
   getAgent,
-  getAgentByName,
+  getUser,
+  getUserByName,
   insertAgentMessage,
+  resolveAgent,
   listAgentMessages,
   type Agent,
   type AgentMessage,
@@ -15,6 +17,17 @@ import logger from '../logger.js';
 import { getRuntimeState } from '../runtime-liveness.js';
 import * as sessionManager from '../session-manager.js';
 import * as replyCapture from '../reply-capture.js';
+import { notify } from '../notifications.js';
+import { withPersona } from '../agent-identity.js';
+import { OWNER_USER } from '../users.js';
+
+/** `@ana` / `ana` / a user id → that user (spec §5c people addressing). */
+function resolveUserRef(ref: string) {
+  const key = ref.trim().replace(/^@/, '');
+  if (key === OWNER_USER.name || key === OWNER_USER.id) return { ok: true as const, data: OWNER_USER };
+  const byName = getUserByName(key);
+  return byName.ok ? byName : getUser(key);
+}
 
 /** Text typed into the recipient's pane for a human reply (spec §4.2). */
 export function formatInjectedReply(userName: string, message: string): string {
@@ -45,8 +58,10 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{
       from_agent_id?: string | null;
       to_agent_id?: string | null;
-      /** Recipient agent id or name (alias of to_agent_id, used by the composer's Reply). */
+      /** Recipient agent alias, name or id (alias of to_agent_id, used by the composer's Reply). */
       to?: string | null;
+      /** Address a person (`@ana`): lands in their Attention filter + notification mirror (spec §5c). */
+      to_user?: string | null;
       workspace?: string | null;
       message: string;
       message_type?: AgentMessage['message_type'];
@@ -64,10 +79,17 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
 
     let toAgentId = body.to_agent_id ?? null;
     if (body.to && !toAgentId) {
-      const byId = getAgent(body.to);
-      const resolved = byId.ok ? byId : getAgentByName(body.to);
+      const resolved = resolveAgent(body.to);
       if (!resolved.ok) return c.json({ error: `Unknown agent '${body.to}'` }, 400);
       toAgentId = resolved.data.id;
+    }
+
+    let toUser: { id: string; name: string } | null = null;
+    if (body.to_user) {
+      if (toAgentId) return c.json({ error: 'Address either an agent (to) or a person (to_user), not both' }, 400);
+      const resolvedUser = resolveUserRef(body.to_user);
+      if (!resolvedUser.ok) return c.json({ error: `Unknown person '${body.to_user}'` }, 400);
+      toUser = resolvedUser.data;
     }
 
     // A human message to an agent (no from_agent_id) is a reply: it is also
@@ -87,6 +109,7 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
       message_type: body.message_type,
       ref_task_id: body.ref_task_id ?? null,
       ref_run_id: body.ref_run_id ?? null,
+      to_user_id: toUser?.id ?? null,
     });
 
     if (!result.ok) return c.json({ error: result.error }, 500);
@@ -96,10 +119,22 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
       to_agent_id: result.data.to_agent_id,
       workspace: result.data.workspace,
       message_type: result.data.message_type,
+      ...(toUser ? { to_user_id: toUser.id, to_user: toUser.name } : {}),
     });
 
+    if (toUser) {
+      // Mirror to the person's phone (push / ntfy / Telegram); never fail the message on it
+      void notify({
+        title: `${user.name} → @${toUser.name}`,
+        body: result.data.message.slice(0, 280),
+        url: '/',
+        tag: `message-${result.data.id}`,
+      }).catch((err) => logger.warn({ error: (err as Error).message }, 'Message notification failed'));
+    }
+
     if (!recipient?.ok) return c.json(result.data, 201);
-    const injectedText = formatInjectedReply(user.name, result.data.message);
+    // Spec §5c: the agent's persona is prepended to everything typed into it
+    const injectedText = withPersona(recipient.data, formatInjectedReply(user.name, result.data.message));
     const injection = injectReply(recipient.data, injectedText);
     if (injection.ok) {
       // Spec §5b: the agent's answer appears in the thread under this message

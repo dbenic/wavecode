@@ -66,6 +66,7 @@ describe('message routes', () => {
       message_type: 'handoff',
       ref_task_id: null,
       ref_run_id: null,
+      to_user_id: null,
     });
     expect(events.emit).toHaveBeenCalledWith(
       'message.created',

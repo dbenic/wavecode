@@ -23,11 +23,11 @@ import {
   type User,
   type WaveEvent,
 } from './db.js';
-import { checkAgentAccess } from './leases.js';
+import { checkAgentAccess, userName } from './leases.js';
 import { canMutate, isAdmin } from './users.js';
 import { parseReplyQuestion } from './reply-capture.js';
 
-export const THREAD_KINDS = ['prompt', 'reply', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
+export const THREAD_KINDS = ['prompt', 'reply', 'command', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
 export type ThreadKind = (typeof THREAD_KINDS)[number];
 
 export function isThreadKind(value: string): value is ThreadKind {
@@ -152,6 +152,14 @@ function base(event: WaveEvent, kind: ThreadKind, agentId: string | null, title:
 const QUESTION_RE = /\?\s*$/;
 const TASK_TYPES = new Set(['task.created', 'task.dispatched', 'task.completed', 'task.blocked', 'task.waiting_for_agent', 'task.failed']);
 const ALERT_TYPES = new Set(['agent.crashed', 'agent.hung', 'agent.lease_expired', 'agent.runtime_relaunched', 'system.stop_all']);
+const COMMAND_TYPES = new Set([
+  'agent.reserved', 'agent.released', 'agent.killed', 'agent.tagged', 'agent.untagged', 'agent.renamed', 'review.promoted',
+]);
+
+function shortTime(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toISOString().slice(11, 16) + ' UTC';
+}
 
 /** Map one event to a thread item, or null when the event is not part of the feed. */
 export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem | null {
@@ -206,6 +214,16 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
       if (agentId && ctx.canAct(agentId)) item.actions.push(replyAction(agentId, msg?.ref_task_id ?? null));
       return item;
     }
+    // --- a message addressed to a person (`@ana`, spec §5c): their Attention inbox
+    const toUserId = msg?.to_user_id ?? str(p.to_user_id);
+    if (toUserId) {
+      const item = base(event, 'report', null, `Message for @${userName(toUserId)}`);
+      item.body = msg?.message ?? null;
+      item.refs = { message_id: event.entity_id, ...(msg?.ref_task_id ? { task_id: msg.ref_task_id } : {}) };
+      item.needs_attention = ctx.viewer.id === toUserId;
+      return item;
+    }
+
     const isRequest = type === 'request';
     // A message from an agent is about that agent; a human message is about its recipient.
     const agentId = msg?.from_agent_id ?? str(p.from_agent_id) ?? msg?.to_agent_id ?? str(p.to_agent_id);
@@ -346,6 +364,37 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
     if (waiting && agentId && ctx.canAct(agentId)) {
       // Only the owner (or an admin) gets this — it is their lease that blocks the task.
       item.actions.push({ id: 'release_agent', label: 'Release agent', method: 'POST', path: `/api/agents/${agentId}/release` });
+    }
+    return item;
+  }
+
+  // --- commands a person issued (spec §5c: every executed command is the user's item)
+  if (event.actor_id && COMMAND_TYPES.has(t)) {
+    const agent = ctx.agent(event.entity_type === 'agent' ? event.entity_id : str(p.agent_id));
+    const at = agent ? `@${agent.alias ?? agent.name}` : '';
+    let title: string | null = null;
+    if (t === 'agent.reserved' && p.reason === 'reserved') {
+      title = `#reserve ${at}${str(p.until) ? ` · until ${shortTime(str(p.until)!)}` : ''}`;
+    } else if (t === 'agent.released' && p.by) {
+      title = `#release ${at}`;
+    } else if (t === 'agent.killed') {
+      title = `#kill ${at}`;
+    } else if (t === 'agent.tagged') {
+      title = `#tag ${at} ${str(p.tag) ?? ''}`.trim();
+    } else if (t === 'agent.untagged') {
+      title = `#untag ${at} ${str(p.tag) ?? ''}`.trim();
+    } else if (t === 'agent.renamed') {
+      title = `rename ${str(p.name) ?? ''} → ${str(p.alias) ? `@${str(p.alias)}` : '(no alias)'}`;
+    } else if (t === 'review.promoted') {
+      title = p.override_reason ? '#promote (override)' : '#promote';
+    }
+    if (!title) return null;
+    const item = base(event, 'command', agent?.id ?? null, title);
+    item.body = t === 'agent.renamed' ? str(p.persona) : t === 'review.promoted' ? str(p.override_reason) : null;
+    if (t === 'review.promoted') {
+      const run = ctx.run(event.entity_id);
+      item.agent_id = run?.agent_id ?? null;
+      item.refs = { run_id: event.entity_id, ...(str(p.task_id) ? { task_id: str(p.task_id)! } : {}) };
     }
     return item;
   }

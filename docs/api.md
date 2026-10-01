@@ -578,6 +578,16 @@ Without `since`: the newest `limit` items. With `since`: items after that cursor
 ### `POST /api/agents/:id/restart`
 Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
 
+## Aliases, groups, people, composer grammar (spec §5c)
+
+- **Resolution** everywhere an agent is named (routes, MCP, CLI, composer): alias → name → id; a leading `@` is ignored.
+- `PATCH /api/agents/:id {alias?, persona?}` (owner/admin). `alias` matches `^[a-z][a-z0-9_-]{1,23}$`, is unique, and may not equal another agent's name/alias, a tag, a person's name or a reserved word (`all`, …) → `409`/`400`. `persona` is one line ≤80 chars and is prepended to everything typed into the agent as `[you are @alias — persona] …` (prompts, replies, task dispatch); the thread shows what the person wrote. Emits `agent.renamed`.
+- **Groups**: `POST /api/agents/:id/tags {tag}`, `DELETE /api/agents/:id/tags/:tag` (owner/admin; `agent.tagged` / `agent.untagged`). `GET /api/agents` rows include `alias`, `persona`, `tags`.
+- **People**: `POST /api/messages {to_user, message}` addresses a person (`to_user_id`): the thread item "Message for @name" needs attention for that person only, and it is mirrored to push / ntfy / Telegram. CLI: `wavecode msg @ana "…"`, `wavecode msg @frontend "…"` (one message per agent), `wavecode msg toni "…"`.
+- **Task numbers**: tasks carry `num`; `depends_on` accepts `#12`.
+- **Command items**: reserve (explicit), release, kill, tag/untag, rename and promote issued by a person appear in `GET /api/thread` as kind `command` with that person as `actor_id` (e.g. `#reserve @toni · until 14:05 UTC`).
+- The composer grammar (`@x text`, `@x @y text`, `@group text`, `@all text`, `@person text`, `#reserve @x [Nh]`, `#release @x`, `#kill @x`, `#tag @x name`, `#task [@x] text [deps:#n,#m]`, `#promote #n`, `#file @x name`, `#status`; anything else → the orchestrator seat unchanged) is parsed in the UI and executed through the routes above.
+
 ## Reply capture + orchestrator seat (spec §5b)
 
 - Every prompt typed into a tmux agent (`POST /api/agents/:id/send` non-raw, MCP `send_prompt`, a human reply via `POST /api/messages`) is answered in the thread: when the agent next goes idle, its pane is captured, the runtime's TUI chrome is stripped (Claude Code, Codex, Grok extractors; tool-call blocks, spinners, prompt box, status bar) and the final prose (≤4 000 chars, head+tail) is stored as an `agent_messages` row with `message_type: 'reply'`, `ref_prompt_actor`, `ref_prompt_event_id` (and `ref_task_id` when the agent had an open run), emitted as `message.created`. No idle within 10 minutes → a `reply` with `truncated: 1`. Clients cannot post `message_type: 'reply'` (`400`).

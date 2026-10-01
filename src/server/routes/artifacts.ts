@@ -1,14 +1,13 @@
 import type { Hono } from 'hono';
-import { getAgent, getAgentByName, getRun, insertRunArtifact, listArtifacts, getArtifact } from '../db.js';
+import { getRun, insertRunArtifact, listArtifacts, getArtifact, resolveAgent } from '../db.js';
 import * as artifactManager from '../artifact-manager.js';
 import type { NodeAppEnv } from '../auth.js';
 import type { Artifact, Result } from '../db.js';
 
-function resolveAgentId(idOrName: string): string {
-  const byId = getAgent(idOrName);
-  if (byId.ok) return byId.data.id;
-  const byName = getAgentByName(idOrName);
-  return byName.ok ? byName.data.id : idOrName;
+/** alias → name → id (spec §5c); unknown refs pass through for the manager to reject. */
+function resolveAgentId(ref: string): string {
+  const agent = resolveAgent(ref);
+  return agent.ok ? agent.data.id : ref;
 }
 
 function attachUploadedArtifact(

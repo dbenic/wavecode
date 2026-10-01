@@ -6,6 +6,7 @@ vi.mock('../db.js', () => ({
   getArtifact: vi.fn(),
   getAgent: vi.fn(() => ({ ok: false, error: 'not found' })),
   getAgentByName: vi.fn(() => ({ ok: false, error: 'not found' })),
+  resolveAgent: vi.fn(() => ({ ok: false, error: 'not found' })),
   getRun: vi.fn(),
   insertRunArtifact: vi.fn(),
 }));

@@ -6,6 +6,8 @@ interface ThreadFeedProps {
   items: ThreadItem[];
   users: Map<string, User>;
   agentNames: Map<string, string>;
+  /** agent id → one-line persona, shown on reply bubbles (spec §5c) */
+  personas?: Map<string, string>;
   attentionOnly: boolean;
   onToggleAttention: () => void;
   attentionCount: number;
@@ -20,6 +22,7 @@ interface ThreadFeedProps {
 const KIND_CLASS: Record<ThreadKind, string> = {
   prompt: 'text-sky-400',
   reply: 'text-emerald-300',
+  command: 'text-fuchsia-300',
   report: 'text-slate-300',
   request: 'text-amber-300',
   run: 'text-emerald-400',
@@ -66,6 +69,7 @@ export default function ThreadFeed(props: ThreadFeedProps) {
             key={item.id}
             item={item}
             agentName={item.agent_id ? props.agentNames.get(item.agent_id) ?? item.agent_id : 'agent'}
+            persona={item.agent_id ? props.personas?.get(item.agent_id) ?? null : null}
             onAction={props.onAction}
           />
         ) : (
@@ -129,9 +133,10 @@ export default function ThreadFeed(props: ThreadFeedProps) {
  * time, the prose, and quick-reply chips when it ends with a question and
  * `[ ] option` lines. Tapping a chip sends that option back to the seat.
  */
-function ReplyBubble({ item, agentName, onAction }: {
+function ReplyBubble({ item, agentName, persona, onAction }: {
   item: ThreadItem;
   agentName: string;
+  persona?: string | null;
   onAction: (item: ThreadItem, action: ThreadAction) => void;
 }) {
   const color = agentColor(agentName);
@@ -149,6 +154,7 @@ function ReplyBubble({ item, agentName, onAction }: {
       >
         <div className="mb-0.5 flex items-baseline gap-2 text-xs">
           <span className="font-semibold" style={{ color }}>{agentName}</span>
+          {persona && <span className="italic text-slate-500">{persona}</span>}
           <span className="tabular-nums text-slate-600">{time(item.at)}</span>
           {item.title !== 'Reply' && <span className="text-amber-400">{item.title.replace(/^Reply\s*/, '')}</span>}
         </div>

@@ -29,6 +29,10 @@ export interface Agent {
   role?: 'orchestrator' | null;
   /** True for the one agent the composer targets by default. */
   orchestrator?: boolean;
+  /** Short handle (`@toni`), one-line persona and group tags (spec §5c). */
+  alias?: string | null;
+  persona?: string | null;
+  tags?: string[];
 }
 
 export type UserRole = 'admin' | 'developer' | 'observer';
@@ -42,7 +46,7 @@ export interface User {
   created_at?: string;
 }
 
-export const THREAD_KINDS = ['prompt', 'reply', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
+export const THREAD_KINDS = ['prompt', 'reply', 'command', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
 export type ThreadKind = (typeof THREAD_KINDS)[number];
 
 export interface ThreadAction {
@@ -86,6 +90,9 @@ export interface Task {
   created_at: string;
   goal_id?: string | null;
   created_by?: string | null;
+  /** `#12` in the composer (spec §5c) */
+  num?: number | null;
+  latest_run?: { id: string } | null;
   dependencies?: string[];
   dependents?: string[];
   run_phase?: FileRunnerPhase | null;

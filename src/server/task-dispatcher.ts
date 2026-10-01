@@ -40,6 +40,7 @@ import * as leases from './leases.js';
 import { ensureRuntimeAlive } from './runtime-liveness.js';
 import { isLoginSeat } from './login-seats.js';
 import { captureRunSummary } from './reply-capture.js';
+import { withPersona } from './agent-identity.js';
 import logger from './logger.js';
 
 let dispatchInProgress = false;
@@ -467,6 +468,8 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
   } catch (err) {
     logger.warn({ error: (err as Error).message }, 'Failed to build briefing, dispatching without');
   }
+  // Spec §5c: `[you are @toni — frontend lead] …` when the agent has a persona
+  prompt = withPersona(agent, prompt);
 
   const open = listOpenRuns(agent.id);
   if (open.length > 0) {
