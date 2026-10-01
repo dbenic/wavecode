@@ -48,6 +48,21 @@ runtimes:
     command: aider --yes
     idle_pattern: '^>\s*$'
     model_flag: --model
+  # Per-runtime credential env (spec §5) is built in and only applies to
+  # agents on a profile: claude-code CLAUDE_CONFIG_DIR={profile_dir}/claude,
+  # codex CODEX_HOME={profile_dir}/codex, grok HOME={profile_dir}/grok-home.
+  # Override with `env:`, `login_command:` and `credential_files:` per runtime.
+
+# Credential profiles: one CLI subscription per developer. Each user's agents
+# run with their profile's credential dir (users.profile, default = user name).
+# Log a profile in with `wavecode profile login <name> <runtime>` on the box,
+# or from the UI (POST /api/profiles/<name>/login). Empty = everyone uses the
+# service user's own login, as before.
+# profiles_root: /home/ci/profiles
+# profiles:
+#   denis: {}
+#   ana: {}
+#   service: { shared: true }   # referee-style seats; admin-only
 
 auth:
   method: token                  # default portable mode; set a token before exposing the port

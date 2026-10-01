@@ -1,4 +1,5 @@
 import { insertEvent, listEvents, type WaveEvent } from './db.js';
+import { currentActorId } from './request-context.js';
 
 type SSEWriter = {
   write: (data: string) => void;
@@ -52,18 +53,28 @@ function formatSSE(event: WaveEvent): string {
     entityType: event.entity_type,
     entityId: event.entity_id,
     payload: event.payload_json ? JSON.parse(event.payload_json) : null,
+    actorId: event.actor_id ?? null,
     createdAt: event.created_at,
   };
   return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+/**
+ * Record and broadcast an event. `actor` is the user id that caused it:
+ * omitted → the in-flight request's user (see request-context.ts), explicit
+ * `null` → system.
+ */
 export function emit(
   type: string,
   entityType: string,
   entityId: string,
   payload?: Record<string, unknown>,
+  actor?: string | { id: string } | null,
 ): WaveEvent | null {
-  const result = insertEvent({ type, entity_type: entityType, entity_id: entityId, payload });
+  const actorId = actor === undefined
+    ? currentActorId()
+    : actor === null ? null : typeof actor === 'string' ? actor : actor.id;
+  const result = insertEvent({ type, entity_type: entityType, entity_id: entityId, payload, actor_id: actorId });
   if (!result.ok) return null;
 
   const event = result.data;

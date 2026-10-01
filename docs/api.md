@@ -16,6 +16,33 @@ Protected endpoint that returns `{ ok: true }` when the current request is authe
 - `token`: requests must provide `Authorization: Bearer <token>`.
 - `fallback_token`: when configured, the bearer token also works in `tailscale` mode.
 
+### Users and roles
+
+Every authenticated request resolves to a user (see `docs/multi-orchestrator-spec.md` §1):
+
+- `auth.fallback_token` → the synthetic admin `owner` (not stored in `users`).
+- A token created via `POST /api/users` or `wavecode user add` → that user. Only the sha256 of the token is stored.
+- In `tailscale` mode, a tailnet client without a user token is `owner`.
+- Unknown token in `token` mode → `401`.
+
+Roles: `admin` (everything), `developer` (act on agents), `observer` (read-only: any non-GET `/api/*` request → `403`).
+
+Events written while a request is in flight record the caller as `actor_id` (null = system); `/api/events/log` and SSE payloads (`actorId`) include it.
+
+### `GET /api/me`
+Current user: `{ id, name, role, color }`.
+
+### `GET /api/users`
+All users (synthetic `owner` first) as `{ id, name, role, color, created_at }`. Token hashes are never returned.
+
+### `POST /api/users` (admin)
+Body `{ name, role?, color? }` — `name` is `[a-z0-9_-]{1,32}` (`owner`, `system`, `all` are reserved), `role` defaults to `developer`, `color` is `#rrggbb` (derived from the name if omitted). Returns `201` with the user plus `token` — the plaintext bearer token, shown **once**. `409` on a duplicate name.
+
+CLI equivalent (local, no daemon needed): `wavecode user add <name> [--role admin|developer|observer] [--color #rrggbb]`.
+
+### `DELETE /api/users/:id` (admin)
+Revokes the user (deletes the row; its token stops working). `owner` and your own user cannot be revoked.
+
 ## Agents
 
 ### `GET /api/agents`
@@ -64,6 +91,26 @@ Kill a spawned agent: stop its runner, terminate the tmux session, remove the
 record. Returns 400 for adopted agents (detach those instead). Emits
 `agent.killed`.
 
+### Agent leases (spec §2)
+
+An agent is **free** (`owner_id: null`) or **owned** by one user. `GET /api/agents` rows include `owner` (name), `owner_id`, `lease_reason` (`reserved` | `task`), `lease_expires_at`.
+
+- Owned agents: only the owner or an admin may `send`, `kill`, detach (`DELETE`), or be a review `handoff` target. Others get `403 {"error":"Agent <name> is owned by <owner>"}`. Reads stay open to everyone.
+- Dispatch only matches a task to a free agent or one owned by the task's creator (`tasks.created_by`). Dispatching to a free agent leases it to the creator (`lease_reason: task`) until the run ends and the agent is idle.
+- A task queued with `agent_id` of an agent someone else owns is accepted (`201`, response includes `waiting_for_agent: {owner}`), stays `pending`, and emits `task.waiting_for_agent` once per owner.
+- The health monitor (30s) releases expired reservations on idle agents (`agent.lease_expired`); working agents keep the lease until idle.
+- Revoking a user releases their leases.
+
+`GET /api/agents` and `/api/agents/:id` also return `lease` (`{owner, owner_id, reason, expires_at}` or null) and `can_act` — whether the *caller* may act on the agent. `POST /api/agents/spawn` accepts `reserve_hours` (MCP `spawn_agent` sends 4) to reserve the new agent for the caller.
+
+`POST /api/reviews/:runId/promote` with `overrideReason` is admin-only (`403` otherwise).
+
+### `POST /api/agents/:id/reserve`
+Body `{ hours? }` — default 4, max 24. Reserving your own agent extends it; an agent owned by someone else → `409`. Emits `agent.reserved {owner, until}`.
+
+### `POST /api/agents/:id/release`
+Owner or admin (`403` otherwise). Emits `agent.released {by, reason}`.
+
 ### `POST /api/agents/:id/send`
 Send text or a raw tmux key sequence to an agent. This is prompt-only —
 it does **not** create a task or run. CLI `wavecode send` instead POSTs
@@ -90,7 +137,7 @@ session running.
 
 ## System
 
-### `POST /api/system/stop-all`
+### `POST /api/system/stop-all` (admin)
 Emergency stop: kill every spawned agent, send Ctrl+C to adopted ones, and
 disable `autonomy.auto_dispatch`. Returns
 `{ ok, killed: string[], interrupted: string[], errors, auto_dispatch_disabled: true }`.
@@ -502,6 +549,50 @@ Delete a push subscription.
 
 Body:
 `{ endpoint: string }`
+
+## Thread (Command Center feed)
+
+### `GET /api/thread`
+Merged, typed, cursor-paged feed built from the event log (spec §4.1). Query: `agent=<id|all>`, `owner=<user id>` (items on agents that user owns, or that the user caused), `kinds=prompt,report,request,run,verdict,task,alert,artifact`, `attention=1`, `since=<cursor>`, `limit` (≤500), `wait_ms` (≤60000, long-poll; only with `since`).
+
+Without `since`: the newest `limit` items. With `since`: items after that cursor. Response `{ items, cursor }`, items oldest → newest; pass `cursor` back as `since`.
+
+`ThreadItem { id, event_id, at, kind, type, agent_id, actor_id, title, body, refs: {task_id?, run_id?, review_id?, artifact_id?, message_id?}, needs_attention, actions }`
+
+| kind | source events | needs_attention | actions (when the viewer may) |
+|---|---|---|---|
+| `prompt` | `agent.prompt_sent` | no | — |
+| `report` | `message.created` type result/info/handoff (human message = "Reply") | no | reply |
+| `request` | `message.created` type request; `agent.status_changed` idle with a last line ending in `?` | yes | reply, send file |
+| `run` | `run.started/finished/failed`, `run.phase` failed/incomplete | failed/incomplete | open log, retry, hand off |
+| `verdict` | `review.ai_completed` | verdict ≠ pass | promote (pass), override promote (admin, non-pass), send fixes, reject |
+| `task` | `task.created/dispatched/completed/blocked/waiting_for_agent/failed` | blocked/waiting | reassign, release agent (lease holder/admin) |
+| `alert` | `agent.crashed/hung/lease_expired/runtime_relaunched`, `system.stop_all`, error messages | yes | restart, kill |
+| `artifact` | `artifact.created/shared` | no | open, forward |
+
+`actions` are `{ id, label, method, path, body? }`, computed server-side from the viewer's role and agent ownership (observers get only read actions). Body values like `{text}`, `{agent_id}`, `{reason}`, `{artifact_id}` (also in `path`) are placeholders for the UI to fill.
+
+### `POST /api/messages` — replies
+`to` (agent id or name) is an alias of `to_agent_id`. A message to an agent **without** `from_agent_id` is a human reply: rule 2 applies (`403` naming the owner), and after it is stored it is typed into the agent's tmux as `[from <user>] <message>`. The response adds `injected: true`, or `injected: false, inject_error` when it could not be typed (file-runner seat, runtime not running, no session). It is never typed into a bare shell.
+
+### `POST /api/agents/:id/restart`
+Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
+
+## Credential profiles (spec §5)
+
+Agents run on a **profile**: a credential directory `<profiles_root>/<profile>` that the runtime is pointed at via env (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HOME` for grok), launched as `env K=V … <command>` on spawn, restart, upgrade, runtime relaunch and file-runner runs. Env values are validated (paths/plain tokens only) and an unresolvable profile fails the launch instead of falling back to another login.
+
+- `users.profile` defaults to the user name; the fallback-token `owner` has none (home-dir login).
+- `POST /api/agents/spawn` uses the caller's profile; `profile` (name or `null`) is admin-only (`403` otherwise). Shared profiles are admin-only.
+- Dispatch: an agent on profile P only takes tasks created by users on P; a `shared` profile takes admin/system tasks; an agent without a profile takes anyone's. A task assigned to an incompatible agent waits with `task.waiting_for_agent {reason: 'profile', profile}`. `GET /api/agents` adds `profile_compatible` for the caller (free but `false` = "free (other subscription)").
+
+### `GET /api/profiles`
+`[{ name, shared, mine, runtimes: { <runtime>: { logged_in } } }]` — whether a credential file exists. Never contents or paths.
+
+### `POST /api/profiles/:name/login`
+Body `{ runtime }`. Profile owner or admin (shared: admin). Opens tmux seat `wc-login-<profile>-<runtime>` running the runtime's `login_command` with the profile env, registered as an adopted agent `login-<profile>-<runtime>` (reserved for you, never dispatched to) so you can read the device-code URL in AgentView. The seat is removed when the login exits or after 15 minutes (`profile.login_started` / `profile.login_finished {reason, logged_in}`). `409` if one is already open.
+
+CLI equivalent on the box: `wavecode profile login <name> <runtime>` (runs the login in your terminal).
 
 ## Events
 

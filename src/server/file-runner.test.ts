@@ -25,6 +25,10 @@ vi.mock('./task-dispatcher.js', () => ({
   finalizeRun: vi.fn(),
 }));
 
+vi.mock('./profiles.js', () => ({
+  resolveProfileEnv: vi.fn(() => ({ ok: true, data: {} })),
+}));
+
 vi.mock('./logger.js', () => ({
   default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
@@ -82,6 +86,7 @@ describe('file-runner.ts', () => {
 
   async function setupRun(overrides: {
     model?: string | null;
+    profile?: string | null;
     prompt?: string;
     child?: FakeChild;
     resultPath?: string;
@@ -112,6 +117,7 @@ describe('file-runner.ts', () => {
         status: 'idle',
         model: overrides.model ?? 'opus',
         effort: null,
+        profile: overrides.profile ?? null,
         created_at: '2026-08-23T00:00:00Z',
       },
     } as never);
@@ -189,6 +195,27 @@ describe('file-runner.ts', () => {
     expect(opts).toEqual(expect.objectContaining({ cwd: workspace, detached: true }));
     expect(opts.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(child.pid).toBe(4242);
+  });
+
+  it('runs claude -p on the seat\'s credential profile (spec §5)', async () => {
+    const profiles = await import('./profiles.js');
+    vi.mocked(profiles.resolveProfileEnv).mockReturnValueOnce({ ok: true, data: { CLAUDE_CONFIG_DIR: '/srv/profiles/ana/claude' } });
+    const { spawn, run } = await setupRun({ profile: 'ana' });
+
+    expect(run.ok).toBe(true);
+    expect(profiles.resolveProfileEnv).toHaveBeenCalledWith('claude-code', 'ana');
+    const [, , opts] = spawn.mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }];
+    expect(opts.env.CLAUDE_CONFIG_DIR).toBe('/srv/profiles/ana/claude');
+    expect(opts.env.PATH).toBe(process.env.PATH);
+  });
+
+  it('never starts claude on the wrong login when the profile cannot be resolved', async () => {
+    const profiles = await import('./profiles.js');
+    vi.mocked(profiles.resolveProfileEnv).mockReturnValueOnce({ ok: false, error: "Profile 'ana' is not configured" });
+    const { spawn, run } = await setupRun({ profile: 'ana' });
+
+    expect(run).toMatchObject({ ok: false, code: 'start_failed', error: "Profile 'ana' is not configured" });
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('records queued → starting → running phases and never touches send-keys', async () => {
@@ -426,7 +453,8 @@ describe('file-runner.ts', () => {
     expect(looksLikeInFlightWork('Reviewed auth.ts; 2 issues remain')).toBe(false);
   });
 
-  it('lists leftover node processes whose cwd is the worktree', async () => {
+  // listWorktreePids reads /proc, which only exists on Linux (the deploy target)
+  it.runIf(process.platform === 'linux')('lists leftover node processes whose cwd is the worktree', async () => {
     const { listWorktreePids } = await import('./file-runner.js');
     const workspace = tmpDir();
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {

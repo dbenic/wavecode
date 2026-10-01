@@ -198,3 +198,74 @@ describe('auth.ts', () => {
     expect(allowed.status).toBe(200);
   });
 });
+
+describe('auth.ts — user resolution (spec §1)', () => {
+  const ana = { id: 'u-ana', name: 'ana', role: 'developer' as const, color: '#2563eb', created_at: '' };
+  const watcher = { id: 'u-obs', name: 'watcher', role: 'observer' as const, color: '#16a34a', created_at: '' };
+  const resolver = (token: string | null, fallback: string | null) => {
+    if (token && token === fallback) return { id: 'owner', name: 'owner', role: 'admin' as const, color: '#000000', created_at: '' };
+    if (token === 'ana-token') return ana;
+    if (token === 'obs-token') return watcher;
+    return null;
+  };
+
+  function makeUserApp(config: WaveConfig) {
+    const app = new Hono<NodeAppEnv>();
+    app.use('/api/*', createAuthMiddleware(() => config, resolver));
+    app.get('/api/whoami', (c) => c.json(c.get('user')));
+    app.post('/api/mutate', (c) => c.json({ by: c.get('user').name }));
+    return app;
+  }
+
+  it('sets the resolved user on the context', async () => {
+    const app = makeUserApp(makeConfig({ method: 'token', fallback_token: 'secret' }));
+    const res = await app.request('/api/whoami', { headers: { Authorization: 'Bearer ana-token' } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(ana);
+
+    const owner = await app.request('/api/whoami', { headers: { Authorization: 'Bearer secret' } });
+    expect((await owner.json()).name).toBe('owner');
+  });
+
+  it('returns 401 for unknown tokens in token mode', async () => {
+    const app = makeUserApp(makeConfig({ method: 'token', fallback_token: 'secret' }));
+    const res = await app.request('/api/whoami', { headers: { Authorization: 'Bearer wrong' } });
+    expect(res.status).toBe(401);
+  });
+
+  it('treats token-less tailnet clients as the synthetic owner in tailscale mode', async () => {
+    const app = makeUserApp(makeConfig({ method: 'tailscale' }));
+    const res = await app.request('/api/whoami', {}, { incoming: { socket: { remoteAddress: '100.64.0.5' } } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: 'owner', role: 'admin' });
+  });
+
+  it('rejects an unknown or revoked token in tailscale mode instead of falling back to owner', async () => {
+    const app = makeUserApp(makeConfig({ method: 'tailscale', fallback_token: 'secret' }));
+    const tailnet = { incoming: { socket: { remoteAddress: '100.64.0.5' } } };
+
+    const bogus = await app.request('/api/whoami', { headers: { Authorization: 'Bearer revoked-token' } }, tailnet);
+    expect(bogus.status).toBe(401);
+    expect(await bogus.json()).toEqual({ error: 'Unauthorized' });
+
+    // SSE query-string tokens follow the same rule
+    const sse = await app.request('/api/events?access_token=revoked-token', {}, tailnet);
+    expect(sse.status).toBe(401);
+
+    // Same tailnet client: no token → owner, a valid user token → that user
+    const none = await app.request('/api/whoami', {}, tailnet);
+    expect((await none.json()).name).toBe('owner');
+    const valid = await app.request('/api/whoami', { headers: { Authorization: 'Bearer ana-token' } }, tailnet);
+    expect((await valid.json()).name).toBe('ana');
+  });
+
+  it('blocks observers from mutating /api routes but allows reads', async () => {
+    const app = makeUserApp(makeConfig({ method: 'token', fallback_token: 'secret' }));
+    const read = await app.request('/api/whoami', { headers: { Authorization: 'Bearer obs-token' } });
+    expect(read.status).toBe(200);
+    const write = await app.request('/api/mutate', { method: 'POST', headers: { Authorization: 'Bearer obs-token' } });
+    expect(write.status).toBe(403);
+    const dev = await app.request('/api/mutate', { method: 'POST', headers: { Authorization: 'Bearer ana-token' } });
+    expect(await dev.json()).toEqual({ by: 'ana' });
+  });
+});

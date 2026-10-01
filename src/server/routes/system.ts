@@ -9,7 +9,8 @@ import * as promptEnhancer from '../prompt-enhancer.js';
 import * as sessionManager from '../session-manager.js';
 import * as outputWatcher from '../output-watcher.js';
 import logger from '../logger.js';
-import { getPublicAuthStatus, type NodeAppEnv } from '../auth.js';
+import { getActingUser, getPublicAuthStatus, type NodeAppEnv } from '../auth.js';
+import { isAdmin } from '../users.js';
 
 export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/auth/status', (c) => {
@@ -133,6 +134,11 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
    * re-enables it.
    */
   app.post('/api/system/stop-all', (c) => {
+    // Emergency brake for everyone — admin only (spec §2 rule 7)
+    const user = getActingUser(c);
+    if (!isAdmin(user)) {
+      return c.json({ error: `Forbidden: stop-all is admin only (you are ${user.name}, ${user.role})` }, 403);
+    }
     const summary = sessionManager.stopAll();
 
     for (const agentId of summary.killed) {
@@ -198,6 +204,7 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
             entity_type: e.entity_type,
             entity_id: e.entity_id,
             payload: e.payload_json ? JSON.parse(e.payload_json) : null,
+            actor_id: e.actor_id ?? null,
             created_at: e.created_at,
           })),
           last_id: lastId,

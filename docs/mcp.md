@@ -19,9 +19,16 @@ URL: https://<host>/mcp
 Authorization: Bearer <token>
 ```
 
-The token is `auth.fallback_token` or `WAVECODE_TOKEN`. Never log it.
+The token is a user token (`wavecode user add <name>` / `POST /api/users`),
+`auth.fallback_token` (the admin `owner`), or `WAVECODE_TOKEN`. Never log it.
 Auth on `/mcp` is the same rule as `/api/*` (Tailscale and/or bearer).
 Unauthenticated requests receive `401`.
+
+**The seat acts as the token's user.** The bearer sent on `initialize` is
+forwarded to every REST call the tools make, so ownership rules, admin-only
+actions, and event `actor_id` all apply to that user. A session is pinned to
+the token that opened it; a request on that `mcp-session-id` with a different
+token gets `403`. Call `whoami` to see who you are.
 
 After `initialize`, the server returns `mcp-session-id`. Subsequent
 requests on that session (tool calls, `notifications/initialized`, GET
@@ -80,11 +87,14 @@ logs to stderr only.
 
 | Tool | What it does |
 |---|---|
-| `list_agents` | All agents: runtime, status, pinned model/effort, last output line |
-| `spawn_agent` | Create an agent. Default is tmux. `runner=file` is a Claude file-runner seat (no send-keys; waits for leftover tests/work after `-p` exits; result.txt wins, cli.log RESULT counts, incomplete if neither and no leftover work). `model`/`effort` pin its LLM (see below) |
+| `whoami` | The user this token acts as: `{id, name, role, color}` |
+| `list_agents` | All agents: runtime, status, pinned model/effort, last output line, `owner`, `lease {owner, owner_id, reason, expires_at}`, and `can_act` (may *you* prompt/assign/kill it) |
+| `reserve_agent` | Reserve an agent for yourself (`hours`, default 4, max 24); refused if someone else owns it |
+| `release_agent` | Release your lease (admins may release any) |
+| `spawn_agent` | Create an agent; it is **reserved for you for 4h** (`reserve_hours` to change) so teammates cannot grab it. Default is tmux. `runner=file` is a Claude file-runner seat (no send-keys; waits for leftover tests/work after `-p` exits; result.txt wins, cli.log RESULT counts, incomplete if neither and no leftover work). `model`/`effort` pin its LLM (see below) |
 | `pin_agent` | Change an agent's model/effort pin (`null` clears; applies on relaunch) |
 | `kill_agent` | Terminate a spawned agent's session and remove it |
-| `stop_all` | **Emergency stop**: kill spawned, interrupt adopted, disable auto-dispatch |
+| `stop_all` | **Emergency stop** (admin tokens only): kill spawned, interrupt adopted, disable auto-dispatch |
 | `send_prompt` | Type into an agent's terminal |
 | `get_agent_output` | Read the agent's recent terminal output |
 
@@ -145,7 +155,7 @@ Same immutable hashed store as the PWA. No second store. No chat bridge.
 | `list_reviews` | Runs awaiting human review, with the latest AI verdict inline |
 | `request_ai_review` | Cross-model review of a run's diff by another agent or the LLM |
 | `get_ai_reviews` | Full review history for a run: verdicts, issues, fix rounds |
-| `promote_run` | Approve. **Blocked without a `pass` verdict** unless `override_reason` is given (stored in the audit log) |
+| `promote_run` | Approve. **Blocked without a `pass` verdict** unless `override_reason` is given (admin tokens only; stored in the audit log) |
 | `retry_run` | Reject + re-queue on the same agent |
 | `handoff_run` | Reject + reassign to another agent |
 | `reject_run` | Reject + fail the task (dependents block) |

@@ -2,10 +2,18 @@ import type { Hono } from 'hono';
 import * as commandChat from '../command-chat.js';
 import * as teamManager from '../team-manager.js';
 import * as validate from '../validate.js';
-import type { NodeAppEnv } from '../auth.js';
+import { getActingUser, type NodeAppEnv } from '../auth.js';
+import { isAdmin } from '../users.js';
 
 export function registerCollaborationRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/chat/send', async (c) => {
+    // The command-chat tools (send_prompt, send_instruction, handoff_file,
+    // spawn_agent) do not yet enforce agent ownership or credential
+    // profiles, so the whole surface is admin-only until they do.
+    if (!isAdmin(getActingUser(c))) {
+      return c.json({ error: 'Command chat is admin-only until its tools enforce agent ownership' }, 403);
+    }
+
     const body = await c.req.json<{ message: string }>();
     const chatValidation = validate.validateChatBody(body);
     if (chatValidation) return c.json({ error: chatValidation }, 400);

@@ -24,12 +24,41 @@ export interface WaveCodeToolDef {
 
 const EFFORT = z.enum(['low', 'medium', 'high', 'xhigh']);
 
+/** spec §3: a seat's freshly spawned agent is reserved for it so a teammate cannot grab it. */
+export const SPAWN_RESERVE_HOURS = 4;
+
 export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
+  // --- Identity & leases ---
+  {
+    name: 'whoami',
+    description:
+      'Who this MCP seat acts as: {id, name, role, color}. Roles: admin (everything incl. stop_all and override promote), developer (free + own agents), observer (read-only).',
+    schema: {},
+    handler: (client) => client.get('/me'),
+  },
+  {
+    name: 'reserve_agent',
+    description:
+      'Reserve an agent for yourself so nobody else can prompt, assign to, or kill it (default 4h, max 24h). Re-reserving your own agent extends it. Fails if someone else owns it.',
+    schema: {
+      agent: z.string().describe('Agent ID or name'),
+      hours: z.number().positive().max(24).optional().describe('Reservation length in hours (default 4)'),
+    },
+    handler: (client, args) =>
+      client.post(`/agents/${encodeURIComponent(String(args.agent))}/reserve`, args.hours === undefined ? {} : { hours: args.hours }),
+  },
+  {
+    name: 'release_agent',
+    description: 'Release your lease on an agent so it is free for anyone (admins may release any agent).',
+    schema: { agent: z.string().describe('Agent ID or name') },
+    handler: (client, args) => client.post(`/agents/${encodeURIComponent(String(args.agent))}/release`),
+  },
+
   // --- Agents ---
   {
     name: 'list_agents',
     description:
-      'List all registered agents with runtime, tmux session, status (idle/working/error), pinned model/effort, and last output line.',
+      'List all registered agents with runtime, tmux session, status (idle/working/error), pinned model/effort, last output line, and lease state: owner (name or null = free), lease {owner, owner_id, reason reserved|task, expires_at}, and can_act (whether YOU may prompt/assign/kill it). Agents owned by someone else are readable but not writable.',
     schema: {},
     handler: (client) => client.get('/agents'),
   },
@@ -45,8 +74,11 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       repo: z.string().optional().describe('Repo path — a dedicated git worktree is created'),
       branch: z.string().optional().describe('Branch for the worktree (default wc-<name>)'),
       runner: z.enum(['tmux', 'file']).optional().describe("file = Claude file-runner (claude -p, result.txt wins, cli.log RESULT counts, incomplete if neither). Default tmux."),
+      reserve_hours: z.number().positive().max(24).optional().describe(`The new agent is reserved for you (default ${SPAWN_RESERVE_HOURS}h) so teammates cannot grab it`),
+      profile: z.string().nullable().optional().describe("Credential profile (whose CLI subscription runs it). Default: your own. Admin only; null = the service user's home login"),
     },
-    handler: (client, args) => client.post('/agents/spawn', args),
+    handler: (client, args) =>
+      client.post('/agents/spawn', { ...args, reserve_hours: args.reserve_hours ?? SPAWN_RESERVE_HOURS }),
   },
   {
     name: 'pin_agent',
@@ -63,20 +95,20 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'kill_agent',
     description:
-      "Kill a spawned agent: terminate its tmux session and remove it. Adopted agents can't be killed — detach them from the UI instead.",
+      "Kill a spawned agent: terminate its tmux session and remove it. Adopted agents can't be killed — detach them from the UI instead. Refused (403) if someone else owns the agent.",
     schema: { agent_id: z.string().describe('Agent ID or name') },
     handler: (client, args) => client.post(`/agents/${args.agent_id}/kill`),
   },
   {
     name: 'stop_all',
     description:
-      'EMERGENCY STOP: kill every spawned agent, send Ctrl+C to adopted ones, and disable auto-dispatch until a human re-enables it.',
+      'EMERGENCY STOP (admin tokens only): kill every spawned agent, send Ctrl+C to adopted ones, and disable auto-dispatch until a human re-enables it.',
     schema: {},
     handler: (client) => client.post('/system/stop-all'),
   },
   {
     name: 'send_prompt',
-    description: "Send a prompt (or instruction) directly into an agent's terminal session.",
+    description: "Send a prompt (or instruction) directly into an agent's terminal session. Refused (403, names the owner) if someone else owns the agent.",
     schema: {
       agent_id: z.string().describe('Agent ID or name'),
       text: z.string().describe('The prompt text to send'),
@@ -315,7 +347,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
   {
     name: 'promote_run',
     description:
-      "Approve a run's work. Blocked unless the latest AI review verdict is 'pass'; supply override_reason to promote anyway (the reason is stored in the audit log).",
+      "Approve a run's work. Blocked unless the latest AI review verdict is 'pass'; supply override_reason to promote anyway (admin tokens only; the reason is stored in the audit log).",
     schema: {
       run_id: z.string(),
       override_reason: z.string().optional().describe('Required when the verdict is not pass'),

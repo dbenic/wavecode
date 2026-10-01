@@ -11,18 +11,22 @@ import * as sessionManager from '../session-manager.js';
 import * as outputWatcher from '../output-watcher.js';
 import * as validate from '../validate.js';
 import logger from '../logger.js';
-import type { NodeAppEnv } from '../auth.js';
+import { getActingUser, type NodeAppEnv } from '../auth.js';
+import type { User } from '../db.js';
+import * as leases from '../leases.js';
+import * as runtimeLiveness from '../runtime-liveness.js';
+import { isProfileCompatible, resolveSpawnProfile } from '../profiles.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
     const agents = listAgents();
-    return c.json(agents.map(enrichAgent));
+    return c.json(agents.map((a) => enrichAgent(a, getActingUser(c))));
   });
 
   app.get('/api/agents/:id', (c) => {
     const result = sessionManager.get(c.req.param('id'));
     if (!result.ok) return c.json({ error: result.error }, 404);
-    return c.json(enrichAgent(result.data));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
   app.post('/api/agents/scan', (c) => {
@@ -69,11 +73,18 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     const agentResult = sessionManager.get(c.req.param('id'));
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
 
     if (body.raw) {
+      // Raw keys (C-c, Escape, Enter) are how a stuck shell gets fixed — never gated.
       const result = sessionManager.sendRawKeys(agentResult.data.id, body.text);
       if (!result.ok) return c.json({ error: result.error }, 500);
     } else {
+      // T0: a prompt typed into a bare shell executes as commands.
+      if (runtimeLiveness.getRuntimeState(agentResult.data) === 'dead') {
+        return c.json({ error: `${runtimeLiveness.RUNTIME_NOT_RUNNING} — relaunch it (or send raw keys) first` }, 409);
+      }
       const result = sessionManager.sendKeys(agentResult.data.id, body.text);
       if (!result.ok) return c.json({ error: result.error }, 500);
     }
@@ -137,6 +148,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const agentId = c.req.param('id');
     const agentResult = getAgent(agentId);
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
 
     outputWatcher.stopWatching(agentId);
     sessionManager.detach(agentId);
@@ -152,6 +165,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
 
     const agent = agentResult.data;
+    const access = leases.checkAgentAccess(agent, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
     outputWatcher.stopWatching(agent.id);
 
     const result = sessionManager.kill(agent.id);
@@ -164,6 +179,60 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent killed');
     return c.json({ ok: true });
+  });
+
+  /**
+   * Restart (thread `alert` action): a spawned agent whose session died gets
+   * a fresh session; a live session whose runtime TUI exited gets the
+   * runtime relaunched in place (T0). Adopted agents with a dead session
+   * cannot be restarted — WaveCode never owned their launch command.
+   */
+  app.post('/api/agents/:id/restart', (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const agent = agentResult.data;
+    const access = leases.checkAgentAccess(agent, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
+
+    if (agent.mode === 'spawned') {
+      const ensured = sessionManager.ensureSpawnedAgentSession(agent.id);
+      if (!ensured.ok) return c.json({ error: ensured.error }, 400);
+      if (ensured.data.createdSession) {
+        outputWatcher.startWatching(agent.id);
+        emit('agent.restarted', 'agent', agent.id, { name: agent.name });
+        return c.json({ ok: true, action: 'session_recreated' });
+      }
+    }
+
+    const state = runtimeLiveness.getRuntimeState(agent);
+    if (state === 'dead') {
+      const relaunched = runtimeLiveness.relaunchRuntime(agent, 'manual');
+      if (!relaunched.ok) return c.json({ error: relaunched.error }, 400);
+      return c.json({ ok: true, action: relaunched.data.sent ? 'runtime_relaunched' : 'relaunch_in_progress' });
+    }
+    if (state === 'unknown') {
+      return c.json({ error: `Session '${agent.tmux_session}' is not running and cannot be restarted` }, 400);
+    }
+    return c.json({ ok: true, action: 'already_running' });
+  });
+
+  app.post('/api/agents/:id/reserve', async (c) => {
+    const body = await c.req.json<{ hours?: unknown }>().catch(() => ({} as { hours?: unknown }));
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+
+    const result = leases.reserveAgent(agentResult.data.id, getActingUser(c), body?.hours);
+    if (!result.ok) return c.json({ error: result.error }, leases.leaseErrorStatus(result.code));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
+  });
+
+  app.post('/api/agents/:id/release', (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+
+    const result = leases.releaseAgent(agentResult.data.id, getActingUser(c));
+    if (!result.ok) return c.json({ error: result.error }, leases.leaseErrorStatus(result.code));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
   app.patch('/api/agents/:id', async (c) => {
@@ -194,7 +263,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       { agentId: result.data.id, model: result.data.model, effort: result.data.effort },
       'Agent pin updated',
     );
-    return c.json(enrichAgent(result.data));
+    return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
   app.post('/api/agents/spawn', async (c) => {
@@ -206,12 +275,24 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       model?: string | null;
       effort?: EffortLevel | null;
       runner?: 'tmux' | 'file';
+      /** Reserve the new agent for the caller (spec §3: MCP spawn_agent sends 4). */
+      reserve_hours?: number;
+      /** Credential profile (spec §5) — admin only; default is the caller's own. */
+      profile?: string | null;
     }>();
 
     const spawnValidation = validate.validateSpawnBody(body);
     if (spawnValidation) return c.json({ error: spawnValidation }, 400);
+    const reserveHours = body.reserve_hours;
+    if (reserveHours !== undefined && (typeof reserveHours !== 'number' || !Number.isFinite(reserveHours)
+      || reserveHours <= 0 || reserveHours > leases.MAX_RESERVE_HOURS)) {
+      return c.json({ error: `reserve_hours must be a number in (0, ${leases.MAX_RESERVE_HOURS}]` }, 400);
+    }
 
-    const result = sessionManager.spawnAgent(body);
+    const profile = resolveSpawnProfile(getActingUser(c), body.profile);
+    if (!profile.ok) return c.json({ error: profile.error }, profile.code === 'forbidden' ? 403 : 400);
+
+    const result = sessionManager.spawnAgent({ ...body, profile: profile.data });
     if (!result.ok) return c.json({ error: result.error }, 400);
 
     const agent = result.data;
@@ -224,16 +305,37 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       model: agent.model,
       effort: agent.effort,
       runner: agent.mode === 'file' ? 'file' : 'tmux',
+      profile: agent.profile ?? null,
     });
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent spawned');
+
+    if (reserveHours !== undefined) {
+      const user = getActingUser(c);
+      const reserved = leases.reserveAgent(agent.id, user, reserveHours);
+      if (!reserved.ok) {
+        logger.warn({ agentId: agent.id, error: reserved.error }, 'Spawned agent could not be reserved');
+        return c.json({ ...enrichAgent(agent, user), reserve_error: reserved.error }, 201);
+      }
+      return c.json(enrichAgent(reserved.data, user), 201);
+    }
     return c.json(agent, 201);
   });
 }
 
-function enrichAgent(agent: Agent) {
+function enrichAgent(agent: Agent, viewer: User) {
+  const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
   return {
     ...agent,
+    owner,
+    // Spec §3: lease state for orchestrators, plus whether *this* caller may
+    // act on the agent (rule 2) so MCP seats never have to guess.
+    lease: agent.owner_id
+      ? { owner, owner_id: agent.owner_id, reason: agent.lease_reason ?? null, expires_at: agent.lease_expires_at ?? null }
+      : null,
+    can_act: leases.checkAgentAccess(agent, viewer).ok,
+    // Spec §5: a free agent on another subscription is "free (other subscription)" — never yours to use.
+    profile_compatible: !agent.profile || isProfileCompatible(agent.profile, viewer),
     lastOutputLine: outputWatcher.getLastOutputLine(agent.id),
     outputVersion: outputWatcher.getOutputVersion(agent.id),
     watching: outputWatcher.isWatching(agent.id),

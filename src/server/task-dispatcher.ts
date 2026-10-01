@@ -36,9 +36,15 @@ import {
   settleRunResultFile,
   shouldAutoRetryFailedRun,
 } from './run-result.js';
+import * as leases from './leases.js';
+import { ensureRuntimeAlive } from './runtime-liveness.js';
+import { isLoginSeat } from './login-seats.js';
 import logger from './logger.js';
 
 let dispatchInProgress = false;
+
+/** task id → `<reason>:<owner|profile>` we last reported `task.waiting_for_agent` for (dedupe). */
+const waitingNotified = new Map<string, string>();
 
 /** How long to re-read result.txt after idle-close stamps FAIL. */
 export const LATE_PASS_RECONCILE_MS = 300_000;
@@ -274,6 +280,9 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
     }
   }
 
+  // Rule 3: a task lease ends once the seat is idle again
+  if (!seatStillBusy) releaseTaskLeaseSafely(agentId);
+
   // Trigger dispatch for idle agents
   if (config.autonomy.auto_dispatch) {
     // Stagger slightly to avoid CLI rate limits
@@ -348,11 +357,49 @@ export async function dispatchNext(options: { manual?: boolean } = {}): Promise<
   }
 }
 
+function releaseTaskLeaseSafely(agentId: string): void {
+  try {
+    leases.maybeReleaseTaskLease(agentId);
+  } catch (err) {
+    logger.warn({ agentId, error: (err as Error).message }, 'Task lease release failed');
+  }
+}
+
+/**
+ * Rule 6: a task explicitly assigned to an agent someone else owns stays
+ * pending. Surface it once per (task, owner) so the creator knows why.
+ */
+function noteWaitingTasks(tasks: Task[], agents: Agent[]): void {
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  for (const task of tasks) {
+    const agent = task.agent_id ? byId.get(task.agent_id) : undefined;
+    const reason = agent ? leases.waitReason(task, agent) : null;
+    if (!agent || !reason) {
+      waitingNotified.delete(task.id);
+      continue;
+    }
+    const key = reason === 'profile' ? `profile:${agent.profile}` : `owner:${agent.owner_id}`;
+    if (waitingNotified.get(task.id) === key) continue;
+    waitingNotified.set(task.id, key);
+    emit('task.waiting_for_agent', 'task', task.id, reason === 'profile'
+      ? { agent_id: agent.id, agent_name: agent.name, reason, profile: agent.profile }
+      : {
+        agent_id: agent.id,
+        agent_name: agent.name,
+        reason,
+        owner: leases.userName(agent.owner_id!),
+        owner_id: agent.owner_id,
+      }, null);
+  }
+}
+
 async function dispatchNextInner(): Promise<void> {
   const config = getConfig();
 
-  const idleAgents = listAgents().filter(
-    (a) => a.status === 'idle' && !hasOpenRun(a.id),
+  const allAgents = listAgents();
+  // Login seats (spec §5) are OAuth terminals, never work seats.
+  const idleAgents = allAgents.filter(
+    (a) => a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a),
   );
 
   if (idleAgents.length === 0) return;
@@ -368,6 +415,8 @@ async function dispatchNextInner(): Promise<void> {
     return;
   }
 
+  noteWaitingTasks(dispatchableTasks, allAgents);
+
   // Match tasks to agents with staggered dispatch
   let delay = 0;
   for (const agent of idleAgents) {
@@ -381,7 +430,10 @@ async function dispatchNextInner(): Promise<void> {
     // Remove from dispatchable list
     const idx = dispatchableTasks.indexOf(task);
     if (idx >= 0) dispatchableTasks.splice(idx, 1);
+    waitingNotified.delete(task.id);
 
+    // Rule 3: dispatching to a free agent leases it to the task's creator
+    leases.autoLeaseForTask(agent, task);
     updateAgentStatus(agent.id, 'working');
 
     emit('task.dispatched', 'task', task.id, {
@@ -424,6 +476,26 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       updateTaskStatus(task.id, 'pending');
     }
     return;
+  }
+
+  // T0: never send-keys into a pane whose runtime TUI has exited — bash
+  // would execute the prompt. Relaunch first; fail the dispatch if it
+  // does not come back.
+  if (!isFileRunnerSeat(agent)) {
+    const live = await ensureRuntimeAlive(agent);
+    if (!live.ok) {
+      const current = getTask(task.id);
+      if (current.ok && current.data.status === 'running') {
+        updateTaskStatus(task.id, 'failed');
+      }
+      updateAgentStatus(agent.id, 'error');
+      emit('task.failed', 'task', task.id, { agent_id: agent.id, error: live.error });
+      // Same bookkeeping as every other failure path: dependents must not
+      // sit in 'pending' forever waiting on a task that will never finish.
+      blockDependents(task.id);
+      logger.warn({ agentId: agent.id, taskId: task.id }, 'Dispatch failed — runtime not running');
+      return;
+    }
   }
 
   if (isFileRunnerSeat(agent)) {
@@ -561,12 +633,15 @@ function isDependencySatisfied(depTaskId: string): boolean {
  * Prefers tasks assigned to this agent, then unassigned tasks.
  */
 function findTaskForAgent(tasks: Task[], agent: Agent): Task | null {
+  // Rule 6: only free agents, or ones owned by the task's creator
+  const eligible = (t: Task) => leases.canDispatchTaskToAgent(t, agent);
+
   // First: tasks explicitly assigned to this agent
-  const assigned = tasks.find((t) => t.agent_id === agent.id);
+  const assigned = tasks.find((t) => t.agent_id === agent.id && eligible(t));
   if (assigned) return assigned;
 
   // Second: unassigned tasks (agent_id IS NULL)
-  const unassigned = tasks.find((t) => t.agent_id === null);
+  const unassigned = tasks.find((t) => t.agent_id === null && eligible(t));
   if (unassigned) return unassigned;
 
   return null;
@@ -646,6 +721,7 @@ export function addDependency(taskId: string, dependsOnId: string): boolean {
 
 export function resetDispatcherForTest(): void {
   dispatchInProgress = false;
+  waitingNotified.clear();
   resetLatePassReconcileForTest();
 }
 

@@ -104,6 +104,10 @@ CREATE TABLE agents (
   workspace TEXT,                 -- git worktree path (null for adopted without worktree)
   mode TEXT NOT NULL DEFAULT 'adopted',  -- 'adopted' | 'spawned'
   status TEXT NOT NULL DEFAULT 'idle',   -- 'idle' | 'working' | 'error'
+  owner_id TEXT,                  -- v13 lease holder (user id, or 'owner'); null = free. No FK (synthetic owner)
+  lease_expires_at TEXT,          -- ISO; null = no expiry while owned
+  lease_reason TEXT,              -- 'reserved' | 'task' | null
+  profile TEXT,                   -- v14 credential profile (spec §5); null = home-dir login
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -178,6 +182,17 @@ CREATE TABLE events (
   entity_type TEXT NOT NULL,    -- 'agent' | 'task' | 'run' | 'artifact'
   entity_id TEXT NOT NULL,
   payload_json TEXT,
+  actor_id TEXT,                -- user who caused it (null = system); see request-context.ts
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE users (            -- v12; auth.fallback_token = synthetic admin 'owner' (no row)
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL DEFAULT 'developer',  -- 'admin' | 'developer' | 'observer'
+  color TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,         -- sha256 of the bearer token; never plaintext
+  profile TEXT,                            -- v14 credential profile, default = name
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```

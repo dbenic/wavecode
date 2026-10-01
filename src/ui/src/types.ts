@@ -14,6 +14,59 @@ export interface Agent {
   lastOutputLine?: string;
   outputVersion?: number;
   watching?: boolean;
+  // Leases (spec §2/§3)
+  owner_id?: string | null;
+  owner?: string | null;
+  lease_reason?: 'reserved' | 'task' | null;
+  lease_expires_at?: string | null;
+  lease?: { owner: string | null; owner_id: string; reason: 'reserved' | 'task' | null; expires_at: string | null } | null;
+  /** Whether the current user may prompt/assign/kill this agent. */
+  can_act?: boolean;
+  /** Credential profile (spec §5) and whether it is the current user's subscription. */
+  profile?: string | null;
+  profile_compatible?: boolean;
+}
+
+export type UserRole = 'admin' | 'developer' | 'observer';
+
+export interface User {
+  id: string;
+  name: string;
+  role: UserRole;
+  color: string;
+  profile?: string | null;
+  created_at?: string;
+}
+
+export const THREAD_KINDS = ['prompt', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
+export type ThreadKind = (typeof THREAD_KINDS)[number];
+
+export interface ThreadAction {
+  id: string;
+  label: string;
+  method: 'GET' | 'POST' | 'PUT';
+  path: string;
+  body?: Record<string, unknown>;
+}
+
+export interface ThreadItem {
+  id: string;
+  event_id: number;
+  at: string;
+  kind: ThreadKind;
+  type: string;
+  agent_id: string | null;
+  actor_id: string | null;
+  title: string;
+  body: string | null;
+  refs: { task_id?: string; run_id?: string; review_id?: string; artifact_id?: string; message_id?: string };
+  needs_attention: boolean;
+  actions: ThreadAction[];
+}
+
+export interface ThreadPage {
+  items: ThreadItem[];
+  cursor: number;
 }
 
 export type FileRunnerPhase = 'queued' | 'starting' | 'running' | 'done' | 'failed' | 'incomplete';
@@ -28,6 +81,7 @@ export interface Task {
   priority: number;
   created_at: string;
   goal_id?: string | null;
+  created_by?: string | null;
   dependencies?: string[];
   dependents?: string[];
   run_phase?: FileRunnerPhase | null;

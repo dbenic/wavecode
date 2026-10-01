@@ -7,6 +7,9 @@ import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
 import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
 import { isFileRunnerSeat } from './file-runner.js';
+import { sweepLeases } from './leases.js';
+import { isLoginSeat, sweepLoginSeats } from './login-seats.js';
+import { getRuntimeState, noteRuntimeAlive, relaunchRuntime } from './runtime-liveness.js';
 import logger from './logger.js';
 
 interface AgentHealthState {
@@ -38,8 +41,23 @@ export function stopHealthMonitor(): void {
   }
 }
 
-async function checkAll(): Promise<void> {
+/** One monitor tick. Exported for tests. */
+export async function checkAll(): Promise<void> {
+  // Lease expiry (spec §2 rule 5): idle agents only — working agents keep
+  // their lease until they go idle.
+  try {
+    const released = sweepLeases();
+    if (released.length > 0) setTimeout(() => void taskDispatcher.dispatchNext(), 0);
+  } catch (e) {
+    logger.error({ error: (e as Error).message }, 'Lease sweep error');
+  }
+
   const agents = listAgents();
+  try {
+    sweepLoginSeats(agents);
+  } catch (e) {
+    logger.error({ error: (e as Error).message }, 'Login seat sweep error');
+  }
   const config = getConfig();
   const hangTimeoutMs = config.autonomy.hang_timeout_min * 60 * 1000;
 
@@ -57,6 +75,8 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
 
   // File-runner seats have no pane. Stale heartbeat is owned by file-runner.ts.
   if (isFileRunnerSeat(agent)) return;
+  // Login seats exit on purpose and run a login command, not the runtime TUI.
+  if (isLoginSeat(agent)) return;
 
   // Check if tmux session is still alive
   const alive = isSessionAlive(agent.tmux_session);
@@ -74,6 +94,30 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
       }
     }
     return;
+  }
+
+  // T0: session alive but the runtime TUI exited (bare shell prompt) →
+  // relaunch it in place. Only for sessions WaveCode launched itself —
+  // adopted sessions belong to a human and must never be typed into.
+  // Dispatch waits for it to settle; the tick does not.
+  try {
+    const state = getRuntimeState(agent);
+    if (state === 'alive') {
+      noteRuntimeAlive(agent.id);
+    } else if (state === 'dead' && agent.mode === 'spawned') {
+      const relaunch = relaunchRuntime(agent, 'health_check');
+      if (!relaunch.ok && agent.status !== 'error') {
+        updateAgentStatus(agent.id, 'error');
+        emit('agent.runtime_relaunch_exhausted', 'agent', agent.id, {
+          name: agent.name,
+          runtime: agent.runtime,
+          error: relaunch.error,
+        });
+        logger.error({ agentId: agent.id, error: relaunch.error }, 'Runtime could not be relaunched — agent marked error');
+      }
+    }
+  } catch (e) {
+    logger.error({ agentId: agent.id, error: (e as Error).message }, 'Runtime liveness check failed');
   }
 
   // Check for hang (no output change for hang_timeout_min)

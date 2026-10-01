@@ -1,11 +1,13 @@
 import type { Hono } from 'hono';
 import fs from 'node:fs';
-import { getRun, getRunArtifacts } from '../db.js';
+import { getAgent, getRun, getRunArtifacts } from '../db.js';
 import * as reviewQueue from '../review-queue.js';
 import * as codeReview from '../code-review.js';
 import { presentRunResult } from '../run-result.js';
 import { presentFileRun } from '../file-runner.js';
-import type { NodeAppEnv } from '../auth.js';
+import { getActingUser, type NodeAppEnv } from '../auth.js';
+import * as leases from '../leases.js';
+import { isAdmin } from '../users.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/reviews/:runId/ai-review', async (c) => {
@@ -35,7 +37,18 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   app.post('/api/ai-reviews/:reviewId/send-fixes', (c) => {
-    const result = codeReview.sendFixesToAgent(c.req.param('reviewId'));
+    // Sending fixes types a prompt into the run's agent — same ownership
+    // rule as a direct send (spec §2 rule 2).
+    const review = codeReview.getReview(c.req.param('reviewId'));
+    if (!review) return c.json({ error: 'Review not found' }, 404);
+    const run = getRun(review.run_id);
+    if (!run.ok) return c.json({ error: run.error }, 404);
+    const agent = getAgent(run.data.agent_id);
+    if (!agent.ok) return c.json({ error: agent.error }, 404);
+    const access = leases.checkAgentAccess(agent.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
+
+    const result = codeReview.sendFixesToAgent(review.id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json({ ok: true });
   });
@@ -52,6 +65,13 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   app.post('/api/reviews/:runId/promote', async (c) => {
     const body = await c.req.json<{ overrideReason?: string }>().catch(() => ({} as { overrideReason?: string }));
+    // Override-promote bypasses the review gate — admin only (spec §2/§3)
+    const user = getActingUser(c);
+    if (typeof body.overrideReason === 'string' && body.overrideReason.trim() && !isAdmin(user)) {
+      return c.json({
+        error: `Forbidden: override-promote is admin only (you are ${user.name}, ${user.role}). Promote without override_reason, or ask an admin.`,
+      }, 403);
+    }
     const result = reviewQueue.promote(c.req.param('runId'), {
       overrideReason: typeof body.overrideReason === 'string' ? body.overrideReason : undefined,
     });
@@ -67,6 +87,11 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   app.post('/api/reviews/:runId/handoff', async (c) => {
     const body = await c.req.json<{ targetAgentId: string }>();
+    const target = getAgent(body.targetAgentId);
+    if (target.ok) {
+      const access = leases.checkAgentAccess(target.data, getActingUser(c));
+      if (!access.ok) return c.json({ error: access.error }, 403);
+    }
     const result = reviewQueue.handOff(c.req.param('runId'), body.targetAgentId);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import yaml from 'js-yaml';
+import { validateProfilesConfig } from './profile-validation.js';
 
 export interface RuntimeConfig {
   command: string;
@@ -10,6 +11,15 @@ export interface RuntimeConfig {
   model_flag?: string;
   /** CLI flag used to pass a pinned reasoning effort (e.g. '--effort'). Unset = pin is recorded but not injected. */
   effort_flag?: string;
+  /**
+   * Env injected at launch when the agent runs on a credential profile
+   * (spec §5). Values are templates; `{profile_dir}` → `<profiles_root>/<profile>`.
+   */
+  env?: Record<string, string>;
+  /** Command a login seat runs for this runtime (e.g. `claude /login`). */
+  login_command?: string;
+  /** Files whose presence means "logged in" (templates, `{profile_dir}`). Contents are never read. */
+  credential_files?: string[];
   // Future deploy agent fields (optional)
   scope?: string;
   claude_md?: string;
@@ -41,6 +51,11 @@ export interface ProjectConfig {
   agent_branches?: Record<string, string>;
 }
 
+export interface ProfileConfig {
+  /** Shared profiles (referee-style service seats) are admin-only. */
+  shared?: boolean;
+}
+
 export interface WaveConfig {
   server: {
     port: number;
@@ -68,6 +83,10 @@ export interface WaveConfig {
     restrict_network: boolean;
   };
   runtimes: Record<string, RuntimeConfig>;
+  /** Root of per-developer credential dirs: `<profiles_root>/<profile>/…` (spec §5). */
+  profiles_root: string;
+  /** Configured credential profiles. Empty = feature off (agents use the home-dir login). */
+  profiles: Record<string, ProfileConfig>;
   auth: {
     method: 'tailscale' | 'token';
     fallback_token: string | null;
@@ -135,6 +154,11 @@ export function loadConfig(cfgPath?: string): WaveConfig {
  * request. Currently checks that artifacts.storage is creatable and writable.
  */
 export function validateConfig(cfg: WaveConfig): void {
+  const profileErrors = validateProfilesConfig(cfg);
+  if (profileErrors.length > 0) {
+    throw new Error(`Invalid credential profile config:\n  ${profileErrors.join('\n  ')}`);
+  }
+
   const storageDir = cfg.artifacts.storage;
 
   try {
@@ -272,11 +296,18 @@ function buildDefaults(baseDir: string): WaveConfig {
         command: 'claude --dangerously-skip-permissions',
         idle_pattern: '\\$\\s*$',
         model_flag: '--model',
+        env: { CLAUDE_CONFIG_DIR: '{profile_dir}/claude' },
+        login_command: 'claude /login',
+        credential_files: ['{profile_dir}/claude/.credentials.json'],
       },
       grok: {
         command: 'grok --always-approve',
         idle_pattern: '^>\\s*$',
         model_flag: '--model',
+        // No profile flag: HOME override for that process only (PATH preserved by `env`)
+        env: { HOME: '{profile_dir}/grok-home' },
+        login_command: 'grok',
+        credential_files: ['{profile_dir}/grok-home/.grok/user-settings.json', '{profile_dir}/grok-home/.grok/auth.json'],
       },
       codex: {
         command: 'codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust',
@@ -285,6 +316,9 @@ function buildDefaults(baseDir: string): WaveConfig {
         // Current Codex CLI (Rust): `-c model_reasoning_effort=xhigh`.
         // Injector concatenates without a space when the flag ends with `=`.
         effort_flag: '-c model_reasoning_effort=',
+        env: { CODEX_HOME: '{profile_dir}/codex' },
+        login_command: 'codex login',
+        credential_files: ['{profile_dir}/codex/auth.json'],
       },
       aider: {
         command: 'aider --yes',
@@ -293,6 +327,8 @@ function buildDefaults(baseDir: string): WaveConfig {
       },
     },
     projects: {},
+    profiles_root: path.join(dataRoot, 'profiles'),
+    profiles: {},
     auth: { method: 'token', fallback_token: null, trusted_proxies: [] },
     notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
     artifacts: { storage: path.join(dataRoot, 'artifacts'), retention_days: 30 },
@@ -328,6 +364,8 @@ function normalizeConfigPaths(cfg: WaveConfig, baseDir: string): WaveConfig {
   normalized.paths.guides_root = normalizePathSetting(normalized.paths.guides_root, baseDir);
   normalized.paths.templates_root = normalizePathSetting(normalized.paths.templates_root, baseDir);
   normalized.artifacts.storage = normalizePathSetting(normalized.artifacts.storage, baseDir);
+  normalized.profiles_root = normalizePathSetting(normalized.profiles_root, baseDir);
+  normalized.profiles = normalized.profiles ?? {};
 
   return normalized;
 }

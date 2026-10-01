@@ -1,7 +1,8 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 
 const NAV_ITEMS = [
-  { path: '/', label: 'Chat', icon: '▶' },
+  // The Command Center composer replaces Chat on phones (still at /chat).
+  { path: '/', label: 'Center', icon: '◎' },
   { path: '/dashboard', label: 'Agents', icon: '◉' },
   { path: '/tasks', label: 'Tasks', icon: '☰' },
   { path: '/review', label: 'Review', icon: '✓' },
@@ -22,8 +23,7 @@ export default function BottomNav() {
     <nav className="sm:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800/60 bg-slate-950/95 backdrop-blur-xl safe-bottom">
       <div className="flex items-center justify-around py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         {NAV_ITEMS.map((item) => {
-          const active = location.pathname === item.path
-            || (item.path === '/' && location.pathname === '/chat');
+          const active = location.pathname === item.path;
           return (
             <button
               key={item.path}

@@ -42,6 +42,16 @@ export const SSE_EVENT_TYPES = [
   'task.updated',
   'goal.created',
   'message.created',
+  // Multi-orchestrator (identity, leases, liveness)
+  'agent.reserved',
+  'agent.released',
+  'agent.lease_expired',
+  'agent.runtime_relaunched',
+  'task.waiting_for_agent',
+  'user.created',
+  'user.revoked',
+  'profile.login_started',
+  'profile.login_finished',
 ] as const;
 
 export type KnownSSEEventType = typeof SSE_EVENT_TYPES[number];
@@ -66,6 +76,9 @@ export function shouldReloadAgentList(type: string): boolean {
     type === 'agent.spawned' ||
     type === 'agent.restarted' ||
     type === 'agent.updated' ||
+    type === 'agent.reserved' ||
+    type === 'agent.released' ||
+    type === 'agent.lease_expired' ||
     type === 'system.stop_all'
   );
 }

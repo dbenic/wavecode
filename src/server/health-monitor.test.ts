@@ -35,6 +35,8 @@ vi.mock('./task-dispatcher.js', () => ({
 vi.mock('./tmux.js', () => ({
   hasSession: vi.fn(),
   killSession: vi.fn(),
+  capturePane: vi.fn(() => ({ ok: true, data: '' })),
+  sendTextAndEnter: vi.fn(),
 }));
 
 vi.mock('./logger.js', () => ({
@@ -62,6 +64,48 @@ describe('health-monitor.ts', () => {
     vi.useRealTimers();
     vi.resetModules();
     vi.restoreAllMocks();
+  });
+
+  async function tickWithPane(paneText: string, mode: 'spawned' | 'adopted' = 'spawned') {
+    const db = await import('./db.js');
+    const config = await import('./config.js');
+    const sessionManager = await import('./session-manager.js');
+    const tmux = await import('./tmux.js');
+
+    vi.mocked(config.getConfig).mockReturnValue({
+      ...makeConfig({ auto_dispatch: true, auto_restart: true, hang_timeout_min: 10 }),
+      runtimes: { 'claude-code': { command: 'claude', idle_pattern: '>', model_flag: '--model' } },
+    } as never);
+    vi.mocked(db.listAgents).mockReturnValue([
+      makeAgent({ id: 'agent-1', name: 'builder', runtime: 'claude-code', mode, status: 'idle', tmux_session: 'wc-builder', model: 'opus' } as never),
+    ]);
+    vi.mocked(tmux.hasSession).mockReturnValue(true);
+    vi.mocked(tmux.capturePane).mockReturnValue({ ok: true, data: paneText });
+    vi.mocked(sessionManager.capturePane).mockReturnValue({ ok: true, data: paneText });
+
+    const monitor = await import('./health-monitor.js');
+    await monitor.checkAll();
+    return { tmux, events: await import('./event-bus.js') };
+  }
+
+  it('relaunches the runtime when the pane has dropped to a bare shell prompt (T0)', async () => {
+    const { tmux, events } = await tickWithPane('Bye!\nci@box:~/repo$ ');
+    expect(tmux.sendTextAndEnter).toHaveBeenCalledWith('wc-builder', 'claude --model opus');
+    expect(events.emit).toHaveBeenCalledWith('agent.runtime_relaunched', 'agent', 'agent-1', expect.objectContaining({
+      reason: 'health_check', runtime: 'claude-code',
+    }));
+  });
+
+  it('never types a relaunch into an adopted (human-owned) session, even at a bare shell (T0)', async () => {
+    const { tmux, events } = await tickWithPane('Bye!\nci@box:~/repo$ ', 'adopted');
+    expect(tmux.sendTextAndEnter).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalledWith('agent.runtime_relaunched', expect.anything(), expect.anything(), expect.anything());
+  });
+
+  it('leaves an alive runtime TUI alone (T0)', async () => {
+    const { tmux, events } = await tickWithPane('│ > │\n  ? for shortcuts');
+    expect(tmux.sendTextAndEnter).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalledWith('agent.runtime_relaunched', expect.anything(), expect.anything(), expect.anything());
   });
 
   it('restarts crashed spawned agents and leaves the task failed (no second dispatch)', async () => {
