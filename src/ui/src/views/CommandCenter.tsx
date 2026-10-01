@@ -352,6 +352,7 @@ export default function CommandCenter() {
       case 'promote': {
         const runId = plan.task.latest_run?.id;
         if (!runId) throw new Error(`Task #${plan.task.num} has no run to promote yet`);
+        if (!window.confirm(`Promote task #${plan.task.num}? This approves its latest run.`)) throw new Error('Promote cancelled');
         await apiPost(`/reviews/${runId}/promote`);
         return;
       }

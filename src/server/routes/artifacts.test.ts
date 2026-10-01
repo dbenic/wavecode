@@ -11,6 +11,15 @@ vi.mock('../db.js', () => ({
   insertRunArtifact: vi.fn(),
 }));
 
+vi.mock('../leases.js', () => ({
+  checkAgentAccess: vi.fn(() => ({ ok: true, data: undefined })),
+}));
+
+vi.mock('../auth.js', async () => {
+  const actual = await vi.importActual<typeof import('../auth.js')>('../auth.js');
+  return { ...actual, getActingUser: vi.fn(() => ({ id: 'owner', name: 'owner', role: 'admin' })) };
+});
+
 vi.mock('../artifact-manager.js', () => ({
   storeArtifactFromBuffer: vi.fn(),
   attachArtifactToAgent: vi.fn(),
@@ -151,8 +160,13 @@ describe('artifact routes', () => {
     });
   });
 
-  it('shares an artifact and returns attached_path', async () => {
+  it('shares an artifact (target resolved by alias/name/id) and returns attached_path', async () => {
+    const db = await import('../db.js');
     const artifacts = await import('../artifact-manager.js');
+    vi.mocked(db.resolveAgent).mockReturnValueOnce({
+      ok: true,
+      data: { id: 'agent-cdx', name: 'countixdev', mode: 'spawned', owner_id: null } as never,
+    });
     vi.mocked(artifacts.shareArtifact).mockReturnValue({
       ok: true,
       data: {
@@ -169,12 +183,34 @@ describe('artifact routes', () => {
     }));
 
     expect(response.status).toBe(200);
-    expect(artifacts.shareArtifact).toHaveBeenCalledWith('artifact-1', 'countixdev');
+    // the manager receives the resolved id, never the raw handle
+    expect(artifacts.shareArtifact).toHaveBeenCalledWith('artifact-1', 'agent-cdx');
     await expect(response.json()).resolves.toEqual({
       ok: true,
       attached_path: '/workspace/countixdev/.wavecode/artifacts/spec.pdf',
       notified: false,
     });
+  });
+
+  it('refuses to share into an agent the caller does not own (403, nothing copied)', async () => {
+    const db = await import('../db.js');
+    const leases = await import('../leases.js');
+    const artifacts = await import('../artifact-manager.js');
+    vi.mocked(db.resolveAgent).mockReturnValueOnce({
+      ok: true,
+      data: { id: 'agent-cdx', name: 'countixdev', mode: 'spawned', owner_id: 'u-ana' } as never,
+    });
+    vi.mocked(leases.checkAgentAccess).mockReturnValueOnce({ ok: false, code: 'forbidden', error: 'Agent countixdev is owned by ana' } as never);
+
+    const app = await createArtifactsApp();
+    const response = await app.fetch(new Request('http://localhost/api/artifacts/artifact-1/share', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: 'countixdev' }),
+    }));
+
+    expect(response.status).toBe(403);
+    expect(artifacts.shareArtifact).not.toHaveBeenCalledWith('artifact-1', 'agent-cdx');
   });
 
   it('GET /api/artifacts?agent_id uses getAgentArtifacts for combined query', async () => {

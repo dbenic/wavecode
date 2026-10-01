@@ -27,6 +27,7 @@ import { executeFileRun, isFileRunnerSeat, stopFileRun } from './file-runner.js'
 import * as sessionManager from './session-manager.js';
 import { buildBriefing } from './briefing-builder.js';
 import { maybeInvokeProjectGate } from './project-gate.js';
+import { clearPendingForDispatch } from './reply-capture.js';
 import {
   appendRunResultBriefing,
   exitCodeForVerdict,
@@ -527,6 +528,10 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
     }
     return;
   }
+
+  // A chat reply still pending on this agent can no longer be told apart
+  // from the task's output — close it out before the task prompt goes in.
+  clearPendingForDispatch(agent);
 
   if (agent.mode === 'spawned') {
     const run = await executeRun(agent.id, task.id, prompt);

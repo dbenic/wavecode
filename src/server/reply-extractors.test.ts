@@ -96,6 +96,26 @@ describe('reply extraction', () => {
     expect(extractReply('claude-code', lines.join('\n'), 'status?').text).toBe('New answer.');
   });
 
+  it('a long prompt Claude Code collapsed to "[Pasted text #N +M lines]" still anchors (the orchestrator brief)', () => {
+    const brief = 'You are the WaveCode orchestrator seat: the team PM. '.repeat(30);
+    const paneText = [
+      '● Previous answer: three agents are idle.',
+      '',
+      '> [Pasted text #1 +22 lines]',
+      '',
+      '● Orchestrator seat ready.',
+      '',
+      '✻ Worked for 2s · done 11:26 PM',
+      '────────────────────────────',
+      '❯ ',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const r = extractReply('claude-code', paneText, brief);
+    expect(r.anchored).toBe(true);
+    expect(r.text).toBe('Orchestrator seat ready.');
+    expect(r.text).not.toMatch(/Previous answer/);
+  });
+
   it('without a prompt (run summaries) the final prose of the capture is used', () => {
     expect(extractReply('codex', pane('codex.txt')).text).toContain('Next step is the MCP tools (T3).');
   });

@@ -77,10 +77,12 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
       return c.json({ error: "message_type 'reply' is reserved for captured agent replies" }, 400);
     }
 
-    let toAgentId = body.to_agent_id ?? null;
-    if (body.to && !toAgentId) {
-      const resolved = resolveAgent(body.to);
-      if (!resolved.ok) return c.json({ error: `Unknown agent '${body.to}'` }, 400);
+    // Both `to` and `to_agent_id` accept alias / name / id (MCP documents it that way)
+    let toAgentId: string | null = null;
+    const agentRef = body.to_agent_id || body.to;
+    if (agentRef) {
+      const resolved = resolveAgent(agentRef);
+      if (!resolved.ok) return c.json({ error: `Unknown agent '${agentRef}'` }, 400);
       toAgentId = resolved.data.id;
     }
 
@@ -124,9 +126,11 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
 
     if (toUser) {
       // Mirror to the person's phone (push / ntfy / Telegram); never fail the message on it
+      // Notification channels are per-install, not per-user, so the body
+      // must stay in the UI — only the fact of a message is mirrored.
       void notify({
-        title: `${user.name} → @${toUser.name}`,
-        body: result.data.message.slice(0, 280),
+        title: `New WaveCode message for @${toUser.name}`,
+        body: `From ${user.name} — open the Command Center to read it`,
         url: '/',
         tag: `message-${result.data.id}`,
       }).catch((err) => logger.warn({ error: (err as Error).message }, 'Message notification failed'));

@@ -19,7 +19,6 @@ import {
   getRun,
   getTask,
   insertAgentMessage,
-  listOpenRuns,
   updateRunSummary,
   type Agent,
 } from './db.js';
@@ -64,19 +63,48 @@ export function trackPrompt(opts: {
   actorId: string | null;
   prompt: string;
   promptEventId?: number | null;
+  /** Only task dispatch passes this; a chat prompt sent while a run is open is still a chat prompt. */
+  taskId?: string | null;
   now?: number;
 }): void {
   const { agent } = opts;
   if (isFileRunnerSeat(agent) || isLoginSeat(agent)) return;
-  const open = listOpenRuns(agent.id)[0];
+
+  // A newer prompt supersedes the pending one — but "never silence": post
+  // whatever the agent had answered so far for the old prompt as truncated.
+  const superseded = pending.get(agent.id);
+  if (superseded) {
+    const pane = capture(agent);
+    const sofar = pane ? extractReply(agent.runtime, pane, superseded.prompt) : { text: '', anchored: false };
+    persist(
+      superseded,
+      agent,
+      (sofar.anchored && sofar.text) || '(superseded by a newer prompt before the agent answered)',
+      true,
+    );
+  }
+
   pending.set(agent.id, {
     agentId: agent.id,
     actorId: opts.actorId,
     prompt: opts.prompt.slice(0, PROMPT_EXCERPT_CHARS),
     promptEventId: opts.promptEventId ?? null,
-    taskId: open?.task_id ?? null,
+    taskId: opts.taskId ?? null,
     sentAt: opts.now ?? Date.now(),
   });
+}
+
+/**
+ * Task dispatch types a task prompt into the pane; a chat prompt that was
+ * still pending can no longer be answered separately, so close it out as
+ * truncated rather than let the task's output be attributed to it.
+ */
+export function clearPendingForDispatch(agent: Agent): void {
+  const p = pending.get(agent.id);
+  if (!p) return;
+  const pane = capture(agent);
+  const sofar = pane ? extractReply(agent.runtime, pane, p.prompt) : { text: '', anchored: false };
+  persist(p, agent, (sofar.anchored && sofar.text) || '(a task was dispatched to the agent before it answered)', true);
 }
 
 function capture(agent: Agent): string | null {
@@ -138,7 +166,10 @@ export function onAgentIdle(
 
   const reply = extractReply(agentResult.data.runtime, pane, p.prompt);
   if (!reply.text) return false; // nothing yet — keep waiting (the 10-minute fallback still applies)
-  if (!opts.transitioned && !reply.anchored) return false;
+  // Without the prompt echo in the pane we cannot tell this answer from a
+  // previous one (echo scrolled out, /clear, dialog) — even on the idle
+  // edge. Leave it to the 10-minute fallback, which marks it truncated.
+  if (!reply.anchored) return false;
 
   persist(p, agentResult.data, reply.text, false);
   return true;
@@ -179,9 +210,6 @@ export function captureRunSummary(runId: string, agentId: string): string | null
     const summary = extractReply(agentResult.data.runtime, pane, task.ok ? task.data.prompt : null).text;
     if (!summary) return null;
     updateRunSummary(runId, summary);
-    // The run's own reply supersedes a pending chat reply anchored to the same work.
-    const p = pending.get(agentId);
-    if (p && p.taskId === run.data.task_id) pending.delete(agentId);
     return summary;
   } catch (e) {
     logger.debug({ runId, agentId, error: (e as Error).message }, 'Run summary capture skipped');

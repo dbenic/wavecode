@@ -98,6 +98,35 @@ describe('db.ts — schema migrations', () => {
     expect(version).toBe(SCHEMA_VERSION);
   });
 
+  it('resolveAgent: an id always wins over an agent whose name looks like that id', async () => {
+    const mod = await import('./db.js');
+    mod.initDb(dbPath);
+
+    const victim = mod.insertAgent({
+      name: 'victim', runtime: 'claude-code', tmux_session: 'wc-victim',
+      workspace: null, mode: 'spawned', status: 'idle',
+    });
+    expect(victim.ok).toBe(true);
+    if (!victim.ok) return;
+
+    // An impostor named exactly like the victim's ULID must not shadow it
+    const impostor = mod.insertAgent({
+      name: victim.data.id, runtime: 'codex', tmux_session: 'wc-impostor',
+      workspace: null, mode: 'spawned', status: 'idle',
+    });
+    expect(impostor.ok).toBe(true);
+
+    const resolved = mod.resolveAgent(victim.data.id);
+    expect(resolved.ok && resolved.data.name).toBe('victim');
+
+    // Still resolvable by plain name and with a leading @
+    expect(mod.resolveAgent('@victim').ok && (mod.resolveAgent('@victim') as { ok: true; data: { id: string } }).data.id).toBe(victim.data.id);
+
+    // The spawn/adopt guard refuses such names up front
+    expect(mod.agentNameShadowsIdentity(victim.data.id)).toBe(true);
+    expect(mod.agentNameShadowsIdentity('something-new')).toBe(false);
+  });
+
   it('stores and updates model/effort pins on agents', async () => {
     const mod = await import('./db.js');
     mod.initDb(dbPath);
