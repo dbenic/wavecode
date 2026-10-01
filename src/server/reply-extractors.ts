@@ -187,6 +187,13 @@ export interface ExtractedReply {
   anchored: boolean;
 }
 
+const PASTED_PLACEHOLDER = /^\s*>?\s*\[Pasted text #\d+(?:\s*\+\d+ lines)?\]/;
+
+function findLastIndex(lines: string[], pred: (l: string) => boolean): number {
+  for (let i = lines.length - 1; i >= 0; i--) if (pred(lines[i])) return i;
+  return -1;
+}
+
 /**
  * Extract the agent's reply to `prompt` from a pane capture. Without a
  * prompt (run summaries), the whole capture is the region.
@@ -196,7 +203,11 @@ export function extractReply(runtime: string, pane: string, prompt?: string | nu
   let region = lines;
   let anchored = false;
   if (prompt) {
-    const echo = findPromptEcho(lines, prompt);
+    let echo = findPromptEcho(lines, prompt);
+    // Claude Code collapses a long pasted prompt to "> [Pasted text #1 +N lines]"
+    // instead of echoing it; the LAST such placeholder is the user turn we
+    // just sent, so it anchors the region just as a verbatim echo would.
+    if (echo < 0) echo = findLastIndex(lines, (l) => PASTED_PLACEHOLDER.test(l));
     if (echo >= 0) {
       region = lines.slice(echo + 1);
       anchored = true;
