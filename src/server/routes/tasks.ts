@@ -17,7 +17,8 @@ import * as taskDispatcher from '../task-dispatcher.js';
 import * as validate from '../validate.js';
 import { presentFileRun, readCliLog } from '../file-runner.js';
 import logger from '../logger.js';
-import type { NodeAppEnv } from '../auth.js';
+import { getActingUser, type NodeAppEnv } from '../auth.js';
+import * as leases from '../leases.js';
 
 function presentTaskRun(run: { id: string; result_path?: string | null }) {
   return presentFileRun(run);
@@ -86,12 +87,18 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     const dependencyIds = normalizeDependencyIds(body.depends_on);
 
     let resolvedAgentId: string | undefined;
+    let waitingFor: string | null = null;
     if (body.agent_id) {
       // Same as GET /api/agents/:id — ULID or the name list_agents exposes.
       // Resolve to the existing seat; never spawn a new one here.
       const byId = getAgent(body.agent_id);
       const agentResult = byId.ok ? byId : getAgentByName(body.agent_id);
       if (!agentResult.ok) return c.json({ error: agentResult.error }, 400);
+      // Queuing for an agent someone else owns is allowed (spec §6): the
+      // dispatcher never runs it there until the lease ends and emits
+      // task.waiting_for_agent meanwhile. Tell the caller up front.
+      const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+      if (!access.ok) waitingFor = leases.userName(agentResult.data.owner_id!);
       resolvedAgentId = agentResult.data.id;
     }
 
@@ -141,6 +148,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       agent_id: task.agent_id,
       priority: task.priority,
       goal_id: task.goal_id,
+      created_by: task.created_by ?? null,
     });
 
     logger.info({ taskId: task.id, goalId: task.goal_id }, 'Task created');
@@ -154,6 +162,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     return c.json({
       ...task,
       dependencies: dependencyIds,
+      ...(waitingFor ? { waiting_for_agent: { owner: waitingFor } } : {}),
     }, 201);
   });
 

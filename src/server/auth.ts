@@ -23,6 +23,15 @@ export interface NodeAppEnv {
   Variables: NodeAppVariables;
 }
 
+/**
+ * The authenticated caller. Apps mounted without the auth middleware (unit
+ * tests, embedded use) act as the synthetic admin `owner` — today's
+ * single-user behavior.
+ */
+export function getActingUser(c: { get: (key: 'user') => User | undefined }): User {
+  return c.get('user') ?? OWNER_USER;
+}
+
 const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export interface PublicAuthStatus {

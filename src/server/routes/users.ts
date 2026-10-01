@@ -4,6 +4,7 @@ import { listUsers } from '../db.js';
 import { emit } from '../event-bus.js';
 import logger from '../logger.js';
 import { createUser, isAdmin, OWNER_USER, revokeUser } from '../users.js';
+import { releaseLeasesOf } from '../leases.js';
 
 function publicUser(user: { id: string; name: string; role: string; color: string }) {
   return { id: user.id, name: user.name, role: user.role, color: user.color };
@@ -51,8 +52,9 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
       return c.json({ error: result.error }, status);
     }
 
-    logger.info({ userId: id, actorId: actor.id }, 'User revoked');
-    emit('user.revoked', 'user', id, {});
+    const released = releaseLeasesOf(id);
+    logger.info({ userId: id, actorId: actor.id, released }, 'User revoked');
+    emit('user.revoked', 'user', id, { released_agents: released });
     return c.json({ ok: true });
   });
 }

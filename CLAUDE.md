@@ -104,6 +104,9 @@ CREATE TABLE agents (
   workspace TEXT,                 -- git worktree path (null for adopted without worktree)
   mode TEXT NOT NULL DEFAULT 'adopted',  -- 'adopted' | 'spawned'
   status TEXT NOT NULL DEFAULT 'idle',   -- 'idle' | 'working' | 'error'
+  owner_id TEXT,                  -- v13 lease holder (user id, or 'owner'); null = free. No FK (synthetic owner)
+  lease_expires_at TEXT,          -- ISO; null = no expiry while owned
+  lease_reason TEXT,              -- 'reserved' | 'task' | null
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

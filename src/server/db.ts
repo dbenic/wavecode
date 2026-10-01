@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'node:path';
 import { ulid } from 'ulid';
 import { resolveRunResultPath } from './run-result.js';
+import { currentActorId } from './request-context.js';
 
 export type Result<T> =
   | { ok: true; data: T }
@@ -25,8 +26,13 @@ export interface Agent {
   status: 'idle' | 'working' | 'error';
   model: string | null;       // pinned LLM model (e.g. 'claude-opus-5', 'grok-4.6'); null = runtime default
   effort: EffortLevel | null; // pinned reasoning effort; null = runtime default
+  owner_id?: string | null;          // lease holder (user id); null = free
+  lease_expires_at?: string | null;  // ISO; null = no expiry while owned
+  lease_reason?: LeaseReason | null;
   created_at: string;
 }
+
+export type LeaseReason = 'reserved' | 'task';
 
 export interface Task {
   id: string;
@@ -36,6 +42,7 @@ export interface Task {
   priority: number;
   created_at: string;
   goal_id: string | null;
+  created_by?: string | null;  // user id of the creator; null = system/legacy
 }
 
 export const GOAL_STATUSES = ['active', 'done', 'failed', 'cancelled'] as const;
@@ -47,6 +54,7 @@ export interface Goal {
   status: GoalStatus;
   workspace: string | null;
   external_id: string | null;
+  created_by?: string | null;
   created_at: string;
 }
 
@@ -213,7 +221,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -229,6 +237,9 @@ const SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'idle',
     model TEXT,
     effort TEXT,
+    owner_id TEXT,
+    lease_expires_at TEXT,
+    lease_reason TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -238,6 +249,7 @@ const SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'active',
     workspace TEXT,
     external_id TEXT,
+    created_by TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_goals_external ON goals(external_id);
@@ -250,7 +262,8 @@ const SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'pending',
     priority INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    goal_id TEXT REFERENCES goals(id)
+    goal_id TEXT REFERENCES goals(id),
+    created_by TEXT
   );
 
   CREATE TABLE IF NOT EXISTS task_dependencies (
@@ -634,6 +647,16 @@ const MIGRATIONS: Record<number, string> = {
     );
     ALTER TABLE events ADD COLUMN actor_id TEXT;
   `,
+  // v12 → v13: Agent leases (multi-orchestrator spec §2) + task/goal creator.
+  // owner_id has no FK: the synthetic 'owner' (fallback token) is not a
+  // users row; revokeUser() releases a deleted user's leases instead.
+  12: `
+    ALTER TABLE agents ADD COLUMN owner_id TEXT;
+    ALTER TABLE agents ADD COLUMN lease_expires_at TEXT;
+    ALTER TABLE agents ADD COLUMN lease_reason TEXT;
+    ALTER TABLE tasks ADD COLUMN created_by TEXT;
+    ALTER TABLE goals ADD COLUMN created_by TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -774,13 +797,16 @@ export function insertTask(task: {
   prompt: string;
   priority?: number;
   goal_id?: string | null;
+  /** Creator user id; omitted → the in-flight request's user (null outside a request). */
+  created_by?: string | null;
 }): Result<Task> {
   const id = generateId();
+  const createdBy = task.created_by === undefined ? currentActorId() : task.created_by;
   try {
     getDb().prepare(`
-      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null);
+      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy);
     const row = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task;
     return { ok: true, data: row };
   } catch (e) {
@@ -825,18 +851,21 @@ export function insertGoal(goal: {
   status?: GoalStatus;
   workspace?: string | null;
   external_id?: string | null;
+  created_by?: string | null;
 }): Result<Goal> {
   const id = generateId();
+  const createdBy = goal.created_by === undefined ? currentActorId() : goal.created_by;
   try {
     getDb().prepare(`
-      INSERT INTO goals (id, title, status, workspace, external_id)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO goals (id, title, status, workspace, external_id, created_by)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       id,
       goal.title,
       goal.status ?? 'active',
       goal.workspace ?? null,
       goal.external_id ?? null,
+      createdBy,
     );
     const row = getDb().prepare('SELECT * FROM goals WHERE id = ?').get(id) as Goal;
     return { ok: true, data: row };
@@ -1075,6 +1104,39 @@ export function listEvents(filters?: {
   if (filters?.limit) { sql += ' LIMIT ?'; params.push(filters.limit); }
 
   return getDb().prepare(sql).all(...params) as WaveEvent[];
+}
+
+// --- Lease helpers (spec §2) ---
+
+/**
+ * Take a lease. `onlyIfFreeOrOwnedBy` makes it atomic: the row is updated
+ * only when the agent is free or already held by that user.
+ */
+export function setAgentLease(
+  id: string,
+  lease: { owner_id: string; reason: LeaseReason; expires_at: string | null },
+): Result<Agent> {
+  const info = getDb().prepare(`
+    UPDATE agents SET owner_id = ?, lease_reason = ?, lease_expires_at = ?
+    WHERE id = ? AND (owner_id IS NULL OR owner_id = ?)
+  `).run(lease.owner_id, lease.reason, lease.expires_at, id, lease.owner_id);
+  if (info.changes === 0) {
+    const existing = getAgent(id);
+    if (!existing.ok) return existing;
+    return { ok: false, error: `Agent ${existing.data.name} is owned by another user` };
+  }
+  return getAgent(id);
+}
+
+export function clearAgentLease(id: string): Result<Agent> {
+  getDb().prepare(`
+    UPDATE agents SET owner_id = NULL, lease_reason = NULL, lease_expires_at = NULL WHERE id = ?
+  `).run(id);
+  return getAgent(id);
+}
+
+export function listAgentsOwnedBy(userId: string): Agent[] {
+  return getDb().prepare('SELECT * FROM agents WHERE owner_id = ?').all(userId) as Agent[];
 }
 
 // --- User helpers ---

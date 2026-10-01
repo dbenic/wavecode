@@ -11,7 +11,8 @@ import * as sessionManager from '../session-manager.js';
 import * as outputWatcher from '../output-watcher.js';
 import * as validate from '../validate.js';
 import logger from '../logger.js';
-import type { NodeAppEnv } from '../auth.js';
+import { getActingUser, type NodeAppEnv } from '../auth.js';
+import * as leases from '../leases.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
@@ -69,6 +70,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     const agentResult = sessionManager.get(c.req.param('id'));
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
 
     if (body.raw) {
       const result = sessionManager.sendRawKeys(agentResult.data.id, body.text);
@@ -137,6 +140,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const agentId = c.req.param('id');
     const agentResult = getAgent(agentId);
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
 
     outputWatcher.stopWatching(agentId);
     sessionManager.detach(agentId);
@@ -152,6 +157,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
 
     const agent = agentResult.data;
+    const access = leases.checkAgentAccess(agent, getActingUser(c));
+    if (!access.ok) return c.json({ error: access.error }, 403);
     outputWatcher.stopWatching(agent.id);
 
     const result = sessionManager.kill(agent.id);
@@ -164,6 +171,25 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     logger.info({ agentId: agent.id, session: agent.tmux_session }, 'Agent killed');
     return c.json({ ok: true });
+  });
+
+  app.post('/api/agents/:id/reserve', async (c) => {
+    const body = await c.req.json<{ hours?: unknown }>().catch(() => ({} as { hours?: unknown }));
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+
+    const result = leases.reserveAgent(agentResult.data.id, getActingUser(c), body?.hours);
+    if (!result.ok) return c.json({ error: result.error }, leases.leaseErrorStatus(result.code));
+    return c.json(enrichAgent(result.data));
+  });
+
+  app.post('/api/agents/:id/release', (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+
+    const result = leases.releaseAgent(agentResult.data.id, getActingUser(c));
+    if (!result.ok) return c.json({ error: result.error }, leases.leaseErrorStatus(result.code));
+    return c.json(enrichAgent(result.data));
   });
 
   app.patch('/api/agents/:id', async (c) => {
@@ -234,6 +260,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 function enrichAgent(agent: Agent) {
   return {
     ...agent,
+    owner: agent.owner_id ? leases.userName(agent.owner_id) : null,
     lastOutputLine: outputWatcher.getLastOutputLine(agent.id),
     outputVersion: outputWatcher.getOutputVersion(agent.id),
     watching: outputWatcher.isWatching(agent.id),

@@ -27,7 +27,8 @@ Read in this order:
 
 | Concern | Files |
 |---|---|
-| Schema + CRUD (SQLite, WAL, migrations v1→v12) | `db.ts` |
+| Schema + CRUD (SQLite, WAL, migrations v1→v13) | `db.ts` |
+| Agent leases: reserve/release, rule-2 guards, auto-lease, expiry sweep | `leases.ts` (+ dispatcher, health-monitor, routes) |
 | Identity: users, hashed tokens, roles, request actor | `users.ts`, `auth.ts`, `request-context.ts`, `routes/users.ts` |
 | Agent lifecycle: scan/adopt/spawn/kill/detach/stopAll | `session-manager.ts`, `runtime-launcher.ts`, `tmux.ts` |
 | Run execution (spawned agents, ndjson over Unix socket) | `runner.ts` |

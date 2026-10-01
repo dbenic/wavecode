@@ -163,7 +163,7 @@ describe('events.actor_id — attribution', () => {
   });
 });
 
-describe('migration v11 → v12', () => {
+describe('migration v11 → current', () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -182,6 +182,9 @@ describe('migration v11 → v12', () => {
     raw.exec(`
       CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
       INSERT INTO events (type, entity_type, entity_id) VALUES ('run.started', 'run', 'r1');
+      CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, runtime TEXT NOT NULL, tmux_session TEXT NOT NULL, workspace TEXT, mode TEXT NOT NULL DEFAULT 'adopted', status TEXT NOT NULL DEFAULT 'idle', model TEXT, effort TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE goals (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', workspace TEXT, external_id TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, agent_id TEXT, prompt TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')), goal_id TEXT);
     `);
     raw.pragma('user_version = 11');
     raw.close();
@@ -193,6 +196,11 @@ describe('migration v11 → v12', () => {
     expect(db.pragma('user_version', { simple: true })).toBe(mod.SCHEMA_VERSION);
     const userCols = (db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map((c) => c.name);
     expect(userCols).toEqual(expect.arrayContaining(['id', 'name', 'role', 'color', 'token_hash', 'created_at']));
+
+    const cols = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    expect(cols('agents')).toEqual(expect.arrayContaining(['owner_id', 'lease_expires_at', 'lease_reason']));
+    expect(cols('tasks')).toContain('created_by');
+    expect(cols('goals')).toContain('created_by');
 
     const events = mod.listEvents();
     expect(events).toHaveLength(1);

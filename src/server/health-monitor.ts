@@ -7,6 +7,7 @@ import * as taskDispatcher from './task-dispatcher.js';
 import * as tmux from './tmux.js';
 import { resultPathForRun, settleRunResultFile, shouldAutoRetryFailedRun } from './run-result.js';
 import { isFileRunnerSeat } from './file-runner.js';
+import { sweepLeases } from './leases.js';
 import logger from './logger.js';
 
 interface AgentHealthState {
@@ -38,7 +39,17 @@ export function stopHealthMonitor(): void {
   }
 }
 
-async function checkAll(): Promise<void> {
+/** One monitor tick. Exported for tests. */
+export async function checkAll(): Promise<void> {
+  // Lease expiry (spec §2 rule 5): idle agents only — working agents keep
+  // their lease until they go idle.
+  try {
+    const released = sweepLeases();
+    if (released.length > 0) setTimeout(() => void taskDispatcher.dispatchNext(), 0);
+  } catch (e) {
+    logger.error({ error: (e as Error).message }, 'Lease sweep error');
+  }
+
   const agents = listAgents();
   const config = getConfig();
   const hangTimeoutMs = config.autonomy.hang_timeout_min * 60 * 1000;

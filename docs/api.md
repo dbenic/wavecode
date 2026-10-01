@@ -91,6 +91,22 @@ Kill a spawned agent: stop its runner, terminate the tmux session, remove the
 record. Returns 400 for adopted agents (detach those instead). Emits
 `agent.killed`.
 
+### Agent leases (spec §2)
+
+An agent is **free** (`owner_id: null`) or **owned** by one user. `GET /api/agents` rows include `owner` (name), `owner_id`, `lease_reason` (`reserved` | `task`), `lease_expires_at`.
+
+- Owned agents: only the owner or an admin may `send`, `kill`, detach (`DELETE`), or be a review `handoff` target. Others get `403 {"error":"Agent <name> is owned by <owner>"}`. Reads stay open to everyone.
+- Dispatch only matches a task to a free agent or one owned by the task's creator (`tasks.created_by`). Dispatching to a free agent leases it to the creator (`lease_reason: task`) until the run ends and the agent is idle.
+- A task queued with `agent_id` of an agent someone else owns is accepted (`201`, response includes `waiting_for_agent: {owner}`), stays `pending`, and emits `task.waiting_for_agent` once per owner.
+- The health monitor (30s) releases expired reservations on idle agents (`agent.lease_expired`); working agents keep the lease until idle.
+- Revoking a user releases their leases.
+
+### `POST /api/agents/:id/reserve`
+Body `{ hours? }` — default 4, max 24. Reserving your own agent extends it; an agent owned by someone else → `409`. Emits `agent.reserved {owner, until}`.
+
+### `POST /api/agents/:id/release`
+Owner or admin (`403` otherwise). Emits `agent.released {by, reason}`.
+
 ### `POST /api/agents/:id/send`
 Send text or a raw tmux key sequence to an agent. This is prompt-only —
 it does **not** create a task or run. CLI `wavecode send` instead POSTs
@@ -117,7 +133,7 @@ session running.
 
 ## System
 
-### `POST /api/system/stop-all`
+### `POST /api/system/stop-all` (admin)
 Emergency stop: kill every spawned agent, send Ctrl+C to adopted ones, and
 disable `autonomy.auto_dispatch`. Returns
 `{ ok, killed: string[], interrupted: string[], errors, auto_dispatch_disabled: true }`.
