@@ -217,3 +217,20 @@ export function extractReply(runtime: string, pane: string, prompt?: string | nu
   const extract = REPLY_EXTRACTORS[runtime] ?? REPLY_EXTRACTORS[runtime.split('-')[0]] ?? genericExtract;
   return { text: clipReply(extract(region).trim()), anchored };
 }
+
+/**
+ * Has the agent finished its turn? Per-runtime end-of-turn markers in the
+ * pane tail. Used when capturing from an agent that is still "working"
+ * (background jobs): without the marker, stable text is only a pause
+ * between steps, not the answer.
+ */
+const TURN_END: Record<string, RegExp> = {
+  'claude-code': /^[✻✶✳✢✽✺]\s.*\b(done|Worked for|Cogitated|Brewed|Baked|Churned|Levitated|Ionized)\b/m,
+  codex: /(^|\n)\s*─*\s*Worked for\b/,
+};
+
+export function turnEnded(runtime: string, pane: string): boolean {
+  const re = TURN_END[runtime] ?? TURN_END[runtime.split('-')[0]];
+  if (!re) return true; // unknown runtime: no marker to wait for
+  return re.test(stripAnsi(pane));
+}

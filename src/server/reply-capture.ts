@@ -25,7 +25,7 @@ import {
 import { emit } from './event-bus.js';
 import { isFileRunnerSeat } from './file-runner.js';
 import logger from './logger.js';
-import { extractReply } from './reply-extractors.js';
+import { extractReply, turnEnded } from './reply-extractors.js';
 import { capturePane } from './session-manager.js';
 
 export const REPLY_TIMEOUT_MS = 10 * 60_000;
@@ -224,7 +224,10 @@ export function onAgentTick(agentId: string, opts: { now?: number } = {}): boole
   if (pane === null) return false;
 
   const reply = extractReply(agentResult.data.runtime, pane, p.prompt);
-  if (!isNewAnswer(p, reply)) {
+  // Still working: text that stops changing can be a pause between tool
+  // calls ("Starting the baseline in the background…"), not the answer —
+  // the runtime must have printed its end-of-turn marker.
+  if (!isNewAnswer(p, reply) || !turnEnded(agentResult.data.runtime, pane)) {
     p.stableText = undefined;
     p.stableSince = undefined;
     return false;

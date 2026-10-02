@@ -115,19 +115,38 @@ describe('reply-capture.ts', () => {
 
   it('an agent that answers but keeps working: the reply is posted once stable for 6s (no idle edge)', () => {
     rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', promptEventId: 5, now: 1000 });
-    paneHarness.text = ANSWER + '\n◦ Working (3h 02m • esc to interrupt) · 2 background terminals running';
+    paneHarness.text = ANSWER + '\n✻ Cogitated for 4s · done 11:28 PM\n◦ Working (3h 02m • esc to interrupt) · 2 background terminals running';
     expect(rc.onAgentTick(pm.id, { now: 2000 })).toBe(false);   // first sighting
     expect(rc.onAgentTick(pm.id, { now: 5000 })).toBe(false);   // stable, but < 6s
-    expect(rc.onAgentTick(pm.id, { now: 8500 })).toBe(true);    // stable ≥ 6s → posted
+    expect(rc.onAgentTick(pm.id, { now: 8500 })).toBe(true);    // stable ≥ 6s and the turn ended → posted
     expect(replies()).toEqual([expect.objectContaining({ ref_prompt_event_id: 5, truncated: 0 })]);
     expect(replies()[0].message).toMatch(/invoices suite/);
+  });
+
+  it('a mid-turn pause is never posted as the reply: the turn-end marker is required while working', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'get me the open bug table', promptEventId: 7, now: 1000 });
+    paneHarness.text = [
+      '> get me the open bug table',
+      '',
+      "● I'll check how many documents share this issue before building the table.",
+      '  Starting the extraction baseline in the background before answering:',
+      '● Running extraction gate… (12s)',
+    ].join('\n');
+    expect(rc.onAgentTick(pm.id, { now: 2000 })).toBe(false);
+    expect(rc.onAgentTick(pm.id, { now: 9000 })).toBe(false);   // stable for 7s but no "✻ … done" → still working
+    expect(rc.onAgentTick(pm.id, { now: 16000 })).toBe(false);
+    expect(replies()).toEqual([]);
+    paneHarness.text += '\n● Here is the table: 4 open bugs.\n\n✻ Worked for 2m 10s · done 10:41 AM';
+    expect(rc.onAgentTick(pm.id, { now: 17000 })).toBe(false);  // new text → clock restarts
+    expect(rc.onAgentTick(pm.id, { now: 24000 })).toBe(true);
+    expect(replies()[0].message).toMatch(/Here is the table/);
   });
 
   it('a still-changing answer is not posted while working', () => {
     rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', promptEventId: 6, now: 1000 });
     paneHarness.text = ANSWER;
     expect(rc.onAgentTick(pm.id, { now: 2000 })).toBe(false);
-    paneHarness.text = ANSWER.replace('for T12.', 'for T12 and T13.'); // text changed → clock restarts
+    paneHarness.text = ANSWER.replace('for T12.', 'for T12 and T13.') + '\n✻ Worked for 9s · done 10:41 AM'; // text changed → clock restarts
     expect(rc.onAgentTick(pm.id, { now: 9000 })).toBe(false);
     expect(rc.onAgentTick(pm.id, { now: 16000 })).toBe(true);
     expect(replies()).toHaveLength(1);
