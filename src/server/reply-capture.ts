@@ -44,6 +44,13 @@ export interface PendingReply {
   /** Last anchored extraction seen while the agent was still working, and when it first looked like that. */
   stableText?: string;
   stableSince?: number;
+  /**
+   * The pane's final prose at the moment the prompt was sent. TUIs run on the
+   * alternate screen (no scrollback), so a long answer scrolls the prompt echo
+   * off the visible window and the anchor is lost; an answer that DIFFERS
+   * from this baseline is still new, while a previous answer equals it.
+   */
+  baselineText: string;
 }
 
 const pending = new Map<string, PendingReply>();
@@ -87,6 +94,7 @@ export function trackPrompt(opts: {
     );
   }
 
+  const paneNow = capture(agent);
   pending.set(agent.id, {
     agentId: agent.id,
     actorId: opts.actorId,
@@ -94,7 +102,14 @@ export function trackPrompt(opts: {
     promptEventId: opts.promptEventId ?? null,
     taskId: opts.taskId ?? null,
     sentAt: opts.now ?? Date.now(),
+    baselineText: paneNow ? extractReply(agent.runtime, paneNow, null).text : '',
   });
+}
+
+/** An extraction counts as the answer when it is anchored to the echo, or is new text since the prompt went out. */
+function isNewAnswer(p: PendingReply, reply: { text: string; anchored: boolean }): boolean {
+  if (!reply.text) return false;
+  return reply.anchored || reply.text !== p.baselineText;
 }
 
 /**
@@ -169,10 +184,10 @@ export function onAgentIdle(
 
   const reply = extractReply(agentResult.data.runtime, pane, p.prompt);
   if (!reply.text) return false; // nothing yet — keep waiting (the 10-minute fallback still applies)
-  // Without the prompt echo in the pane we cannot tell this answer from a
-  // previous one (echo scrolled out, /clear, dialog) — even on the idle
-  // edge. Leave it to the 10-minute fallback, which marks it truncated.
-  if (!reply.anchored) return false;
+  // Unanchored (echo scrolled off the alternate screen, /clear, dialog): only
+  // text that differs from what was on screen at send time is a new answer;
+  // a previous answer equals the baseline and is left to the fallback.
+  if (!isNewAnswer(p, reply)) return false;
 
   persist(p, agentResult.data, reply.text, false);
   return true;
@@ -198,7 +213,7 @@ export function onAgentTick(agentId: string, opts: { now?: number } = {}): boole
   if (pane === null) return false;
 
   const reply = extractReply(agentResult.data.runtime, pane, p.prompt);
-  if (!reply.anchored || !reply.text) {
+  if (!isNewAnswer(p, reply)) {
     p.stableText = undefined;
     p.stableSince = undefined;
     return false;

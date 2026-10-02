@@ -101,11 +101,12 @@ describe('reply-capture.ts', () => {
   });
 
   it('quiet idle (no working edge) resolves only after 6s, on a stable pane, with the echo found', () => {
+    paneHarness.text = '● Something unrelated.\n❯ '; // what was on screen when the prompt went out
     rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', now: 0 });
     paneHarness.text = ANSWER;
     expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: false, now: 3_000 })).toBe(false); // too soon
     expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: true, now: 7_000 })).toBe(false);  // still streaming
-    paneHarness.text = '● Something unrelated.'; // echo not visible → not trusted without an idle edge
+    paneHarness.text = '● Something unrelated.'; // the pre-prompt text again → not a new answer
     expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: false, now: 7_000 })).toBe(false);
     paneHarness.text = ANSWER;
     expect(rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: false, now: 7_000 })).toBe(true);
@@ -148,12 +149,33 @@ describe('reply-capture.ts', () => {
     ]);
   });
 
-  it('on the idle edge an answer without the prompt echo is NOT trusted (could be a previous answer)', () => {
+  it('on the idle edge a PREVIOUS answer (on screen when the prompt was sent) is never mistaken for the reply', () => {
+    paneHarness.text = '● Three agents are idle and nothing is blocked.\n❯ '; // the old answer is on screen
     rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is the deploy status?', promptEventId: 3, now: 1000 });
-    paneHarness.text = '● Three agents are idle and nothing is blocked.'; // old answer, no echo of the new prompt
+    // echo scrolled off the alternate screen; the pane still shows the old answer
     expect(rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true, now: 2000 })).toBe(false);
     expect(replies()).toEqual([]);
     expect(rc.getPendingReply(pm.id)).toBeTruthy(); // left for the 10-minute fallback
+  });
+
+  it('a long answer whose prompt echo scrolled off the alternate screen is still captured (new text since send)', () => {
+    paneHarness.text = '● Three agents are idle and nothing is blocked.\n❯ ';
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'About @chatgpt-countix: status', promptEventId: 4, now: 1000 });
+    // 25-line window: no "> About @chatgpt-countix: status" echo visible, only the tail of the new answer
+    paneHarness.text = [
+      '    the build passing. It also reports that the imports/JCD slice is frozen.',
+      '  - Review: I have no RESULT line or review verdict for any of this.',
+      '',
+      '  Do you want me to check again once the API suite finishes?',
+      '  [ ] Check again in about 20 minutes',
+      '  [ ] No, I will ask when I need it',
+      '',
+      '✻ Brewed for 6s · done 8:10 AM',
+      '❯ ',
+    ].join('\n');
+    expect(rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true, now: 9000 })).toBe(true);
+    expect(replies()[0].message).toMatch(/no RESULT line/);
+    expect(replies()[0].truncated).toBe(0);
   });
 
   it('after 10 minutes without idle, posts what is there as truncated — never silence', () => {

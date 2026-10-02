@@ -14,6 +14,8 @@ const pane = { state: 'alive' as 'alive' | 'dead' | 'unknown' };
 vi.mock('../session-manager.js', async () => {
   const db = await vi.importActual<typeof import('../db.js')>('../db.js');
   return {
+    // reply-capture snapshots the pane when a prompt is tracked (baseline for unanchored answers)
+    capturePane: vi.fn(() => ({ ok: true, data: '' })),
     get: (idOrName: string) => {
       const byId = db.getAgent(idOrName);
       return byId.ok ? byId : db.getAgentByName(idOrName);

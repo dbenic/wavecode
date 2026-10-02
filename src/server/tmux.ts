@@ -96,12 +96,19 @@ export function listSessions(): Result<Array<{ name: string; created: number; la
   }
 }
 
+export const SPAWN_COLS = 200;
+export const SPAWN_ROWS = 80;
+
 export function newSession(sessionName: string, workDir: string, command?: string): void {
   // Always create with a shell first — if a command is passed directly to
   // new-session and it exits (even on error), tmux destroys the session
   // immediately, making failures invisible. Instead we create a shell session
   // and then send the command as keystrokes so the session survives errors.
-  const args = ['new-session', '-d', '-s', sessionName, '-c', workDir];
+  // A detached session defaults to 80x24. TUIs run on the alternate screen
+  // (no scrollback), so the visible window is all capture-pane ever sees —
+  // give spawned sessions a tall, wide virtual terminal so long answers and
+  // the prompt echo stay on screen together.
+  const args = ['new-session', '-d', '-s', sessionName, '-c', workDir, '-x', String(SPAWN_COLS), '-y', String(SPAWN_ROWS)];
   tmuxExec(args);
 
   if (command) {
