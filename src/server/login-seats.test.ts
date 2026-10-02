@@ -264,7 +264,7 @@ describe('login seats', () => {
       // listed as free (other subscription) for ana
       const listed = await call(app, 'GET', '/api/agents', ana.token);
       const a3 = listed.json.find((a: { name: string }) => a.name === 'a3');
-      expect(a3).toMatchObject({ profile: 'bob', owner: null, profile_compatible: false });
+      expect(a3).toMatchObject({ profile: 'bob', owner: null, profile_compatible: false, subscription: { account: null, plan: null } });
     });
   });
 });

@@ -111,6 +111,30 @@ describe('AgentView', () => {
     expect(outputFetchCount).toBe(2);
   });
 
+  it('the header badge says whose subscription the agent runs on (account · plan), falling back to the profile name', async () => {
+    const useApi = await import('../hooks/useApi');
+    const agent = { ...makeAgent(), runtime: 'claude-code', profile: 'denis', subscription: { account: 'denis@example.com', plan: 'Claude Max' } };
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/agents/agent-1') return agent as never;
+      if (path === '/agents') return [agent] as never;
+      if (path === '/enhance/status') return { available: false } as never;
+      if (path.startsWith('/agents/agent-1/output')) return { output: '', html: '' } as never;
+      return [] as never;
+    });
+    render(
+      <MemoryRouter initialEntries={['/agent/agent-1']}>
+        <Routes><Route path="/agent/:id" element={<AgentView />} /></Routes>
+      </MemoryRouter>,
+    );
+    const badge = await screen.findByText('denis@example.com · Claude Max');
+    expect(badge).toHaveAttribute('title', 'Subscription: denis@example.com · Claude Max (profile denis)');
+
+    const { subscriptionLabel } = await import('./AgentView');
+    expect(subscriptionLabel({ profile: 'ana', subscription: { account: null, plan: null } })).toBe('ana');
+    expect(subscriptionLabel({ profile: null, subscription: { account: null, plan: 'ChatGPT Plus' } })).toBe('ChatGPT Plus');
+    expect(subscriptionLabel({ profile: null, subscription: undefined })).toBeNull();
+  });
+
   it('uses attached workspace paths in both direct and AI sends', async () => {
     const user = userEvent.setup();
     const useApi = await import('../hooks/useApi');

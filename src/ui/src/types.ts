@@ -25,6 +25,8 @@ export interface Agent {
   /** Credential profile (spec §5) and whether it is the current user's subscription. */
   profile?: string | null;
   profile_compatible?: boolean;
+  /** Account label and plan of the login the agent runs on (null = unknown). */
+  subscription?: { account: string | null; plan: string | null };
   /** 'orchestrator' = the PM seat (spec §5b). */
   role?: 'orchestrator' | null;
   /** True for the one agent the composer targets by default. */

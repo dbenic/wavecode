@@ -11,6 +11,23 @@ import { extractMdPaths } from '../components/MdFileActions';
 import AgentGuidesBar from '../components/AgentGuidesBar';
 import DecisionsBar from '../components/DecisionsBar';
 
+/**
+ * "denis@… · Claude Max": whose subscription the agent runs on. Falls back to
+ * the profile name (or "home login") so the badge always says *which* login
+ * even before anyone has signed that profile in.
+ */
+export function subscriptionLabel(agent: Pick<Agent, 'profile' | 'subscription'>): string | null {
+  const account = agent.subscription?.account ?? agent.profile ?? null;
+  const plan = agent.subscription?.plan ?? null;
+  if (!account && !plan) return null;
+  return [account, plan].filter(Boolean).join(' · ');
+}
+
+function subscriptionTitle(agent: Pick<Agent, 'profile' | 'subscription'>): string {
+  const login = agent.profile ? `profile ${agent.profile}` : 'home-dir login';
+  return `Subscription: ${subscriptionLabel(agent) ?? 'unknown'} (${login})`;
+}
+
 export default function AgentView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -447,6 +464,14 @@ export default function AgentView() {
                 {(agent.model || agent.effort) && (
                   <span className="rounded border border-indigo-500/40 bg-indigo-950/60 px-1.5 py-px text-[10px] font-semibold text-indigo-200 normal-case">
                     {agent.model ?? 'default model'}{agent.effort ? ` @${agent.effort}` : ''}
+                  </span>
+                )}
+                {subscriptionLabel(agent) && (
+                  <span
+                    className="rounded border border-amber-500/40 bg-amber-950/50 px-1.5 py-px text-[10px] font-semibold text-amber-200 normal-case truncate max-w-[18rem]"
+                    title={subscriptionTitle(agent)}
+                  >
+                    {subscriptionLabel(agent)}
                   </span>
                 )}
               </h1>
