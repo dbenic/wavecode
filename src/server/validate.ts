@@ -127,9 +127,13 @@ export function validateTaskBody(body: {
   depends_on?: string[];
   goal_id?: string;
   hold?: boolean;
+  reviewer?: string;
 }): string | null {
   if (!body.prompt || typeof body.prompt !== 'string') {
     return 'prompt is required';
+  }
+  if (body.reviewer !== undefined && (typeof body.reviewer !== 'string' || !body.reviewer.trim())) {
+    return 'reviewer must be an agent (@alias, name or id)';
   }
   if (body.prompt.length > MAX_PROMPT_LENGTH) {
     return `prompt exceeds maximum length (${MAX_PROMPT_LENGTH} chars)`;

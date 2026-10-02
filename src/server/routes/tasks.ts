@@ -10,9 +10,12 @@ import {
   getRun,
   listTasks,
   updateTaskStatus,
+  updateTaskReviewer,
   listRuns,
   findGoal,
 } from '../db.js';
+import * as codeReview from '../code-review.js';
+import { canMutate } from '../users.js';
 import { getConfig } from '../config.js';
 import { emit } from '../event-bus.js';
 import * as taskDispatcher from '../task-dispatcher.js';
@@ -86,6 +89,8 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       room?: string;
       /** Dispatch template: build (default) | review | verify | spec. */
       template?: string;
+      /** Explicit reviewer for this task's runs (@alias, name or id) — ladder rung 1. */
+      reviewer?: string;
     }>();
 
     const taskValidation = validate.validateTaskBody(body);
@@ -108,6 +113,16 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
       if (!access.ok) waitingFor = leases.userName(agentResult.data.owner_id!);
       resolvedAgentId = agentResult.data.id;
+    }
+
+    let resolvedReviewerId: string | null = null;
+    if (body.reviewer !== undefined) {
+      const reviewerResult = resolveAgent(body.reviewer.trim());
+      if (!reviewerResult.ok) return c.json({ error: `Reviewer not found: ${body.reviewer}` }, 400);
+      if (resolvedAgentId && reviewerResult.data.id === resolvedAgentId) {
+        return c.json({ error: 'The reviewer cannot be the agent doing the task' }, 400);
+      }
+      resolvedReviewerId = reviewerResult.data.id;
     }
 
     let resolvedGoalId: string | null = null;
@@ -156,6 +171,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
           goal_id: resolvedGoalId,
           ...(taskRoom ? { room: taskRoom } : {}),
           ...(body.template ? { template: body.template } : {}),
+          ...(resolvedReviewerId ? { reviewer: resolvedReviewerId } : {}),
         });
         if (!result.ok) {
           throw new Error(result.error);
@@ -194,6 +210,47 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       dependencies: dependencyIds,
       ...(waitingFor ? { waiting_for_agent: { owner: waitingFor } } : {}),
     }, 201);
+  });
+
+  app.post('/api/tasks/:id/reviewer', async (c) => {
+    // `#review #12 @opus`: name the reviewer for a task. If its latest run is
+    // being reviewed or waiting for a reviewer, that review moves to the agent
+    // now; if the run finished unreviewed, the review starts now.
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden: observers cannot assign reviewers' }, 403);
+    const taskResult = getTask(c.req.param('id'));
+    if (!taskResult.ok) return c.json({ error: taskResult.error }, 404);
+    const body = await c.req.json<{ reviewer?: string | null }>().catch(() => ({} as { reviewer?: string | null }));
+    if (body.reviewer !== null && (typeof body.reviewer !== 'string' || !body.reviewer.trim())) {
+      return c.json({ error: 'reviewer is required (@alias, name or id), or null to clear' }, 400);
+    }
+    let reviewerId: string | null = null;
+    if (body.reviewer) {
+      const reviewerResult = resolveAgent(body.reviewer.trim());
+      if (!reviewerResult.ok) return c.json({ error: `Reviewer not found: ${body.reviewer}` }, 400);
+      if (reviewerResult.data.id === taskResult.data.agent_id) {
+        return c.json({ error: 'The reviewer cannot be the agent doing the task' }, 400);
+      }
+      reviewerId = reviewerResult.data.id;
+    }
+    const updated = updateTaskReviewer(taskResult.data.id, reviewerId);
+    if (!updated.ok) return c.json({ error: updated.error }, 400);
+
+    let review: unknown = null;
+    if (reviewerId) {
+      const latest = listRuns({ task_id: taskResult.data.id })[0];
+      if (latest && latest.review_status === 'pending') {
+        const open = codeReview.getReviewsForRun(latest.id).find((r) => r.status === 'reviewing' || r.status === 'pending');
+        const result = open
+          ? await codeReview.reassignReview(open.id, reviewerId, user.name)
+          : latest.status === 'done' && !codeReview.getLatestCompletedReview(latest.id)
+            ? await codeReview.startReviewByLadder(latest, 0, reviewerId)
+            : null;
+        if (result && !result.ok) return c.json({ error: result.error, task: updated.data }, 400);
+        review = result?.ok ? result.data : null;
+      }
+    }
+    return c.json({ task: updated.data, review });
   });
 
   app.post('/api/tasks/:id/retry', (c) => {

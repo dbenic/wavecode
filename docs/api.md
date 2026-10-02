@@ -398,6 +398,22 @@ Request self-review or cross-model review.
 Body:
 `{ type?: "self" | "cross-model", reviewer_agent_id?: string, reviewer_runtime?: string }`
 
+`reviewer_agent_id` accepts `@alias`, name or id (ladder rung 1; 400 if it is
+the author). With neither reviewer field the **assignment ladder** picks
+(task reviewer → `default_reviewer` → free tagged `review` → any free agent);
+with nobody free the run keeps a pending placeholder, `review.needs_reviewer`
+is emitted with candidates, and the call returns 409.
+
+### `POST /api/ai-reviews/:reviewId/reassign`
+Move a running or waiting review to another agent (the thread's "→ @x" chip).
+Body: `{ reviewer: "@alias | name | id" }`. The old row closes as `failed`
+with a note; a new review starts at the same fix round. Observers: 403.
+
+### `POST /api/tasks/:id/reviewer`
+`#review #12 @opus`: set the task's reviewer (`{ reviewer: "@x" | null }`).
+If the task's latest run is being reviewed or waiting, that review moves now;
+if it finished unreviewed, the review starts now. Returns `{ task, review }`.
+
 ### `GET /api/reviews/:runId/ai-reviews`
 List AI reviews for a run.
 

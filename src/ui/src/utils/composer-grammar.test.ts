@@ -34,6 +34,13 @@ describe('composer grammar (spec §5c)', () => {
       });
     });
 
+    it('#review #12 @toni (either order) names the reviewer for a task; malformed → the seat', () => {
+      expect(parseComposer('#review #12 @toni', ctx)).toEqual({ kind: 'review', task: tasks[2], agent: toni });
+      expect(parseComposer('#review @toni 12', ctx)).toEqual({ kind: 'review', task: tasks[2], agent: toni });
+      expect(parseComposer('#review @toni', ctx).kind).toBe('prompt');
+      expect(parseComposer('#review #12 @nobody', ctx).kind).toBe('prompt');
+    });
+
     it('an unknown #foo goes to the orchestrator seat unchanged', () => {
       expect(parseComposer('#foo do the thing', ctx)).toEqual({ kind: 'prompt', agents: [pm], text: '#foo do the thing' });
       // even when the chip points elsewhere
@@ -118,7 +125,7 @@ describe('composer grammar (spec §5c)', () => {
 
     it('# → commands; # + digits → open tasks only', () => {
       expect(suggestionsFor('#', sctx).map((s) => s.insert)).toContain('#reserve');
-      expect(suggestionsFor('#re', sctx).map((s) => s.insert)).toEqual(['#reserve', '#release']);
+      expect(suggestionsFor('#re', sctx).map((s) => s.insert)).toEqual(['#reserve', '#release', '#review']);
       expect(suggestionsFor('#1', sctx).map((s) => s.insert)).toEqual(['#12']); // #1 is done
       expect(suggestionsFor('#2', sctx)).toEqual([{ insert: '#2', label: '#2', detail: 'pending · leases' }]);
     });

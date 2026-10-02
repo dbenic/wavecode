@@ -60,6 +60,8 @@ export interface Task {
   /** Project room (spec §5e) and dispatch template kind ('build' | 'review' | 'verify' | 'spec'). */
   room?: string | null;
   template?: string | null;
+  /** Explicit reviewer agent id (assignment ladder rung 1); null = let the ladder pick. */
+  reviewer?: string | null;
 }
 
 export const GOAL_STATUSES = ['active', 'done', 'failed', 'cancelled'] as const;
@@ -259,7 +261,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -316,7 +318,8 @@ const SCHEMA_SQL = `
     created_by TEXT,
     num INTEGER,
     room TEXT,
-    template TEXT
+    template TEXT,
+    reviewer TEXT
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_num ON tasks(num) WHERE num IS NOT NULL;
 
@@ -848,6 +851,11 @@ const MIGRATIONS: Record<number, string> = {
     );
     CREATE INDEX IF NOT EXISTS idx_room_proposals_room ON room_proposals(room, status);
   `,
+  // v19 → v20: explicit reviewer on a task (assignment ladder rung 1: "you said it").
+  // An agent id; resolution alias → name → id happens at the API edge.
+  19: `
+    ALTER TABLE tasks ADD COLUMN reviewer TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -1073,14 +1081,15 @@ export function insertTask(task: {
   created_by?: string | null;
   room?: string | null;
   template?: string | null;
+  reviewer?: string | null;
 }): Result<Task> {
   const id = generateId();
   const createdBy = task.created_by === undefined ? currentActorId() : task.created_by;
   try {
     getDb().prepare(`
-      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num, room, template)
-      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks), ?, ?)
-    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy, task.room ?? null, task.template ?? null);
+      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num, room, template, reviewer)
+      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks), ?, ?, ?)
+    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy, task.room ?? null, task.template ?? null, task.reviewer ?? null);
     const row = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task;
     return { ok: true, data: row };
   } catch (e) {
@@ -1229,6 +1238,12 @@ export function getGoalWithRollup(idOrExternal: string): Result<GoalWithRollup> 
   ).get(found.data.id) as GoalRollupRow | undefined;
   if (!row) return { ok: false, error: `Goal ${idOrExternal} not found` };
   return { ok: true, data: toGoalWithRollup(row) };
+}
+
+export function updateTaskReviewer(id: string, reviewer: string | null): Result<Task> {
+  const result = getDb().prepare('UPDATE tasks SET reviewer = ? WHERE id = ?').run(reviewer, id);
+  if (result.changes === 0) return { ok: false, error: `Task ${id} not found` };
+  return getTask(id);
 }
 
 export function updateTaskStatus(id: string, status: Task['status']): Result<Task> {

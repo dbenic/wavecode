@@ -189,6 +189,33 @@ describe('thread.ts', () => {
       expect(actionIds(fixes)).toEqual(['send_fixes', 'reject']); // ana: no override (not admin)
     });
 
+    it('report ← review.ai_started with a ladder rung: who got it, why, and "→ @alt" chips to change', () => {
+      const run = makeRun(seat.id);
+      const alt = agent('grok-b');
+      const picked = item(ev('review.ai_started', 'run', run.id, {
+        review_id: 'rv-9', reviewer_agent_id: free.id, reviewer_agent: free.name, rung: 'pool', reason: 'free, other vendor',
+        alternatives: [{ id: alt.id, name: alt.name, alias: null, runtime: 'grok' }],
+      }));
+      const num = db.getTask(run.task_id);
+      expect(picked).toMatchObject({ kind: 'report', agent_id: seat.id, title: `Review of #${num.ok ? num.data.num : '?'} → @${free.name}`, body: 'picked: free, other vendor', needs_attention: false });
+      expect(picked.actions).toEqual([{ id: 'reassign', label: `→ @${alt.name}`, method: 'POST', path: '/api/ai-reviews/rv-9/reassign', body: { reviewer: alt.id } }]);
+      // explicit choice: no "picked" line
+      const named = item(ev('review.ai_started', 'run', run.id, { review_id: 'rv-10', reviewer_agent_id: free.id, rung: 'explicit', reason: 'named by you', alternatives: [] }));
+      expect(named.body).toBeNull();
+      // observers see the item but get no chips
+      expect(item(ev('review.ai_started', 'run', run.id, { review_id: 'rv-9', reviewer_agent_id: free.id, rung: 'pool', reason: 'x', alternatives: [{ id: alt.id, name: alt.name }] }), watcher).actions).toEqual([]);
+    });
+
+    it('request ← review.needs_reviewer: attention + "Review with @x" chips for candidates', () => {
+      const run = makeRun(seat.id);
+      const needs = item(ev('review.needs_reviewer', 'run', run.id, {
+        review_id: 'rv-11', fix_round: 1, reason: 'no free agent', candidates: [{ id: free.id, name: free.name, alias: null, runtime: 'claude-code' }],
+      }));
+      expect(needs).toMatchObject({ kind: 'request', agent_id: seat.id, needs_attention: true, body: 'no free agent' });
+      expect(needs.title).toMatch(/needs a reviewer \(fix round 1\)$/);
+      expect(needs.actions).toEqual([{ id: 'pick_reviewer', label: `Review with @${free.name}`, method: 'POST', path: `/api/reviews/${run.id}/ai-review`, body: { reviewer_agent_id: free.id } }]);
+    });
+
     it('task ← task.created/dispatched/completed/blocked/waiting_for_agent/failed', () => {
       const created = item(ev('task.created', 'task', 't1', { prompt: 'build auth', agent_id: null }));
       expect(created).toMatchObject({ kind: 'task', title: 'Task created', body: 'build auth', needs_attention: false, actions: [] });

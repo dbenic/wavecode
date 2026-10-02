@@ -7,7 +7,7 @@ import { presentRunResult } from '../run-result.js';
 import { presentFileRun } from '../file-runner.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
-import { isAdmin } from '../users.js';
+import { canMutate, isAdmin } from '../users.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/reviews/:runId/ai-review', async (c) => {
@@ -15,19 +15,39 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
       type?: 'self' | 'cross-model';
       reviewer_agent_id?: string;
       reviewer_runtime?: string;
-    }>().catch(() => ({}));
+    }>().catch(() => ({} as Record<string, unknown>));
 
     const runId = c.req.param('runId');
     const reviewType = (body as Record<string, unknown>).type ?? 'cross-model';
+    if (reviewType === 'self') {
+      const result = await codeReview.requestSelfReview(runId);
+      if (!result.ok) return c.json({ error: result.error }, 400);
+      return c.json(result.data);
+    }
 
-    const result = reviewType === 'self'
-      ? await codeReview.requestSelfReview(runId)
-      : await codeReview.requestCrossModelReview(
-        runId,
-        (body as Record<string, unknown>).reviewer_agent_id as string | undefined,
-        (body as Record<string, unknown>).reviewer_runtime as string | undefined,
-      );
+    const reviewerRef = (body as Record<string, unknown>).reviewer_agent_id;
+    const reviewerRuntime = (body as Record<string, unknown>).reviewer_runtime;
+    // Ladder rung 1 (explicit, alias → name → id) or, with nothing named, the
+    // ladder itself. A reviewer_runtime without an agent keeps the LLM-direct path.
+    if (typeof reviewerRef === 'string' || typeof reviewerRuntime !== 'string') {
+      const run = getRun(runId);
+      if (!run.ok) return c.json({ error: run.error }, 404);
+      const result = await codeReview.startReviewByLadder(run.data, 0, typeof reviewerRef === 'string' ? reviewerRef : null);
+      if (!result.ok) return c.json({ error: result.error }, typeof reviewerRef === 'string' ? 400 : 409);
+      return c.json(result.data);
+    }
+    const result = await codeReview.requestCrossModelReview(runId, undefined, reviewerRuntime);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json(result.data);
+  });
 
+  app.post('/api/ai-reviews/:reviewId/reassign', async (c) => {
+    // Hand a running or waiting review to another agent (thread "Change" chip, `#review #n @agent`).
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: `Forbidden: observers cannot reassign reviews` }, 403);
+    const body = await c.req.json<{ reviewer?: string }>().catch(() => ({} as { reviewer?: string }));
+    if (typeof body.reviewer !== 'string' || !body.reviewer.trim()) return c.json({ error: 'reviewer is required (@alias, name or id)' }, 400);
+    const result = await codeReview.reassignReview(c.req.param('reviewId'), body.reviewer.trim(), user.name);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
   });

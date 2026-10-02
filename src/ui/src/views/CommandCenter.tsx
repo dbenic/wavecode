@@ -370,6 +370,9 @@ export default function CommandCenter() {
       case 'tag':
         await apiPost(`/agents/${plan.agent.id}/tags`, { tag: plan.tag });
         return;
+      case 'review':
+        await apiPost(`/tasks/${plan.task.id}/reviewer`, { reviewer: plan.agent.id });
+        return;
       case 'task':
         await apiPost('/tasks', {
           prompt: plan.text,

@@ -53,6 +53,15 @@ Read in this order:
 
 ## Recently landed (see git log for detail)
 
+-1. **Reviewer assignment ladder** (`reviewer-ladder.ts`, 2026-10-02):
+   explicit → task → `default_reviewer` → free tagged `review` → any free
+   agent → "needs a reviewer" (pending placeholder, retried whenever an
+   agent goes idle). Other vendor preferred, never the author, PM seats and
+   reserved/busy/other-subscription agents are not "free". Auto picks are
+   posted in the thread with "→ @alt" chips; `#review #n @x`,
+   `POST /api/ai-reviews/:id/reassign`, `POST /api/tasks/:id/reviewer`,
+   `tasks.reviewer` (schema v20), `review.auto_pick`.
+
 0. **Per-project referee** — `projects.<name>` in config (workspace glob +
    gate command). Matching agents skip LLM `verify_completion`; promote
    requires a stored `RESULT GREEN|RED` from the referee. RED is allowed

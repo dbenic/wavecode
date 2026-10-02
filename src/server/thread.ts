@@ -18,9 +18,11 @@ import {
   getLatestEventId,
   listEvents,
   listEventsBefore,
+  getTask,
   type Agent,
   type AgentMessage,
   type Run,
+  type Task,
   type User,
   type WaveEvent,
 } from './db.js';
@@ -84,6 +86,17 @@ export class ThreadContext {
       this.agents.set(id, r.ok ? r.data : null);
     }
     return this.agents.get(id) ?? null;
+  }
+
+  private tasks = new Map<string, Task | null>();
+
+  task(id: string | null | undefined): Task | null {
+    if (!id) return null;
+    if (!this.tasks.has(id)) {
+      const r = getTask(id);
+      this.tasks.set(id, r.ok ? r.data : null);
+    }
+    return this.tasks.get(id) ?? null;
   }
 
   run(id: string): Run | null {
@@ -301,6 +314,45 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         path: `/api/reviews/${event.entity_id}/handoff`,
         body: { targetAgentId: '{agent_id}' },
       });
+    }
+    return item;
+  }
+
+  // --- reviewer assignment (ladder): who got the review and why; "Change" chips
+  if (t === 'review.ai_started' && p.rung) {
+    const run = ctx.run(event.entity_id);
+    const task = ctx.task(str(p.task_id) ?? run?.task_id);
+    const reviewer = ctx.agent(str(p.reviewer_agent_id));
+    const handle = reviewer ? `@${reviewer.alias ?? reviewer.name}` : str(p.reviewer_agent) ?? 'reviewer';
+    const round = typeof p.fix_round === 'number' && p.fix_round > 0 ? ` (fix round ${p.fix_round})` : '';
+    const item = base(event, 'report', run?.agent_id ?? null, `Review of ${task?.num ? `#${task.num}` : 'this run'} → ${handle}${round}`);
+    item.body = p.rung === 'explicit' ? null : `picked: ${str(p.reason) ?? String(p.rung)}`;
+    const reviewId = str(p.review_id);
+    item.refs = { run_id: event.entity_id, ...(reviewId ? { review_id: reviewId } : {}), ...(task ? { task_id: task.id } : {}) };
+    if (ctx.canMutate && reviewId && Array.isArray(p.alternatives)) {
+      for (const alt of p.alternatives as Array<{ id?: unknown; name?: unknown; alias?: unknown }>) {
+        if (typeof alt?.id !== 'string') continue;
+        const label = typeof alt.alias === 'string' ? alt.alias : typeof alt.name === 'string' ? alt.name : alt.id;
+        item.actions.push({ id: 'reassign', label: `→ @${label}`, method: 'POST', path: `/api/ai-reviews/${reviewId}/reassign`, body: { reviewer: alt.id } });
+      }
+    }
+    return item;
+  }
+
+  if (t === 'review.needs_reviewer') {
+    const run = ctx.run(event.entity_id);
+    const task = ctx.task(str(p.task_id) ?? run?.task_id);
+    const round = typeof p.fix_round === 'number' && p.fix_round > 0 ? ` (fix round ${p.fix_round})` : '';
+    const item = base(event, 'request', run?.agent_id ?? null, `${task?.num ? `#${task.num}` : 'Run'} needs a reviewer${round}`);
+    item.body = str(p.reason);
+    item.refs = { run_id: event.entity_id, ...(task ? { task_id: task.id } : {}) };
+    item.needs_attention = true;
+    if (ctx.canMutate && Array.isArray(p.candidates)) {
+      for (const cand of (p.candidates as Array<{ id?: unknown; name?: unknown; alias?: unknown }>).slice(0, 4)) {
+        if (typeof cand?.id !== 'string') continue;
+        const label = typeof cand.alias === 'string' ? cand.alias : typeof cand.name === 'string' ? cand.name : cand.id;
+        item.actions.push({ id: 'pick_reviewer', label: `Review with @${label}`, method: 'POST', path: `/api/reviews/${event.entity_id}/ai-review`, body: { reviewer_agent_id: cand.id } });
+      }
     }
     return item;
   }

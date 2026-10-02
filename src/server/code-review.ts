@@ -6,6 +6,7 @@ import {
   getTask,
   getAgent,
   listAgents,
+  resolveAgent,
   type Run,
   type Result,
 } from './db.js';
@@ -16,6 +17,14 @@ import * as sessionManager from './session-manager.js';
 import * as tmux from './tmux.js';
 import logger from './logger.js';
 import { recordReviewReport } from './rooms.js';
+import { pickReviewer, summarizeAgent, type ReviewerNone, type ReviewerPick, type ReviewerRung } from './reviewer-ladder.js';
+
+/** How a reviewer was chosen; recorded on the `review.ai_started` event for the thread. */
+export interface PickInfo {
+  rung: ReviewerRung;
+  reason: string;
+  alternatives?: ReturnType<typeof summarizeAgent>[];
+}
 
 // --- DB: code_reviews table ---
 
@@ -269,6 +278,7 @@ export async function requestCrossModelReview(
   reviewerAgentId?: string,
   reviewerRuntime?: string,
   fixRound: number = 0,
+  pick?: PickInfo,
 ): Promise<Result<CodeReview>> {
   const runResult = getRun(runId);
   if (!runResult.ok) return { ok: false, error: runResult.error };
@@ -294,6 +304,9 @@ export async function requestCrossModelReview(
     workspace: agent.workspace,
     changedFiles: run.changed_files,
   });
+
+  // A "needs a reviewer" placeholder for this run is resolved by this review.
+  clearPendingReviews(runId);
 
   const reviewId = generateId();
   getDb().prepare(`
@@ -346,6 +359,10 @@ VERDICT: [PASS / NEEDS FIXES / REJECT]`;
     type: 'cross-model',
     runtime,
     reviewer_agent: reviewerAgent?.name ?? 'llm-direct',
+    reviewer_agent_id: reviewerAgent?.id ?? null,
+    fix_round: fixRound,
+    task_id: run.task_id,
+    ...(pick ? { rung: pick.rung, reason: pick.reason, alternatives: pick.alternatives ?? [] } : {}),
   });
   logger.info({ reviewId, runId, runtime, reviewer: reviewerAgent?.name ?? 'llm' }, 'Cross-model review started');
 
@@ -455,15 +472,127 @@ export async function maybeAutoReview(runId: string): Promise<void> {
   if (!runResult.ok || runResult.data.status !== 'done') return;
 
   // Don't re-review a run that already has a completed or in-flight review;
-  // fix-loop rounds are triggered from onAuthorAgentIdle instead.
+  // fix-loop rounds are triggered from onAuthorAgentIdle instead. A
+  // 'pending' placeholder (needs a reviewer) is retried.
   const existing = getReviewsForRun(runId);
   if (existing.some((r) => r.status === 'reviewing' || r.status === 'done')) return;
 
-  const reviewerAgentId = resolveReviewerAgentId(runResult.data.agent_id);
-  const result = await requestCrossModelReview(runId, reviewerAgentId ?? undefined);
+  const result = await startReviewByLadder(runResult.data, 0);
   if (!result.ok) {
-    logger.warn({ runId, error: result.error }, 'Auto-review could not start');
+    logger.info({ runId, reason: result.error }, 'Auto-review is waiting for a reviewer');
   }
+}
+
+/**
+ * Start a cross-model review with the reviewer the ladder picks (see
+ * reviewer-ladder.ts). With nobody to pick, a 'pending' placeholder row is
+ * kept and `review.needs_reviewer` is emitted with candidates; the next
+ * agent to go idle, or a person picking one, resolves it.
+ */
+export async function startReviewByLadder(run: Run, fixRound: number, explicit?: string | null): Promise<Result<CodeReview>> {
+  const pick = pickReviewer(run, { explicit });
+  if (!pick.ok) {
+    markNeedsReviewer(run, fixRound, pick);
+    return { ok: false, error: pick.reason };
+  }
+  return requestCrossModelReview(run.id, pick.agent.id, undefined, fixRound, pickInfo(pick));
+}
+
+function pickInfo(pick: ReviewerPick): PickInfo {
+  return { rung: pick.rung, reason: pick.reason, alternatives: pick.alternatives.map(summarizeAgent) };
+}
+
+function pendingReviewFor(runId: string): CodeReview | undefined {
+  return getDb().prepare(`
+    SELECT * FROM code_reviews
+    WHERE run_id = ? AND status = 'pending' AND reviewer_type = 'cross-model' AND reviewer_agent_id IS NULL
+    ORDER BY created_at DESC LIMIT 1
+  `).get(runId) as CodeReview | undefined;
+}
+
+function clearPendingReviews(runId: string): void {
+  getDb().prepare(`
+    DELETE FROM code_reviews
+    WHERE run_id = ? AND status = 'pending' AND reviewer_type = 'cross-model' AND reviewer_agent_id IS NULL
+  `).run(runId);
+}
+
+function markNeedsReviewer(run: Run, fixRound: number, none: ReviewerNone): void {
+  // One placeholder per run — a second "needs a reviewer" item would be noise.
+  if (pendingReviewFor(run.id)) return;
+  const reviewId = generateId();
+  getDb().prepare(`
+    INSERT INTO code_reviews (id, run_id, reviewer_type, reviewer_agent_id, reviewer_runtime, status, fix_round)
+    VALUES (?, ?, 'cross-model', NULL, NULL, 'pending', ?)
+  `).run(reviewId, run.id, fixRound);
+  emit('review.needs_reviewer', 'run', run.id, {
+    review_id: reviewId,
+    fix_round: fixRound,
+    task_id: run.task_id,
+    reason: none.reason,
+    candidates: none.candidates.map(summarizeAgent),
+  });
+  logger.info({ runId: run.id, reason: none.reason }, 'Run needs a reviewer');
+}
+
+/**
+ * Retry every run that is waiting for a reviewer. Called when any agent goes
+ * idle — the cheap loop lives here, not in the agents.
+ */
+export async function assignPendingReviews(): Promise<void> {
+  const config = getConfig();
+  if (!config.review.auto_review) return;
+  const rows = getDb().prepare(`
+    SELECT * FROM code_reviews
+    WHERE status = 'pending' AND reviewer_type = 'cross-model' AND reviewer_agent_id IS NULL
+    ORDER BY created_at ASC
+  `).all() as CodeReview[];
+  for (const row of rows) {
+    const runResult = getRun(row.run_id);
+    if (!runResult.ok || runResult.data.review_status !== 'pending') {
+      clearPendingReviews(row.run_id); // promoted/rejected meanwhile
+      continue;
+    }
+    const pick = pickReviewer(runResult.data);
+    if (!pick.ok) continue;
+    const result = await requestCrossModelReview(row.run_id, pick.agent.id, undefined, row.fix_round, pickInfo(pick));
+    if (!result.ok) logger.warn({ runId: row.run_id, error: result.error }, 'Pending review could not start');
+  }
+}
+
+/** Fire-and-forget hook for the output watcher: an agent just went idle. */
+export function onAnyAgentIdle(): void {
+  assignPendingReviews().catch((err) => logger.debug({ error: (err as Error).message }, 'assignPendingReviews failed'));
+}
+
+/**
+ * Hand an in-flight or waiting review to another agent (the thread's
+ * "Change" chip, `#review #n @agent`). The old row is closed as 'failed'
+ * with a note; its poller stops on the next tick.
+ */
+export async function reassignReview(reviewId: string, reviewerRef: string, by: string): Promise<Result<CodeReview>> {
+  const review = getReview(reviewId);
+  if (!review) return { ok: false, error: 'Review not found' };
+  if (review.status !== 'reviewing' && review.status !== 'pending') {
+    return { ok: false, error: `Review is ${review.status}; only a running or waiting review can be reassigned` };
+  }
+  const runResult = getRun(review.run_id);
+  if (!runResult.ok) return { ok: false, error: runResult.error };
+  const target = resolveAgent(reviewerRef);
+  if (!target.ok) return { ok: false, error: target.error };
+  if (target.data.id === runResult.data.agent_id) {
+    return { ok: false, error: `${target.data.alias ?? target.data.name} wrote this run and cannot review it` };
+  }
+  if (target.data.id === review.reviewer_agent_id) return { ok: false, error: 'That agent already has this review' };
+
+  if (review.status === 'reviewing') {
+    getDb().prepare(`UPDATE code_reviews SET status = 'failed', feedback = ? WHERE id = ?`)
+      .run(`Reassigned to ${target.data.alias ?? target.data.name} by ${by}`, reviewId);
+  }
+  return requestCrossModelReview(review.run_id, target.data.id, undefined, review.fix_round, {
+    rung: 'explicit',
+    reason: `reassigned by ${by}`,
+  });
 }
 
 /**
@@ -539,15 +668,9 @@ export async function onAuthorAgentIdle(agentId: string): Promise<void> {
   const runResult = getRun(pending.run_id);
   if (!runResult.ok || runResult.data.review_status !== 'pending') return;
 
-  const reviewerAgentId = resolveReviewerAgentId(agentId);
-  const result = await requestCrossModelReview(
-    pending.run_id,
-    reviewerAgentId ?? undefined,
-    undefined,
-    pending.fix_round + 1,
-  );
+  const result = await startReviewByLadder(runResult.data, pending.fix_round + 1);
   if (!result.ok) {
-    logger.warn({ runId: pending.run_id, error: result.error }, 'Re-review after fixes could not start');
+    logger.info({ runId: pending.run_id, reason: result.error }, 'Re-review after fixes is waiting for a reviewer');
   }
 }
 
@@ -594,6 +717,11 @@ function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
 
   const timer = setInterval(() => {
     attempts++;
+    const current = getReview(reviewId);
+    if (!current || current.status !== 'reviewing') {
+      clearInterval(timer); // reassigned or finalized elsewhere
+      return;
+    }
     if (attempts > maxAttempts) {
       clearInterval(timer);
       finalizeReview(

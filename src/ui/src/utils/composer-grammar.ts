@@ -6,7 +6,7 @@
  *   @group text        prompt every agent tagged `group`
  *   @all text          broadcast on the wire
  *   @person text       message a person (their Attention inbox + phone)
- *   #reserve @x [Nh]   #release @x   #kill @x   #tag @x name
+ *   #reserve @x [Nh]   #release @x   #kill @x   #tag @x name   #review #n @x
  *   #task [@x] text [deps:#n,#m]     #promote #n
  *   #file @x name      share an uploaded file by name or id
  *   #status            ask the orchestrator seat for a status
@@ -36,6 +36,7 @@ export type Plan =
   | { kind: 'tag'; agent: Agent; tag: string }
   | { kind: 'task'; agent: Agent | null; text: string; deps: Task[] }
   | { kind: 'promote'; task: Task }
+  | { kind: 'review'; task: Task; agent: Agent }
   | { kind: 'file'; agent: Agent; name: string }
   | { kind: 'status'; seat: Agent }
   | { kind: 'none'; reason: string };
@@ -49,6 +50,7 @@ export const COMMANDS: Array<{ cmd: string; usage: string }> = [
   { cmd: 'kill', usage: '#kill @agent' },
   { cmd: 'task', usage: '#task [@agent] text [deps:#n,#m]' },
   { cmd: 'promote', usage: '#promote #n' },
+  { cmd: 'review', usage: '#review #n @agent' },
   { cmd: 'file', usage: '#file @agent name' },
   { cmd: 'status', usage: '#status' },
   { cmd: 'tag', usage: '#tag @agent group' },
@@ -121,6 +123,16 @@ function parseCommand(cmd: string, args: string[], text: string, ctx: GrammarCon
     case 'promote': {
       const task = args.length === 1 ? taskByRef(args[0], ctx.tasks) : null;
       return task ? { kind: 'promote', task } : null;
+    }
+    case 'review': {
+      // `#review #12 @opus` or `#review @opus #12`: name the reviewer for a task (ladder rung 1)
+      if (args.length !== 2) return null;
+      const [a, b] = args;
+      const agentRef = a.startsWith('@') ? a : b.startsWith('@') ? b : null;
+      const taskRef = agentRef === a ? b : a;
+      const agent = agentRef ? findAgent(agentRef, ctx.agents) : null;
+      const task = taskByRef(taskRef, ctx.tasks);
+      return agent && task ? { kind: 'review', task, agent } : null;
     }
     case 'file': {
       const agent = agentArg();

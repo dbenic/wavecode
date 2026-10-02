@@ -30,6 +30,7 @@ export const SSE_EVENT_TYPES = [
   'review.handed_off',
   'review.rejected',
   'review.ai_started',
+  'review.needs_reviewer',
   'review.ai_completed',
   'review.fixes_sent',
   'queue.empty',

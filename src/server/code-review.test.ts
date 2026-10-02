@@ -19,6 +19,7 @@ const reviewConfig = {
   max_fix_loops: 2,
   require_pass_to_promote: false,
   gate_dependents_on_approval: false,
+  auto_pick: true,
 };
 
 vi.mock('./config.js', () => ({
@@ -301,6 +302,64 @@ describe('code-review.ts', () => {
       insertReview(db, runId, { status: 'reviewing' });
       await codeReview.maybeAutoReview(runId);
       expect(codeReview.getReviewsForRun(runId)).toHaveLength(1);
+    });
+  });
+
+  describe('ladder: waiting for a reviewer', () => {
+    it('with nobody free, keeps a pending placeholder and emits review.needs_reviewer with candidates', async () => {
+      const db = await import('./db.js');
+      const codeReview = await import('./code-review.js');
+      const { emit } = await import('./event-bus.js');
+      const { author, reviewer, runId } = await seedRunFixture();
+      reviewConfig.default_reviewer = '';
+      db.updateAgentStatus(reviewer.id, 'working');
+
+      await codeReview.maybeAutoReview(runId);
+      const rows = codeReview.getReviewsForRun(runId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'pending', reviewer_agent_id: null, fix_round: 0 });
+      const needs = vi.mocked(emit).mock.calls.find((c) => c[0] === 'review.needs_reviewer');
+      expect(needs?.[3]).toMatchObject({ review_id: rows[0].id, candidates: [{ id: reviewer.id, name: 'reviewer' }] });
+      expect((needs?.[3] as { candidates: unknown[] }).candidates.map((c) => (c as { id: string }).id)).not.toContain(author.id);
+
+      // a second pass does not add a second placeholder
+      await codeReview.maybeAutoReview(runId);
+      expect(codeReview.getReviewsForRun(runId)).toHaveLength(1);
+
+      // the reviewer goes idle → the pending review starts with it, placeholder gone
+      db.updateAgentStatus(reviewer.id, 'idle');
+      await codeReview.assignPendingReviews();
+      const after = codeReview.getReviewsForRun(runId);
+      expect(after.filter((r) => r.status === 'pending')).toHaveLength(0);
+      // (no diff under the tmux mock → the new review finalizes at once; what matters is who got it)
+      expect(after.find((r) => r.reviewer_agent_id === reviewer.id)).toBeTruthy();
+    });
+
+    it('reassignReview closes the running review and starts one with the named agent; never the author', async () => {
+      const db = await import('./db.js');
+      const codeReview = await import('./code-review.js');
+      const { author, reviewer, runId } = await seedRunFixture();
+      const other = db.insertAgent({ name: 'opus', runtime: 'claude-code', tmux_session: 'wc-opus', workspace: null, mode: 'spawned', status: 'working' });
+      if (!other.ok) throw new Error(other.error);
+
+      // An in-flight review (the tmux mock yields no diff, so requestCrossModelReview would finalize at once)
+      const firstId = db.generateId();
+      db.getDb().prepare(`
+        INSERT INTO code_reviews (id, run_id, reviewer_type, reviewer_agent_id, reviewer_runtime, status, diff, fix_round)
+        VALUES (?, ?, 'cross-model', ?, 'aider', 'reviewing', 'diff --git a b', 1)
+      `).run(firstId, runId, reviewer.id);
+
+      expect((await codeReview.reassignReview(firstId, 'author', 'ana')).ok).toBe(false);
+      expect((await codeReview.reassignReview(firstId, 'reviewer', 'ana')).ok).toBe(false); // already has it
+      const moved = await codeReview.reassignReview(firstId, 'opus', 'ana');
+      expect(moved.ok).toBe(true);
+      const rows = codeReview.getReviewsForRun(runId);
+      expect(rows.find((r) => r.id === firstId)).toMatchObject({ status: 'failed', feedback: 'Reassigned to opus by ana' });
+      expect(rows.find((r) => r.reviewer_agent_id === other.data.id)).toMatchObject({ fix_round: 1 });
+      expect(author.id).not.toBe(other.data.id);
+
+      // a closed review cannot be moved again
+      expect((await codeReview.reassignReview(firstId, 'reviewer', 'ana')).ok).toBe(false);
     });
   });
 

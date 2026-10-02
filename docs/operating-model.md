@@ -104,9 +104,24 @@ wavepulse-gate RESULT remains the only promote evidence.
 The review pipeline, in order:
 
 1. **Automatic cross-review** (`review.auto_review: true`): every finished
-   run's git diff is reviewed by a *different* agent — the resolver picks
-   `default_reviewer` by name, then by runtime, and explicitly refuses the
-   author; with no other agent available, the WaveCode LLM reviews directly.
+   run's git diff is reviewed by a *different* agent. Who, in order (the
+   **assignment ladder**, `src/server/reviewer-ladder.ts`):
+   1. *explicit* — you named one (`#review #12 @opus`, or `reviewer` on the
+      task / `reviewer_agent_id` on the API);
+   2. *task* — `tasks.reviewer` set when the task was created;
+   3. *default* — `review.default_reviewer` (agent name, then runtime);
+   4. *tag* — a **free** agent tagged `review` (`review.auto_pick: true`);
+   5. *pool* — any **free** agent;
+   6. *none* — the run waits with a "needs a reviewer" thread item and
+      "Review with @x" chips; the next agent to go idle takes it.
+
+   Rungs 1–3 use the agent even if busy (chosen on purpose). Rungs 4–5 need
+   a free agent: idle, no lease, no open run, profile-compatible with the
+   task's creator, not a PM seat — and never the author. The other vendor
+   than the author is preferred (different blind spots). Every automatic
+   choice is posted in the thread ("Review of #12 → @opus · picked: free,
+   other vendor") with "→ @alt" chips to move it; `#review #12 @x` or
+   `POST /api/ai-reviews/:id/reassign` does the same.
    The reviewer answers in a fixed format; the parsed **verdict** and issue
    count are stored on the review row (an unparseable review is treated as
    `needs-fixes`, never as a pass). An empty or uncapturable diff still
@@ -148,7 +163,8 @@ The review pipeline, in order:
 ```yaml
 review:
   auto_review: true              # cross-review every finished run
-  default_reviewer: reviewer-bot # agent name or runtime; never the author
+  default_reviewer: reviewer-bot # agent name or runtime; never the author (ladder rung 3)
+  auto_pick: true                # rungs 4–5: pick a free agent (tag `review` first, other vendor preferred)
   max_fix_loops: 2               # bounded fix→re-review rounds
   require_pass_to_promote: true  # promote gate even without auto_review
   gate_dependents_on_approval: true  # DAG advances on approval, not 'done'

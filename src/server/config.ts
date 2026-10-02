@@ -117,6 +117,12 @@ export interface WaveConfig {
     require_pass_to_promote: boolean;
     /** Dependent tasks dispatch only after their dependency's run is human-approved, not merely 'done'. */
     gate_dependents_on_approval: boolean;
+    /**
+     * Assignment ladder rungs 3–4: with no explicit or configured reviewer,
+     * pick a free agent (tag `review` first, other vendor preferred). Off =
+     * the run waits with a "needs a reviewer" item until someone picks.
+     */
+    auto_pick: boolean;
   };
   llm: {
     provider: 'anthropic' | 'openai-compatible';
@@ -348,6 +354,7 @@ function buildDefaults(baseDir: string): WaveConfig {
       max_fix_loops: 2,
       require_pass_to_promote: false,
       gate_dependents_on_approval: false,
+      auto_pick: true,
     },
     llm: {
       provider: 'anthropic',
