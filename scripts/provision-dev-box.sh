@@ -202,7 +202,7 @@ runtimes:
     model_flag: -m
     effort_flag: -c model_reasoning_effort=
     env: { CODEX_HOME: '{profile_dir}/codex', GIT_CONFIG_GLOBAL: '{profile_dir}/gitconfig' }
-    login_command: codex login
+    login_command: codex login --device-auth   # headless box: device code instead of a localhost redirect
     credential_files: ['{profile_dir}/codex/auth.json']
   grok:
     command: grok --always-approve
