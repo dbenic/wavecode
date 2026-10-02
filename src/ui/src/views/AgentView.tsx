@@ -427,7 +427,7 @@ export default function AgentView() {
       onTouchEnd={handleTouchEnd}
     >
       {/* Header */}
-      <header className="sticky top-0 z-40 border-b border-slate-800/60 bg-slate-950/90 backdrop-blur-xl">
+      <header className="sticky top-0 sm:top-10 z-40 border-b border-slate-800/60 bg-slate-950/90 backdrop-blur-xl">
         <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -437,11 +437,22 @@ export default function AgentView() {
               &larr;
             </button>
             <div className="min-w-0">
-              <h1 className="text-sm font-bold text-slate-100 truncate">
-                {agent.name}
+              <h1 className="text-sm font-bold text-slate-100 truncate flex items-center gap-2">
+                <span>{agent.alias ? `@${agent.alias}` : agent.name}</span>
+                {agent.alias && <span className="text-[10px] font-normal text-slate-500">{agent.name}</span>}
+                {/* Always-visible identity: runtime + pinned LLM, so you never scroll up to check who is talking */}
+                <span className="rounded border border-slate-700 bg-slate-900 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-slate-300">
+                  {agent.runtime}
+                </span>
+                {(agent.model || agent.effort) && (
+                  <span className="rounded border border-indigo-500/40 bg-indigo-950/60 px-1.5 py-px text-[10px] font-semibold text-indigo-200 normal-case">
+                    {agent.model ?? 'default model'}{agent.effort ? ` @${agent.effort}` : ''}
+                  </span>
+                )}
               </h1>
-              <p className="text-[10px] text-slate-600 tracking-wide uppercase">
-                {agent.runtime} &middot; {agent.tmux_session}
+              <p className="text-[10px] text-slate-600 tracking-wide truncate">
+                {agent.persona ? <span className="italic text-slate-500">{agent.persona} · </span> : null}
+                <span className="uppercase">{agent.tmux_session}{agent.owner ? ` · ${agent.owner}` : ''}</span>
               </p>
             </div>
           </div>
