@@ -8,6 +8,8 @@ interface ThreadFeedProps {
   agentNames: Map<string, string>;
   /** agent id → one-line persona, shown on reply bubbles (spec §5c) */
   personas?: Map<string, string>;
+  /** agent id → bubble color override: a seat speaks in its user's color (spec §5d) */
+  agentColors?: Map<string, string>;
   attentionOnly: boolean;
   onToggleAttention: () => void;
   attentionCount: number;
@@ -70,6 +72,7 @@ export default function ThreadFeed(props: ThreadFeedProps) {
             item={item}
             agentName={item.agent_id ? props.agentNames.get(item.agent_id) ?? item.agent_id : 'agent'}
             persona={item.agent_id ? props.personas?.get(item.agent_id) ?? null : null}
+            color={item.agent_id ? props.agentColors?.get(item.agent_id) : undefined}
             onAction={props.onAction}
           />
         ) : (
@@ -133,13 +136,14 @@ export default function ThreadFeed(props: ThreadFeedProps) {
  * time, the prose, and quick-reply chips when it ends with a question and
  * `[ ] option` lines. Tapping a chip sends that option back to the seat.
  */
-function ReplyBubble({ item, agentName, persona, onAction }: {
+function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction }: {
   item: ThreadItem;
   agentName: string;
   persona?: string | null;
+  color?: string;
   onAction: (item: ThreadItem, action: ThreadAction) => void;
 }) {
-  const color = agentColor(agentName);
+  const color = colorOverride ?? agentColor(agentName);
   const chips = item.actions.filter((a) => a.id === 'quick_reply');
   const other = item.actions.filter((a) => a.id !== 'quick_reply');
   // The options are shown as chips; drop their `[ ]` lines from the prose.

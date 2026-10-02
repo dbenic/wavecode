@@ -43,7 +43,8 @@ export interface Agent {
 export const AGENT_ROLES = ['orchestrator'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
-export type LeaseReason = 'reserved' | 'task';
+/** 'seat' = a user's own orchestrator seat (spec §5d): never expires, never released by hand. */
+export type LeaseReason = 'reserved' | 'task' | 'seat';
 
 export interface Task {
   id: string;
@@ -140,6 +141,12 @@ export interface User {
   color: string;
   /** Credential profile this user's agents run on; null = home-dir login (the synthetic owner). */
   profile: string | null;
+  /** The user's own orchestrator seat (spec §5d), if created. */
+  seat_agent_id?: string | null;
+  /** Standing rules appended to the seat's brief. */
+  seat_rules?: string | null;
+  /** Which bearer authenticated this request: the person's own token, or their seat's (spec §5d). */
+  auth_via?: 'token' | 'seat';
   created_at: string;
 }
 
@@ -245,7 +252,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -369,8 +376,12 @@ const SCHEMA_SQL = `
     color TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     profile TEXT,
+    seat_agent_id TEXT,
+    seat_token_hash TEXT,
+    seat_rules TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_seat_token ON users(seat_token_hash) WHERE seat_token_hash IS NOT NULL;
 
   CREATE INDEX IF NOT EXISTS idx_events_entity
     ON events(entity_type, entity_id, created_at);
@@ -734,6 +745,14 @@ const MIGRATIONS: Record<number, string> = {
     UPDATE tasks SET num = (SELECT COUNT(*) FROM tasks t2 WHERE t2.rowid <= tasks.rowid);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_num ON tasks(num) WHERE num IS NOT NULL;
     ALTER TABLE agent_messages ADD COLUMN to_user_id TEXT;
+  `,
+  // v16 → v17: One orchestrator seat per user (spec §5d) — the seat agent,
+  // its own revocable bearer token (hash only) and the user's standing rules.
+  16: `
+    ALTER TABLE users ADD COLUMN seat_agent_id TEXT;
+    ALTER TABLE users ADD COLUMN seat_token_hash TEXT;
+    ALTER TABLE users ADD COLUMN seat_rules TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_seat_token ON users(seat_token_hash) WHERE seat_token_hash IS NOT NULL;
   `,
 };
 
@@ -1309,7 +1328,7 @@ export function listAgentsOwnedBy(userId: string): Agent[] {
 
 // --- User helpers ---
 
-const USER_COLUMNS = 'id, name, role, color, profile, created_at';
+const USER_COLUMNS = 'id, name, role, color, profile, seat_agent_id, seat_rules, created_at';
 
 /** Insert a user. `token_hash` is the sha256 of the bearer token — never the plaintext. */
 export function insertUser(user: {
@@ -1342,6 +1361,26 @@ export function getUser(id: string): Result<User> {
 
 export function getUserByTokenHash(tokenHash: string): User | null {
   return (getDb().prepare(`SELECT ${USER_COLUMNS} FROM users WHERE token_hash = ?`).get(tokenHash) as User | undefined) ?? null;
+}
+
+/** The user a seat token belongs to (spec §5d: the seat acts as its user). */
+export function getUserBySeatTokenHash(tokenHash: string): User | null {
+  return (getDb().prepare(`SELECT ${USER_COLUMNS} FROM users WHERE seat_token_hash = ?`).get(tokenHash) as User | undefined) ?? null;
+}
+
+export function updateUserSeat(id: string, fields: { seat_agent_id?: string | null; seat_token_hash?: string | null; seat_rules?: string | null }): Result<User> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  for (const key of ['seat_agent_id', 'seat_token_hash', 'seat_rules'] as const) {
+    if (fields[key] !== undefined) { sets.push(`${key} = ?`); params.push(fields[key]); }
+  }
+  if (sets.length > 0) getDb().prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+  return getUser(id);
+}
+
+export function hasSeatToken(id: string): boolean {
+  const row = getDb().prepare('SELECT seat_token_hash FROM users WHERE id = ?').get(id) as { seat_token_hash: string | null } | undefined;
+  return !!row?.seat_token_hash;
 }
 
 export function getUserByName(name: string): Result<User> {

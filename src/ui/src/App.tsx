@@ -11,6 +11,7 @@ import Library from './views/Library';
 import Specs from './views/Specs';
 import CommandCenter from './views/CommandCenter';
 import Users from './views/Users';
+import MySeat from './views/MySeat';
 import BottomNav from './components/BottomNav';
 import DesktopNav from './components/DesktopNav';
 import ErrorBanner from './components/ErrorBanner';
@@ -63,6 +64,7 @@ export default function App() {
             <Route path="/specs" element={<Specs />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/settings/users" element={<Users />} />
+            <Route path="/settings/seat" element={<MySeat />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           <BottomNav />

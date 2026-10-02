@@ -1,9 +1,12 @@
 import type { Hono } from 'hono';
 import type { NodeAppEnv } from '../auth.js';
-import { listUsers } from '../db.js';
+import { getUser, listUsers } from '../db.js';
+import * as sessionManager from '../session-manager.js';
+import * as outputWatcher from '../output-watcher.js';
 import { emit } from '../event-bus.js';
 import logger from '../logger.js';
-import { createUser, isAdmin, OWNER_USER, revokeUser } from '../users.js';
+import { createUser, isAdmin, isSeatBearer, OWNER_USER, revokeUser } from '../users.js';
+import { getSeatStatus } from '../seats.js';
 import { releaseLeasesOf } from '../leases.js';
 
 function publicUser(user: { id: string; name: string; role: string; color: string; profile: string | null }) {
@@ -12,7 +15,13 @@ function publicUser(user: { id: string; name: string; role: string; color: strin
 
 export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/me', (c) => {
-    return c.json(publicUser(c.get('user')));
+    const user = c.get('user');
+    // Spec §5d: the Center needs to know whether to offer "Create / Recreate my seat"
+    const seat = getSeatStatus(user);
+    return c.json({
+      ...publicUser(user),
+      seat: seat.status === 'ok' ? { status: 'ok', agent_id: seat.agent.id } : seat,
+    });
   });
 
   app.get('/api/users', (c) => {
@@ -24,6 +33,8 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/users', async (c) => {
     const actor = c.get('user');
     if (!isAdmin(actor)) return c.json({ error: 'Forbidden: admin only' }, 403);
+    // A seat token acts as its user but must never mint persistent access
+    if (isSeatBearer(actor)) return c.json({ error: 'Forbidden: a seat token cannot manage users' }, 403);
 
     type CreateBody = { name?: unknown; role?: unknown; color?: unknown; profile?: unknown };
     // Malformed JSON is the caller's error (400), never an unhandled 500
@@ -52,14 +63,25 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
   app.delete('/api/users/:id', (c) => {
     const actor = c.get('user');
     if (!isAdmin(actor)) return c.json({ error: 'Forbidden: admin only' }, 403);
+    if (isSeatBearer(actor)) return c.json({ error: 'Forbidden: a seat token cannot manage users' }, 403);
 
     const id = c.req.param('id');
     if (id === actor.id) return c.json({ error: 'You cannot revoke your own user' }, 400);
+
+    // A revoked user's seat must not survive as an orphan (it would become the
+    // shared Ask fallback, free for dispatch, and block re-creating the user).
+    const seatId = (() => { const u = getUser(id); return u.ok ? u.data.seat_agent_id ?? null : null; })();
 
     const result = revokeUser(id);
     if (!result.ok) {
       const status = result.error.includes('not found') ? 404 : 400;
       return c.json({ error: result.error }, status);
+    }
+
+    if (seatId) {
+      outputWatcher.stopWatching(seatId);
+      const killed = sessionManager.kill(seatId);
+      if (!killed.ok) logger.warn({ userId: id, seatId, error: killed.error }, 'Could not kill revoked user seat');
     }
 
     const released = releaseLeasesOf(id);

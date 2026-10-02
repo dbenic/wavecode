@@ -127,6 +127,10 @@ export default function Settings() {
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center gap-3">
           <button onClick={() => navigate('/')} className="text-slate-500 hover:text-slate-300 transition-colors text-sm">&larr;</button>
           <h1 className="text-sm font-bold tracking-[0.15em] text-slate-100 uppercase">Settings</h1>
+          <nav aria-label="Settings sections" className="ml-auto flex gap-3 text-xs">
+            <button onClick={() => navigate('/settings/seat')} className="text-slate-400 hover:text-slate-200">My seat</button>
+            <button onClick={() => navigate('/settings/users')} className="text-slate-400 hover:text-slate-200">Users</button>
+          </nav>
         </div>
       </header>
 

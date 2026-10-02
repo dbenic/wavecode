@@ -404,7 +404,7 @@ async function dispatchNextInner(): Promise<void> {
   const allAgents = listAgents();
   // Login seats (spec §5) are OAuth terminals, never work seats.
   const idleAgents = allAgents.filter(
-    (a) => a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a),
+    (a) => a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat',
   );
 
   if (idleAgents.length === 0) return;

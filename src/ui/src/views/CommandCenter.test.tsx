@@ -251,6 +251,30 @@ describe('CommandCenter', () => {
     });
   });
 
+  describe('your own seat (spec §5d)', () => {
+    it('without a seat: a banner offers "Create my seat"; Ask still goes to the shared seat meanwhile', async () => {
+      const api = await setup({ ...ana, seat: { status: 'none' } });
+      expect(screen.getByRole('status')).toHaveTextContent('Ask goes to the shared seat');
+      await userEvent.click(screen.getByRole('button', { name: 'Create my seat' }));
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/users/me/seat', {}));
+      expect(vi.mocked(api.apiGet).mock.calls.filter(([p]) => p === '/me').length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('a missing seat is offered for recreation and Ask is blocked instead of silently falling back', async () => {
+      const api = await setup({ ...ana, seat: { status: 'missing', agent_id: 'gone' } });
+      expect(screen.getByRole('status')).toHaveTextContent('Your orchestrator seat is gone.');
+      expect(screen.getByRole('button', { name: 'Recreate my seat' })).toBeInTheDocument();
+      await userEvent.type(screen.getByRole('textbox', { name: 'Message' }), 'what is everyone on?{Enter}');
+      expect(screen.getByRole('alert')).toHaveTextContent('Your orchestrator seat is gone');
+      expect(vi.mocked(api.apiPost).mock.calls.filter(([p]) => String(p).endsWith('/send'))).toEqual([]);
+    });
+
+    it('with a seat: no banner', async () => {
+      await setup({ ...ana, seat: { status: 'ok', agent_id: 'pm' } });
+      expect(screen.queryByRole('button', { name: /my seat/ })).toBeNull();
+    });
+  });
+
   it('loads roster, thread, board and presence', async () => {
     await setup();
     expect(within(screen.getByRole('region', { name: 'Mine' })).getByText('grok-fe')).toBeInTheDocument();

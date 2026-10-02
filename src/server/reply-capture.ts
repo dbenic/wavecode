@@ -36,6 +36,8 @@ const PROMPT_EXCERPT_CHARS = 2000;
 
 export interface PendingReply {
   agentId: string;
+  /** A housekeeping prompt (e.g. the seat brief) — dropped quietly when superseded unanswered. */
+  quietIfSuperseded?: boolean;
   actorId: string | null;
   prompt: string;
   promptEventId: number | null;
@@ -75,6 +77,12 @@ export function trackPrompt(opts: {
   promptEventId?: number | null;
   /** Only task dispatch passes this; a chat prompt sent while a run is open is still a chat prompt. */
   taskId?: string | null;
+  /**
+   * Housekeeping prompts (the orchestrator brief, spec §5d) nobody is waiting
+   * on: if a real prompt supersedes it before any answer, drop it quietly
+   * instead of posting a "superseded" placeholder into the user's thread.
+   */
+  quietIfSuperseded?: boolean;
   now?: number;
 }): void {
   const { agent } = opts;
@@ -86,7 +94,9 @@ export function trackPrompt(opts: {
   if (superseded) {
     const pane = capture(agent);
     const sofar = pane ? extractReply(agent.runtime, pane, superseded.prompt) : { text: '', anchored: false };
-    persist(
+    if (superseded.quietIfSuperseded && !(sofar.anchored && sofar.text)) {
+      pending.delete(agent.id);
+    } else persist(
       superseded,
       agent,
       (sofar.anchored && sofar.text) || '(superseded by a newer prompt before the agent answered)',
@@ -103,6 +113,7 @@ export function trackPrompt(opts: {
     taskId: opts.taskId ?? null,
     sentAt: opts.now ?? Date.now(),
     baselineText: paneNow ? extractReply(agent.runtime, paneNow, null).text : '',
+    ...(opts.quietIfSuperseded ? { quietIfSuperseded: true } : {}),
   });
 }
 

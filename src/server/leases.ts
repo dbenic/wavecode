@@ -87,6 +87,10 @@ export function reserveAgent(agentId: string, user: Pick<User, 'id'>, hours?: un
   if (agent.owner_id && agent.owner_id !== user.id) {
     return { ok: false, code: 'conflict', error: `Agent ${agent.name} is owned by ${userName(agent.owner_id)}` };
   }
+  if (agent.lease_reason === 'seat') {
+    // A seat's lease never expires; a reservation would put an expiry on it
+    return { ok: false, code: 'conflict', error: `${agent.name} is ${userName(agent.owner_id!)}'s orchestrator seat — it is always theirs` };
+  }
 
   const until = new Date(Date.now() + h * 3_600_000).toISOString();
   const updated = setAgentLease(agent.id, { owner_id: user.id, reason: 'reserved', expires_at: until });
@@ -106,6 +110,9 @@ export function releaseAgent(agentId: string, user: Pick<User, 'id' | 'role'>): 
 
   const access = checkAgentAccess(agent, user);
   if (!access.ok) return access;
+  if (agent.lease_reason === 'seat') {
+    return { ok: false, code: 'conflict', error: `${agent.name} is an orchestrator seat — it is never released (delete the seat instead)` };
+  }
 
   const updated = clearAgentLease(agent.id);
   if (!updated.ok) return { ok: false, code: 'not_found', error: updated.error };

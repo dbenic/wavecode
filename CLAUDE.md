@@ -203,6 +203,9 @@ CREATE TABLE users (            -- v12; auth.fallback_token = synthetic admin 'o
   color TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,         -- sha256 of the bearer token; never plaintext
   profile TEXT,                            -- v14 credential profile, default = name
+  seat_agent_id TEXT,                      -- v17 the user's own orchestrator seat (spec §5d)
+  seat_token_hash TEXT UNIQUE,             -- v17 sha256 of the seat's bearer (same user, revocable alone)
+  seat_rules TEXT,                         -- v17 standing rules appended to the seat's brief
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
