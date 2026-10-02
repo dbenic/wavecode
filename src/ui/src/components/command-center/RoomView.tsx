@@ -45,6 +45,7 @@ export default function RoomView({ agents, lastEvent }: RoomViewProps) {
   const [content, setContent] = useState<string>('');
   const [writable, setWritable] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
+  const [modifiedAt, setModifiedAt] = useState<string | null>(null);
   const [sendTo, setSendTo] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,12 +74,13 @@ export default function RoomView({ agents, lastEvent }: RoomViewProps) {
     setError(null);
     setNotice(null);
     try {
-      const res = await apiGet<{ content: string; writable: boolean }>(
+      const res = await apiGet<{ content: string; writable: boolean; modified_at: string | null }>(
         `/rooms/${encodeURIComponent(p)}/docs/${docPath.split('/').map(encodeURIComponent).join('/')}`,
       );
       setPath(docPath);
       setContent(res.content);
       setWritable(res.writable);
+      setModifiedAt(res.modified_at ?? null);
       setDraft(null);
     } catch (e) {
       setError((e as Error).message);
@@ -97,15 +99,23 @@ export default function RoomView({ agents, lastEvent }: RoomViewProps) {
     if (!project || !lastEvent || !lastEvent.type.startsWith('room.')) return;
     if (lastEvent.payload?.project !== project) return;
     void loadDocs(project);
-    if (lastEvent.payload?.path === path && draft === null && path) void openDoc(project, path);
+    if (lastEvent.payload?.path === path && path) {
+      if (draft === null) void openDoc(project, path);
+      // Editing: do not clobber the draft, but say so — saving will be refused until reloaded
+      else setNotice(`${path} changed on the server while you were editing — reload before saving`);
+    }
   }, [lastEvent, project, path, draft, loadDocs, openDoc]);
 
   async function save() {
     if (!project || !path || draft === null) return;
     setError(null);
     try {
-      await apiPut(`/rooms/${encodeURIComponent(project)}/docs/${path.split('/').map(encodeURIComponent).join('/')}`, { content: draft });
+      const saved = await apiPut<{ modified_at: string | null }>(
+        `/rooms/${encodeURIComponent(project)}/docs/${path.split('/').map(encodeURIComponent).join('/')}`,
+        { content: draft, ...(modifiedAt ? { expected_modified_at: modifiedAt } : {}) },
+      );
       setContent(draft);
+      setModifiedAt(saved?.modified_at ?? null);
       setDraft(null);
       setNotice(`Saved ${path}`);
       void loadDocs(project);

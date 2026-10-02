@@ -137,11 +137,24 @@ export function resolveTaskRoom(opts: { explicit?: string | null; agent?: Pick<A
 
 // --- documents -------------------------------------------------------------
 
-export type DocErrorCode = 'invalid' | 'forbidden' | 'not_found' | 'too_large';
+export type DocErrorCode = 'invalid' | 'forbidden' | 'not_found' | 'too_large' | 'conflict' | 'failed';
 export type DocResult<T> = { ok: true; data: T } | { ok: false; error: string; code: DocErrorCode };
 
-export function docErrorStatus(code: DocErrorCode): 400 | 403 | 404 | 413 {
-  return { invalid: 400, forbidden: 403, not_found: 404, too_large: 413 }[code] as 400 | 403 | 404 | 413;
+export function docErrorStatus(code: DocErrorCode): 400 | 403 | 404 | 409 | 413 | 500 {
+  return { invalid: 400, forbidden: 403, not_found: 404, too_large: 413, conflict: 409, failed: 500 }[code] as 400 | 403 | 404 | 409 | 413 | 500;
+}
+
+/** Briefing caps: ROOM.md/SPEC.md heads, the template, and the report list are bounded so one big doc cannot bloat every dispatch. */
+export const BRIEFING_HEAD_BYTES = 4 * 1024;
+export const BRIEFING_TEMPLATE_BYTES = 8 * 1024;
+export const BRIEFING_REPORTS = 10;
+
+function mtimeIso(file: string): string | null {
+  try {
+    return fs.statSync(file).mtime.toISOString();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -216,17 +229,24 @@ export function listDocs(room: Room, viewer: Writer): DocEntry[] {
   });
 }
 
-export function readDoc(room: Room, rel: string): DocResult<{ path: string; content: string }> {
+export function readDoc(room: Room, rel: string): DocResult<{ path: string; content: string; modified_at: string | null }> {
   const resolved = resolveDocPath(room, rel);
   if (!resolved.ok) return resolved;
   try {
-    return { ok: true, data: { path: resolved.data.rel, content: fs.readFileSync(resolved.data.file, 'utf8') } };
+    const content = fs.readFileSync(resolved.data.file, 'utf8');
+    return { ok: true, data: { path: resolved.data.rel, content, modified_at: mtimeIso(resolved.data.file) } };
   } catch {
     return { ok: false, code: 'not_found', error: `${resolved.data.rel} not found in room ${room.project}` };
   }
 }
 
-export function writeDoc(room: Room, rel: string, content: unknown, user: Writer): DocResult<{ path: string; size: number }> {
+export function writeDoc(
+  room: Room,
+  rel: string,
+  content: unknown,
+  user: Writer,
+  opts: { expectedModifiedAt?: string | null } = {},
+): DocResult<{ path: string; size: number; modified_at: string | null }> {
   const resolved = resolveDocPath(room, rel);
   if (!resolved.ok) return resolved;
   const access = canWriteDoc(user, room, resolved.data.rel);
@@ -234,10 +254,26 @@ export function writeDoc(room: Room, rel: string, content: unknown, user: Writer
   if (typeof content !== 'string') return { ok: false, code: 'invalid', error: 'content must be text' };
   const size = Buffer.byteLength(content, 'utf8');
   if (size > MAX_DOC_BYTES) return { ok: false, code: 'too_large', error: `documents are limited to ${MAX_DOC_BYTES} bytes` };
-  fs.mkdirSync(path.dirname(resolved.data.file), { recursive: true });
-  fs.writeFileSync(resolved.data.file, content, 'utf8');
+
+  // Lost-update guard: a caller that read the doc says what it last saw
+  if (opts.expectedModifiedAt !== undefined && opts.expectedModifiedAt !== null) {
+    const current = mtimeIso(resolved.data.file);
+    if (current !== null && current !== opts.expectedModifiedAt) {
+      return { ok: false, code: 'conflict', error: `${resolved.data.rel} changed on the server since you read it — reload and merge` };
+    }
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(resolved.data.file), { recursive: true });
+    // tmp + rename: a concurrent reader or a dispatch briefing never sees a half-written doc
+    const tmp = `${resolved.data.file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, resolved.data.file);
+  } catch (e) {
+    return { ok: false, code: 'failed', error: `Could not write ${resolved.data.rel}: ${(e as Error).message}` };
+  }
   emit('room.doc_written', 'room', room.id, { project: room.project, path: resolved.data.rel, size });
-  return { ok: true, data: { path: resolved.data.rel, size } };
+  return { ok: true, data: { path: resolved.data.rel, size, modified_at: mtimeIso(resolved.data.file) } };
 }
 
 // --- written by WaveCode -------------------------------------------------------
@@ -362,9 +398,11 @@ export function mirrorDecision(workspace: string | null | undefined, decision: {
 
 // --- briefing --------------------------------------------------------------------
 
-function head(file: string, lines: number): string | null {
+/** First `lines` lines, and never more than `maxBytes` — a single huge line cannot bloat a briefing. */
+function head(file: string, lines: number, maxBytes = BRIEFING_HEAD_BYTES): string | null {
   try {
-    return fs.readFileSync(file, 'utf8').split('\n').slice(0, lines).join('\n').trim();
+    const text = fs.readFileSync(file, 'utf8').split('\n').slice(0, lines).join('\n').trim();
+    return Buffer.byteLength(text, 'utf8') > maxBytes ? `${Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8')}\n[… truncated]` : text;
   } catch {
     return null;
   }
@@ -372,17 +410,22 @@ function head(file: string, lines: number): string | null {
 
 export function loadTemplate(room: Room, kind: TemplateKind): string {
   try {
-    return fs.readFileSync(path.join(room.root, 'TEMPLATES', `${kind}.md`), 'utf8');
+    const text = fs.readFileSync(path.join(room.root, 'TEMPLATES', `${kind}.md`), 'utf8');
+    return Buffer.byteLength(text, 'utf8') > BRIEFING_TEMPLATE_BYTES
+      ? Buffer.from(text, 'utf8').subarray(0, BRIEFING_TEMPLATE_BYTES).toString('utf8')
+      : text;
   } catch {
     return DEFAULT_TEMPLATES[kind];
   }
 }
 
 export function fillTemplate(template: string, vars: { task: string; room: string; done_when: string }): string {
+  // {room} and {done_when} first, so a task text that mentions those literal
+  // tokens is never expanded by a later pass
   const filled = template
-    .replaceAll('{task}', vars.task)
     .replaceAll('{room}', vars.room)
-    .replaceAll('{done_when}', vars.done_when);
+    .replaceAll('{done_when}', vars.done_when)
+    .replaceAll('{task}', vars.task);
   return template.includes('{task}') ? filled : `${filled.trimEnd()}\n\n## Task\n${vars.task}\n`;
 }
 
@@ -391,7 +434,14 @@ export function fillTemplate(template: string, vars: { task: string; room: strin
  * the top of ROOM.md and SPEC.md) and the task wrapped in its template.
  */
 export function roomBriefing(room: Room, kind: TemplateKind, task: string, viewer: Writer = { id: 'system', role: 'admin' }): string {
-  const files = listDocs(room, viewer).map((d) => d.path);
+  const docs = listDocs(room, viewer);
+  const topLevel = docs.filter((d) => !d.path.startsWith('REPORTS/')).map((d) => d.path);
+  const reports = docs.filter((d) => d.path.startsWith('REPORTS/')).sort((a, b) => b.modified_at.localeCompare(a.modified_at));
+  const files = [
+    ...topLevel,
+    ...reports.slice(0, BRIEFING_REPORTS).map((d) => d.path),
+    ...(reports.length > BRIEFING_REPORTS ? [`(+${reports.length - BRIEFING_REPORTS} older reports)`] : []),
+  ];
   const roomMd = head(path.join(room.root, 'ROOM.md'), INDEX_LINES);
   const specMd = head(path.join(room.root, 'SPEC.md'), INDEX_LINES + 10);
   const index = [

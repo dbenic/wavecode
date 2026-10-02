@@ -1,6 +1,6 @@
 import type { Context, Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
-import { getRoom, updateRoomOwner, updateUserDefaultRoom } from '../db.js';
+import { getRoom, getUser, updateRoomOwner, updateUserDefaultRoom } from '../db.js';
 import { userName } from '../leases.js';
 import {
   canWriteDoc,
@@ -59,6 +59,7 @@ export function registerRoomRoutes(app: Hono<NodeAppEnv>): void {
     if (!isAdmin(user) && room.data.owner_id !== user.id) return c.json({ error: 'Only the room owner or an admin may change the owner' }, 403);
     const body = await c.req.json<{ owner_id?: unknown }>().catch(() => ({} as { owner_id?: unknown }));
     if (body?.owner_id !== null && typeof body?.owner_id !== 'string') return c.json({ error: 'owner_id must be a user id or null' }, 400);
+    if (typeof body.owner_id === 'string' && !getUser(body.owner_id).ok) return c.json({ error: `No such user: ${body.owner_id}` }, 400);
     const updated = updateRoomOwner(room.data.project, body.owner_id as string | null);
     return updated.ok ? c.json(updated.data) : c.json({ error: updated.error }, 500);
   });
@@ -80,9 +81,10 @@ export function registerRoomRoutes(app: Hono<NodeAppEnv>): void {
   app.put('/api/rooms/:project/docs/*', async (c) => {
     const room = getRoom(c.req.param('project'));
     if (!room.ok) return c.json({ error: room.error }, 404);
-    const body = await c.req.json<{ content?: unknown }>().catch(() => null);
+    const body = await c.req.json<{ content?: unknown; expected_modified_at?: unknown }>().catch(() => null);
     if (!body || typeof body !== 'object') return c.json({ error: 'Body must be a JSON object with content' }, 400);
-    const written = writeDoc(room.data, docPath(c), body.content, getActingUser(c));
+    const expected = typeof body.expected_modified_at === 'string' ? body.expected_modified_at : undefined;
+    const written = writeDoc(room.data, docPath(c), body.content, getActingUser(c), { expectedModifiedAt: expected });
     if (!written.ok) return c.json({ error: written.error }, docErrorStatus(written.code));
     return c.json(written.data);
   });

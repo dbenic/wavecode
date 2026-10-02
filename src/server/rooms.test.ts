@@ -171,6 +171,44 @@ describe('project rooms (spec §5e)', () => {
       expect(rooms.resolveDocPath(room.data, 'REPORTS/out/x.md')).toMatchObject({ ok: false, error: expect.stringMatching(/symlink/) });
       expect(rooms.resolveDocPath(room.data, './REPORTS/ok.md')).toMatchObject({ ok: true, data: { rel: 'REPORTS/ok.md' } });
     });
+
+    it('writes are guarded against lost updates: a stale expected_modified_at is a 409 conflict', () => {
+      const room = rooms.ensureRoom('conflict');
+      if (!room.ok) throw new Error(room.error);
+      const admin = { id: 'owner', role: 'admin' as const };
+      expect(rooms.writeDoc(room.data, 'ROOM.md', 'v1', admin).ok).toBe(true);
+      const file = path.join(room.data.root, 'ROOM.md');
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(file, past, past);
+      const seen = rooms.readDoc(room.data, 'ROOM.md');
+      if (!seen.ok) throw new Error(seen.error);
+      expect(seen.data.modified_at).toBe(past.toISOString());
+
+      const fresh = rooms.writeDoc(room.data, 'ROOM.md', 'v2', admin, { expectedModifiedAt: seen.data.modified_at });
+      expect(fresh.ok).toBe(true);
+      const stale = rooms.writeDoc(room.data, 'ROOM.md', 'v3 from an old editor', admin, { expectedModifiedAt: seen.data.modified_at });
+      expect(stale).toMatchObject({ ok: false, code: 'conflict' });
+      expect(fs.readFileSync(file, 'utf8')).toBe('v2');
+      expect(fs.readdirSync(room.data.root).some((f) => f.endsWith('.tmp'))).toBe(false);
+    });
+
+    it('the dispatch briefing is byte-capped: one huge ROOM.md line cannot bloat every task prompt', () => {
+      const room = rooms.ensureRoom('bloat');
+      if (!room.ok) throw new Error(room.error);
+      const admin = { id: 'owner', role: 'admin' as const };
+      expect(rooms.writeDoc(room.data, 'ROOM.md', 'x'.repeat(200 * 1024), admin).ok).toBe(true);
+      const briefing = rooms.roomBriefing(room.data, 'build', 'do the thing');
+      expect(Buffer.byteLength(briefing, 'utf8')).toBeLessThan(16 * 1024);
+      expect(briefing).toContain('[… truncated]');
+      expect(briefing).toContain('do the thing');
+    });
+
+    it('template placeholders inside the task text are never expanded', () => {
+      expect(rooms.fillTemplate('{task}', { task: 'keep {done_when} and {room} literal', room: '/r', done_when: 'DW' }))
+        .toBe('keep {done_when} and {room} literal');
+      expect(rooms.fillTemplate('Room {room}\n{task}\nDone: {done_when}', { task: 'T', room: '/r', done_when: 'DW' }))
+        .toBe('Room /r\nT\nDone: DW');
+    });
   });
 
   describe('routes', () => {

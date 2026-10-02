@@ -458,6 +458,14 @@ developer built from.
 - UI: a **Room** tab in the Center (file list, inline markdown view/edit
   for the files the user may write, "send to @agent" on any file).
 
+**Known limitation (by design, documented):** the write rules above are
+enforced on the HTTP/MCP surface. The `.wavecode/room` symlink gives an
+agent's *process* plain filesystem access to the room because every agent
+runs as the same Unix user — an agent instructed to `cat > .wavecode/room/
+SPEC.md` can. Room edits by agents are therefore trust-but-audit (every
+briefing shows who last wrote each file); hard enforcement needs per-user
+Unix isolation (spec F2) or a read-only mount of the room into workspaces.
+
 Acceptance: a spec written via `write_doc` is visible in the developer's
 dispatch briefing and in the tester's; a review verdict lands as a file
 under `REPORTS/` and a line in `LEDGER.md`; the PM seat's answer to "what
