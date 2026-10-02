@@ -257,3 +257,27 @@ export function boardDefaultCollapsed(tasks: Pick<Task, 'status' | 'created_by'>
 export function openTaskCount(tasks: Pick<Task, 'status'>[]): number {
   return tasks.filter((t) => t.status === 'pending' || t.status === 'running' || t.status === 'blocked').length;
 }
+
+// --- focused-thread filter ---------------------------------------------------------
+
+/**
+ * Items for one agent's thread: its own items, plus Ask questions sent to
+ * the orchestrator seat *about* it ("About @handle: …") and the seat's
+ * replies to those questions (linked by prompt_event_id).
+ */
+export function itemsForAgent<T extends { kind: string; agent_id: string | null; body: string | null; event_id: number; refs: { prompt_event_id?: number } }>(
+  items: T[],
+  agentId: string,
+  handle: string,
+): T[] {
+  const aboutPrefix = `About @${handle}:`.toLowerCase();
+  const aboutPromptIds = new Set(
+    items
+      .filter((i) => i.kind === 'prompt' && i.agent_id !== agentId && (i.body ?? '').trim().toLowerCase().startsWith(aboutPrefix))
+      .map((i) => i.event_id),
+  );
+  return items.filter((i) =>
+    i.agent_id === agentId
+    || aboutPromptIds.has(i.event_id)
+    || (i.kind === 'reply' && i.refs.prompt_event_id !== undefined && aboutPromptIds.has(i.refs.prompt_event_id)));
+}

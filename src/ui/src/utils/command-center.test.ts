@@ -152,3 +152,18 @@ describe('command-center utils', () => {
     expect(parseSlashCommand('/deploy')).toMatchObject({ ok: false, error: expect.stringMatching(/Unknown command \/deploy/) });
   });
 });
+
+describe('itemsForAgent', () => {
+  it("includes Ask questions about the agent (sent to the seat) and the seat's replies to them", async () => {
+    const { itemsForAgent } = await import('./command-center');
+    const items = [
+      { event_id: 1, kind: 'prompt', agent_id: 'pm', body: 'About @countix: status', refs: {} },
+      { event_id: 2, kind: 'reply', agent_id: 'pm', body: 'It is running the gate.', refs: { prompt_event_id: 1 } },
+      { event_id: 3, kind: 'prompt', agent_id: 'pm', body: 'what is everyone doing?', refs: {} },
+      { event_id: 4, kind: 'run', agent_id: 'countix', body: null, refs: {} },
+      { event_id: 5, kind: 'reply', agent_id: 'pm', body: 'Three agents idle.', refs: { prompt_event_id: 3 } },
+    ];
+    expect(itemsForAgent(items, 'countix', 'countix').map((i) => i.event_id)).toEqual([1, 2, 4]);
+    expect(itemsForAgent(items, 'pm', 'pm').map((i) => i.event_id)).toEqual([1, 2, 3, 5]);
+  });
+});

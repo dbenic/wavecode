@@ -30,8 +30,7 @@ import {
   mergeThreadItems,
   orderThread,
   type ComposerMode,
-  type SlashCommand,
-} from '../utils/command-center';
+  type SlashCommand, itemsForAgent } from '../utils/command-center';
 
 type Tab = 'roster' | 'thread' | 'board';
 
@@ -175,10 +174,11 @@ export default function CommandCenter() {
   const agentNames = useMemo(() => new Map(agents.map((a) => [a.id, handleOf(a)])), [agents]);
   const personas = useMemo(() => new Map(agents.filter((a) => a.persona).map((a) => [a.id, a.persona!])), [agents]);
   // Replies sit directly under the prompt they answer.
-  const visibleItems = useMemo(
-    () => orderThread(focused ? items.filter((i) => i.agent_id === focused) : items),
-    [items, focused],
-  );
+  const visibleItems = useMemo(() => {
+    if (!focused) return orderThread(items);
+    const focusedHandle = agentNames.get(focused) ?? focused;
+    return orderThread(itemsForAgent(items, focused, focusedHandle));
+  }, [items, focused, agentNames]);
   // The inbox spans every agent, whatever is focused.
   const attentionCount = useMemo(() => items.filter((i) => i.needs_attention).length, [items]);
   const focusedAgent = agents.find((a) => a.id === focused) ?? null;
