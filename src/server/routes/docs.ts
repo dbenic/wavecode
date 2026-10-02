@@ -5,6 +5,7 @@ import type { NodeAppEnv } from '../auth.js';
 import { getAgent, listAgents } from '../db.js';
 import { createAgentDocSlug, createLegacyAgentDocSlug, createRootDocSlug } from '../doc-slugs.js';
 import { resolvePathWithinRoot } from '../path-utils.js';
+import { recordQaReport } from '../rooms.js';
 
 interface DocEntry {
   slug: string;
@@ -248,6 +249,14 @@ export function registerDocsRoutes(app: Hono<NodeAppEnv>): void {
     fs.writeFileSync(fullPath, body.content, 'utf-8');
 
     const relPath = path.relative(workspace, fullPath).split(path.sep).join('/');
+    // Spec §5e: QA findings also land in the project room's REPORTS/ + LEDGER.md
+    if (subdir.replace(/\/+$/, '') === 'qa-reports') {
+      try {
+        recordQaReport(result.data, safeFilename, body.content);
+      } catch {
+        // the agent doc is written either way
+      }
+    }
     const slug = createAgentDocSlug(agentId, relPath);
     return c.json(
       { ok: true, path: relPath, slug, url: `/docs/${slug}` },

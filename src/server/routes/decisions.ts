@@ -9,6 +9,7 @@ import {
 } from '../db.js';
 import { emit } from '../event-bus.js';
 import { previewBriefing } from '../briefing-builder.js';
+import { mirrorDecision } from '../rooms.js';
 
 export function registerDecisionRoutes(app: Hono<NodeAppEnv>): void {
   // List decisions — optionally filtered by workspace
@@ -52,6 +53,7 @@ export function registerDecisionRoutes(app: Hono<NodeAppEnv>): void {
     });
 
     if (!result.ok) return c.json({ error: result.error }, 500);
+    mirrorDecision(workspace, result.data); // spec §5e: the room's DECISIONS.md
 
     emit('decision.created', 'decision', result.data.id, {
       workspace,

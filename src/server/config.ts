@@ -68,6 +68,8 @@ export interface WaveConfig {
     teams_root: string;
     guides_root: string;
     templates_root: string;
+    /** Project rooms (spec §5e): `<rooms_root>/<project>/` with SPEC.md, LEDGER.md, REPORTS/ … */
+    rooms_root: string;
   };
   /** Per-project verify/referee profiles. Unmatched workspaces keep today's behavior. */
   projects: Record<string, ProjectConfig>;
@@ -284,6 +286,7 @@ function buildDefaults(baseDir: string): WaveConfig {
       teams_root: path.join(baseDir, 'teams'),
       guides_root: path.join(baseDir, 'guides'),
       templates_root: path.join(baseDir, 'templates'),
+      rooms_root: path.join(dataRoot, 'rooms'),
     },
     autonomy: {
       auto_dispatch: true,
@@ -366,6 +369,7 @@ function normalizeConfigPaths(cfg: WaveConfig, baseDir: string): WaveConfig {
   normalized.paths.teams_root = normalizePathSetting(normalized.paths.teams_root, baseDir);
   normalized.paths.guides_root = normalizePathSetting(normalized.paths.guides_root, baseDir);
   normalized.paths.templates_root = normalizePathSetting(normalized.paths.templates_root, baseDir);
+  normalized.paths.rooms_root = normalizePathSetting(normalized.paths.rooms_root, baseDir);
   normalized.artifacts.storage = normalizePathSetting(normalized.artifacts.storage, baseDir);
   normalized.profiles_root = normalizePathSetting(normalized.profiles_root, baseDir);
   normalized.profiles = normalized.profiles ?? {};

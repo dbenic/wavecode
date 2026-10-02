@@ -57,6 +57,9 @@ export interface Task {
   created_by?: string | null;  // user id of the creator; null = system/legacy
   /** Short sequential number for `#12` in the composer (spec §5c). */
   num?: number | null;
+  /** Project room (spec §5e) and dispatch template kind ('build' | 'review' | 'verify' | 'spec'). */
+  room?: string | null;
+  template?: string | null;
 }
 
 export const GOAL_STATUSES = ['active', 'done', 'failed', 'cancelled'] as const;
@@ -147,6 +150,8 @@ export interface User {
   seat_rules?: string | null;
   /** Which bearer authenticated this request: the person's own token, or their seat's (spec §5d). */
   auth_via?: 'token' | 'seat';
+  /** Room for tasks this user creates when the agent's workspace matches none (spec §5e). */
+  default_room?: string | null;
   created_at: string;
 }
 
@@ -252,7 +257,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -307,7 +312,9 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     goal_id TEXT REFERENCES goals(id),
     created_by TEXT,
-    num INTEGER
+    num INTEGER,
+    room TEXT,
+    template TEXT
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_num ON tasks(num) WHERE num IS NOT NULL;
 
@@ -379,6 +386,15 @@ const SCHEMA_SQL = `
     seat_agent_id TEXT,
     seat_token_hash TEXT,
     seat_rules TEXT,
+    default_room TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS rooms (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL UNIQUE,
+    root TEXT NOT NULL,
+    owner_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_users_seat_token ON users(seat_token_hash) WHERE seat_token_hash IS NOT NULL;
@@ -754,6 +770,20 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE users ADD COLUMN seat_rules TEXT;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_seat_token ON users(seat_token_hash) WHERE seat_token_hash IS NOT NULL;
   `,
+  // v17 → v18: Project rooms (spec §5e) — one shared folder per project;
+  // tasks carry their room and template, users a default room.
+  17: `
+    CREATE TABLE IF NOT EXISTS rooms (
+      id TEXT PRIMARY KEY,
+      project TEXT NOT NULL UNIQUE,
+      root TEXT NOT NULL,
+      owner_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    ALTER TABLE tasks ADD COLUMN room TEXT;
+    ALTER TABLE tasks ADD COLUMN template TEXT;
+    ALTER TABLE users ADD COLUMN default_room TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -977,14 +1007,16 @@ export function insertTask(task: {
   goal_id?: string | null;
   /** Creator user id; omitted → the in-flight request's user (null outside a request). */
   created_by?: string | null;
+  room?: string | null;
+  template?: string | null;
 }): Result<Task> {
   const id = generateId();
   const createdBy = task.created_by === undefined ? currentActorId() : task.created_by;
   try {
     getDb().prepare(`
-      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num)
-      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks))
-    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy);
+      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num, room, template)
+      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks), ?, ?)
+    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy, task.room ?? null, task.template ?? null);
     const row = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task;
     return { ok: true, data: row };
   } catch (e) {
@@ -1328,7 +1360,7 @@ export function listAgentsOwnedBy(userId: string): Agent[] {
 
 // --- User helpers ---
 
-const USER_COLUMNS = 'id, name, role, color, profile, seat_agent_id, seat_rules, created_at';
+const USER_COLUMNS = 'id, name, role, color, profile, seat_agent_id, seat_rules, default_room, created_at';
 
 /** Insert a user. `token_hash` is the sha256 of the bearer token — never the plaintext. */
 export function insertUser(user: {
@@ -1381,6 +1413,49 @@ export function updateUserSeat(id: string, fields: { seat_agent_id?: string | nu
 export function hasSeatToken(id: string): boolean {
   const row = getDb().prepare('SELECT seat_token_hash FROM users WHERE id = ?').get(id) as { seat_token_hash: string | null } | undefined;
   return !!row?.seat_token_hash;
+}
+
+// --- Rooms (spec §5e) ---
+
+export interface Room {
+  id: string;
+  project: string;
+  root: string;
+  owner_id: string | null;
+  created_at: string;
+}
+
+export function insertRoom(room: { project: string; root: string; owner_id?: string | null }): Result<Room> {
+  const id = generateId();
+  try {
+    getDb().prepare('INSERT INTO rooms (id, project, root, owner_id) VALUES (?, ?, ?, ?)').run(id, room.project, room.root, room.owner_id ?? null);
+  } catch (e) {
+    const msg = (e as Error).message;
+    return { ok: false, error: msg.includes('UNIQUE') ? `Room '${room.project}' already exists` : msg };
+  }
+  return getRoom(room.project);
+}
+
+export function getRoom(project: string): Result<Room> {
+  const row = getDb().prepare('SELECT * FROM rooms WHERE project = ?').get(project) as Room | undefined;
+  return row ? { ok: true, data: row } : { ok: false, error: `Room '${project}' not found` };
+}
+
+export function listRoomRows(): Room[] {
+  return getDb().prepare('SELECT * FROM rooms ORDER BY project').all() as Room[];
+}
+
+export function updateRoomOwner(project: string, ownerId: string | null): Result<Room> {
+  getDb().prepare('UPDATE rooms SET owner_id = ? WHERE project = ?').run(ownerId, project);
+  return getRoom(project);
+}
+
+export function updateTaskRoom(taskId: string, room: string): void {
+  getDb().prepare('UPDATE tasks SET room = ? WHERE id = ?').run(room, taskId);
+}
+
+export function updateUserDefaultRoom(userId: string, room: string | null): void {
+  getDb().prepare('UPDATE users SET default_room = ? WHERE id = ?').run(room, userId);
 }
 
 export function getUserByName(name: string): Result<User> {

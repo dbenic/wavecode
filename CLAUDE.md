@@ -190,6 +190,14 @@ CREATE TABLE events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE rooms (            -- v18 project room (spec §5e): <paths.rooms_root>/<project>/
+  id TEXT PRIMARY KEY,
+  project TEXT NOT NULL UNIQUE,
+  root TEXT NOT NULL,
+  owner_id TEXT,                -- may write SPEC.md / TEMPLATES/ (admins always can)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE agent_tags (       -- v16 groups: @frontend fans out (spec §5c)
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   tag TEXT NOT NULL,
@@ -206,6 +214,7 @@ CREATE TABLE users (            -- v12; auth.fallback_token = synthetic admin 'o
   seat_agent_id TEXT,                      -- v17 the user's own orchestrator seat (spec §5d)
   seat_token_hash TEXT UNIQUE,             -- v17 sha256 of the seat's bearer (same user, revocable alone)
   seat_rules TEXT,                         -- v17 standing rules appended to the seat's brief
+  default_room TEXT,                       -- v18 room for tasks whose agent workspace matches no project
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```

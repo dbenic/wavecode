@@ -54,6 +54,34 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     handler: (client, args) => client.post(`/agents/${encodeURIComponent(String(args.agent))}/release`),
   },
 
+  // --- Project rooms (spec §5e) ---
+  {
+    name: 'list_rooms',
+    description: 'List project rooms: the shared folder per project with SPEC.md (what we are building), ROOM.md (the PM summary), LEDGER.md, DECISIONS.md, REPORTS/ and TEMPLATES/.',
+    schema: {},
+    handler: (client) => client.get('/rooms'),
+  },
+  {
+    name: 'list_docs',
+    description: 'List the files in a project room, with whether you may write each.',
+    schema: { room: z.string().describe('Room / project name') },
+    handler: (client, args) => client.get(`/rooms/${encodeURIComponent(String(args.room))}/docs`),
+  },
+  {
+    name: 'read_doc',
+    description: 'Read a file from a project room, e.g. SPEC.md, ROOM.md, LEDGER.md or REPORTS/<file>.md. Quote SPEC.md when asked what we are building.',
+    schema: { room: z.string(), path: z.string().describe('Path inside the room, e.g. SPEC.md') },
+    handler: (client, args) =>
+      client.get(`/rooms/${encodeURIComponent(String(args.room))}/docs/${String(args.path).split('/').map(encodeURIComponent).join('/')}`),
+  },
+  {
+    name: 'write_doc',
+    description: 'Write (replace) a file in a project room. Any seat may write ROOM.md and REPORTS/…; SPEC.md and TEMPLATES/… need the room owner or an admin; LEDGER.md and DECISIONS.md are WaveCode-only. Update ROOM.md after a decision.',
+    schema: { room: z.string(), path: z.string(), content: z.string() },
+    handler: (client, args) =>
+      client.put(`/rooms/${encodeURIComponent(String(args.room))}/docs/${String(args.path).split('/').map(encodeURIComponent).join('/')}`, { content: args.content }),
+  },
+
   // --- Agents ---
   {
     name: 'list_agents',

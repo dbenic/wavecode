@@ -1,7 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import {
-  getDb, generateId, getRun, getTask, getAgent, listAgents,
-  type Run, type Result,
+  getDb,
+  generateId,
+  getRun,
+  getTask,
+  getAgent,
+  listAgents,
+  type Run,
+  type Result,
 } from './db.js';
 import { getConfig } from './config.js';
 import { emit } from './event-bus.js';
@@ -9,6 +15,7 @@ import { completeText } from './llm-provider.js';
 import * as sessionManager from './session-manager.js';
 import * as tmux from './tmux.js';
 import logger from './logger.js';
+import { recordReviewReport } from './rooms.js';
 
 // --- DB: code_reviews table ---
 
@@ -424,6 +431,9 @@ export function finalizeReview(
     'Code review completed',
   );
 
+  // Spec §5e: the verdict lands in the project room — REPORTS/ + LEDGER.md
+  recordReviewInRoom(review, verdict, issuesFound, feedback);
+
   if (opts.allowFixLoop !== false) {
     maybeContinueFixLoop(review, verdict);
   }
@@ -637,4 +647,28 @@ After fixing, run the relevant tests to verify your fixes work.`;
   });
 
   return { ok: true, data: undefined };
+}
+
+function recordReviewInRoom(review: CodeReview, verdict: string | null, issues: number, feedback: string): void {
+  try {
+    const run = getRun(review.run_id);
+    if (!run.ok) return;
+    const task = getTask(run.data.task_id);
+    if (!task.ok) return;
+    const author = getAgent(run.data.agent_id);
+    const reviewerAgent = review.reviewer_agent_id ? getAgent(review.reviewer_agent_id) : null;
+    const reviewer = reviewerAgent?.ok ? reviewerAgent.data.alias ?? reviewerAgent.data.name : review.reviewer_runtime ?? 'WaveCode LLM';
+    recordReviewReport({
+      task: task.data,
+      run: run.data,
+      author: author.ok ? author.data : null,
+      reviewer,
+      verdict: verdict ?? 'needs-fixes',
+      issues,
+      fixRound: review.fix_round,
+      feedback,
+    });
+  } catch (err) {
+    logger.debug({ reviewId: review.id, error: (err as Error).message }, 'Room review report skipped');
+  }
 }
