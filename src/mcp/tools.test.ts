@@ -80,6 +80,7 @@ describe('mcp tools', () => {
       'list_artifacts', 'upload_artifact', 'attach_artifact', 'share_artifact',
       'list_decisions', 'record_decision',
       'whoami', 'reserve_agent', 'release_agent',
+      'list_rooms', 'list_docs', 'read_doc', 'write_doc',
     ]) {
       expect(names).toContain(required);
     }
@@ -333,6 +334,19 @@ describe('mcp tools', () => {
   });
 });
 
+
+describe('mcp tools — project rooms (spec §5e)', () => {
+  it('read_doc / write_doc map to the room docs API with encoded paths', async () => {
+    const { client, fetchMock } = makeClient({});
+    await tool('read_doc').handler(client, { room: 'shop', path: 'REPORTS/a b.md' });
+    expect(lastCall(fetchMock).url).toBe('http://wavecode.test:3777/api/rooms/shop/docs/REPORTS/a%20b.md');
+    await tool('write_doc').handler(client, { room: 'shop', path: 'ROOM.md', content: '# hi' });
+    expect(lastCall(fetchMock)).toMatchObject({ url: 'http://wavecode.test:3777/api/rooms/shop/docs/ROOM.md', body: { content: '# hi' } });
+    expect(lastCall(fetchMock).init.method).toBe('PUT');
+    await tool('list_docs').handler(client, { room: 'shop' });
+    expect(lastCall(fetchMock).url).toBe('http://wavecode.test:3777/api/rooms/shop/docs');
+  });
+});
 
 describe('mcp tools — identity & leases (spec §3)', () => {
   it('whoami GETs /api/me', async () => {

@@ -216,6 +216,10 @@ describe('migration v11 → current', () => {
     expect(cols('agent_messages')).toContain('to_user_id');
     // v17 (spec §5d): one orchestrator seat per user
     expect(cols('users')).toEqual(expect.arrayContaining(['seat_agent_id', 'seat_token_hash', 'seat_rules']));
+    // v18 (spec §5e): project rooms
+    expect(cols('rooms')).toEqual(['id', 'project', 'root', 'owner_id', 'created_at']);
+    expect(cols('tasks')).toEqual(expect.arrayContaining(['room', 'template']));
+    expect(cols('users')).toContain('default_room');
 
     const events = mod.listEvents();
     expect(events).toHaveLength(1);

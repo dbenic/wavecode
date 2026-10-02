@@ -13,6 +13,7 @@ import { shareFile } from './file-sharing.js';
 import { getResolvedLlmConfig, isLlmConfigured, runToolConversation, type LlmToolDefinition } from './llm-provider.js';
 import { startWatching } from './output-watcher.js';
 import { emit } from './event-bus.js';
+import { mirrorDecision } from './rooms.js';
 
 // --- DB helpers for chat ---
 
@@ -582,6 +583,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
       });
 
       if (!result.ok) return `Error: ${result.error}`;
+      mirrorDecision(agent.workspace, result.data); // spec §5e
 
       emit('decision.created', 'decision', result.data.id, {
         workspace: agent.workspace,

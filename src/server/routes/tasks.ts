@@ -3,6 +3,7 @@ import {
   getAgent,
   getDb,
   getTaskByNum,
+  getRoom,
   resolveAgent,
   insertTask,
   getTask,
@@ -20,6 +21,7 @@ import { presentFileRun, readCliLog } from '../file-runner.js';
 import logger from '../logger.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
+import { isTemplateKind, resolveTaskRoom, TEMPLATE_KINDS } from '../rooms.js';
 
 function presentTaskRun(run: { id: string; result_path?: string | null }) {
   return presentFileRun(run);
@@ -80,6 +82,10 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       depends_on?: string[];
       goal_id?: string;
       hold?: boolean;
+      /** Project room (spec §5e); default: the agent's workspace room, else your default room. */
+      room?: string;
+      /** Dispatch template: build (default) | review | verify | spec. */
+      template?: string;
     }>();
 
     const taskValidation = validate.validateTaskBody(body);
@@ -88,11 +94,13 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     const dependencyIds = normalizeDependencyIds(body.depends_on);
 
     let resolvedAgentId: string | undefined;
+    let resolvedAgent: import('../db.js').Agent | null = null;
     let waitingFor: string | null = null;
     if (body.agent_id) {
       // alias → name → id (spec §5c), same as every agent route.
       // Resolve to the existing seat; never spawn a new one here.
       const agentResult = resolveAgent(body.agent_id);
+      if (agentResult.ok) resolvedAgent = agentResult.data;
       if (!agentResult.ok) return c.json({ error: agentResult.error }, 400);
       // Queuing for an agent someone else owns is allowed (spec §6): the
       // dispatcher never runs it there until the lease ends and emits
@@ -112,6 +120,22 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     }
 
     // `#12` / `12` refer to task numbers (spec §5c); anything else is a task id
+    if (body.template !== undefined && !isTemplateKind(body.template)) {
+      return c.json({ error: `template must be one of: ${TEMPLATE_KINDS.join(', ')}` }, 400);
+    }
+    if (body.room !== undefined && (typeof body.room !== 'string' || !getRoom(body.room).ok)) {
+      return c.json({ error: `Room not found: ${String(body.room)}` }, 400);
+    }
+    // Spec §5e: explicit room, else the agent's workspace room, else the creator's default room
+    let taskRoom: string | null = body.room ?? null;
+    if (!taskRoom) {
+      try {
+        taskRoom = resolveTaskRoom({ agent: resolvedAgent, creatorId: getActingUser(c).id })?.project ?? null;
+      } catch {
+        taskRoom = null; // resolved again at dispatch
+      }
+    }
+
     for (let i = 0; i < dependencyIds.length; i++) {
       const depRef = dependencyIds[i];
       const num = /^#?(\d+)$/.exec(depRef);
@@ -130,6 +154,8 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
           agent_id: resolvedAgentId,
           priority: body.priority,
           goal_id: resolvedGoalId,
+          ...(taskRoom ? { room: taskRoom } : {}),
+          ...(body.template ? { template: body.template } : {}),
         });
         if (!result.ok) {
           throw new Error(result.error);

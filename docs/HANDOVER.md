@@ -27,7 +27,7 @@ Read in this order:
 
 | Concern | Files |
 |---|---|
-| Schema + CRUD (SQLite, WAL, migrations v1→v17) | `db.ts` |
+| Schema + CRUD (SQLite, WAL, migrations v1→v18) | `db.ts` |
 | Agent leases: reserve/release, rule-2 guards, auto-lease, expiry sweep | `leases.ts` (+ dispatcher, health-monitor, routes) |
 | Identity: users, hashed tokens, roles, request actor | `users.ts`, `auth.ts`, `request-context.ts`, `routes/users.ts` |
 | Agent lifecycle: scan/adopt/spawn/kill/detach/stopAll | `session-manager.ts`, `runtime-launcher.ts`, `tmux.ts` |
@@ -41,6 +41,7 @@ Read in this order:
 | Reply capture (pane → `reply` messages, run summaries) + orchestrator seat | `reply-capture.ts`, `reply-extractors.ts` (+ `__fixtures__/panes`), `orchestrator.ts`, `docs/orchestrator-seat.md` |
 | Aliases / personas / tag groups / people addressing; composer grammar | `agent-identity.ts`, `db.resolveAgent`, `routes/agents.ts` (tags), `cli/msg-command.ts`, `ui/src/utils/composer-grammar.ts` |
 | One orchestrator seat per user (seat lease, seat token, MCP registration, rules, My seat) | `seats.ts`, `seat-mcp.ts`, `routes/seat.ts`, `ui/src/views/MySeat.tsx` |
+| Project rooms (SPEC/ROOM/LEDGER/DECISIONS/REPORTS/TEMPLATES, briefing, reports, docs API) | `rooms.ts`, `routes/rooms.ts`, MCP `list_docs/read_doc/write_doc`, `ui/…/RoomView.tsx` |
 | Command Center UI (default route `/`): roster, thread, composer, board, presence, Users page | `ui/src/views/CommandCenter.tsx`, `ui/src/components/command-center/*`, `ui/src/utils/command-center.ts`, `ui/src/views/Users.tsx` |
 | Agent wire (messages) | `routes/messages.ts`, CLI `wavecode msg` |
 | MCP control plane | `../mcp/tools.ts` (stdio `wavecode mcp` + HTTP `/mcp`) |

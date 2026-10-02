@@ -9,6 +9,7 @@ paths:
   teams_root: teams
   guides_root: guides       # cloned guide sources (e.g., awesome-design-md)
   templates_root: templates # cloned template repos (workspace starters)
+  rooms_root: .wavecode-data/rooms  # project rooms: <rooms_root>/<project>/SPEC.md, ROOM.md, LEDGER.md, REPORTS/ (spec §5e)
 
 autonomy:
   auto_dispatch: true

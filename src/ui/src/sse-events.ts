@@ -52,6 +52,9 @@ export const SSE_EVENT_TYPES = [
   'user.revoked',
   'profile.login_started',
   'profile.login_finished',
+  'room.created',
+  'room.doc_written',
+  'room.report_added',
 ] as const;
 
 export type KnownSSEEventType = typeof SSE_EVENT_TYPES[number];

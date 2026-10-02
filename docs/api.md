@@ -578,6 +578,17 @@ Without `since`: the newest `limit` items. With `since`: items after that cursor
 ### `POST /api/agents/:id/restart`
 Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
 
+## Project rooms (spec §5e)
+
+One shared folder per project under `paths.rooms_root/<project>/`: `SPEC.md`, `ROOM.md`, `LEDGER.md`, `DECISIONS.md`, `REPORTS/`, `TEMPLATES/{build,review,verify,spec}.md`. Every configured project gets a room; others are created with `POST /api/rooms {project}` (the caller owns it). Agent workspaces get `.wavecode/room` → the room (added to `.git/info/exclude`).
+
+- `GET /api/rooms` → `[{project, root, owner_id, owner, can_write_spec, is_default}]` · `PATCH /api/rooms/:project {owner_id}` (owner/admin).
+- `GET /api/rooms/:project/docs` → `{project, root, docs: [{path, size, modified_at, writable}]}` · `GET /api/rooms/:project/docs/<path>` → `{path, content, writable}` · `PUT /api/rooms/:project/docs/<path> {content}`.
+- Write rules: `SPEC.md`, `TEMPLATES/…` and other files — room owner or admin; `ROOM.md`, `REPORTS/…` — any non-observer (any seat); `LEDGER.md`, `DECISIONS.md` — WaveCode only. Reads are open. Paths are relative, `.md/.txt/.json/.log`, no `..`, dotfiles or symlinks; ≤512 KB.
+- WaveCode writes: each finished run's RESULT file + prose summary, each review verdict + feedback, and each QA report (`POST /api/agents/:id/docs` with `subdir: qa-reports`) as a file under `REPORTS/` plus a `LEDGER.md` line; decisions are appended to `DECISIONS.md`.
+- Tasks: `POST /api/tasks {room?, template?}` — `room` defaults to the room whose `projects.<name>.workspace_match` matches the agent's workspace, else the creator's default room (`PUT /api/users/me/default-room {room}`); `template` is `build` (default) / `review` / `verify` / `spec`. Every dispatch starts with the room index (file list + top of `ROOM.md` and `SPEC.md`) and the task wrapped in its template (`{task}`, `{room}`, `{done_when}`).
+- MCP: `list_rooms`, `list_docs {room}`, `read_doc {room, path}`, `write_doc {room, path, content}`. The orchestrator brief lists the rooms and tells the seat to read `ROOM.md` before answering, quote `SPEC.md` for "what are we building", and update `ROOM.md` after a decision.
+
 ## One orchestrator seat per user (spec §5d)
 
 All routes act on the caller's own seat. Observers get `403`; the fallback-token `owner` (no user record) gets `400`.

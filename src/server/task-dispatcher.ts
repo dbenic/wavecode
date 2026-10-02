@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import {
   getDb,
   listTasks,
@@ -14,6 +15,7 @@ import {
   insertRun,
   finishRun,
   updateRunResultPath,
+  updateTaskRoom,
   reconcileFailedRunToPass,
   type Task,
   type Agent,
@@ -42,6 +44,7 @@ import { ensureRuntimeAlive } from './runtime-liveness.js';
 import { isLoginSeat } from './login-seats.js';
 import { captureRunSummary } from './reply-capture.js';
 import { withPersona } from './agent-identity.js';
+import { isTemplateKind, linkRoomIntoWorkspace, recordRunReport, resolveTaskRoom, roomBriefing } from './rooms.js';
 import logger from './logger.js';
 
 let dispatchInProgress = false;
@@ -171,6 +174,8 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
   const config = getConfig();
   // Spec §5b: keep what the agent said about this run (pane prose) on the run.
   captureRunSummary(runId, agentId);
+  // Spec §5e: the RESULT file and the run's prose land in the room's REPORTS/ + LEDGER.md
+  recordRunInRoom(runId, agentId);
   const seatStillBusy = listOpenRuns(agentId).some((r) => r.id !== runId);
 
   if (run.review_status === 'rejected') {
@@ -460,14 +465,28 @@ async function dispatchNextInner(): Promise<void> {
 async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
   // Build context briefing from sibling agents, recent changes, decisions
   let prompt = task.prompt;
+  let briefing: string | null = null;
   try {
-    const briefing = buildBriefing(agent, task);
+    briefing = buildBriefing(agent, task) || null;
     if (briefing) {
       prompt = `${briefing}\n\n---\n## YOUR TASK\n${task.prompt}`;
       logger.info({ agentId: agent.id, taskId: task.id }, 'Prepended context briefing to task prompt');
     }
   } catch (err) {
     logger.warn({ error: (err as Error).message }, 'Failed to build briefing, dispatching without');
+  }
+  // Spec §5e: the project room's index + the task's template come first
+  try {
+    const room = resolveTaskRoom({ explicit: task.room ?? null, agent, creatorId: task.created_by ?? null });
+    if (room) {
+      if (!task.room) updateTaskRoom(task.id, room.project);
+      linkRoomIntoWorkspace(agent.workspace, room);
+      const kind = isTemplateKind(task.template) ? task.template : 'build';
+      prompt = roomBriefing(room, kind, task.prompt)
+        + (briefing ? `\n\n---\n## CONTEXT FROM THE TEAM\n${briefing}` : '');
+    }
+  } catch (err) {
+    logger.debug({ taskId: task.id, error: (err as Error).message }, 'No room briefing');
   }
   // Spec §5c: `[you are @toni — frontend lead] …` when the agent has a persona
   prompt = withPersona(agent, prompt);
@@ -756,4 +775,24 @@ export function getDependents(taskId: string): string[] {
     'SELECT task_id FROM task_dependencies WHERE depends_on_id = ?',
   ).all(taskId) as { task_id: string }[];
   return rows.map((r) => r.task_id);
+}
+
+/** Copy a finished run's RESULT file and summary into its room (best effort). */
+function recordRunInRoom(runId: string, agentId: string): void {
+  try {
+    const run = getRun(runId);
+    const agent = getAgent(agentId);
+    if (!run.ok || !agent.ok) return;
+    const task = getTask(run.data.task_id);
+    if (!task.ok) return;
+    let resultText: string | null = null;
+    try {
+      resultText = fs.readFileSync(resultPathForRun(run.data, agent.data.workspace), 'utf8');
+    } catch {
+      // no result file
+    }
+    recordRunReport(run.data, task.data, agent.data, resultText);
+  } catch (err) {
+    logger.debug({ runId, error: (err as Error).message }, 'Room run report skipped');
+  }
 }

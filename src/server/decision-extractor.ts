@@ -3,6 +3,7 @@ import { isLlmConfigured, getResolvedLlmConfig } from './llm-provider.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import fs from 'node:fs';
+import { mirrorDecision } from './rooms.js';
 
 const EXTRACTION_PROMPT = `You are analyzing a coding agent's transcript. Extract any architectural decisions the agent made — choices about technology, patterns, conventions, file organization, API design, etc.
 
@@ -121,6 +122,7 @@ function parseAndStoreDecisions(text: string, agent: Agent, run: Run): void {
         source_run_id: run.id,
       });
       if (result.ok) {
+        mirrorDecision(agent.workspace, result.data); // spec §5e
         emit('decision.created', 'decision', result.data.id, {
           workspace: agent.workspace,
           summary: result.data.summary,

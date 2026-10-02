@@ -14,6 +14,7 @@ import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import Board from '../components/command-center/Board';
 import BoardRail from '../components/command-center/BoardRail';
 import RosterAvatars from '../components/command-center/RosterAvatars';
+import RoomView from '../components/command-center/RoomView';
 import Composer, { type ComposerSend } from '../components/command-center/Composer';
 import PresenceStrip from '../components/command-center/PresenceStrip';
 import Roster from '../components/command-center/Roster';
@@ -56,6 +57,9 @@ export default function CommandCenter() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalOutput, setTerminalOutput] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  /** Main column: the thread, or the project room (spec §5e). */
+  const [centerView, setCenterView] = useState<'thread' | 'room'>('thread');
+  const [lastRoomEvent, setLastRoomEvent] = useState<SSEEvent | null>(null);
   /** null = follow the default rule (spec §4.4) until the viewer toggles; session-only React state. */
   const [boardCollapsedChoice, setBoardCollapsedChoice] = useState<boolean | null>(null);
 
@@ -142,6 +146,7 @@ export default function CommandCenter() {
 
   useSSE((event: SSEEvent) => {
     if (event.type === 'heartbeat') return;
+    if (event.type.startsWith('room.')) setLastRoomEvent(event);
     void refreshThread({ full: invalidatesThreadActions(event.type) });
     if (event.type.startsWith('agent.') || event.type === 'system.stop_all' || event.type === 'profile.login_started') {
       if (event.type !== 'agent.output_updated') void loadAgents();
@@ -491,6 +496,23 @@ export default function CommandCenter() {
         </aside>
 
         <main className={`${tab === 'thread' ? 'flex' : 'hidden'} min-h-0 flex-col sm:flex`}>
+          <div role="tablist" aria-label="Center view" className="flex gap-1 border-b border-slate-800/60 px-3 pt-1.5">
+            {(['thread', 'room'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                role="tab"
+                aria-selected={centerView === v}
+                onClick={() => setCenterView(v)}
+                className={`rounded-t px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.15em] ${centerView === v ? 'bg-slate-800 text-slate-100' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                {v === 'thread' ? 'Thread' : 'Room'}
+              </button>
+            ))}
+          </div>
+          {centerView === 'room' ? (
+            <RoomView agents={agents} lastEvent={lastRoomEvent} />
+          ) : (
           <ThreadFeed
             items={visibleItems}
             users={userMap}
@@ -507,6 +529,7 @@ export default function CommandCenter() {
               ? { open: terminalOpen, output: terminalOutput, onToggle: () => setTerminalOpen((v) => !v) }
               : null}
           />
+          )}
           {canMutate && me && seatState !== 'ok' && me.id !== 'owner' && (
             <div role="status" className="flex flex-wrap items-center gap-2 border-t border-slate-800/60 px-3 py-1.5 text-xs">
               <span className={seatState === 'missing' ? 'text-amber-400' : 'text-slate-500'}>

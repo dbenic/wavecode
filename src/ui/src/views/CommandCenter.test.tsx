@@ -275,6 +275,21 @@ describe('CommandCenter', () => {
     });
   });
 
+  it('the Room tab replaces the thread with the project room (spec §5e)', async () => {
+    const api = await import('../hooks/useApi');
+    const base = vi.mocked(api.apiGet).getMockImplementation();
+    await setup();
+    vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/rooms') return [] as never;
+      return base ? base(path) : (null as never);
+    });
+    await userEvent.click(screen.getByRole('tab', { name: 'Room' }));
+    expect(await screen.findByText(/No project rooms yet/)).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Thread' })).toBeNull();
+    await userEvent.click(screen.getByRole('tab', { name: 'Thread' }));
+    expect(screen.getByRole('region', { name: 'Thread' })).toBeInTheDocument();
+  });
+
   it('loads roster, thread, board and presence', async () => {
     await setup();
     expect(within(screen.getByRole('region', { name: 'Mine' })).getByText('grok-fe')).toBeInTheDocument();
