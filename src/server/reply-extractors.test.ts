@@ -120,7 +120,10 @@ describe('reply extraction', () => {
     const r = extractReply('claude-code', pane('claude-table.txt'), 'Get me the open task / bug table');
     expect(r.text).toMatch(/^Ninety-one August invoices are blocked/);
     expect(r.text).toContain('| 5 | Non-EU supplier with no VAT ID: accept national tax no. (reverse charge 25%) | Codex1 (chatgpt-countix) | 21 |');
-    expect(r.text).toContain('| --- |');
+    // wrapped cells are folded into their row; one separator after the header, not one per row
+    expect(r.text).toContain('| FX | Non-EUR invoices: HNB rate on tax point, book in EUR | Extra agent, you start it | 24 |');
+    expect((r.text.match(/^\|( --- \|)+$/gm) ?? []).length).toBe(1);
+    expect(r.text).not.toMatch(/^\|\s*\|/m); // no rows with an empty first cell left
     expect(r.text).toContain('- Counts: the invoice counts may overlap');
     expect(r.text).toContain('[ ] Yes, accept national tax no.');
     expect(r.text).not.toMatch(/[┌└┼]/);

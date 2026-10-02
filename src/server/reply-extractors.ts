@@ -106,6 +106,46 @@ function parseBlocks(lines: string[], g: BlockGrammar): Block[] {
   return blocks;
 }
 
+/**
+ * Tidy markdown tables produced from box-drawing: a wrapped cell becomes a
+ * row whose first cell is empty — fold it into the previous row — and a
+ * rule between every row collapses to the single separator after the header.
+ */
+export function tidyTables(lines: string[]): string[] {
+  const out: string[] = [];
+  let inTable = false;
+  let sawSeparator = false;
+  for (const line of lines) {
+    const isRow = /^\|.*\|$/.test(line);
+    const isSep = /^\|( --- \|)+$/.test(line);
+    if (!isRow && !isSep) {
+      inTable = false;
+      sawSeparator = false;
+      out.push(line);
+      continue;
+    }
+    if (isSep) {
+      if (inTable && !sawSeparator) {
+        out.push(line);
+        sawSeparator = true;
+      }
+      continue;
+    }
+    const cells = line.slice(1, -1).split('|').map((c) => c.trim());
+    const prev = out[out.length - 1];
+    if (inTable && cells[0] === '' && prev && /^\|.*\|$/.test(prev) && !/^\|( --- \|)+$/.test(prev)) {
+      // continuation of the previous row: append each non-empty cell to its column
+      const prevCells = prev.slice(1, -1).split('|').map((c) => c.trim());
+      const merged = prevCells.map((c, i) => (cells[i] ? `${c} ${cells[i]}`.trim() : c));
+      out[out.length - 1] = `| ${merged.join(' | ')} |`;
+      continue;
+    }
+    inTable = true;
+    out.push(`| ${cells.join(' | ')} |`);
+  }
+  return out;
+}
+
 /** The prose after the last tool call; if the turn ended on a tool call, the last prose before it. */
 function finalProse(blocks: Block[]): string {
   let lastTool = -1;
@@ -115,7 +155,7 @@ function finalProse(blocks: Block[]): string {
     const before = blocks.filter((b) => b.kind === 'prose');
     prose = before.slice(-1);
   }
-  return prose.map((b) => b.lines.join('\n').trim()).filter(Boolean).join('\n\n');
+  return prose.map((b) => tidyTables(b.lines).join('\n').trim()).filter(Boolean).join('\n\n');
 }
 
 /** Prompt-box chrome: rounded borders, bare rules, and the `│ > … │` input row. Tables (┌├└ rules, `│ a │ b │` rows) are content. */
