@@ -388,6 +388,44 @@ lease on the card; `@toni @mia review each other's lane` creates two prompt
 items and two pane sends; an unknown `#foo` goes to the orchestrator seat
 unchanged; `@frontend` with two tagged agents sends to both.
 
+## 5d. One orchestrator seat per user
+
+Each developer gets their **own** orchestrator seat — own conversation
+history, own standing rules, own subscription — while the worker agents
+stay one shared pool governed by leases (§2). Asking in the Center talks to
+*your* seat; it sees everyone's agents and may act on the free ones and
+yours, exactly like you.
+
+- **Seat = agent** with `role = 'orchestrator'`, `owner_id = <user>`,
+  `lease_reason = 'seat'` (never expires, never auto-released), `profile`
+  = the user's profile, name `pm-<user>`. `users.seat_agent_id` points at it.
+- **Creation on demand**: "Create my seat" in the Center (and
+  `POST /api/users/me/seat {runtime?}`) spawns it, registers the `wavecode`
+  MCP server *inside that profile's CLI config* with a **seat token** —
+  a second bearer token for the same user (`users.seat_token_hash`), so
+  the seat acts as the user under the same lease/role rules and can be
+  revoked without rotating the person's own token — then briefs it with
+  `docs/orchestrator-seat.md` + the user's rules.
+- **Rules & memory**: `users.seat_rules TEXT` (Settings → My seat; e.g.
+  "always answer in Slovene", "never promote without asking me") is
+  appended to the brief. The seat keeps a `SEAT.md` in its workspace with
+  standing facts it learns (the brief tells it to maintain the file); the
+  CLI session itself holds the conversation memory. Thread history is
+  already per user via `actor_id`.
+- **Routing**: Ask targets the caller's seat; `config.orchestrator_agent`
+  remains the shared fallback (admin's) for users without a seat. The
+  seat's replies carry the user's color.
+- **Health**: a seat is a spawned agent — liveness relaunch and the
+  attempt cap apply; if the seat is missing when the user asks, the
+  Center offers to (re)create it rather than silently falling back.
+- **Observers** get no seat (read-only role).
+
+Acceptance: Ana and Denis each ask "what is @builder doing?" at the same
+time → two seats answer in their own threads; Ana's seat gets 403 trying
+to `send_prompt` to an agent Denis reserved; editing Ana's seat rules and
+re-briefing changes her seat's next answer; revoking the seat token stops
+the seat's MCP calls but not Ana's login.
+
 ## 6. Build order (one task each; each lands with tests)
 
 | # | Task | Depends on |
@@ -402,6 +440,7 @@ unchanged; `@frontend` with two tagged agents sends to both.
 | T7 | §5b reply capture: pending-reply tracking on every prompt path, per-runtime pane extractors, `reply` messages in the thread, composer defaults to the orchestrator seat, `docs/orchestrator-seat.md` operating prompt + `agents.role`, quick-reply chips | T5 |
 | T8 | §5c aliases (`agents.alias`), persona, tags/groups, composer grammar + autocomplete, people addressing | T7 |
 | T9 | §4.4 collapsible Board + Roster rails with badges, thread takes the width | T8 |
+| T10 | §5d per-user orchestrator seats: seat agents, seat tokens, MCP registration inside the profile, rules + SEAT.md memory, Ask routes to the caller's seat, Settings → My seat | T8 |
 
 ## 7. Acceptance
 
