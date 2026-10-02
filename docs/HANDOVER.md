@@ -174,13 +174,17 @@ Test-suite gotchas that will bite you:
 
 ### Target layout (decided 2026-10-02): two machines, two trust zones
 
-- **Dev box** (new Hetzner AX102): WaveCode + every agent in tmux + the
+- **Dev box** `countix-dev` (188.40.85.171, Hetzner AX102, Ubuntu 26.04): WaveCode + every agent in tmux + the
   per-developer credential profiles. No production secrets, ever. Provision
   with `scripts/provision-dev-box.sh` (root, idempotent): service user `wave`,
   Node 22 via nvm, CLIs, build, `config.yaml` with `profiles:` per developer,
   systemd, Tailscale, ufw (SSH + tailnet only). Then each developer runs
   `wavecode profile login <name> claude-code|codex|grok` once per CLI so their
   agents and personal seat run on *their own* subscription (spec §5).
+  Linux users: `denis` (sudo) and the `wave` service user; group `wavedev` may
+  `sudo -iu wave`. Profiles `denis dev1 dev2 dev3` (placeholders until the
+  developers are known; rename = mv dir + config key). Developers log in with
+  `wave-login <runtime> [profile]`. Ops note: `/home/wave/wavecode-ops.md`.
 - **Old box** (136.243.8.205): becomes CI runner + staging + release host.
   Hand-offs move to GitHub PRs; the CI verdict per sha gates promote (gap F1).
 - Migration: copy `.wavecode-data/rooms/` across (docs are the source of
