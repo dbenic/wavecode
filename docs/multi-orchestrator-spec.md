@@ -426,6 +426,79 @@ to `send_prompt` to an agent Denis reserved; editing Ana's seat rules and
 re-briefing changes her seat's next answer; revoking the seat token stops
 the seat's MCP calls but not Ana's login.
 
+## 5e. The project room — one shared space per project
+
+Roles are personas, not architecture: a developer, a tester and a spec
+writer are the same agent primitive with different briefs. What they need
+in common is one place where the spec, the decisions, the ledger and the
+test evidence live, that every seat is briefed with and every tool can
+read. Today specs land in one agent's docs, reports in another's,
+decisions in a table — nothing guarantees the tester reads the spec the
+developer built from.
+
+- `rooms` (`id`, `project` key from `projects.<name>` or a free name,
+  `root` dir under `paths.rooms_root/<project>/`, `created_at`). The room
+  folder: `SPEC.md` (what we are building), `LEDGER.md` (task ids → status
+  → verdict, written by WaveCode), `DECISIONS.md` (mirror of the decisions
+  table, appended), `REPORTS/` (test/QA/review reports, one file per run),
+  `TEMPLATES/{build,review,verify,spec}.md` (§5f), `ROOM.md` (the PM's
+  running summary: current goal, who is on what, open questions, vocabulary
+  — see §5f). Agent workspaces get a `.wavecode/room` symlink to it.
+- **Briefing**: every dispatch prepends the room index (file list + first
+  lines of `ROOM.md`) and the task's template; the orchestrator brief tells
+  the seat to read `ROOM.md` before answering and to update it after a
+  decision. Replies and task prompts can reference room files by path.
+- **MCP / API**: `list_docs {room}`, `read_doc {room, path}`,
+  `write_doc {room, path, content}` (owner-of-room or admin for `SPEC.md`
+  and templates; any seat for `REPORTS/` and `ROOM.md`), `GET/PUT
+  /api/rooms/:project/docs/*`. Reports from runs (RESULT files, review
+  feedback, QA findings) are copied into `REPORTS/` automatically.
+- Tasks carry `room` (default: the room matching the agent's workspace via
+  `projects.<name>.workspace_match`, else the user's default room).
+- UI: a **Room** tab in the Center (file list, inline markdown view/edit
+  for the files the user may write, "send to @agent" on any file).
+
+Acceptance: a spec written via `write_doc` is visible in the developer's
+dispatch briefing and in the tester's; a review verdict lands as a file
+under `REPORTS/` and a line in `LEDGER.md`; the PM seat's answer to "what
+are we building?" quotes `SPEC.md`; a user without room write access gets
+403 on `SPEC.md` but can read it.
+
+## 5f. The retro loop — learning from questions and outcomes
+
+Learning means a curated memory plus measured prompt evolution, gated like
+code. Three mechanisms:
+
+1. **Feedback on replies.** 👍/👎 and an optional "better: …" on any reply
+   bubble → `reply_feedback(reply_message_id, prompt_event_id, user_id,
+   score, note)`. The seat brief tells it to read its last 20 feedback
+   rows (`list_feedback` tool) at the start of a session and before long
+   answers, and to keep what it learns in `SEAT.md` (§5d).
+2. **Prompt templates with metrics.** Dispatch uses
+   `TEMPLATES/<kind>.md` (`build`, `review`, `verify`, `spec`) with
+   `{task}`, `{room}`, `{done_when}` placeholders; `tasks.template` records
+   which. Per template WaveCode tracks: first-pass PASS rate (verdict pass
+   on fix_round 0), mean fix rounds, questions-back rate (`request`
+   messages per task), time to first RESULT. `GET /api/rooms/:project/
+   metrics` and a strip in the Board rail.
+3. **Nightly retro.** A scheduled task (the §F6-style timer, or `wavecode
+   retro <room>`) runs on the room's PM seat: read the week's tasks,
+   verdicts, fix rounds, `request` messages, feedback and the questions
+   people asked; produce (a) proposed diffs to templates and `ROOM.md`
+   with the evidence for each ("4/6 builds failed typecheck on first
+   review → add `npm run typecheck` to build.done_when"), (b) a vocabulary
+   update (questions people re-ask, the words they used, the answer shape
+   that scored well). Proposals are artifacts in the review queue; a human
+   approves → WaveCode applies the diff. The seat may edit `SEAT.md`
+   without review.
+
+Acceptance: a 👎 with "too long" on an inventory-style answer is visible to
+the seat's next session and its next status answer is shorter; a build
+template edit proposed by the retro appears in the review queue with its
+evidence and applies on promote; metrics show per-template first-pass rate
+after two tasks; nothing in `TEMPLATES/` or `SPEC.md` changes without a
+promote.
+
 ## 6. Build order (one task each; each lands with tests)
 
 | # | Task | Depends on |
@@ -441,6 +514,8 @@ the seat's MCP calls but not Ana's login.
 | T8 | §5c aliases (`agents.alias`), persona, tags/groups, composer grammar + autocomplete, people addressing | T7 |
 | T9 | §4.4 collapsible Board + Roster rails with badges, thread takes the width | T8 |
 | T10 | §5d per-user orchestrator seats: seat agents, seat tokens, MCP registration inside the profile, rules + SEAT.md memory, Ask routes to the caller's seat, Settings → My seat | T8 |
+| T11 | §5e project room: rooms + folder layout, workspace symlink, dispatch/seat briefing with the room index + template, list/read/write_doc MCP + /api/rooms, auto-copied reports, Room tab | T10 |
+| T12 | §5f retro loop: reply feedback (UI + table + `list_feedback`), templates with placeholders and per-template metrics, nightly retro task producing reviewable diffs, vocabulary notes in ROOM.md | T11 |
 
 ## 7. Acceptance
 

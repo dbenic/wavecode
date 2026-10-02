@@ -31,8 +31,7 @@ import {
   mergeThreadItems,
   orderThread,
   type ComposerMode,
-  type SlashCommand,
-} from '../utils/command-center';
+  type SlashCommand, itemsForAgent } from '../utils/command-center';
 
 type Tab = 'roster' | 'thread' | 'board';
 
@@ -182,10 +181,11 @@ export default function CommandCenter() {
   const seatState = me?.seat?.status ?? 'none';
   const askBlocked = seatState === 'missing' ? 'Your orchestrator seat is gone — recreate it (button above) to Ask' : null;
   // Replies sit directly under the prompt they answer.
-  const visibleItems = useMemo(
-    () => orderThread(focused ? items.filter((i) => i.agent_id === focused) : items),
-    [items, focused],
-  );
+  const visibleItems = useMemo(() => {
+    if (!focused) return orderThread(items);
+    const focusedHandle = agentNames.get(focused) ?? focused;
+    return orderThread(itemsForAgent(items, focused, focusedHandle));
+  }, [items, focused, agentNames]);
   // The inbox spans every agent, whatever is focused.
   const attentionCount = useMemo(() => items.filter((i) => i.needs_attention).length, [items]);
   const focusedAgent = agents.find((a) => a.id === focused) ?? null;
