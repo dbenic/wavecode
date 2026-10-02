@@ -133,7 +133,11 @@ export function tidyTables(lines: string[]): string[] {
     }
     const cells = line.slice(1, -1).split('|').map((c) => c.trim());
     const prev = out[out.length - 1];
-    if (inTable && cells[0] === '' && prev && /^\|.*\|$/.test(prev) && !/^\|( --- \|)+$/.test(prev)) {
+    // A wrapped cell shows up as a row that is empty except for one column
+    // (any column — Claude wraps the first one too). Fold it into the row above.
+    const filled = cells.filter((c) => c !== '').length;
+    const continuation = inTable && filled >= 1 && filled < cells.length && (cells[0] === '' || filled === 1);
+    if (continuation && prev && /^\|.*\|$/.test(prev) && !/^\|( --- \|)+$/.test(prev)) {
       // continuation of the previous row: append each non-empty cell to its column
       const prevCells = prev.slice(1, -1).split('|').map((c) => c.trim());
       const merged = prevCells.map((c, i) => (cells[i] ? `${c} ${cells[i]}`.trim() : c));

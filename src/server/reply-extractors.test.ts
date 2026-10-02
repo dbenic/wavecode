@@ -131,6 +131,23 @@ describe('reply extraction', () => {
     expect(r.text).not.toMatch(/1: Bad/);
   });
 
+  it('tidyTables folds a wrap in the FIRST column too, and leaves real one-cell rows alone outside tables', async () => {
+    const { tidyTables } = await import('./reply-extractors.js');
+    expect(tidyTables([
+      '| Agent | On | State |',
+      '| --- | --- | --- |',
+      "| Fable's July custody match | Review complete | 24 booked, 3 wrong-dated, 15 missing |",
+      '| (42 docs) |  |  |',
+      '| --- | --- | --- |',
+      '| Codex1 | #3 OIB suppliers | 15 minutes in |',
+    ])).toEqual([
+      '| Agent | On | State |',
+      '| --- | --- | --- |',
+      "| Fable's July custody match (42 docs) | Review complete | 24 booked, 3 wrong-dated, 15 missing |",
+      '| Codex1 | #3 OIB suppliers | 15 minutes in |',
+    ]);
+  });
+
   it('without a prompt (run summaries) the final prose of the capture is used', () => {
     expect(extractReply('codex', pane('codex.txt')).text).toContain('Next step is the MCP tools (T3).');
   });
