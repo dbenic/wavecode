@@ -28,18 +28,30 @@ describe('registerSeatMcp', () => {
 
   const base = { workspace: '', token: 'wc_seat_secret', daemonUrl: 'http://127.0.0.1:3777' };
 
-  it('claude-code on a profile: HTTP server with the seat bearer in $CLAUDE_CONFIG_DIR/.claude.json, other keys kept, 0600', () => {
-    const file = path.join(root, 'ana', 'claude', '.claude.json');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ theme: 'dark', mcpServers: { other: { type: 'stdio', command: 'x' } } }));
+  it('claude-code on a profile: the seat workspace project config — NEVER the profile-wide .claude.json every worker on that profile reads', () => {
+    const profileCfg = path.join(root, 'ana', 'claude', '.claude.json');
+    fs.mkdirSync(path.dirname(profileCfg), { recursive: true });
+    const before = JSON.stringify({ theme: 'dark', mcpServers: { other: { type: 'stdio', command: 'x' } } });
+    fs.writeFileSync(profileCfg, before);
+    const ws = path.join(tmpDir, 'ws');
 
-    const res = mcp.registerSeatMcp({ ...base, runtime: 'claude-code', profile: 'ana', workspace: path.join(tmpDir, 'ws') });
-    expect(res).toEqual({ ok: true, file });
-    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
-    expect(json.theme).toBe('dark');
-    expect(json.mcpServers.other).toEqual({ type: 'stdio', command: 'x' });
+    const res = mcp.registerSeatMcp({ ...base, runtime: 'claude-code', profile: 'ana', workspace: ws });
+    expect(res).toEqual({ ok: true, file: path.join(ws, '.mcp.json') });
+    // the shared profile config is untouched: a builder spawned on ana's profile must not inherit her seat token
+    expect(fs.readFileSync(profileCfg, 'utf8')).toBe(before);
+    const json = JSON.parse(fs.readFileSync(path.join(ws, '.mcp.json'), 'utf8'));
     expect(json.mcpServers.wavecode).toEqual({ type: 'http', url: 'http://127.0.0.1:3777/mcp', headers: { Authorization: 'Bearer wc_seat_secret' } });
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.join(ws, '.mcp.json')).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(path.join(ws, '.claude', 'settings.local.json'), 'utf8')).enabledMcpjsonServers).toEqual(['wavecode']);
+  });
+
+  it('refuses to overwrite a config file that is not valid JSON (never clobbers CLI state)', () => {
+    const ws = path.join(tmpDir, 'ws-broken');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(ws, '.mcp.json'), '{ this is not json');
+    const res = mcp.registerSeatMcp({ ...base, runtime: 'claude-code', profile: null, workspace: ws });
+    expect(res.ok).toBe(false);
+    expect(fs.readFileSync(path.join(ws, '.mcp.json'), 'utf8')).toBe('{ this is not json');
   });
 
   it('claude-code without a profile: the seat workspace project config, pre-approved — never the shared home config', () => {
@@ -71,6 +83,6 @@ describe('registerSeatMcp', () => {
   it('refuses where the config would be shared, and runtimes without a registrar', () => {
     expect(mcp.registerSeatMcp({ ...base, runtime: 'codex', profile: null })).toMatchObject({ ok: false, error: expect.stringMatching(/shared/) });
     expect(mcp.registerSeatMcp({ ...base, runtime: 'aider', profile: 'ana' })).toMatchObject({ ok: false, error: expect.stringMatching(/manually/) });
-    expect(mcp.registerSeatMcp({ ...base, runtime: 'claude-code', profile: 'carol' })).toMatchObject({ ok: false, error: "Profile 'carol' is not configured" });
+    // claude-code registration is project-scoped and no longer touches the profile; profile validity is enforced at seat creation
   });
 });

@@ -145,6 +145,8 @@ export interface User {
   seat_agent_id?: string | null;
   /** Standing rules appended to the seat's brief. */
   seat_rules?: string | null;
+  /** Which bearer authenticated this request: the person's own token, or their seat's (spec §5d). */
+  auth_via?: 'token' | 'seat';
   created_at: string;
 }
 

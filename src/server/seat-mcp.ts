@@ -1,10 +1,11 @@
 /**
  * Register the `wavecode` MCP server inside an orchestrator seat's own CLI
  * config with the seat token (spec §5d), so the seat drives WaveCode as its
- * user. Only ever written where *this seat alone* reads it: the user's
- * credential-profile dir, or the seat's workspace — never a shared login,
- * where every agent would inherit the user's identity. Files are 0600; the
- * token is never logged.
+ * user. Only ever written where *this seat alone* reads it — the seat's own
+ * workspace (project-scope config). NEVER the profile's user-scope config:
+ * every worker agent spawned on that profile would inherit the user's
+ * identity while executing untrusted repo content. Files are 0600, written
+ * atomically; the token is never logged.
  */
 
 import fs from 'node:fs';
@@ -32,24 +33,36 @@ export function daemonUrl(): string {
 
 function writePrivate(file: string, content: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, content, { encoding: 'utf8', mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  // tmp + rename: a reader never sees a half-written config
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  fs.renameSync(tmp, file);
 }
 
+/** Missing file → {}. An existing file that does not parse is an error, never silently replaced. */
 function readJson(file: string): Record<string, unknown> {
+  let raw: string;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw e;
   }
+  if (!raw.trim()) return {};
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${file} is not a JSON object — refusing to overwrite it`);
+  }
+  return parsed;
 }
 
 /**
- * Claude Code: an HTTP MCP server with the seat token as bearer. With a
- * profile it goes into that profile's user config (`$CLAUDE_CONFIG_DIR/.claude.json`);
- * without one, into the seat workspace's project config (`.mcp.json`, pre-approved
- * in `.claude/settings.local.json`).
+ * Claude Code: an HTTP MCP server with the seat token as bearer, in the seat
+ * workspace's project config (`.mcp.json`, pre-approved in
+ * `.claude/settings.local.json`) — profile or not. The profile's user-scope
+ * `.claude.json` is shared by every agent on that profile and must never
+ * carry the seat token.
  */
 function registerClaude(input: SeatMcpInput): SeatMcpResult {
   const server = {
@@ -57,20 +70,11 @@ function registerClaude(input: SeatMcpInput): SeatMcpResult {
     url: `${input.daemonUrl}/mcp`,
     headers: { Authorization: `Bearer ${input.token}` },
   };
-  let file: string;
-  if (input.profile) {
-    const env = resolveProfileEnv(input.runtime, input.profile);
-    if (!env.ok) return env;
-    const dir = env.data.CLAUDE_CONFIG_DIR;
-    if (!dir) return { ok: false, error: `Runtime '${input.runtime}' has no CLAUDE_CONFIG_DIR for profile '${input.profile}'` };
-    file = path.join(dir, '.claude.json');
-  } else {
-    file = path.join(input.workspace, '.mcp.json');
-    const settingsFile = path.join(input.workspace, '.claude', 'settings.local.json');
-    const settings = readJson(settingsFile);
-    const enabled = new Set([...(Array.isArray(settings.enabledMcpjsonServers) ? settings.enabledMcpjsonServers as string[] : []), 'wavecode']);
-    writePrivate(settingsFile, JSON.stringify({ ...settings, enabledMcpjsonServers: [...enabled] }, null, 2));
-  }
+  const file = path.join(input.workspace, '.mcp.json');
+  const settingsFile = path.join(input.workspace, '.claude', 'settings.local.json');
+  const settings = readJson(settingsFile);
+  const enabled = new Set([...(Array.isArray(settings.enabledMcpjsonServers) ? settings.enabledMcpjsonServers as string[] : []), 'wavecode']);
+  writePrivate(settingsFile, JSON.stringify({ ...settings, enabledMcpjsonServers: [...enabled] }, null, 2));
   const config = readJson(file);
   const servers = (config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers : {}) as Record<string, unknown>;
   writePrivate(file, JSON.stringify({ ...config, mcpServers: { ...servers, wavecode: server } }, null, 2));

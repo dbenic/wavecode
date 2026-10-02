@@ -70,7 +70,14 @@ export function getSeatStatus(user: Pick<User, 'seat_agent_id'>): SeatStatus {
  */
 export function defaultSeatFor(viewer: Pick<User, 'id' | 'seat_agent_id'>, agents: Agent[]): Agent | null {
   if (viewer.seat_agent_id) return agents.find((a) => a.id === viewer.seat_agent_id) ?? null;
-  return resolveOrchestratorAgent(agents.filter((a) => a.lease_reason !== 'seat'));
+  // The shared fallback is never another person's seat — held or orphaned
+  // (a revoked user's pm-<name> whose lease was released).
+  return resolveOrchestratorAgent(agents.filter((a) => a.lease_reason !== 'seat' && !isPersonalSeatName(a.name)));
+}
+
+/** `pm-<user>` is the naming scheme for personal seats (seatName). */
+export function isPersonalSeatName(name: string): boolean {
+  return /^pm-[a-z0-9][a-z0-9_-]*$/.test(name);
 }
 
 /** Seat-specific part of the brief: who it serves, their rules, and its SEAT.md memory. */
@@ -105,6 +112,8 @@ function guardUser(user: Pick<User, 'id' | 'role'>): SeatResult<User> {
 export interface CreatedSeat {
   agent: Agent;
   mcp: SeatMcpResult;
+  /** Only when MCP registration failed: the one-time plaintext for manual registration. */
+  token?: string;
 }
 
 /**
@@ -156,7 +165,9 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
   void briefOrchestratorSeat(agent.data.id, me.id, { extra: seatBriefExtra(me, workspace) }).catch((err) =>
     logger.warn({ agentId: agent.data.id, error: (err as Error).message }, 'Seat brief failed'),
   );
-  return { ok: true, data: { agent: agent.data, mcp } };
+  // When automatic registration failed the token exists only here: hand it
+  // over once so the user can register the MCP server by hand.
+  return { ok: true, data: { agent: agent.data, mcp, ...(mcp.ok ? {} : { token }) } };
 }
 
 export function setSeatRules(user: Pick<User, 'id' | 'role'>, rules: unknown): SeatResult<User> {
@@ -192,7 +203,7 @@ export function revokeSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<voi
 }
 
 /** Issue a new seat token and re-register it in the seat's config (the old one stops working). */
-export function rotateSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<SeatMcpResult> {
+export function rotateSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<{ mcp: SeatMcpResult; token?: string }> {
   const guarded = guardUser(user);
   if (!guarded.ok) return guarded;
   const status = getSeatStatus(guarded.data);
@@ -201,5 +212,6 @@ export function rotateSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<Sea
   const mcp = registerSeatMcp(mcpInput(guarded.data, status.agent, token));
   updateUserSeat(guarded.data.id, { seat_token_hash: hashToken(token) });
   emit('seat.token_rotated', 'user', guarded.data.id, { user: guarded.data.name, mcp_registered: mcp.ok });
-  return { ok: true, data: mcp };
+  // Unregistered → the plaintext is handed over once for manual registration
+  return { ok: true, data: { mcp, ...(mcp.ok ? {} : { token }) } };
 }

@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { getUser, hasSeatToken } from '../db.js';
+import { isSeatBearer } from '../users.js';
 import * as outputWatcher from '../output-watcher.js';
 import {
   createSeat,
@@ -12,8 +13,20 @@ import {
   setSeatRules,
 } from '../seats.js';
 
+const SEAT_BEARER_ERROR = 'Forbidden: seat tokens cannot create, re-key or configure seats — use your own token';
+
 /** Settings → My seat (spec §5d). Every route acts on the caller's own seat only. */
 export function registerSeatRoutes(app: Hono<NodeAppEnv>): void {
+  // The seat itself may read its status but never mint/rotate/revoke tokens,
+  // create seats or change its own rules — that stays with the person.
+  app.use('/api/users/me/seat/*', async (c, next) => {
+    if (c.req.method !== 'GET' && isSeatBearer(getActingUser(c))) return c.json({ error: SEAT_BEARER_ERROR }, 403);
+    await next();
+  });
+  app.use('/api/users/me/seat', async (c, next) => {
+    if (c.req.method !== 'GET' && isSeatBearer(getActingUser(c))) return c.json({ error: SEAT_BEARER_ERROR }, 403);
+    await next();
+  });
   app.get('/api/users/me/seat', (c) => {
     const user = getActingUser(c);
     const fresh = getUser(user.id);
@@ -34,7 +47,10 @@ export function registerSeatRoutes(app: Hono<NodeAppEnv>): void {
     outputWatcher.startWatching(result.data.agent.id);
     return c.json({
       agent: result.data.agent,
-      mcp: result.data.mcp.ok ? { registered: true } : { registered: false, error: result.data.mcp.error },
+      mcp: result.data.mcp.ok
+        ? { registered: true }
+        // shown once, like a user token: the only copy outside the hash
+        : { registered: false, error: result.data.mcp.error, token: result.data.token },
     }, 201);
   });
 
@@ -61,6 +77,10 @@ export function registerSeatRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/users/me/seat/token', (c) => {
     const result = rotateSeatToken(getActingUser(c));
     if (!result.ok) return c.json({ error: result.error }, seatErrorStatus(result.code));
-    return c.json({ ok: true, has_token: true, mcp: result.data.ok ? { registered: true } : { registered: false, error: result.data.error } });
+    return c.json({
+      ok: true,
+      has_token: true,
+      mcp: result.data.mcp.ok ? { registered: true } : { registered: false, error: result.data.mcp.error, token: result.data.token },
+    });
   });
 }

@@ -4,6 +4,7 @@
  */
 
 import { Hono } from 'hono';
+import { seatWorkspace } from './seats.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -55,9 +56,9 @@ describe('one orchestrator seat per user (spec §5d)', () => {
     return { status: res.status, json: text ? JSON.parse(text) : null };
   }
 
-  /** The seat token, as only the seat sees it: read back from its MCP config. */
+  /** The seat token, as only the seat sees it: read back from the seat workspace's project MCP config. */
   function seatTokenOf(user: string): string {
-    const cfg = JSON.parse(fs.readFileSync(path.join(root, user, 'claude', '.claude.json'), 'utf8'));
+    const cfg = JSON.parse(fs.readFileSync(path.join(seatWorkspace(`pm-${user}`), '.mcp.json'), 'utf8'));
     return cfg.mcpServers.wavecode.headers.Authorization.replace('Bearer ', '');
   }
 
@@ -216,6 +217,19 @@ describe('one orchestrator seat per user (spec §5d)', () => {
 
     expect((await call('PUT', '/api/users/me/seat/rules', ana.token, { rules: 'x'.repeat(2001) })).status).toBe(400);
     expect((await call('GET', '/api/users/me/seat', ana.token)).json).toMatchObject({ status: 'ok', rules: expect.stringContaining('Slovene'), has_token: true });
+  });
+
+  it('a seat token cannot re-key itself, create seats, change rules, or manage users (403); its own token still can', async () => {
+    await createSeat(ana);
+    const seatToken = seatTokenOf('ana');
+    expect((await call('POST', '/api/users/me/seat/token', seatToken)).status).toBe(403);
+    expect((await call('DELETE', '/api/users/me/seat/token', seatToken)).status).toBe(403);
+    expect((await call('PUT', '/api/users/me/seat/rules', seatToken, { rules: 'x' })).status).toBe(403);
+    expect((await call('POST', '/api/users/me/seat', seatToken, {})).status).toBe(403);
+    // reading its own status is fine
+    expect((await call('GET', '/api/users/me/seat', seatToken)).status).toBe(200);
+    // the person's own token keeps full control
+    expect((await call('PUT', '/api/users/me/seat/rules', ana.token, { rules: 'answer briefly' })).status).toBe(200);
   });
 
   it('acceptance: revoking the seat token stops the seat\'s MCP calls but not Ana\'s login; rotating issues a new one', async () => {
