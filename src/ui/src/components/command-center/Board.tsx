@@ -7,6 +7,8 @@ interface BoardProps {
   users: Map<string, User>;
   reviewCount: number;
   canAssign: boolean;
+  /** Collapse to the badge rail (spec §4.4); desktop only. */
+  onCollapse?: () => void;
 }
 
 const STATUS_CLASS: Record<Task['status'], string> = {
@@ -21,13 +23,26 @@ const STATUS_GLYPH: Record<Task['status'], string> = {
   running: '▶', pending: '○', blocked: '⏸', failed: '✗', done: '✓',
 };
 
-export default function Board({ tasks, users, reviewCount, canAssign }: BoardProps) {
+export default function Board({ tasks, users, reviewCount, canAssign, onCollapse }: BoardProps) {
   const lanes = swimlanes(tasks.filter((t) => t.status !== 'done' || isRecent(t)), users);
   return (
     <section aria-label="Board" className="flex flex-col gap-3 p-3">
       <div className="flex items-center justify-between">
         <h2 className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-600">Board</h2>
-        <span className="text-xs text-slate-400">reviews: {reviewCount}</span>
+        <span className="flex items-center gap-2">
+          <span className="text-xs text-slate-400">reviews: {reviewCount}</span>
+          {onCollapse && (
+            <button
+              type="button"
+              onClick={onCollapse}
+              aria-label="Collapse board"
+              title="Collapse board"
+              className="hidden text-xs text-slate-500 hover:text-slate-300 sm:inline"
+            >
+              ▸
+            </button>
+          )}
+        </span>
       </div>
       {lanes.length === 0 && <p className="text-xs text-slate-600">No tasks yet.</p>}
       {lanes.map((lane) => (

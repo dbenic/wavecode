@@ -187,6 +187,70 @@ describe('CommandCenter', () => {
     });
   });
 
+  describe('collapsible Board and Roster (spec §4.4)', () => {
+    const grid = () => screen.getByTestId('command-center-grid').className;
+
+    it('defaults to the 40px rail with badges when the viewer owns no running task; click expands, ▸ collapses', async () => {
+      await setup();
+      const rail = within(screen.getByTestId('board-rail'));
+      expect(rail.getByLabelText('Open tasks: 1')).toBeInTheDocument();
+      expect(rail.getByLabelText('Pending reviews: 2')).toBeInTheDocument();
+      expect(rail.getByLabelText('Attention: 2')).toBeInTheDocument();
+      expect(grid()).toContain('min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_40px]');
+      expect(screen.getByTestId('board-full').className).toContain('sm:hidden'); // phones still get the board tab
+
+      await userEvent.click(rail.getByRole('button', { name: 'Expand board' }));
+      expect(screen.queryByTestId('board-rail')).toBeNull();
+      expect(grid()).toContain('min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_18rem]');
+      expect(screen.getByTestId('board-full').className).not.toContain('sm:hidden');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Collapse board' }));
+      expect(screen.getByTestId('board-rail')).toBeInTheDocument();
+    });
+
+    it('defaults to expanded when the viewer owns a running task', async () => {
+      const api = await import('../hooks/useApi');
+      const original = vi.mocked(api.apiGet).getMockImplementation();
+      await setup();
+      vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
+        if (path === '/tasks') return [{ id: 'task-9', agent_id: 'grok-fe', prompt: 'mine, running', status: 'running', priority: 0, created_at: new Date().toISOString(), created_by: 'u-ana' }] as never;
+        return original ? original(path) : (null as never);
+      });
+      await act(async () => {
+        sseHandler?.({ id: 60, type: 'task.dispatched', entityType: 'task', entityId: 'task-9', payload: {}, createdAt: '' });
+      });
+      await waitFor(() => expect(screen.queryByTestId('board-rail')).toBeNull());
+      expect(grid()).toContain('_18rem]');
+    });
+
+    it('the viewer\'s own toggle wins over the default for the session', async () => {
+      const api = await import('../hooks/useApi');
+      const original = vi.mocked(api.apiGet).getMockImplementation();
+      await setup();
+      await userEvent.click(within(screen.getByTestId('board-rail')).getByRole('button', { name: 'Expand board' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Collapse board' }));
+      // a running task of mine appears — the default would now expand, but the viewer chose collapsed
+      vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
+        if (path === '/tasks') return [{ id: 'task-9', agent_id: 'grok-fe', prompt: 'mine', status: 'running', priority: 0, created_at: '', created_by: 'u-ana' }] as never;
+        return original ? original(path) : (null as never);
+      });
+      await act(async () => {
+        sseHandler?.({ id: 61, type: 'task.dispatched', entityType: 'task', entityId: 'task-9', payload: {}, createdAt: '' });
+      });
+      expect(screen.getByTestId('board-rail')).toBeInTheDocument();
+    });
+
+    it('the Roster collapses to avatars at ≤1100px (full roster above), and avatars focus the thread', async () => {
+      await setup();
+      expect(screen.getByTestId('roster-avatars').className).toBe('hidden sm:block min-[1101px]:hidden');
+      expect(screen.getByTestId('roster-full').className).toBe('sm:hidden min-[1101px]:block');
+      expect(grid()).toContain('sm:grid-cols-[3.5rem_minmax(0,1fr)_40px]');
+      await userEvent.click(within(screen.getByTestId('roster-avatars')).getByRole('button', { name: '@codex-rev' }));
+      expect(screen.getByText('Run failed')).toBeInTheDocument();
+      expect(screen.queryByText('Report one')).toBeNull();
+    });
+  });
+
   it('loads roster, thread, board and presence', async () => {
     await setup();
     expect(within(screen.getByRole('region', { name: 'Mine' })).getByText('grok-fe')).toBeInTheDocument();
@@ -274,12 +338,12 @@ describe('CommandCenter', () => {
 
   it('focusing an agent filters the thread and targets the composer; the terminal tail opens on demand', async () => {
     await setup();
-    await userEvent.click(screen.getByRole('button', { name: /codex-rev/ }));
+    await userEvent.click(within(screen.getByTestId('roster-full')).getByRole('button', { name: /codex-rev/ }));
     expect(screen.queryByText('Report one')).toBeNull();
     expect(screen.getByText('Run failed')).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Target' })).toHaveValue('codex-rev');
 
-    await userEvent.click(screen.getByRole('button', { name: /^grok-fe/ }));
+    await userEvent.click(within(screen.getByTestId('roster-full')).getByRole('button', { name: /^grok-fe/ }));
     await userEvent.click(screen.getByRole('button', { name: /terminal tail/ }));
     expect(await screen.findByTestId('terminal-tail')).toHaveTextContent('✓ ok');
   });

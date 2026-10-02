@@ -245,3 +245,14 @@ export function parseSlashCommand(input: string): SlashParse {
   }
   return { ok: false, error: `Unknown command /${cmd}. Try /reserve 4h, /release, /kill, /review, /promote, /retry` };
 }
+
+// --- Board / roster rails (spec §4.4) ---
+
+/** Collapsed unless the viewer owns (created) a task that is running right now. */
+export function boardDefaultCollapsed(tasks: Pick<Task, 'status' | 'created_by'>[], meId: string | null): boolean {
+  return !tasks.some((t) => t.status === 'running' && !!meId && t.created_by === meId);
+}
+
+export function openTaskCount(tasks: Pick<Task, 'status'>[]): number {
+  return tasks.filter((t) => t.status === 'pending' || t.status === 'running' || t.status === 'blocked').length;
+}
