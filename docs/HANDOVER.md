@@ -172,6 +172,20 @@ Test-suite gotchas that will bite you:
 - The Claude CLI on the box has the `wavecode` MCP server registered
   (user scope) — any `claude` session there is orchestration-capable.
 
+### Target layout (decided 2026-10-02): two machines, two trust zones
+
+- **Dev box** (new Hetzner AX102): WaveCode + every agent in tmux + the
+  per-developer credential profiles. No production secrets, ever. Provision
+  with `scripts/provision-dev-box.sh` (root, idempotent): service user `wave`,
+  Node 22 via nvm, CLIs, build, `config.yaml` with `profiles:` per developer,
+  systemd, Tailscale, ufw (SSH + tailnet only). Then each developer runs
+  `wavecode profile login <name> claude-code|codex|grok` once per CLI so their
+  agents and personal seat run on *their own* subscription (spec §5).
+- **Old box** (136.243.8.205): becomes CI runner + staging + release host.
+  Hand-offs move to GitHub PRs; the CI verdict per sha gates promote (gap F1).
+- Migration: copy `.wavecode-data/rooms/` across (docs are the source of
+  truth); recreate agents and users on the new box rather than copying the DB.
+
 ## Known gaps — the next work, in priority order
 
 1. **Ownership-aware command chat** — `command-chat.ts` tools (`send_prompt`,
