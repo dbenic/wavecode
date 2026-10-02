@@ -1,17 +1,50 @@
 import DOMPurify from 'dompurify';
 
 const MARKDOWN_PURIFY_CONFIG = {
-  ALLOWED_TAGS: ['a', 'br', 'code', 'em', 'h1', 'h2', 'h3', 'h4', 'hr', 'li', 'p', 'pre', 'strong'],
+  ALLOWED_TAGS: ['a', 'br', 'code', 'em', 'h1', 'h2', 'h3', 'h4', 'hr', 'li', 'p', 'pre', 'strong', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
   ALLOWED_ATTR: ['class', 'href', 'rel', 'target'],
   ALLOW_DATA_ATTR: false,
   ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|\/|#)/i,
 };
 
+const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
+const TABLE_SEP_RE = /^\s*\|(\s*:?-{2,}:?\s*\|)+\s*$/;
+
+/**
+ * GFM tables (header row, `| --- |` separator, body rows) → <table>, emitted
+ * on ONE line so the later newline → <br/> pass cannot break them. Runs on
+ * already-escaped text, so cells carry no live HTML.
+ */
+function renderTables(escaped: string): string {
+  const lines = escaped.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (TABLE_ROW_RE.test(lines[i]) && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1])) {
+      const cells = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+      const header = cells(lines[i]);
+      const rows: string[][] = [];
+      let j = i + 2;
+      while (j < lines.length && TABLE_ROW_RE.test(lines[j]) && !TABLE_SEP_RE.test(lines[j])) {
+        rows.push(cells(lines[j]));
+        j++;
+      }
+      const th = header.map((h) => `<th class="px-2 py-1 text-left font-semibold text-slate-200 border-b border-slate-700/60">${h}</th>`).join('');
+      const tb = rows.map((r) => `<tr class="align-top">${header.map((_, k) => `<td class="px-2 py-1 border-b border-slate-800/60 text-slate-300">${r[k] ?? ''}</td>`).join('')}</tr>`).join('');
+      out.push(`<table class="my-2 w-full border-collapse text-[12px]"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>`);
+      i = j - 1;
+      continue;
+    }
+    out.push(lines[i]);
+  }
+  return out.join('\n');
+}
+
 export function renderMarkdown(md: string): string {
-  const rawHtml = md
+  const escaped = md
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
+    .replace(/>/g, '&gt;');
+  const rawHtml = renderTables(escaped)
     .replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) =>
       `<pre class="bg-slate-900/80 border border-slate-700/40 rounded-lg p-3 my-3 overflow-x-auto text-[11px] leading-relaxed text-emerald-300/90"><code>${code.trim()}</code></pre>`)
     .replace(/`([^`]+)`/g, '<code class="bg-slate-800/80 px-1.5 py-0.5 rounded text-emerald-400/80 text-[11px]">$1</code>')

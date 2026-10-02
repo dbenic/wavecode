@@ -1,3 +1,4 @@
+import { renderMarkdown } from '../../utils/markdown';
 import { useEffect, useRef, useState } from 'react';
 import type { ThreadAction, ThreadItem, ThreadKind, User } from '../../types';
 import { agentColor, userColor } from '../../utils/command-center';
@@ -166,7 +167,13 @@ function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction,
           <span className="tabular-nums text-slate-600">{time(item.at)}</span>
           {item.title !== 'Reply' && <span className="text-amber-400">{item.title.replace(/^Reply\s*/, '')}</span>}
         </div>
-        {body && <p className="whitespace-pre-wrap break-words text-sm text-slate-100">{body}</p>}
+        {body && (
+          <div
+            className="reply-markdown break-words text-sm text-slate-100 [&_p]:mb-2 [&_p]:text-sm [&_p]:text-slate-100 [&_li]:text-slate-200 [&_table]:block [&_table]:overflow-x-auto"
+            // renderMarkdown escapes HTML first and sanitizes the result (DOMPurify allowlist)
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
+          />
+        )}
       </div>
       {chips.length > 0 && (
         <div role="group" aria-label="Quick replies" className="mt-1 flex flex-wrap gap-1.5 pl-1">
