@@ -50,7 +50,7 @@ export default function CommandCenter() {
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [tab, setTab] = useState<Tab>('thread');
   const [target, setTarget] = useState('');
-  const [mode, setMode] = useState<ComposerMode>('prompt');
+  const [mode, setMode] = useState<ComposerMode>('ask');
   const [replyTaskId, setReplyTaskId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, string>>({});
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -442,14 +442,14 @@ export default function CommandCenter() {
       <div
         data-testid="command-center-grid"
         className={`grid min-h-0 flex-1 ${boardCollapsed
-          ? 'sm:grid-cols-[3.5rem_minmax(0,1fr)_40px] min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_40px]'
-          : 'sm:grid-cols-[3.5rem_minmax(0,1fr)_18rem] min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_18rem]'}`}
+          ? 'sm:grid-cols-[3.5rem_minmax(0,1fr)_40px] min-[900px]:grid-cols-[16rem_minmax(0,1fr)_40px]'
+          : 'sm:grid-cols-[3.5rem_minmax(0,1fr)_18rem] min-[900px]:grid-cols-[16rem_minmax(0,1fr)_18rem]'}`}
       >
         <aside className={`${tab === 'roster' ? 'block' : 'hidden'} min-h-0 overflow-y-auto border-slate-800/60 sm:block sm:border-r`}>
-          <div className="hidden sm:block min-[1101px]:hidden" data-testid="roster-avatars">
+          <div className="hidden sm:block min-[900px]:hidden" data-testid="roster-avatars">
             <RosterAvatars agents={agents} users={userMap} focusedAgentId={focused} onFocus={focus} />
           </div>
-          <div className="sm:hidden min-[1101px]:block" data-testid="roster-full">
+          <div className="sm:hidden min-[900px]:block" data-testid="roster-full">
           <Roster
             agents={agents}
             tasks={tasks}

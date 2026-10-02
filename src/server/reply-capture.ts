@@ -41,6 +41,9 @@ export interface PendingReply {
   promptEventId: number | null;
   taskId: string | null;
   sentAt: number;
+  /** Last anchored extraction seen while the agent was still working, and when it first looked like that. */
+  stableText?: string;
+  stableSince?: number;
 }
 
 const pending = new Map<string, PendingReply>();
@@ -170,6 +173,42 @@ export function onAgentIdle(
   // previous one (echo scrolled out, /clear, dialog) — even on the idle
   // edge. Leave it to the 10-minute fallback, which marks it truncated.
   if (!reply.anchored) return false;
+
+  persist(p, agentResult.data, reply.text, false);
+  return true;
+}
+
+/**
+ * Output-watcher hook for ticks where the agent is NOT idle. An agent that
+ * answers and then keeps working (Codex with background jobs, a long test
+ * run after the reply) never produces an idle edge, so the anchored answer
+ * is accepted once it has stopped changing for QUIET_RESOLVE_MS.
+ */
+export function onAgentTick(agentId: string, opts: { now?: number } = {}): boolean {
+  const p = pending.get(agentId);
+  if (!p) return false;
+  const now = opts.now ?? Date.now();
+
+  const agentResult = getAgent(agentId);
+  if (!agentResult.ok) {
+    pending.delete(agentId);
+    return false;
+  }
+  const pane = capture(agentResult.data);
+  if (pane === null) return false;
+
+  const reply = extractReply(agentResult.data.runtime, pane, p.prompt);
+  if (!reply.anchored || !reply.text) {
+    p.stableText = undefined;
+    p.stableSince = undefined;
+    return false;
+  }
+  if (reply.text !== p.stableText) {
+    p.stableText = reply.text;
+    p.stableSince = now;
+    return false;
+  }
+  if (now - (p.stableSince ?? now) < QUIET_RESOLVE_MS) return false;
 
   persist(p, agentResult.data, reply.text, false);
   return true;

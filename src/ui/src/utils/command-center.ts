@@ -212,7 +212,8 @@ export function apiRelativePath(path: string): string {
 
 // --- Composer ---
 
-export type ComposerMode = 'prompt' | 'task' | 'reply' | 'file';
+/** 'ask' = question to the orchestrator seat (LLM-interpreted); 'prompt' = raw text into the target's terminal. */
+export type ComposerMode = 'ask' | 'prompt' | 'task' | 'reply' | 'file';
 
 export type SlashCommand =
   | { cmd: 'reserve'; hours: number }

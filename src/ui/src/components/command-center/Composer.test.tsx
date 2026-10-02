@@ -137,11 +137,23 @@ describe('Composer', () => {
     expect(onSend).toHaveBeenLastCalledWith({ kind: 'plan', plan: expect.objectContaining({ kind: 'reserve', hours: 2 }) });
   });
 
-  it('Ask is the default mode name; the seat is marked in the target chip', () => {
-    render(<Harness onSend={vi.fn()} initialTarget="pm" />);
+  it('Ask and Prompt are distinct modes; the seat is marked in the target chip', () => {
+    render(<Harness onSend={vi.fn()} initialTarget="pm" initialMode="ask" />);
     expect(screen.getByRole('radio', { name: 'Ask' })).toHaveAttribute('aria-checked', 'true');
-    expect(screen.queryByRole('radio', { name: 'Prompt' })).toBeNull();
+    expect(screen.getByRole('radio', { name: 'Prompt' })).toHaveAttribute('aria-checked', 'false');
     expect(screen.getByRole('combobox', { name: 'Target' })).toHaveDisplayValue('@pm · seat');
+  });
+
+  it('Ask sends the question to the seat with the focused agent as context; Prompt goes raw to the agent', async () => {
+    const onSend = vi.fn(async () => true as const);
+    render(<Harness onSend={onSend} initialTarget="grok-fe" initialMode="ask" />);
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await userEvent.type(box, 'status{Enter}');
+    expect(onSend).toHaveBeenLastCalledWith({ kind: 'prompt', agentId: 'pm', text: 'About @grok-fe: status' });
+
+    await userEvent.click(screen.getByRole('radio', { name: 'Prompt' }));
+    await userEvent.type(box, 'status{Enter}');
+    expect(onSend).toHaveBeenLastCalledWith({ kind: 'prompt', agentId: 'grok-fe', text: 'status' });
   });
 
   it('@name in the text retargets the send and the chip', async () => {

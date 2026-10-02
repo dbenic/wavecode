@@ -1,11 +1,23 @@
 /**
- * The Roster on narrow desktops (≤1100px, spec §4.4): one avatar per agent —
+ * The Roster on narrow desktops (≤900px, spec §4.4): one avatar per agent —
  * initial in the lease holder's color, status dot — click focuses its thread.
  */
 
 import type { Agent, User } from '../../types';
 import { userColor } from '../../utils/command-center';
 import { handleOf } from '../../utils/composer-grammar';
+
+/**
+ * Short label for the rail: the alias when set (that is what aliases are
+ * for), else initials of the name's hyphen/underscore parts
+ * (`wavepulse-fable-file` → `WFF`, `builder` → `BU`), max 4 chars.
+ */
+export function railLabel(agent: Pick<Agent, 'name' | 'alias'>): string {
+  if (agent.alias) return agent.alias.slice(0, 4);
+  const parts = agent.name.split(/[-_.]+/).filter(Boolean);
+  if (parts.length >= 2) return parts.map((p) => p[0]).join('').slice(0, 4).toUpperCase();
+  return agent.name.slice(0, 2).toUpperCase();
+}
 
 interface RosterAvatarsProps {
   agents: Agent[];
@@ -41,10 +53,10 @@ export default function RosterAvatars({ agents, users, focusedAgentId, onFocus }
             onClick={() => onFocus(agent.id)}
             title={`@${handle} · ${agent.status}${agent.owner ? ` · ${agent.owner}` : ''}`}
             aria-label={`@${handle}`}
-            className={`relative flex h-8 w-8 items-center justify-center rounded-full border-2 text-xs font-semibold uppercase text-slate-100 ${focusedAgentId === agent.id ? 'border-emerald-400' : 'border-slate-800'}`}
+            className={`relative flex h-8 w-11 items-center justify-center rounded-full border-2 text-[10px] font-semibold text-slate-100 ${agent.alias ? 'lowercase' : 'uppercase'} ${focusedAgentId === agent.id ? 'border-emerald-400' : 'border-slate-800'}`}
             style={{ backgroundColor: agent.owner_id ? userColor(users, agent.owner_id) : '#1e293b' }}
           >
-            {handle.slice(0, 2)}
+            {railLabel(agent)}
             <span aria-hidden className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-slate-950 ${STATUS_DOT[agent.status]}`} />
           </button>
         );

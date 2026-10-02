@@ -112,6 +112,26 @@ describe('reply-capture.ts', () => {
     expect(replies()).toHaveLength(1);
   });
 
+  it('an agent that answers but keeps working: the reply is posted once stable for 6s (no idle edge)', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', promptEventId: 5, now: 1000 });
+    paneHarness.text = ANSWER + '\n◦ Working (3h 02m • esc to interrupt) · 2 background terminals running';
+    expect(rc.onAgentTick(pm.id, { now: 2000 })).toBe(false);   // first sighting
+    expect(rc.onAgentTick(pm.id, { now: 5000 })).toBe(false);   // stable, but < 6s
+    expect(rc.onAgentTick(pm.id, { now: 8500 })).toBe(true);    // stable ≥ 6s → posted
+    expect(replies()).toEqual([expect.objectContaining({ ref_prompt_event_id: 5, truncated: 0 })]);
+    expect(replies()[0].message).toMatch(/invoices suite/);
+  });
+
+  it('a still-changing answer is not posted while working', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', promptEventId: 6, now: 1000 });
+    paneHarness.text = ANSWER;
+    expect(rc.onAgentTick(pm.id, { now: 2000 })).toBe(false);
+    paneHarness.text = ANSWER.replace('for T12.', 'for T12 and T13.'); // text changed → clock restarts
+    expect(rc.onAgentTick(pm.id, { now: 9000 })).toBe(false);
+    expect(rc.onAgentTick(pm.id, { now: 16000 })).toBe(true);
+    expect(replies()).toHaveLength(1);
+  });
+
   it('without a pending prompt the pane is not even captured', () => {
     expect(rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true })).toBe(false);
     expect(paneHarness.calls).toBe(0);

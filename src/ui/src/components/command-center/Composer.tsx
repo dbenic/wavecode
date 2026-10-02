@@ -30,8 +30,10 @@ interface ComposerProps {
 }
 
 const MODES: { id: ComposerMode; label: string }[] = [
-  // "Ask" = type into the agent's terminal; its answer comes back as a reply (spec §5b)
-  { id: 'prompt', label: 'Ask' },
+  // "Ask" = a question for the orchestrator seat, which reads the agents and answers in prose;
+  // the focused agent is passed as context. "Prompt" = raw text into the target's terminal.
+  { id: 'ask', label: 'Ask' },
+  { id: 'prompt', label: 'Prompt' },
   { id: 'task', label: 'Task' },
   { id: 'reply', label: 'Reply' },
   { id: 'file', label: 'File' },
@@ -81,8 +83,22 @@ export default function Composer(props: ComposerProps) {
     let trimmed = text.trim();
     let agent = currentAgent;
 
-    // Ask mode speaks the §5c grammar (slash commands keep working)
-    if (props.mode === 'prompt' && !trimmed.startsWith('/')) {
+    // Ask: explicit @/# addressing uses the grammar; anything else goes to the
+    // orchestrator seat with the focused agent as context — the seat understands
+    // the question and interprets the agent's terminal, the composer does not.
+    if (props.mode === 'ask' && !trimmed.startsWith('/') && !trimmed.startsWith('@') && !trimmed.startsWith('#')) {
+      const seat = props.agents.find((a) => a.orchestrator) ?? null;
+      if (seat) {
+        if (!trimmed) return 'Type a question';
+        if (seat.can_act === false) return `${handleOf(seat)} is owned by ${seat.owner ?? 'someone else'}`;
+        const about = currentAgent && currentAgent.id !== seat.id ? `About @${handleOf(currentAgent)}: ` : '';
+        return { kind: 'prompt', agentId: seat.id, text: `${about}${trimmed}` };
+      }
+      // No seat configured: behave like Prompt
+    }
+
+    // Ask/Prompt speak the §5c grammar (slash commands keep working)
+    if ((props.mode === 'prompt' || props.mode === 'ask') && !trimmed.startsWith('/')) {
       const seat = props.agents.find((a) => a.orchestrator) ?? null;
       const plan = parseComposer(trimmed, { agents: props.agents, users, tasks, seat, chip: currentAgent });
       if (plan.kind === 'none') return plan.reason;
@@ -119,6 +135,7 @@ export default function Composer(props: ComposerProps) {
     }
     if (!trimmed) return 'Type a message';
     switch (props.mode) {
+      case 'ask':
       case 'prompt': return { kind: 'prompt', agentId: agent!.id, text: trimmed };
       case 'reply': return { kind: 'reply', agentId: agent!.id, text: trimmed, ...(props.replyTaskId ? { refTaskId: props.replyTaskId } : {}) };
       default: return {
@@ -281,7 +298,9 @@ export default function Composer(props: ComposerProps) {
             aria-controls={suggestions.length > 0 ? 'composer-suggestions' : undefined}
             placeholder={props.mode === 'task'
               ? 'Describe the task… (/reserve 4h, /release, /kill, /review, /promote, /retry)'
-              : `Ask ${agent ? handleOf(agent) : 'an agent'}… (@name, #command)`}
+              : props.mode === 'ask'
+                ? `Ask about ${agent ? handleOf(agent) : 'the team'}… (@name or #command to address an agent directly)`
+                : `Prompt ${agent ? handleOf(agent) : 'an agent'}… (typed into its terminal)`}
             className="min-h-[2.25rem] flex-1 resize-none rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-100 placeholder:text-slate-600"
           />
         )}

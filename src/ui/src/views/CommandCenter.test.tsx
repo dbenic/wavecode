@@ -196,12 +196,12 @@ describe('CommandCenter', () => {
       expect(rail.getByLabelText('Open tasks: 1')).toBeInTheDocument();
       expect(rail.getByLabelText('Pending reviews: 2')).toBeInTheDocument();
       expect(rail.getByLabelText('Attention: 2')).toBeInTheDocument();
-      expect(grid()).toContain('min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_40px]');
+      expect(grid()).toContain('min-[900px]:grid-cols-[16rem_minmax(0,1fr)_40px]');
       expect(screen.getByTestId('board-full').className).toContain('sm:hidden'); // phones still get the board tab
 
       await userEvent.click(rail.getByRole('button', { name: 'Expand board' }));
       expect(screen.queryByTestId('board-rail')).toBeNull();
-      expect(grid()).toContain('min-[1101px]:grid-cols-[16rem_minmax(0,1fr)_18rem]');
+      expect(grid()).toContain('min-[900px]:grid-cols-[16rem_minmax(0,1fr)_18rem]');
       expect(screen.getByTestId('board-full').className).not.toContain('sm:hidden');
 
       await userEvent.click(screen.getByRole('button', { name: 'Collapse board' }));
@@ -240,10 +240,10 @@ describe('CommandCenter', () => {
       expect(screen.getByTestId('board-rail')).toBeInTheDocument();
     });
 
-    it('the Roster collapses to avatars at ≤1100px (full roster above), and avatars focus the thread', async () => {
+    it('the Roster collapses to avatars at ≤900px (full roster above), and avatars focus the thread', async () => {
       await setup();
-      expect(screen.getByTestId('roster-avatars').className).toBe('hidden sm:block min-[1101px]:hidden');
-      expect(screen.getByTestId('roster-full').className).toBe('sm:hidden min-[1101px]:block');
+      expect(screen.getByTestId('roster-avatars').className).toBe('hidden sm:block min-[900px]:hidden');
+      expect(screen.getByTestId('roster-full').className).toBe('sm:hidden min-[900px]:block');
       expect(grid()).toContain('sm:grid-cols-[3.5rem_minmax(0,1fr)_40px]');
       await userEvent.click(within(screen.getByTestId('roster-avatars')).getByRole('button', { name: '@codex-rev' }));
       expect(screen.getByText('Run failed')).toBeInTheDocument();
@@ -375,6 +375,11 @@ describe('CommandCenter', () => {
     const api = await setup();
     const box = screen.getByRole('textbox', { name: 'Message' });
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Target' }), 'grok-fe');
+    // Ask (default): a question goes to the seat with the focused agent as context
+    await userEvent.type(box, 'status?{Enter}');
+    expect(api.apiPost).toHaveBeenCalledWith('/agents/pm/send', { text: 'About @grok-fe: status?' });
+    // Prompt: raw text into the agent's terminal
+    await userEvent.click(screen.getByRole('radio', { name: 'Prompt' }));
     await userEvent.type(box, 'start{Enter}');
     expect(api.apiPost).toHaveBeenCalledWith('/agents/grok-fe/send', { text: 'start' });
 

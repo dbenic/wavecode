@@ -299,12 +299,15 @@ function tickInner(agentId: string, state: WatcherState): void {
   }
 
   // Spec §5b: the agent answered — capture the reply before runs are closed.
-  if (idleEdge !== null) {
-    try {
+  try {
+    if (idleEdge !== null) {
       replyCapture.onAgentIdle(agentId, { transitioned: idleEdge, outputChanged });
-    } catch (e) {
-      logger.debug({ agentId, error: (e as Error).message }, 'Reply capture failed');
+    } else {
+      // Still working: accept an answer that has stopped changing (spec §5b)
+      replyCapture.onAgentTick(agentId);
     }
+  } catch (e) {
+    logger.debug({ agentId, error: (e as Error).message }, 'Reply capture failed');
   }
 
   closeFinishedRuns(agentId, output, detectedStatus, { closeAllIfIdle });
