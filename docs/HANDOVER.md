@@ -121,6 +121,21 @@ Read in this order:
    confirm. `@person` notification mirrors carry no body (channels are
    per-install, not per-user).
 
+9. **Per-user seats, project rooms, retro loop (T10–T12, spec §5d–§5f)** —
+   `pm-<user>` seat agents on the user's profile with a revocable seat
+   token registered **only in the seat workspace's project MCP config**
+   (never a profile-wide CLI config: workers would inherit the identity);
+   seat tokens are tagged (`via_seat`) and may not mint/rotate tokens,
+   manage users, create seats, record feedback or start retros. Rooms:
+   `paths.rooms_root/<project>/` with SPEC/LEDGER/DECISIONS/REPORTS/
+   TEMPLATES/ROOM.md, `.wavecode/room` symlink in workspaces, write rules
+   enforced on disk (canonical copies + `room.integrity_restored`), atomic
+   doc writes with `expected_modified_at` → 409, byte-capped dispatch
+   briefings. Retro: 👍/👎 on replies (people only; a personal seat's brief
+   folds in only its owner's and admins' notes), per-template metrics,
+   proposals applied only on promote, nightly retro into the room owner's
+   seat.
+
 ## Working on this codebase
 
 - `npm install && npm --prefix src/ui install`, then `npm test` (all green;
@@ -173,6 +188,12 @@ Test-suite gotchas that will bite you:
    `running`), and reconcile `result.txt` PASS back to `done` *and* unblock
    dependents (today only `result` flips, status stays `failed`). Until
    then: pause `auto_dispatch`, deploy only when agents are idle.
+1e. **Nightly retro marks the day done before it succeeds** — a transient
+   failure (dead seat runtime at `retro.hour_utc`) skips the day; write the
+   marker after success and skip when a retro prompt is still pending.
+   Also validate `retro.hour_utc` (0–23) and `window_days` (≥1).
+1f. **Retro evidence and `GET /api/feedback` without `agent`** mix all seats
+   and rooms; scope "what people asked" to the room's seat(s).
 1d. **False idle-close** — a run was auto-closed FAIL while the agent paused
    between steps (no `result.txt` yet); the agent later wrote PASS. The
    idle-close should wait for a RESULT file or a long quiet period, not the
