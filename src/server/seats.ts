@@ -28,7 +28,7 @@ import {
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { briefOrchestratorSeat, resolveOrchestratorAgent } from './orchestrator.js';
-import { resolveSpawnProfile } from './profiles.js';
+import { requireProfileLogin, resolveSpawnProfile } from './profiles.js';
 import { daemonUrl, registerSeatMcp, type SeatMcpInput, type SeatMcpResult } from './seat-mcp.js';
 import * as sessionManager from './session-manager.js';
 import { generateToken, hashToken, OWNER_USER_ID } from './users.js';
@@ -131,6 +131,8 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
 
   const profile = resolveSpawnProfile(me, undefined);
   if (!profile.ok) return { ok: false, code: profile.code === 'forbidden' ? 'forbidden' : 'invalid', error: profile.error };
+  const login = requireProfileLogin(profile.data, runtime);
+  if (!login.ok) return { ok: false, code: 'invalid', error: login.error };
 
   const name = seatName(me);
   // A leftover pm-<user> from an interrupted creation (or a lost link) is

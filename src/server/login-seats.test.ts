@@ -252,6 +252,15 @@ describe('login seats', () => {
       const spawnSpy = vi.spyOn(sm, 'spawnAgent').mockImplementation((opts) => db.insertAgent({
         name: opts.name, runtime: opts.runtime, tmux_session: `wc-${opts.name}`, workspace: '/w', mode: 'spawned', status: 'idle', profile: opts.profile ?? null,
       }));
+      // Not logged in yet → refused with the fix, nothing spawned
+      const early = await call(app, 'POST', '/api/agents/spawn', ana.token, { name: 'a0', runtime: 'codex' });
+      expect(early.status).toBe(409);
+      expect(early.json.error).toMatch(/not logged in for codex.*wave-login codex ana/);
+      expect(spawnSpy).not.toHaveBeenCalled();
+      for (const profile of ['ana', 'bob']) {
+        fs.mkdirSync(path.join(root, profile, 'codex'), { recursive: true });
+        fs.writeFileSync(path.join(root, profile, 'codex', 'auth.json'), '{}');
+      }
       const mine = await call(app, 'POST', '/api/agents/spawn', ana.token, { name: 'a1', runtime: 'codex' });
       expect(mine.status).toBe(201);
       expect(spawnSpy).toHaveBeenLastCalledWith(expect.objectContaining({ profile: 'ana' }));

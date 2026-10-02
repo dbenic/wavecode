@@ -25,7 +25,7 @@ import * as replyCapture from '../reply-capture.js';
 import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
 import { defaultSeatFor } from '../seats.js';
 import { validateAlias, validatePersona, validateTag, withPersona } from '../agent-identity.js';
-import { isProfileCompatible, resolveSpawnProfile } from '../profiles.js';
+import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
 import { subscriptionFor } from '../subscription-info.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
@@ -395,6 +395,9 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
 
     const profile = resolveSpawnProfile(getActingUser(c), body.profile);
     if (!profile.ok) return c.json({ error: profile.error }, profile.code === 'forbidden' ? 403 : 400);
+    // Never start a CLI that would sit at its login menu (spec §5).
+    const login = requireProfileLogin(profile.data, body.runtime);
+    if (!login.ok) return c.json({ error: login.error }, 409);
 
     const result = sessionManager.spawnAgent({ ...body, profile: profile.data });
     if (!result.ok) return c.json({ error: result.error }, 400);

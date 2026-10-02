@@ -36,6 +36,15 @@ const FALLBACK = 'fallback-admin';
 type App = Hono<import('./auth.js').NodeAppEnv>;
 interface Person { id: string; token: string }
 
+/** Presence of the runtime credential files = "logged in" (contents are never read). */
+function touchLogins(root: string, profile: string): void {
+  for (const rel of ['claude/.credentials.json', 'codex/auth.json', 'grok-home/.grok/auth.json']) {
+    const f = path.join(root, profile, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, '{}');
+  }
+}
+
 describe('one orchestrator seat per user (spec §5d)', () => {
   let tmpDir: string;
   let root: string;
@@ -84,6 +93,8 @@ describe('one orchestrator seat per user (spec §5d)', () => {
       'artifacts:', `  storage: ${path.join(tmpDir, 'artifacts')}`, '',
     ].join('\n'));
     (await import('./config.js')).loadConfig(path.join(tmpDir, 'config.yaml'));
+    // Profiles are logged in (credential files present) unless a test removes them.
+    for (const profile of ['ana', 'denis']) touchLogins(root, profile);
     db = await import('./db.js');
     db.resetDbForTest();
     db.initDb(path.join(tmpDir, 'test.db'));
@@ -136,6 +147,15 @@ describe('one orchestrator seat per user (spec §5d)', () => {
       // MCP registered inside ana's profile with a seat token that acts as ana
       const me = await call('GET', '/api/me', seatTokenOf('ana'));
       expect(me.json).toMatchObject({ name: 'ana', seat: { status: 'ok', agent_id: seat.id } });
+    });
+
+    it('refuses a seat on a profile that is not logged in for the runtime, with the fix (nothing spawned)', async () => {
+      fs.rmSync(path.join(root, 'denis', 'claude'), { recursive: true, force: true });
+      const res = await call('POST', '/api/users/me/seat', denis.token, {});
+      expect(res.status).toBe(400);
+      expect(res.json.error).toMatch(/not logged in for claude-code.*wave-login claude-code denis/);
+      expect(db.getAgentByName('pm-denis').ok).toBe(false);
+      expect((await call('POST', '/api/users/me/seat', denis.token, { runtime: 'codex' })).status).toBe(201); // codex login exists
     });
 
     it('one seat per user (409), observers get none (403), the fallback owner is told to create a user', async () => {

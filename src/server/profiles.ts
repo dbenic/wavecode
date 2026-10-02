@@ -152,6 +152,30 @@ export function isProfileCompatible(
   return !!actor && actor.profile === agentProfile;
 }
 
+/**
+ * A runtime started on a profile that has never been logged in sits at the
+ * CLI's first-run login menu and swallows whatever WaveCode types into it.
+ * Refuse up front with the fix. Home-dir login (null profile) and runtimes
+ * without `credential_files` are not checked. Presence only; never contents.
+ */
+export function requireProfileLogin(
+  profile: string | null | undefined,
+  runtime: string,
+  cfgOverride?: WaveConfig,
+): Result<void> {
+  if (!profile) return { ok: true, data: undefined }; // home-dir login: nothing to check, no config needed
+  const cfg = cfgOverride ?? getConfig();
+  const rc = cfg.runtimes[runtime];
+  if (!rc?.credential_files?.length) return { ok: true, data: undefined };
+  const dir = profileDir(profile, cfg);
+  const loggedIn = rc.credential_files.some((f) => fs.existsSync(f.replaceAll('{profile_dir}', dir)));
+  if (loggedIn) return { ok: true, data: undefined };
+  return {
+    ok: false,
+    error: `Profile '${profile}' is not logged in for ${runtime} — log it in first (Settings → Profiles, or on the server: wave-login ${runtime} ${profile})`,
+  };
+}
+
 export interface ProfileStatus {
   name: string;
   shared: boolean;
