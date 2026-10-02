@@ -147,8 +147,12 @@ export function registerRoomRoutes(app: Hono<NodeAppEnv>): void {
 
   /** Run the retro now (also nightly): the room's seat reads the evidence and proposes changes. */
   app.post('/api/rooms/:project/retro', async (c) => {
-    const result = await runRetro(c.req.param('project'), { actorId: getActingUser(c).id });
-    if (!result.ok) return c.json({ error: result.error }, result.code === 'not_found' ? 404 : result.code === 'unavailable' ? 409 : 400);
+    const user = getActingUser(c);
+    const result = await runRetro(c.req.param('project'), { actorId: user.id, actor: user });
+    if (!result.ok) {
+      const status = result.code === 'not_found' ? 404 : result.code === 'forbidden' ? 403 : result.code === 'unavailable' ? 409 : 400;
+      return c.json({ error: result.error }, status);
+    }
     return c.json(result.data, 202);
   });
 

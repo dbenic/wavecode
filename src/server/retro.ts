@@ -18,6 +18,9 @@ import {
   type Room,
 } from './db.js';
 import { emit } from './event-bus.js';
+import { isAdmin } from './users.js';
+import { checkAgentAccess } from './leases.js';
+import type { User } from './db.js';
 import { recentFeedback } from './feedback.js';
 import logger from './logger.js';
 import { roomMetrics, type TemplateMetrics } from './metrics.js';
@@ -27,7 +30,7 @@ import { addReport, listRooms } from './rooms.js';
 import * as sessionManager from './session-manager.js';
 import { getRuntimeState } from './runtime-liveness.js';
 
-export type RetroErrorCode = 'not_found' | 'unavailable' | 'failed';
+export type RetroErrorCode = 'not_found' | 'unavailable' | 'failed' | 'forbidden';
 export type RetroResult<T> = { ok: true; data: T } | { ok: false; error: string; code: RetroErrorCode };
 
 const DAY_MS = 86_400_000;
@@ -138,11 +141,25 @@ export function retroPrompt(room: Room, evidencePath: string): string {
   ].join(' ');
 }
 
-export async function runRetro(project: string, opts: { actorId?: string | null; now?: Date } = {}): Promise<RetroResult<{ seat: string; evidence: string; activity: number }>> {
+export async function runRetro(
+  project: string,
+  opts: { actorId?: string | null; actor?: Pick<User, 'id' | 'role' | 'via_seat'> | null; now?: Date } = {},
+): Promise<RetroResult<{ seat: string; evidence: string; activity: number }>> {
   const room = getRoom(project);
   if (!room.ok) return { ok: false, code: 'not_found', error: room.error };
   const seat = retroSeatFor(room.data);
   if (!seat) return { ok: false, code: 'unavailable', error: `No seat to run the retro for ${project} — the room owner needs a seat, or configure orchestrator_agent` };
+
+  // The retro types a prompt into the room owner's private seat: same lease
+  // rule as any other prompt (owner or admin), and never from a seat token.
+  // The nightly runner has no actor and is exempt.
+  if (opts.actor) {
+    if (opts.actor.via_seat) return { ok: false, code: 'forbidden', error: 'Seat tokens cannot start a retro' };
+    if (!isAdmin(opts.actor)) {
+      const access = checkAgentAccess(seat, opts.actor);
+      if (!access.ok) return { ok: false, code: 'forbidden', error: access.error };
+    }
+  }
 
   if (getRuntimeState(seat) === 'dead') {
     return { ok: false, code: 'unavailable', error: `${seat.name}'s runtime is not running — relaunch it, then run the retro` };

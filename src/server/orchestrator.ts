@@ -152,7 +152,7 @@ export async function briefOrchestratorSeat(
 
   // Spec §5e: every seat learns where the project rooms are and to keep ROOM.md current
   // Spec §5f: the seat's next session starts from the feedback its answers got
-  const brief = buildOrchestratorBrief(undefined, [roomsBriefLine(), feedbackBriefLine(agent.id), opts.extra].filter(Boolean).join(' ') || null);
+  const brief = buildOrchestratorBrief(undefined, [roomsBriefLine(), feedbackBriefLine(agent), opts.extra].filter(Boolean).join(' ') || null);
   const sent = sessionManager.sendKeys(agent.id, brief);
   if (!sent.ok) return { ok: false, error: sent.error };
 

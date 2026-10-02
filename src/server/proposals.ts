@@ -18,6 +18,7 @@ import {
   type User,
 } from './db.js';
 import { emit } from './event-bus.js';
+import { MAX_DOC_BYTES } from './rooms.js';
 import { userName } from './leases.js';
 import { appendLedger, canWriteDoc, readDoc, resolveDocPath, writeDoc } from './rooms.js';
 
@@ -36,7 +37,8 @@ export function lineDiff(before: string, after: string): string {
   const b = after.split('\n');
   const n = a.length;
   const m = b.length;
-  if (n * m > 4_000_000) return `--- before (${n} lines)\n+++ after (${m} lines)\n(too large to diff — full content in the proposal)`;
+  // n*m bounds the LCS table; max(n,m) bounds the per-row allocations (4M tiny arrays would block the loop)
+  if (n * m > 4_000_000 || Math.max(n, m) > 20_000) return `--- before (${n} lines)\n+++ after (${m} lines)\n(too large to diff — full content in the proposal)`;
   const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
@@ -71,6 +73,10 @@ export function proposeRoomChange(
   if (!resolved.ok) return { ok: false, code: 'invalid', error: resolved.error };
   if (!proposable(resolved.data.rel)) return { ok: false, code: 'invalid', error: `${resolved.data.rel} is written by WaveCode or directly — not via proposals` };
   if (typeof input.content !== 'string') return { ok: false, code: 'invalid', error: 'content must be the full new file' };
+  // Same cap as a direct write — otherwise the proposal is stored, diffed, and can never be promoted
+  if (Buffer.byteLength(input.content, 'utf8') > MAX_DOC_BYTES) {
+    return { ok: false, code: 'invalid', error: `proposals are limited to ${MAX_DOC_BYTES} bytes` };
+  }
   if (typeof input.evidence !== 'string' || !input.evidence.trim()) {
     return { ok: false, code: 'invalid', error: 'evidence is required — say what in the tasks, verdicts or feedback justifies the change' };
   }
