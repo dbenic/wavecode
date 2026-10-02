@@ -98,6 +98,13 @@ describe('ThreadFeed', () => {
     expect(props.onAction).toHaveBeenCalledWith(reply, reply.actions[1]);
   });
 
+  it('a seat\'s reply bubble uses its user\'s color (spec §5d)', () => {
+    renderFeed({ items: [item({ event_id: 12, kind: 'reply', title: 'Reply', body: 'hi' })], agentColors: new Map([['a1', '#db2777']]) });
+    const bubble = screen.getByTestId('thread-item-12').querySelector('div') as HTMLElement;
+    expect(bubble.style.borderLeftColor).toBe('rgb(219, 39, 119)');
+    expect(within(screen.getByTestId('thread-item-12')).getByText('grok-fe').style.color).toBe('rgb(219, 39, 119)');
+  });
+
   it('reply bubbles show the agent persona', () => {
     renderFeed({ items: [item({ event_id: 11, kind: 'reply', title: 'Reply', body: 'done' })], personas: new Map([['a1', 'frontend lead']]) });
     expect(within(screen.getByTestId('thread-item-11')).getByText('frontend lead')).toBeInTheDocument();

@@ -17,7 +17,7 @@ export interface Agent {
   // Leases (spec §2/§3)
   owner_id?: string | null;
   owner?: string | null;
-  lease_reason?: 'reserved' | 'task' | null;
+  lease_reason?: 'reserved' | 'task' | 'seat' | null;
   lease_expires_at?: string | null;
   lease?: { owner: string | null; owner_id: string; reason: 'reserved' | 'task' | null; expires_at: string | null } | null;
   /** Whether the current user may prompt/assign/kill this agent. */
@@ -44,6 +44,8 @@ export interface User {
   color: string;
   profile?: string | null;
   created_at?: string;
+  /** /api/me only: the caller's own orchestrator seat (spec §5d). */
+  seat?: { status: 'none' } | { status: 'ok'; agent_id: string } | { status: 'missing'; agent_id: string };
 }
 
 export const THREAD_KINDS = ['prompt', 'reply', 'command', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;

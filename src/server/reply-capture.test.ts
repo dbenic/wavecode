@@ -191,6 +191,20 @@ describe('reply-capture.ts', () => {
     expect(replies()[1].message).toMatch(/no reply captured within 10 minutes/);
   });
 
+  it('a housekeeping prompt (seat brief) superseded unanswered is dropped quietly; a user prompt is not', () => {
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'You are the WaveCode orchestrator seat…', quietIfSuperseded: true });
+    paneHarness.text = '> You are the WaveCode orchestrator seat…\n\n❯ ';
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?' });
+    expect(replies()).toEqual([]);
+    expect(rc.getPendingReply(pm.id)).toMatchObject({ prompt: 'what is chatgpt-countix doing?' });
+
+    // an answered brief is still kept, and plain prompts keep the "never silence" placeholder
+    paneHarness.text = '> You are the WaveCode orchestrator seat…\n\n● Orchestrator seat ready.\n\n❯ ';
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'You are the WaveCode orchestrator seat…', quietIfSuperseded: true });
+    rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'next' });
+    expect(replies().map((r) => r.message)).toEqual(expect.arrayContaining(['Orchestrator seat ready.']));
+  });
+
   it('file-runner and login seats are never tracked', () => {
     const file = db.insertAgent({ name: 'f', runtime: 'claude-code', tmux_session: 'file:f', workspace: '/w', mode: 'file', status: 'idle' });
     const login = db.insertAgent({ name: 'l', runtime: 'claude-code', tmux_session: 'wc-login-ana-claude-code', workspace: '/w', mode: 'adopted', status: 'idle' });

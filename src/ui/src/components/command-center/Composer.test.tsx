@@ -156,6 +156,19 @@ describe('Composer', () => {
     expect(onSend).toHaveBeenLastCalledWith({ kind: 'prompt', agentId: 'grok-fe', text: 'status' });
   });
 
+  it('Ask is blocked with the reason when the seat is missing (no silent fallback); @/# still work', async () => {
+    const onSend = vi.fn(async () => true as const);
+    render(<Composer agents={AGENTS} target="pm" onTargetChange={vi.fn()} mode="ask" onModeChange={vi.fn()} replyTaskId={null}
+      askBlocked="Your orchestrator seat is gone — recreate it" onSend={onSend} />);
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await userEvent.type(box, 'what is everyone on?{Enter}');
+    expect(screen.getByRole('alert')).toHaveTextContent('Your orchestrator seat is gone — recreate it');
+    expect(onSend).not.toHaveBeenCalled();
+    await userEvent.clear(box);
+    await userEvent.type(box, '@grok-fe hi{Escape}{Enter}');
+    expect(onSend).toHaveBeenCalledWith({ kind: 'prompt', agentId: 'grok-fe', text: 'hi' });
+  });
+
   it('@name in the text retargets the send and the chip', async () => {
     const onSend = vi.fn(async () => true as const);
     render(<Harness onSend={onSend} initialTarget="pm" />);

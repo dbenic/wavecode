@@ -578,6 +578,16 @@ Without `since`: the newest `limit` items. With `since`: items after that cursor
 ### `POST /api/agents/:id/restart`
 Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
 
+## One orchestrator seat per user (spec §5d)
+
+All routes act on the caller's own seat. Observers get `403`; the fallback-token `owner` (no user record) gets `400`.
+
+- `GET /api/users/me/seat` → `{status: 'none'|'ok'|'missing', agent?|agent_id?, eligible, rules, has_token}`. `GET /api/me` adds `seat: {status, agent_id?}`.
+- `POST /api/users/me/seat {runtime?}` (default `claude-code`) → `201 {agent, mcp: {registered, error?}}`. Spawns `pm-<user>` on the user's credential profile in `<data>/seats/pm-<user>` (with a `SEAT.md` memory file), `role: orchestrator`, owned by the user with lease `seat` (never expires; cannot be reserved, released or swept; the dispatcher never gives it worker tasks). Issues a **seat token** (second bearer for the same user; only its hash is stored) and registers the `wavecode` MCP server with it inside the seat's own CLI config (Claude Code: `$CLAUDE_CONFIG_DIR/.claude.json` of the profile, or the seat workspace's `.mcp.json` without a profile; Codex: the profile's `$CODEX_HOME/config.toml`, refused without a profile because the default is shared). Then briefs it with `docs/orchestrator-seat.md` + who it serves + the SEAT.md instruction + `users.seat_rules`. `409` if you already have one; a *missing* seat is recreated.
+- `PUT /api/users/me/seat/rules {rules}` (≤2000 chars, `null` clears) · `POST /api/users/me/seat/brief` re-sends the brief with the current rules.
+- `DELETE /api/users/me/seat/token` revokes the seat token (the seat's MCP calls get `401`; your own login keeps working) · `POST /api/users/me/seat/token` issues and registers a new one.
+- Routing: `GET /api/agents` flags `orchestrator: true` on the viewer's own seat; without one, on the shared seat (`config.orchestrator_agent`, never another user's seat); with a *missing* seat, on none — the Center offers "Recreate my seat" and blocks Ask instead of silently falling back. Seat replies render in the owner's color.
+
 ## Aliases, groups, people, composer grammar (spec §5c)
 
 - **Resolution** everywhere an agent is named (routes, MCP, CLI, composer): alias → name → id; a leading `@` is ignored.

@@ -25,6 +25,7 @@ import {
   apiRelativePath,
   fillAction,
   boardDefaultCollapsed,
+  userColor,
   invalidatesThreadActions,
   openTaskCount,
   mergeThreadItems,
@@ -174,6 +175,12 @@ export default function CommandCenter() {
   // Agents are shown by alias when they have one (spec §5c)
   const agentNames = useMemo(() => new Map(agents.map((a) => [a.id, handleOf(a)])), [agents]);
   const personas = useMemo(() => new Map(agents.filter((a) => a.persona).map((a) => [a.id, a.persona!])), [agents]);
+  // A seat speaks in its user's color (spec §5d)
+  const agentColors = useMemo(() => new Map(agents
+    .filter((a) => a.lease_reason === 'seat' && a.owner_id)
+    .map((a) => [a.id, userColor(userMap, a.owner_id)])), [agents, userMap]);
+  const seatState = me?.seat?.status ?? 'none';
+  const askBlocked = seatState === 'missing' ? 'Your orchestrator seat is gone — recreate it (button above) to Ask' : null;
   // Replies sit directly under the prompt they answer.
   const visibleItems = useMemo(
     () => orderThread(focused ? items.filter((i) => i.agent_id === focused) : items),
@@ -380,6 +387,23 @@ export default function CommandCenter() {
     await quiet(() => apiPatch(`/agents/${agent.id}`, { alias: alias.trim() || null, persona: persona.trim() || null }));
   }
 
+  const [creatingSeat, setCreatingSeat] = useState(false);
+  /** Create (or recreate) the caller's orchestrator seat (spec §5d). */
+  async function createMySeat() {
+    setCreatingSeat(true);
+    try {
+      await apiPost('/users/me/seat', {});
+      const fresh = await apiGet<User>('/me');
+      setMe(fresh);
+      targetTouchedRef.current = false; // follow the new seat
+      void loadAgents();
+    } catch {
+      // ErrorBanner shows why
+    } finally {
+      setCreatingSeat(false);
+    }
+  }
+
   async function stopAll() {
     if (!window.confirm('Emergency stop: kill spawned agents, interrupt adopted ones, and disable auto-dispatch?')) return;
     try {
@@ -472,6 +496,7 @@ export default function CommandCenter() {
             users={userMap}
             agentNames={agentNames}
             personas={personas}
+            agentColors={agentColors}
             attentionOnly={attentionOnly}
             onToggleAttention={() => setAttentionOnly((v) => !v)}
             attentionCount={attentionCount}
@@ -482,6 +507,24 @@ export default function CommandCenter() {
               ? { open: terminalOpen, output: terminalOutput, onToggle: () => setTerminalOpen((v) => !v) }
               : null}
           />
+          {canMutate && me && seatState !== 'ok' && me.id !== 'owner' && (
+            <div role="status" className="flex flex-wrap items-center gap-2 border-t border-slate-800/60 px-3 py-1.5 text-xs">
+              <span className={seatState === 'missing' ? 'text-amber-400' : 'text-slate-500'}>
+                {seatState === 'missing'
+                  ? 'Your orchestrator seat is gone.'
+                  : 'Ask goes to the shared seat — get your own (own history, rules and subscription).'}
+              </span>
+              <button
+                type="button"
+                disabled={creatingSeat}
+                onClick={() => void createMySeat()}
+                className="rounded border border-emerald-600 px-2 py-0.5 text-emerald-300 hover:bg-emerald-600/10 disabled:opacity-40"
+              >
+                {seatState === 'missing' ? 'Recreate my seat' : 'Create my seat'}
+              </button>
+              <Link to="/settings/seat" className="text-slate-500 underline hover:text-slate-300">My seat</Link>
+            </div>
+          )}
           {meError && (
             <p role="alert" className="border-t border-slate-800/60 px-3 py-2 text-xs text-amber-400">
               Couldn't load your identity (/api/me) — sending is disabled. Reload to retry.
@@ -500,6 +543,7 @@ export default function CommandCenter() {
               replyTaskId={replyTaskId}
               users={users}
               tasks={tasks}
+              askBlocked={askBlocked}
               onSend={send}
             />
           )}

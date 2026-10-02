@@ -11,6 +11,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   deleteUser,
   getUserByTokenHash,
+  getUserBySeatTokenHash,
   insertUser,
   isUserRole,
   type Result,
@@ -63,7 +64,10 @@ function tokensEqual(a: string, b: string): boolean {
 export function resolveUserByToken(token: string | null, fallbackToken: string | null): User | null {
   if (!token) return null;
   if (fallbackToken && tokensEqual(token, fallbackToken)) return OWNER_USER;
-  return getUserByTokenHash(hashToken(token));
+  const hash = hashToken(token);
+  // A seat token (spec §5d) is a second bearer for the same user: the seat
+  // acts under that user's role and lease rules, and can be revoked alone.
+  return getUserByTokenHash(hash) ?? getUserBySeatTokenHash(hash);
 }
 
 export function canMutate(user: Pick<User, 'role'>): boolean {

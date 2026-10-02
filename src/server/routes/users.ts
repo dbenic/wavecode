@@ -4,6 +4,7 @@ import { listUsers } from '../db.js';
 import { emit } from '../event-bus.js';
 import logger from '../logger.js';
 import { createUser, isAdmin, OWNER_USER, revokeUser } from '../users.js';
+import { getSeatStatus } from '../seats.js';
 import { releaseLeasesOf } from '../leases.js';
 
 function publicUser(user: { id: string; name: string; role: string; color: string; profile: string | null }) {
@@ -12,7 +13,13 @@ function publicUser(user: { id: string; name: string; role: string; color: strin
 
 export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/me', (c) => {
-    return c.json(publicUser(c.get('user')));
+    const user = c.get('user');
+    // Spec §5d: the Center needs to know whether to offer "Create / Recreate my seat"
+    const seat = getSeatStatus(user);
+    return c.json({
+      ...publicUser(user),
+      seat: seat.status === 'ok' ? { status: 'ok', agent_id: seat.agent.id } : seat,
+    });
   });
 
   app.get('/api/users', (c) => {

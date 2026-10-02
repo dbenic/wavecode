@@ -214,6 +214,8 @@ describe('migration v11 → current', () => {
     expect(cols('agent_tags')).toEqual(['agent_id', 'tag']);
     expect(cols('tasks')).toContain('num');
     expect(cols('agent_messages')).toContain('to_user_id');
+    // v17 (spec §5d): one orchestrator seat per user
+    expect(cols('users')).toEqual(expect.arrayContaining(['seat_agent_id', 'seat_token_hash', 'seat_rules']));
 
     const events = mod.listEvents();
     expect(events).toHaveLength(1);

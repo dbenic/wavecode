@@ -22,14 +22,16 @@ import type { User } from '../db.js';
 import * as leases from '../leases.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
 import * as replyCapture from '../reply-capture.js';
-import { briefOrchestratorSeat, parseAgentRole, resolveOrchestratorAgent } from '../orchestrator.js';
+import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
+import { defaultSeatFor } from '../seats.js';
 import { validateAlias, validatePersona, validateTag, withPersona } from '../agent-identity.js';
 import { isProfileCompatible, resolveSpawnProfile } from '../profiles.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
     const agents = listAgents();
-    const orchestratorId = resolveOrchestratorAgent(agents)?.id ?? null;
+    // Spec §5d: the default (Ask) target is the viewer's own seat, else the shared one
+    const orchestratorId = defaultSeatFor(getActingUser(c), agents)?.id ?? null;
     const tags = safeAllTags();
     return c.json(agents.map((a) => enrichAgent(a, getActingUser(c), orchestratorId, tags?.get(a.id) ?? [])));
   });
@@ -451,7 +453,7 @@ function safeAllTags(): Map<string, string[]> | null {
 
 function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null, tags?: string[]) {
   const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
-  const defaultSeat = orchestratorId === undefined ? resolveOrchestratorAgent(listAgents())?.id ?? null : orchestratorId;
+  const defaultSeat = orchestratorId === undefined ? defaultSeatFor(viewer, listAgents())?.id ?? null : orchestratorId;
   return {
     ...agent,
     owner,

@@ -25,6 +25,8 @@ interface ComposerProps {
   users?: User[];
   /** For `#n` task references and autocomplete. */
   tasks?: Task[];
+  /** Why Ask cannot go to the seat right now (spec §5d: a missing seat is offered for recreation, not silently replaced). */
+  askBlocked?: string | null;
   /** Resolves true on success, or an error message to show under the box. */
   onSend: (send: ComposerSend) => Promise<true | string>;
 }
@@ -87,6 +89,7 @@ export default function Composer(props: ComposerProps) {
     // orchestrator seat with the focused agent as context — the seat understands
     // the question and interprets the agent's terminal, the composer does not.
     if (props.mode === 'ask' && !trimmed.startsWith('/') && !trimmed.startsWith('@') && !trimmed.startsWith('#')) {
+      if (props.askBlocked) return props.askBlocked;
       const seat = props.agents.find((a) => a.orchestrator) ?? null;
       if (seat) {
         if (!trimmed) return 'Type a question';

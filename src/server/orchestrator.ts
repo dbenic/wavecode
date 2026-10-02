@@ -62,7 +62,7 @@ export function parseAgentRole(value: unknown): { ok: true; role: AgentRole | nu
  * submits early, so the markdown is flattened (headings dropped, list items
  * and paragraphs joined).
  */
-export function buildOrchestratorBrief(root: string = PACKAGE_ROOT): string {
+export function buildOrchestratorBrief(root: string = PACKAGE_ROOT, extra?: string | null): string {
   let md: string;
   try {
     md = fs.readFileSync(path.join(root, ORCHESTRATOR_BRIEF_PATH), 'utf8');
@@ -77,6 +77,7 @@ export function buildOrchestratorBrief(root: string = PACKAGE_ROOT): string {
     .map((l) => l.trim())
     .filter((l) => l && !/^#{1,6}\s/.test(l))
     .map((l) => l.replace(/^[-*]\s+/, '• '))
+    .concat(extra ? [extra] : [])
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -129,7 +130,8 @@ async function waitForSeatReady(
 export async function briefOrchestratorSeat(
   agentId: string,
   actorId: string | null,
-  opts: { timeoutMs?: number; pollMs?: number } = {},
+  /** `extra`: seat-specific instructions appended to the brief (spec §5d: the user's rules + SEAT.md). */
+  opts: { timeoutMs?: number; pollMs?: number; extra?: string | null } = {},
 ): Promise<Result<void>> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return agentResult;
@@ -146,12 +148,12 @@ export async function briefOrchestratorSeat(
     return { ok: false, error: 'runtime not running' };
   }
 
-  const brief = buildOrchestratorBrief();
+  const brief = buildOrchestratorBrief(undefined, opts.extra);
   const sent = sessionManager.sendKeys(agent.id, brief);
   if (!sent.ok) return { ok: false, error: sent.error };
 
   const event = emit('agent.prompt_sent', 'agent', agent.id, { text: brief.slice(0, 2000), via: 'orchestrator_brief' }, actorId);
-  trackPrompt({ agent, actorId, prompt: brief, promptEventId: event?.id ?? null });
+  trackPrompt({ agent, actorId, prompt: brief, promptEventId: event?.id ?? null, quietIfSuperseded: true });
   emit('agent.orchestrator_briefed', 'agent', agent.id, { name: agent.name }, actorId);
   logger.info({ agentId, name: agent.name }, 'Orchestrator seat briefed');
   return { ok: true, data: undefined };
