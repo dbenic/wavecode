@@ -150,6 +150,8 @@ export interface User {
   seat_rules?: string | null;
   /** Room for tasks this user creates when the agent's workspace matches none (spec §5e). */
   default_room?: string | null;
+  /** Set on the request's user when it authenticated with a seat token (spec §5d). */
+  via_seat?: boolean;
   created_at: string;
 }
 

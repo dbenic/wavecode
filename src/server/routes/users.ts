@@ -4,7 +4,7 @@ import { listUsers } from '../db.js';
 import { emit } from '../event-bus.js';
 import logger from '../logger.js';
 import { createUser, isAdmin, OWNER_USER, revokeUser } from '../users.js';
-import { getSeatStatus } from '../seats.js';
+import { getSeatStatus, removeSeatOf } from '../seats.js';
 import { releaseLeasesOf } from '../leases.js';
 
 function publicUser(user: { id: string; name: string; role: string; color: string; profile: string | null }) {
@@ -63,6 +63,10 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
     const id = c.req.param('id');
     if (id === actor.id) return c.json({ error: 'You cannot revoke your own user' }, 400);
 
+    // Spec §5d: the person's seat goes with them — otherwise releasing its
+    // lease would leave an ownerless orchestrator the dispatcher could use.
+    const seatRemoved = removeSeatOf(id);
+
     const result = revokeUser(id);
     if (!result.ok) {
       const status = result.error.includes('not found') ? 404 : 400;
@@ -71,7 +75,7 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
 
     const released = releaseLeasesOf(id);
     logger.info({ userId: id, actorId: actor.id, released }, 'User revoked');
-    emit('user.revoked', 'user', id, { released_agents: released });
+    emit('user.revoked', 'user', id, { released_agents: released, seat_removed: seatRemoved });
     return c.json({ ok: true });
   });
 }

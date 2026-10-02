@@ -57,7 +57,7 @@ describe('one orchestrator seat per user (spec §5d)', () => {
 
   /** The seat token, as only the seat sees it: read back from its MCP config. */
   function seatTokenOf(user: string): string {
-    const cfg = JSON.parse(fs.readFileSync(path.join(root, user, 'claude', '.claude.json'), 'utf8'));
+    const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.wavecode-data', 'seats', `pm-${user}`, '.mcp.json'), 'utf8'));
     return cfg.mcpServers.wavecode.headers.Authorization.replace('Bearer ', '');
   }
 
@@ -233,6 +233,62 @@ describe('one orchestrator seat per user (spec §5d)', () => {
     expect(rotated).not.toBe(seatToken);
     expect((await call('GET', '/api/me', rotated)).json.name).toBe('ana');
     expect((await call('GET', '/api/me', seatToken)).status).toBe(401);
+  });
+
+  describe('review fixes: the seat token is narrower than the person', () => {
+    it('cannot manage users, seats, settings or the system, and never carries admin powers', async () => {
+      const { createUser } = await import('./users.js');
+      const boss = createUser({ name: 'boss', role: 'admin', profile: 'denis' });
+      if (!boss.ok) throw new Error(boss.error);
+      expect((await call('POST', '/api/users/me/seat', boss.data.token, {})).status).toBe(201);
+      const seatToken = seatTokenOf('boss');
+
+      expect((await call('GET', '/api/me', seatToken)).json.name).toBe('boss');
+      expect((await call('GET', '/api/users', seatToken)).status).toBe(200);
+      for (const [method, url, body] of [
+        ['POST', '/api/users', { name: 'evil' }],
+        ['DELETE', `/api/users/${ana.id}`],
+        ['DELETE', '/api/users/me/seat/token'],
+        ['PUT', '/api/users/me/seat/rules', { rules: 'x' }],
+        ['POST', '/api/system/stop-all'],
+      ] as const) {
+        const res = await call(method, url, seatToken, body);
+        expect(res.status, `${method} ${url}`).toBe(403);
+        expect(res.json.error).toMatch(/seat token cannot/);
+      }
+      // admin powers capped: boss's own login could take over ana's reserved agent; the seat cannot
+      await call('POST', '/api/agents/builder/reserve', ana.token, { hours: 1 });
+      expect((await call('POST', '/api/agents/builder/send', boss.data.token, { text: 'x' })).status).toBe(200);
+      expect((await call('POST', '/api/agents/builder/send', seatToken, { text: 'x' })).status).toBe(403);
+    });
+
+    it('revoking a user removes their seat instead of leaving an ownerless orchestrator', async () => {
+      const seat = await createSeat(ana);
+      expect((await call('DELETE', `/api/users/${ana.id}`, FALLBACK)).status).toBe(200);
+      expect(db.getAgent(seat.id).ok).toBe(false);
+      expect(tmuxHarness.sessions.has('wc-pm-ana')).toBe(false);
+      expect(db.listEvents().some((e) => e.type === 'seat.removed')).toBe(true);
+    });
+
+    it('a leftover pm-<user> of this user is re-linked as the seat (no permanent 409); someone else\'s is refused', async () => {
+      const leftover = db.insertAgent({ name: 'pm-ana', runtime: 'claude-code', tmux_session: 'wc-pm-ana', workspace: path.join(tmpDir, 'ws-leftover'), mode: 'spawned', status: 'idle' });
+      if (!leftover.ok) throw new Error(leftover.error);
+      db.setAgentLease(leftover.data.id, { owner_id: ana.id, reason: 'reserved', expires_at: null });
+      tmuxHarness.sessions.add('wc-pm-ana');
+      const res = await call('POST', '/api/users/me/seat', ana.token, {});
+      expect(res.status).toBe(201);
+      expect(res.json.agent).toMatchObject({ id: leftover.data.id, role: 'orchestrator', lease_reason: 'seat', owner_id: ana.id });
+      expect((await call('GET', '/api/users/me/seat', ana.token)).json).toMatchObject({ status: 'ok' });
+
+      db.insertAgent({ name: 'pm-denis', runtime: 'claude-code', tmux_session: 'wc-pm-denis', workspace: null, mode: 'spawned', status: 'idle' });
+      db.setAgentLease((db.getAgentByName('pm-denis') as { data: { id: string } }).data.id, { owner_id: ana.id, reason: 'reserved', expires_at: null });
+      expect((await call('POST', '/api/users/me/seat', denis.token, {})).status).toBe(409);
+    });
+
+    it('rotation says the running seat needs a restart to pick up the new token', async () => {
+      await createSeat(ana);
+      expect((await call('POST', '/api/users/me/seat/token', ana.token)).json).toMatchObject({ restart_required: true });
+    });
   });
 
   describe('the seat lease', () => {

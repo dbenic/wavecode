@@ -61,6 +61,12 @@ export function registerSeatRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/users/me/seat/token', (c) => {
     const result = rotateSeatToken(getActingUser(c));
     if (!result.ok) return c.json({ error: result.error }, seatErrorStatus(result.code));
-    return c.json({ ok: true, has_token: true, mcp: result.data.ok ? { registered: true } : { registered: false, error: result.data.error } });
+    return c.json({
+      ok: true,
+      has_token: true,
+      // the running seat still holds the old token in its MCP session
+      restart_required: true,
+      mcp: result.data.ok ? { registered: true } : { registered: false, error: result.data.error },
+    });
   });
 }

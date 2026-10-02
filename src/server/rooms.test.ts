@@ -114,9 +114,9 @@ describe('project rooms (spec §5e)', () => {
         expect(fs.existsSync(path.join(room.data.root, f)), f).toBe(true);
       }
       expect(fs.statSync(path.join(room.data.root, 'REPORTS')).isDirectory()).toBe(true);
-      fs.writeFileSync(path.join(room.data.root, 'SPEC.md'), 'kept');
+      fs.writeFileSync(path.join(room.data.root, 'ROOM.md'), 'kept');
       rooms.ensureRoom('notes');
-      expect(fs.readFileSync(path.join(room.data.root, 'SPEC.md'), 'utf8')).toBe('kept');
+      expect(fs.readFileSync(path.join(room.data.root, 'ROOM.md'), 'utf8')).toBe('kept');
       expect(rooms.ensureRoom('Bad Name').ok).toBe(false);
     });
 
@@ -133,16 +133,82 @@ describe('project rooms (spec §5e)', () => {
       expect(rooms.resolveTaskRoom({ agent: null, creatorId: bob.id })).toBeNull();
     });
 
-    it('agent workspaces get .wavecode/room → the room (and it stays out of git status)', () => {
+    it('agent workspaces get .wavecode/room → the room, kept out of git status — also in git worktrees', async () => {
+      const { execFileSync } = await import('node:child_process');
+      const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
       const room = rooms.ensureRoom('shop');
       if (!room.ok) throw new Error(room.error);
+      const repo = path.join(wsRoot, 'shop-main');
+      fs.mkdirSync(repo, { recursive: true });
+      git(repo, 'init', '-q', '-b', 'main');
+      git(repo, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
       const ws = path.join(wsRoot, 'shop-fe');
-      fs.mkdirSync(path.join(ws, '.git', 'info'), { recursive: true });
+      git(repo, 'worktree', 'add', '-q', ws, '-b', 'wc-fe');
+      expect(fs.statSync(path.join(ws, '.git')).isFile()).toBe(true); // a worktree: .git is a file
+
       expect(rooms.linkRoomIntoWorkspace(ws, room.data)).toBe(true);
       expect(fs.readlinkSync(path.join(ws, '.wavecode', 'room'))).toBe(room.data.root);
-      expect(fs.readFileSync(path.join(ws, '.git', 'info', 'exclude'), 'utf8')).toContain('.wavecode/');
+      expect(git(ws, 'status', '--porcelain')).toBe(''); // the link does not show up
+      expect(rooms.excludeFromGit('/not/a/repo', '.wavecode/')).toBe(false);
       expect(rooms.linkRoomIntoWorkspace(ws, room.data)).toBe(true); // idempotent
       expect(rooms.linkRoomIntoWorkspace('/does/not/exist', room.data)).toBe(false);
+    });
+  });
+
+  describe('review fixes', () => {
+    it('protected files are read-only on disk, and edits made through .wavecode/room are restored (with an alert)', async () => {
+      const room = rooms.ensureRoom('shop');
+      if (!room.ok) throw new Error(room.error);
+      expect((await call('PUT', '/api/rooms/shop/docs/SPEC.md', FALLBACK, { content: '# Shop\n\nApple Pay checkout.' })).status).toBe(200);
+      const spec = path.join(room.data.root, 'SPEC.md');
+      expect(fs.statSync(spec).mode & 0o777).toBe(0o444);
+      for (const f of ['LEDGER.md', 'DECISIONS.md', 'TEMPLATES/build.md']) {
+        expect(fs.statSync(path.join(room.data.root, f)).mode & 0o222, f).toBe(0);
+      }
+      // ROOM.md and REPORTS/ are the "any seat" area — writable on disk
+      expect(fs.statSync(path.join(room.data.root, 'ROOM.md')).mode & 0o200).not.toBe(0);
+
+      // an agent that chmods and edits SPEC.md through its workspace link, and deletes the ledger
+      fs.chmodSync(spec, 0o644);
+      fs.writeFileSync(spec, 'hijacked spec');
+      fs.chmodSync(path.join(room.data.root, 'LEDGER.md'), 0o644);
+      fs.unlinkSync(path.join(room.data.root, 'LEDGER.md'));
+      expect(rooms.verifyAllRooms().sort()).toEqual(['shop/LEDGER.md', 'shop/SPEC.md']);
+      expect(fs.readFileSync(spec, 'utf8')).toBe('# Shop\n\nApple Pay checkout.');
+      expect(fs.statSync(spec).mode & 0o777).toBe(0o444);
+      expect(fs.existsSync(path.join(room.data.root, 'LEDGER.md'))).toBe(true);
+      const events = db.listEvents().filter((e) => e.type === 'room.integrity_restored').map((e) => JSON.parse(e.payload_json!));
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ project: 'shop', path: 'SPEC.md', deleted: false }),
+        expect.objectContaining({ project: 'shop', path: 'LEDGER.md', deleted: true }),
+      ]));
+      expect(rooms.verifyAllRooms()).toEqual([]);
+    });
+
+    it('reads and briefings never use a tampered copy; ledger appends build on the canonical file', async () => {
+      const room = rooms.ensureRoom('shop');
+      if (!room.ok) throw new Error(room.error);
+      await call('PUT', '/api/rooms/shop/docs/SPEC.md', FALLBACK, { content: 'real spec' });
+      const spec = path.join(room.data.root, 'SPEC.md');
+      fs.chmodSync(spec, 0o644);
+      fs.writeFileSync(spec, 'fake spec');
+      expect((await call('GET', '/api/rooms/shop/docs/SPEC.md', ana.token)).json.content).toBe('real spec');
+      fs.chmodSync(spec, 0o644);
+      fs.writeFileSync(spec, 'fake spec');
+      expect(rooms.roomBriefing(room.data, 'build', 'do it')).toContain('real spec');
+
+      const ledger = path.join(room.data.root, 'LEDGER.md');
+      fs.chmodSync(ledger, 0o644);
+      fs.writeFileSync(ledger, 'forged ledger');
+      rooms.appendLedger(room.data, { task: '#1', agent: 'a', event: 'run done', result: 'PASS' });
+      const text = fs.readFileSync(ledger, 'utf8');
+      expect(text).not.toContain('forged ledger');
+      expect(text).toContain('| #1 | a | run done | PASS |');
+    });
+
+    it('template filling is one pass: task text with {room} or $& is inserted verbatim', () => {
+      const out = rooms.fillTemplate('Room {room}\nTask: {task}\nDone: {done_when}', { task: 'echo $& and {room} and $1', room: '/r/shop', done_when: 'tests pass' });
+      expect(out).toBe('Room /r/shop\nTask: echo $& and {room} and $1\nDone: tests pass');
     });
   });
 

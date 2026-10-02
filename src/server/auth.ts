@@ -34,6 +34,21 @@ export function getActingUser(c: { get: (key: 'user') => User | undefined }): Us
 
 const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+/**
+ * What a seat token may never do (spec §5d): it acts as its user for work —
+ * agents, tasks, reviews, rooms, the wire — but not for identity or the
+ * control plane. Returns a short reason, or null when allowed.
+ */
+export function seatTokenDenied(method: string, pathname: string): string | null {
+  if (pathname === '/api/users' || pathname.startsWith('/api/users/')) {
+    return method === 'GET' && pathname === '/api/users' ? null : 'manage users or seats';
+  }
+  if (pathname.startsWith('/api/settings')) return 'change settings';
+  if (pathname.startsWith('/api/system/')) return 'use system controls';
+  if (/^\/api\/profiles\/[^/]+\/login$/.test(pathname)) return 'open login seats';
+  return null;
+}
+
 export interface PublicAuthStatus {
   method: WaveConfig['auth']['method'];
   tokenConfigured: boolean;
@@ -217,6 +232,14 @@ export function createAuthMiddleware(
 
     if (!canMutate(user) && c.req.path.startsWith('/api/') && !READ_ONLY_METHODS.has(c.req.method)) {
       return c.json({ error: `Forbidden: '${user.name}' is an observer (read-only)` }, 403);
+    }
+
+    // Spec §5d: a seat token is narrower than its person's login — it never
+    // carries admin powers and cannot manage people, seats, settings or the system.
+    if (user.via_seat) {
+      const denied = seatTokenDenied(c.req.method, c.req.path);
+      if (denied) return c.json({ error: `Forbidden: a seat token cannot ${denied} — use your own login` }, 403);
+      if (user.role === 'admin') user = { ...user, role: 'developer' };
     }
 
     c.set('user', user);

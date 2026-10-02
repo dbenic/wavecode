@@ -67,7 +67,11 @@ export function resolveUserByToken(token: string | null, fallbackToken: string |
   const hash = hashToken(token);
   // A seat token (spec §5d) is a second bearer for the same user: the seat
   // acts under that user's role and lease rules, and can be revoked alone.
-  return getUserByTokenHash(hash) ?? getUserBySeatTokenHash(hash);
+  // It is marked, so a seat can be held to "propose, don't edit" (spec §5f).
+  const person = getUserByTokenHash(hash);
+  if (person) return person;
+  const seatUser = getUserBySeatTokenHash(hash);
+  return seatUser ? { ...seatUser, via_seat: true } : null;
 }
 
 export function canMutate(user: Pick<User, 'role'>): boolean {

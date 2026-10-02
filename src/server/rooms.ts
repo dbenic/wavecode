@@ -13,10 +13,12 @@
  * Agent workspaces get `.wavecode/room` → the room folder.
  */
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from './config.js';
 import {
+  getDb,
   getRoom,
   getUser,
   insertRoom,
@@ -72,6 +74,90 @@ export function roomsRoot(): string {
   return getConfig().paths.rooms_root;
 }
 
+// --- integrity: the write rules hold on disk too ----------------------------
+//
+// Agents see the room through `.wavecode/room` and all run as one OS user, so
+// file permissions alone cannot stop them. Every file except ROOM.md and
+// REPORTS/ (the "any seat" area) is therefore *protected*: kept read-only
+// (0444), with its canonical content stored by WaveCode. An edit made outside
+// the API is detected and restored (room.integrity_restored alert).
+
+/** Files only the API (owner/admin) or WaveCode may change. */
+export function isProtectedDoc(rel: string): boolean {
+  return !(rel === 'ROOM.md' || rel.startsWith('REPORTS/'));
+}
+
+const CANON_PREFIX = 'room-doc:';
+
+function canonKey(project: string, rel: string): string {
+  return `${CANON_PREFIX}${project}:${rel}`;
+}
+
+function getCanonical(project: string, rel: string): string | null {
+  const row = getDb().prepare('SELECT value FROM kv_settings WHERE key = ?').get(canonKey(project, rel)) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+function setCanonical(project: string, rel: string, content: string): void {
+  getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(canonKey(project, rel), content);
+}
+
+/** Write a protected file: canonical copy + read-only on disk. */
+function writeProtected(room: Pick<Room, 'project' | 'root'>, rel: string, content: string): void {
+  const file = path.join(room.root, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    fs.chmodSync(file, 0o644);
+  } catch {
+    // new file
+  }
+  fs.writeFileSync(file, content, 'utf8');
+  fs.chmodSync(file, 0o444);
+  setCanonical(room.project, rel, content);
+}
+
+/**
+ * Restore protected files edited (or deleted) outside the API. Returns the
+ * restored paths; emits room.integrity_restored for each.
+ */
+export function verifyRoomIntegrity(room: Room): string[] {
+  const rows = getDb().prepare('SELECT key, value FROM kv_settings WHERE key LIKE ?').all(`${CANON_PREFIX}${room.project}:%`) as { key: string; value: string }[];
+  const restored: string[] = [];
+  for (const row of rows) {
+    const rel = row.key.slice(`${CANON_PREFIX}${room.project}:`.length);
+    const file = path.join(room.root, rel);
+    let disk: string | null = null;
+    try {
+      disk = fs.readFileSync(file, 'utf8');
+    } catch {
+      disk = null;
+    }
+    if (disk === row.value) {
+      try {
+        if ((fs.statSync(file).mode & 0o222) !== 0) fs.chmodSync(file, 0o444);
+      } catch {
+        // gone between read and stat — the next pass restores it
+      }
+      continue;
+    }
+    writeProtected(room, rel, row.value);
+    restored.push(rel);
+    emit('room.integrity_restored', 'room', room.id, { project: room.project, path: rel, deleted: disk === null }, null);
+    logger.warn({ room: room.project, path: rel }, 'Room file changed outside WaveCode — restored');
+  }
+  return restored;
+}
+
+/** Health-monitor tick: every room. */
+export function verifyAllRooms(): string[] {
+  const restored: string[] = [];
+  for (const room of listRoomRows()) {
+    for (const rel of verifyRoomIntegrity(room)) restored.push(`${room.project}/${rel}`);
+  }
+  return restored;
+}
+
 /** Create the room row and folder layout; idempotent (never overwrites an existing file). */
 export function ensureRoom(project: string, ownerId: string | null = null): Result<Room> {
   if (!ROOM_NAME_RE.test(project)) return { ok: false, error: 'room name must be 1–48 chars of [a-z0-9_.-]' };
@@ -82,7 +168,14 @@ export function ensureRoom(project: string, ownerId: string | null = null): Resu
     fs.mkdirSync(path.join(root, 'TEMPLATES'), { recursive: true });
     for (const [rel, content] of Object.entries(seedFiles(project))) {
       const file = path.join(root, rel);
-      if (!fs.existsSync(file)) fs.writeFileSync(file, content, 'utf8');
+      const key = rel.split(path.sep).join('/');
+      if (!fs.existsSync(file)) {
+        if (isProtectedDoc(key)) writeProtected({ project, root }, key, content);
+        else fs.writeFileSync(file, content, 'utf8');
+      } else if (isProtectedDoc(key) && getCanonical(project, key) === null) {
+        // a room from before integrity tracking: adopt what is on disk
+        writeProtected({ project, root }, key, fs.readFileSync(file, 'utf8'));
+      }
     }
   } catch (e) {
     return { ok: false, error: `Cannot create room folder: ${(e as Error).message}` };
@@ -219,6 +312,7 @@ export function listDocs(room: Room, viewer: Writer): DocEntry[] {
 export function readDoc(room: Room, rel: string): DocResult<{ path: string; content: string }> {
   const resolved = resolveDocPath(room, rel);
   if (!resolved.ok) return resolved;
+  if (isProtectedDoc(resolved.data.rel)) verifyRoomIntegrity(room);
   try {
     return { ok: true, data: { path: resolved.data.rel, content: fs.readFileSync(resolved.data.file, 'utf8') } };
   } catch {
@@ -234,8 +328,12 @@ export function writeDoc(room: Room, rel: string, content: unknown, user: Writer
   if (typeof content !== 'string') return { ok: false, code: 'invalid', error: 'content must be text' };
   const size = Buffer.byteLength(content, 'utf8');
   if (size > MAX_DOC_BYTES) return { ok: false, code: 'too_large', error: `documents are limited to ${MAX_DOC_BYTES} bytes` };
-  fs.mkdirSync(path.dirname(resolved.data.file), { recursive: true });
-  fs.writeFileSync(resolved.data.file, content, 'utf8');
+  if (isProtectedDoc(resolved.data.rel)) {
+    writeProtected(room, resolved.data.rel, content);
+  } else {
+    fs.mkdirSync(path.dirname(resolved.data.file), { recursive: true });
+    fs.writeFileSync(resolved.data.file, content, 'utf8');
+  }
   emit('room.doc_written', 'room', room.id, { project: room.project, path: resolved.data.rel, size });
   return { ok: true, data: { path: resolved.data.rel, size } };
 }
@@ -254,7 +352,20 @@ function cell(text: string): string {
 /** One row in LEDGER.md. */
 export function appendLedger(room: Room, row: { task: string; agent: string; event: string; result: string; report?: string | null }): void {
   const line = `| ${stamp().when} | ${cell(row.task)} | ${cell(row.agent)} | ${cell(row.event)} | ${cell(row.result)} | ${row.report ? cell(row.report) : ''} |\n`;
-  fs.appendFileSync(path.join(room.root, 'LEDGER.md'), line, 'utf8');
+  appendProtected(room, 'LEDGER.md', line);
+}
+
+/** Append to a WaveCode-written file from its canonical copy (a tampered disk copy is discarded). */
+function appendProtected(room: Room, rel: string, text: string): void {
+  let base = getCanonical(room.project, rel);
+  if (base === null) {
+    try {
+      base = fs.readFileSync(path.join(room.root, rel), 'utf8');
+    } catch {
+      base = '';
+    }
+  }
+  writeProtected(room, rel, base + text);
 }
 
 function uniqueReportPath(room: Room, base: string): string {
@@ -354,7 +465,7 @@ export function mirrorDecision(workspace: string | null | undefined, decision: {
     const room = roomForWorkspace(workspace);
     if (!room) return;
     const detail = decision.detail?.trim() ? `\n  ${decision.detail.trim().replace(/\n/g, '\n  ')}` : '';
-    fs.appendFileSync(path.join(room.root, 'DECISIONS.md'), `\n- ${stamp().when} — ${decision.summary.trim()}${detail}\n`, 'utf8');
+    appendProtected(room, 'DECISIONS.md', `\n- ${stamp().when} — ${decision.summary.trim()}${detail}\n`);
   } catch (e) {
     logger.warn({ error: (e as Error).message }, 'Decision mirror failed');
   }
@@ -378,11 +489,12 @@ export function loadTemplate(room: Room, kind: TemplateKind): string {
   }
 }
 
+/**
+ * One pass over the template with a replacer function: a task text that
+ * itself contains `{room}` or `$&` is inserted verbatim, never re-expanded.
+ */
 export function fillTemplate(template: string, vars: { task: string; room: string; done_when: string }): string {
-  const filled = template
-    .replaceAll('{task}', vars.task)
-    .replaceAll('{room}', vars.room)
-    .replaceAll('{done_when}', vars.done_when);
+  const filled = template.replace(/\{(task|room|done_when)\}/g, (_m, key: keyof typeof vars) => vars[key]);
   return template.includes('{task}') ? filled : `${filled.trimEnd()}\n\n## Task\n${vars.task}\n`;
 }
 
@@ -391,6 +503,7 @@ export function fillTemplate(template: string, vars: { task: string; room: strin
  * the top of ROOM.md and SPEC.md) and the task wrapped in its template.
  */
 export function roomBriefing(room: Room, kind: TemplateKind, task: string, viewer: Writer = { id: 'system', role: 'admin' }): string {
+  verifyRoomIntegrity(room); // brief from the real SPEC/templates, not a tampered copy
   const files = listDocs(room, viewer).map((d) => d.path);
   const roomMd = head(path.join(room.root, 'ROOM.md'), INDEX_LINES);
   const specMd = head(path.join(room.root, 'SPEC.md'), INDEX_LINES + 10);
@@ -420,15 +533,33 @@ export function linkRoomIntoWorkspace(workspace: string | null | undefined, room
       // no link yet
     }
     fs.symlinkSync(room.root, link, 'dir');
-    // keep it out of git status when the workspace is a plain repo
-    const exclude = path.join(workspace, '.git', 'info', 'exclude');
-    if (fs.existsSync(path.dirname(exclude))) {
-      const current = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
-      if (!current.split('\n').includes('.wavecode/')) fs.appendFileSync(exclude, `${current.endsWith('\n') || !current ? '' : '\n'}.wavecode/\n`);
-    }
+    excludeFromGit(workspace, '.wavecode/');
     return true;
   } catch (e) {
     logger.warn({ workspace, error: (e as Error).message }, 'Room link failed');
+    return false;
+  }
+}
+
+/**
+ * Keep `pattern` out of `git status`. Asks git for the exclude file, which
+ * also works in worktrees (where `.git` is a file and info/exclude lives in
+ * the common dir). Not a repo / no git → nothing to do.
+ */
+export function excludeFromGit(workspace: string, pattern: string): boolean {
+  let exclude: string;
+  try {
+    const out = execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    exclude = path.resolve(workspace, out);
+  } catch {
+    return false;
+  }
+  try {
+    fs.mkdirSync(path.dirname(exclude), { recursive: true });
+    const current = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
+    if (!current.split('\n').includes(pattern)) fs.appendFileSync(exclude, `${current.endsWith('\n') || !current ? '' : '\n'}${pattern}\n`);
+    return true;
+  } catch {
     return false;
   }
 }

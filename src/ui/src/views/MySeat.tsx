@@ -150,7 +150,7 @@ export default function MySeat() {
               </button>
             )}
             {seat.status === 'ok' && (
-              <button type="button" disabled={busy} onClick={() => void run(() => apiPost('/users/me/seat/token'), 'New seat token issued and registered.')} className="rounded border border-slate-600 px-2 py-0.5 text-slate-300 disabled:opacity-40">
+              <button type="button" disabled={busy} onClick={() => void run(() => apiPost('/users/me/seat/token'), 'New seat token issued and registered — restart the seat so its MCP session picks it up.')} className="rounded border border-slate-600 px-2 py-0.5 text-slate-300 disabled:opacity-40">
                 {seat.has_token ? 'Rotate token' : 'Issue new token'}
               </button>
             )}
