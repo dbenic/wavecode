@@ -116,6 +116,18 @@ describe('reply extraction', () => {
     expect(r.text).not.toMatch(/Previous answer/);
   });
 
+  it('Claude Code: a box-drawing table and the bullets/decision after it survive as markdown; the CLI survey is stripped', () => {
+    const r = extractReply('claude-code', pane('claude-table.txt'), 'Get me the open task / bug table');
+    expect(r.text).toMatch(/^Ninety-one August invoices are blocked/);
+    expect(r.text).toContain('| 5 | Non-EU supplier with no VAT ID: accept national tax no. (reverse charge 25%) | Codex1 (chatgpt-countix) | 21 |');
+    expect(r.text).toContain('| --- |');
+    expect(r.text).toContain('- Counts: the invoice counts may overlap');
+    expect(r.text).toContain('[ ] Yes, accept national tax no.');
+    expect(r.text).not.toMatch(/[┌└┼]/);
+    expect(r.text).not.toMatch(/How is Claude doing/);
+    expect(r.text).not.toMatch(/1: Bad/);
+  });
+
   it('without a prompt (run summaries) the final prose of the capture is used', () => {
     expect(extractReply('codex', pane('codex.txt')).text).toContain('Next step is the MCP tools (T3).');
   });

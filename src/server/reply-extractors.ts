@@ -98,7 +98,10 @@ function parseBlocks(lines: string[], g: BlockGrammar): Block[] {
       if (current.kind === 'prose') current = null; // tool output after prose: not part of the prose
       continue;
     }
-    if (current.kind === 'prose') current.lines.push(line.replace(/^ {1,2}/, ''));
+    if (current.kind === 'prose') {
+      const rendered = tableLineToMarkdown(line.replace(/^ {1,2}/, ''));
+      if (rendered !== null) current.lines.push(rendered);
+    }
   }
   return blocks;
 }
@@ -115,7 +118,22 @@ function finalProse(blocks: Block[]): string {
   return prose.map((b) => b.lines.join('\n').trim()).filter(Boolean).join('\n\n');
 }
 
-const BOX_RE = /^\s*[╭╮╰╯│┃─━═┌┐└┘├┤]/;
+/** Prompt-box chrome: rounded borders, bare rules, and the `│ > … │` input row. Tables (┌├└ rules, `│ a │ b │` rows) are content. */
+const BOX_RE = /^\s*(?:[╭╮╰╯┃]|[─━═]+\s*$|│\s*[>❯]|│\s*$)/;
+const TABLE_RULE_RE = /^\s*[┌├└][─┬┼┴┐┤┘]+\s*$/;
+const TABLE_ROW_RE = /^\s*│(.*)│\s*$/;
+
+/** Render a box-drawing table line as markdown so it survives in the thread. */
+function tableLineToMarkdown(line: string): string | null {
+  if (TABLE_RULE_RE.test(line)) {
+    if (/^\s*[┌└]/.test(line)) return null; // top/bottom borders carry nothing
+    const cells = line.replace(/^\s*├|┤\s*$/g, '').split('┼').length;
+    return `|${' --- |'.repeat(cells)}`;
+  }
+  const m = TABLE_ROW_RE.exec(line);
+  if (m && m[1].includes('│')) return `| ${m[1].split('│').map((c) => c.trim()).join(' | ')} |`;
+  return line;
+}
 
 const CLAUDE_GRAMMAR: BlockGrammar = {
   marker: /^\s?[●⏺]\s?(.*)$/,
@@ -130,7 +148,9 @@ const CLAUDE_GRAMMAR: BlockGrammar = {
     || /^·\s.*(…|\.\.\.)/.test(l)
     || BOX_RE.test(l) && !/^\s*│\s*⎿/.test(l)  // prompt box borders
     || /^\s*[❯>](\s|$)/.test(l)                // prompt box / echoed user turns
-    || /⏵⏵|\? for shortcuts|esc to interrupt|Context left until|bypass permissions|accept edits on|auto-accept/i.test(l),
+    || /⏵⏵|\? for shortcuts|esc to interrupt|Context left until|bypass permissions|accept edits on|auto-accept/i.test(l)
+    || /How is Claude doing this session\?/i.test(l)   // the CLI's own survey, never part of an answer
+    || /^\s*1: Bad\s+2: Fine\s+3: Good/.test(l),
 };
 
 const GROK_GRAMMAR: BlockGrammar = {
