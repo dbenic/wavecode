@@ -71,12 +71,18 @@ export function resolveProfileEnv(
   return { ok: true, data: env };
 }
 
+/** Env variables whose value is a file, not a directory (only the parent is created). */
+const FILE_VALUED_ENV = new Set(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG', 'KUBECONFIG', 'NPM_CONFIG_USERCONFIG']);
+
 /** Create the profile dir and every env path inside it ("dirs are created on first login"). */
 export function ensureProfileDirs(profile: string, env: Record<string, string>, cfg: WaveConfig = getConfig()): void {
   const dir = profileDir(profile, cfg);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  for (const value of Object.values(env)) {
-    if (value === dir || value.startsWith(`${dir}${path.sep}`)) fs.mkdirSync(value, { recursive: true, mode: 0o700 });
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== dir && !value.startsWith(`${dir}${path.sep}`)) continue;
+    const target = FILE_VALUED_ENV.has(key) ? path.dirname(value) : value;
+    if (fs.existsSync(target)) continue; // including a file already there (e.g. a seeded gitconfig)
+    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
   }
 }
 
