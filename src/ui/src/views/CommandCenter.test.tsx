@@ -290,6 +290,20 @@ describe('CommandCenter', () => {
     expect(screen.getByRole('region', { name: 'Thread' })).toBeInTheDocument();
   });
 
+  it('👍/👎 on a reply posts feedback for that reply (spec §5f)', async () => {
+    threadPages = [{ cursor: 5, items: [
+      item({ event_id: 1, title: 'Report one' }),
+      item({ event_id: 40, kind: 'reply', title: 'Reply', agent_id: 'pm', body: 'everyone is busy', refs: { message_id: 'msg-40' },
+        feedback: { up: 0, down: 0, mine: null, mine_note: null, can_vote: true } }),
+    ] }];
+    const api = await setup();
+    const bubble = within(screen.getByTestId('thread-item-40'));
+    await userEvent.click(bubble.getByRole('button', { name: 'Not helpful' }));
+    await userEvent.type(bubble.getByLabelText('Better:'), 'too long');
+    await userEvent.click(bubble.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/messages/msg-40/feedback', { score: -1, note: 'too long' }));
+  });
+
   it('loads roster, thread, board and presence', async () => {
     await setup();
     expect(within(screen.getByRole('region', { name: 'Mine' })).getByText('grok-fe')).toBeInTheDocument();

@@ -578,6 +578,14 @@ Without `since`: the newest `limit` items. With `since`: items after that cursor
 ### `POST /api/agents/:id/restart`
 Owner/admin. Spawned agent with a dead session → session recreated (`agent.restarted`); live session whose runtime exited → runtime relaunched in place (`agent.runtime_relaunched`). Returns `{ ok, action }`.
 
+## The retro loop (spec §5f)
+
+- **Feedback**: `POST /api/messages/:id/feedback {score: 1|-1, note?}` on a captured `reply` (one vote per person per reply; voting again replaces it; observers `403`). Thread `reply` items carry `feedback: {up, down, mine, mine_note, can_vote}`. `GET /api/feedback?agent=&limit=` — without `agent`, the caller's own seat. MCP `list_feedback`. Every seat brief includes its recent 👎/noted feedback ("👎 \"too long\" — on: \"who is free?\"") and tells it to keep the lesson in SEAT.md.
+- **Templates**: dispatch uses `TEMPLATES/<kind>.md` (`{task}`, `{room}`, `{done_when}`) and records the kind on `tasks.template`.
+- **Metrics**: `GET /api/rooms/:project/metrics[?since=]` → `{project, templates: [{template, tasks, reviewed, first_pass_rate, mean_fix_rounds, questions_rate, mean_time_to_result_s}]}` (first pass = verdict PASS on fix round 0; questions = `request` messages per task). MCP `get_room_metrics`. Shown as a strip on the Board and a first-pass badge on the Board rail.
+- **Proposals**: `POST /api/rooms/:project/proposals {path, content, evidence}` (MCP `propose_room_change`) → review queue (`GET /api/proposals?status=pending`, `GET /api/rooms/:project/proposals`). `POST /api/proposals/:id/promote` — a person who may write the file (never a seat token) — applies it if the file has not changed since (else `409`, `stale`), with a ledger line; `POST /api/proposals/:id/reject`. A seat token's `PUT` on `SPEC.md` / `TEMPLATES/…` becomes a proposal (`202 {proposed: true, proposal}`): nothing in `TEMPLATES/` or `SPEC.md` changes from an automated actor without a promote (a person's own edit is the approval). The seat may still write `ROOM.md` and `REPORTS/` directly and its `SEAT.md` freely.
+- **Retro**: `POST /api/rooms/:project/retro` / `wavecode retro <room>` — writes the evidence (metrics, tasks with verdicts/fix rounds/questions back, feedback, what people asked the seats) to `REPORTS/<date>-retro-evidence.md` and asks the room owner's seat (else the shared orchestrator) to propose template and ROOM.md vocabulary changes with evidence. Nightly at `retro.hour_utc` (default 03 UTC, `retro.nightly: true`) for rooms with activity in `retro.window_days` (7), once per day.
+
 ## Project rooms (spec §5e)
 
 One shared folder per project under `paths.rooms_root/<project>/`: `SPEC.md`, `ROOM.md`, `LEDGER.md`, `DECISIONS.md`, `REPORTS/`, `TEMPLATES/{build,review,verify,spec}.md`. Every configured project gets a room; others are created with `POST /api/rooms {project}` (the caller owns it). Agent workspaces get `.wavecode/room` → the room (added to `.git/info/exclude`).

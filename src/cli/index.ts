@@ -521,6 +521,21 @@ userCmd
     console.log(formatCreatedUser(result.data));
   });
 
+// --- retro ---
+program
+  .command('retro <room>')
+  .description('Run the retro for a project room now: its seat proposes template / ROOM.md changes (spec §5f)')
+  .action(async (room: string) => {
+    loadInstalledConfig();
+    const { runRetroCommand, formatRetroStarted } = await import('./retro-command.js');
+    const result = await runRetroCommand(room);
+    if (!result.ok) {
+      console.error(`Retro failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(formatRetroStarted(room, result.data));
+  });
+
 // --- profile ---
 const profileCmd = program
   .command('profile')

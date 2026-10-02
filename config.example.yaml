@@ -54,6 +54,14 @@ runtimes:
   # codex CODEX_HOME={profile_dir}/codex, grok HOME={profile_dir}/grok-home.
   # Override with `env:`, `login_command:` and `credential_files:` per runtime.
 
+# Nightly retro (spec §5f): each room with activity in the window gets a retro
+# on its seat at hour_utc; the seat's template / ROOM.md proposals land in the
+# review queue. Run one now with `wavecode retro <room>`.
+retro:
+  nightly: true
+  hour_utc: 3
+  window_days: 7
+
 # Orchestrator (PM) seat: the Command Center composer sends here by default.
 # Falls back to the first agent with role orchestrator, then one named pm.
 # orchestrator_agent: pm

@@ -37,6 +37,16 @@ describe('Board', () => {
     expect(within(screen.getByLabelText('Lane System')).queryByText('ancient')).toBeNull(); // old done work hidden
   });
 
+  it('shows the per-template metrics strip (spec §5f)', () => {
+    render(<Board tasks={[]} users={new Map()} reviewCount={0} canAssign metrics={{ room: 'shop', templates: [
+      { template: 'build', tasks: 2, reviewed: 2, first_pass_rate: 0.5, mean_fix_rounds: 0.5, questions_rate: 0.5, mean_time_to_result_s: 720 },
+      { template: 'verify', tasks: 0, reviewed: 0, first_pass_rate: null, mean_fix_rounds: null, questions_rate: null, mean_time_to_result_s: null },
+    ] }} />);
+    expect(screen.getByTestId('metrics-build')).toHaveTextContent('build50% first pass0.5 fixes0.5 q/task12m to RESULT');
+    expect(screen.queryByTestId('metrics-verify')).toBeNull();
+    expect(screen.getByLabelText('Template metrics')).toHaveTextContent('shop · templates');
+  });
+
   it('pending tasks are draggable with the task id; running ones are not; observers cannot drag', () => {
     const { rerender } = render(<Board tasks={[task({ id: 'p1', prompt: 'todo' }), task({ id: 'r1', prompt: 'busy', status: 'running' })]} users={new Map()} reviewCount={0} canAssign />);
     const pending = screen.getByText('todo').closest('li')!;

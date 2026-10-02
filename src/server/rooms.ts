@@ -263,7 +263,7 @@ export function resolveDocPath(room: Pick<Room, 'root'>, rel: string): DocResult
   return { ok: true, data: { rel: clean, file } };
 }
 
-type Writer = Pick<User, 'id' | 'role'>;
+type Writer = Pick<User, 'id' | 'role'> & { via_seat?: boolean };
 
 /**
  * Who may write what (spec §5e): SPEC.md and TEMPLATES/ — the room owner or
@@ -274,6 +274,8 @@ export function canWriteDoc(user: Writer, room: Pick<Room, 'owner_id'>, rel: str
   if (user.role === 'observer') return { ok: false, error: 'Observers are read-only' };
   if (rel === 'LEDGER.md' || rel === 'DECISIONS.md') return { ok: false, error: `${rel} is written by WaveCode` };
   if (rel === 'ROOM.md' || rel.startsWith('REPORTS/')) return { ok: true };
+  // Spec §5f: automated actors (seat tokens) never change SPEC.md / TEMPLATES/ directly
+  if (user.via_seat) return { ok: false, error: `Seats propose changes to ${rel} (propose_room_change); a person promotes them` };
   const privileged = user.role === 'admin' || (!!room.owner_id && room.owner_id === user.id);
   return privileged ? { ok: true } : { ok: false, error: `Only the room owner or an admin may write ${rel}` };
 }

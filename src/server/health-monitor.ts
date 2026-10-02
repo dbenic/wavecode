@@ -10,6 +10,7 @@ import { isFileRunnerSeat } from './file-runner.js';
 import { sweepLeases } from './leases.js';
 import { sweepExpiredReplies } from './reply-capture.js';
 import { verifyAllRooms } from './rooms.js';
+import { maybeRunNightlyRetros } from './retro.js';
 import { isLoginSeat, sweepLoginSeats } from './login-seats.js';
 import { getRuntimeState, noteRuntimeAlive, relaunchRuntime } from './runtime-liveness.js';
 import logger from './logger.js';
@@ -53,6 +54,9 @@ export async function checkAll(): Promise<void> {
   } catch (e) {
     logger.error({ error: (e as Error).message }, 'Lease sweep error');
   }
+
+  // Spec §5f: the nightly retro (no-op outside retro.hour_utc / after today's run)
+  void maybeRunNightlyRetros().catch((e) => logger.error({ error: (e as Error).message }, 'Nightly retro error'));
 
   // Spec §5e: room write rules hold on disk too — undo edits made through .wavecode/room
   try {

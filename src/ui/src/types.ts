@@ -72,6 +72,31 @@ export interface ThreadItem {
   refs: { task_id?: string; run_id?: string; review_id?: string; artifact_id?: string; message_id?: string; prompt_event_id?: number };
   needs_attention: boolean;
   actions: ThreadAction[];
+  /** reply only (spec §5f) */
+  feedback?: { up: number; down: number; mine: number | null; mine_note: string | null; can_vote: boolean };
+}
+
+/** Per-template metrics for a room (spec §5f). */
+export interface TemplateMetrics {
+  template: 'build' | 'review' | 'verify' | 'spec';
+  tasks: number;
+  reviewed: number;
+  first_pass_rate: number | null;
+  mean_fix_rounds: number | null;
+  questions_rate: number | null;
+  mean_time_to_result_s: number | null;
+}
+
+/** A proposed room-file change awaiting promote (spec §5f). */
+export interface RoomProposal {
+  id: string;
+  room: string;
+  path: string;
+  diff: string;
+  evidence: string;
+  status: 'pending' | 'approved' | 'rejected' | 'stale';
+  proposed_by: string | null;
+  created_at: string;
 }
 
 export interface ThreadPage {

@@ -198,6 +198,19 @@ CREATE TABLE rooms (            -- v18 project room (spec §5e): <paths.rooms_ro
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE reply_feedback (   -- v19 👍/👎 + note on a captured reply (spec §5f)
+  id TEXT PRIMARY KEY, reply_message_id TEXT NOT NULL, prompt_event_id INTEGER, agent_id TEXT,
+  user_id TEXT NOT NULL, score INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL,
+  UNIQUE (reply_message_id, user_id)
+);
+
+CREATE TABLE room_proposals (   -- v19 retro/seat proposals; applied only on promote (spec §5f)
+  id TEXT PRIMARY KEY, room TEXT NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL,
+  base_sha256 TEXT NOT NULL, diff TEXT NOT NULL, evidence TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'approved' | 'rejected' | 'stale'
+  proposed_by TEXT, proposed_by_agent_id TEXT, decided_by TEXT, decided_at TEXT, created_at TEXT NOT NULL
+);
+
 CREATE TABLE agent_tags (       -- v16 groups: @frontend fans out (spec §5c)
   agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
   tag TEXT NOT NULL,

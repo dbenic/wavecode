@@ -105,6 +105,35 @@ describe('ThreadFeed', () => {
     expect(within(screen.getByTestId('thread-item-12')).getByText('grok-fe').style.color).toBe('rgb(219, 39, 119)');
   });
 
+  it('replies take 👍 / 👎 with an optional "better: …" note (spec §5f)', async () => {
+    const reply = item({
+      event_id: 30, kind: 'reply', title: 'Reply', body: 'a long inventory', refs: { message_id: 'm1' },
+      feedback: { up: 2, down: 0, mine: null, mine_note: null, can_vote: true },
+    });
+    const onFeedback = vi.fn();
+    renderFeed({ items: [reply], onFeedback });
+    const bubble = within(screen.getByTestId('thread-item-30'));
+    expect(bubble.getByRole('button', { name: 'Helpful' })).toHaveTextContent('👍 2');
+    await userEvent.click(bubble.getByRole('button', { name: 'Helpful' }));
+    expect(onFeedback).toHaveBeenLastCalledWith(reply, 1);
+
+    await userEvent.click(bubble.getByRole('button', { name: 'Not helpful' }));
+    await userEvent.type(bubble.getByLabelText('Better:'), 'too long');
+    await userEvent.click(bubble.getByRole('button', { name: 'Send' }));
+    expect(onFeedback).toHaveBeenLastCalledWith(reply, -1, 'too long');
+  });
+
+  it('shows my vote and note; no voting for observers', () => {
+    renderFeed({ items: [
+      item({ event_id: 31, kind: 'reply', title: 'Reply', body: 'x', feedback: { up: 0, down: 1, mine: -1, mine_note: 'too long', can_vote: true } }),
+      item({ event_id: 32, kind: 'reply', title: 'Reply', body: 'y', feedback: { up: 0, down: 0, mine: null, mine_note: null, can_vote: false } }),
+    ], onFeedback: vi.fn() });
+    const mine = within(screen.getByTestId('thread-item-31'));
+    expect(mine.getByRole('button', { name: 'Not helpful' })).toHaveAttribute('aria-pressed', 'true');
+    expect(mine.getByText('“too long”')).toBeInTheDocument();
+    expect(within(screen.getByTestId('thread-item-32')).queryByRole('button', { name: 'Helpful' })).toBeNull();
+  });
+
   it('reply bubbles show the agent persona', () => {
     renderFeed({ items: [item({ event_id: 11, kind: 'reply', title: 'Reply', body: 'done' })], personas: new Map([['a1', 'frontend lead']]) });
     expect(within(screen.getByTestId('thread-item-11')).getByText('frontend lead')).toBeInTheDocument();

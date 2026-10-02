@@ -7,6 +7,8 @@ interface BoardRailProps {
   openTasks: number;
   pendingReviews: number;
   attention: number;
+  /** Build template first-pass PASS rate (spec §5f), when known. */
+  firstPass?: number | null;
   onExpand: () => void;
 }
 
@@ -21,7 +23,7 @@ function Badge({ label, value, tone }: { label: string; value: number; tone: str
   );
 }
 
-export default function BoardRail({ openTasks, pendingReviews, attention, onExpand }: BoardRailProps) {
+export default function BoardRail({ openTasks, pendingReviews, attention, firstPass, onExpand }: BoardRailProps) {
   return (
     <button
       type="button"
@@ -34,6 +36,12 @@ export default function BoardRail({ openTasks, pendingReviews, attention, onExpa
       <Badge label="Open tasks" value={openTasks} tone="bg-sky-500/20 text-sky-300" />
       <Badge label="Pending reviews" value={pendingReviews} tone="bg-violet-500/20 text-violet-300" />
       <Badge label="Attention" value={attention} tone="bg-amber-500 text-slate-950" />
+      {firstPass !== undefined && firstPass !== null && (
+        <span title={`First-pass PASS rate (build): ${Math.round(firstPass * 100)}%`} aria-label={`First pass: ${Math.round(firstPass * 100)}%`} className="flex flex-col items-center gap-0.5">
+          <span className="text-[11px] font-semibold tabular-nums text-emerald-300">{Math.round(firstPass * 100)}%</span>
+          <span aria-hidden className="text-[8px] uppercase tracking-wider text-slate-600">1st</span>
+        </span>
+      )}
     </button>
   );
 }

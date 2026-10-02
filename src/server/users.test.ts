@@ -220,6 +220,9 @@ describe('migration v11 → current', () => {
     expect(cols('rooms')).toEqual(['id', 'project', 'root', 'owner_id', 'created_at']);
     expect(cols('tasks')).toEqual(expect.arrayContaining(['room', 'template']));
     expect(cols('users')).toContain('default_room');
+    // v19 (spec §5f): the retro loop
+    expect(cols('reply_feedback')).toEqual(expect.arrayContaining(['reply_message_id', 'user_id', 'score', 'note']));
+    expect(cols('room_proposals')).toEqual(expect.arrayContaining(['room', 'path', 'content', 'base_sha256', 'diff', 'evidence', 'status']));
 
     const events = mod.listEvents();
     expect(events).toHaveLength(1);

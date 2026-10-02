@@ -18,4 +18,11 @@ describe('BoardRail', () => {
     await userEvent.click(rail);
     expect(onExpand).toHaveBeenCalledTimes(1);
   });
+
+  it('shows the build first-pass rate when known (spec §5f)', () => {
+    const { rerender } = render(<BoardRail openTasks={1} pendingReviews={0} attention={0} firstPass={0.5} onExpand={vi.fn()} />);
+    expect(screen.getByLabelText('First pass: 50%')).toHaveTextContent('50%');
+    rerender(<BoardRail openTasks={1} pendingReviews={0} attention={0} firstPass={null} onExpand={vi.fn()} />);
+    expect(screen.queryByLabelText(/First pass/)).toBeNull();
+  });
 });

@@ -16,6 +16,7 @@ import {
   finishRun,
   updateRunResultPath,
   updateTaskRoom,
+  updateTaskTemplate,
   reconcileFailedRunToPass,
   type Task,
   type Agent,
@@ -482,6 +483,8 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       if (!task.room) updateTaskRoom(task.id, room.project);
       linkRoomIntoWorkspace(agent.workspace, room);
       const kind = isTemplateKind(task.template) ? task.template : 'build';
+      // Spec §5f: record which template the task ran with (per-template metrics)
+      if (task.template !== kind) updateTaskTemplate(task.id, kind);
       prompt = roomBriefing(room, kind, task.prompt)
         + (briefing ? `\n\n---\n## CONTEXT FROM THE TEAM\n${briefing}` : '');
     }

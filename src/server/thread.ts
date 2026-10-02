@@ -13,6 +13,7 @@
 import {
   getAgent,
   getAgentMessage,
+  feedbackForMessages,
   getRun,
   getLatestEventId,
   listEvents,
@@ -26,6 +27,7 @@ import {
 import { checkAgentAccess, userName } from './leases.js';
 import { canMutate, isAdmin } from './users.js';
 import { parseReplyQuestion } from './reply-capture.js';
+import { feedbackSummary } from './feedback.js';
 
 export const THREAD_KINDS = ['prompt', 'reply', 'command', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
 export type ThreadKind = (typeof THREAD_KINDS)[number];
@@ -63,6 +65,8 @@ export interface ThreadItem {
   };
   needs_attention: boolean;
   actions: ThreadAction[];
+  /** reply only (spec §5f): 👍/👎 counts, the viewer's own vote, whether they may vote */
+  feedback?: { up: number; down: number; mine: number | null; mine_note: string | null; can_vote: boolean };
 }
 
 /** Per-request lookup cache so a page of events costs one query per entity. */
@@ -190,6 +194,7 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
       };
       const question = parseReplyQuestion(item.body ?? '');
       item.needs_attention = question.asks;
+      item.feedback = { ...feedbackSummary(feedbackForMessages([event.entity_id]), ctx.viewer.id), can_vote: ctx.canMutate };
       if (agentId && ctx.canAct(agentId)) {
         // Quick-reply chips: tapping one types the option back into the same seat.
         for (const option of question.options) {

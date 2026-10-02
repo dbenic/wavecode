@@ -5,12 +5,14 @@ import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import type { Agent, ReviewItem as ReviewItemType } from '../types';
 import { isReviewEventType } from '../sse-events';
 import ReviewItemCard from '../components/ReviewItem';
+import RoomProposals from '../components/RoomProposals';
 
 export default function ReviewQueue() {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewItemType[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [proposalsVersion, setProposalsVersion] = useState(0);
 
   const fetchData = useCallback(() => {
     Promise.all([
@@ -29,6 +31,7 @@ export default function ReviewQueue() {
     if (isReviewEventType(event.type) || event.type === 'run.finished') {
       fetchData();
     }
+    if (event.type.startsWith('room.proposal_')) setProposalsVersion((v) => v + 1);
   }, [fetchData]);
 
   useSSE(handleSSE);
@@ -64,6 +67,7 @@ export default function ReviewQueue() {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 py-6">
+        <RoomProposals version={proposalsVersion} />
         {!loaded ? (
           <div className="flex items-center justify-center py-20">
             <div className="text-[10px] text-slate-600 tracking-[0.3em] uppercase animate-pulse">

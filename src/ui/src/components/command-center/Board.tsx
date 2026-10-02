@@ -1,4 +1,4 @@
-import type { Task, User } from '../../types';
+import type { Task, TemplateMetrics, User } from '../../types';
 import { swimlanes } from '../../utils/command-center';
 import { TASK_DRAG_TYPE } from './Roster';
 
@@ -9,6 +9,32 @@ interface BoardProps {
   canAssign: boolean;
   /** Collapse to the badge rail (spec §4.4); desktop only. */
   onCollapse?: () => void;
+  /** Per-template metrics of the viewer's room (spec §5f). */
+  metrics?: { room: string; templates: TemplateMetrics[] } | null;
+}
+
+function pct(n: number | null): string {
+  return n === null ? '—' : `${Math.round(n * 100)}%`;
+}
+
+/** The metrics strip: one line per template that has tasks. */
+export function MetricsStrip({ metrics }: { metrics: { room: string; templates: TemplateMetrics[] } }) {
+  const used = metrics.templates.filter((m) => m.tasks > 0);
+  if (used.length === 0) return null;
+  return (
+    <div aria-label="Template metrics" className="rounded-lg bg-slate-900/40 p-2 text-[11px] text-slate-400">
+      <div className="mb-1 text-[10px] uppercase tracking-[0.2em] text-slate-600">{metrics.room} · templates</div>
+      {used.map((m) => (
+        <div key={m.template} data-testid={`metrics-${m.template}`} className="flex flex-wrap gap-x-2">
+          <span className="font-semibold text-slate-300">{m.template}</span>
+          <span title="verdict PASS on fix round 0">{pct(m.first_pass_rate)} first pass</span>
+          <span>{m.mean_fix_rounds ?? '—'} fixes</span>
+          <span>{m.questions_rate ?? '—'} q/task</span>
+          <span>{m.mean_time_to_result_s === null ? '—' : `${Math.round(m.mean_time_to_result_s / 60)}m`} to RESULT</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 const STATUS_CLASS: Record<Task['status'], string> = {
@@ -23,7 +49,7 @@ const STATUS_GLYPH: Record<Task['status'], string> = {
   running: '▶', pending: '○', blocked: '⏸', failed: '✗', done: '✓',
 };
 
-export default function Board({ tasks, users, reviewCount, canAssign, onCollapse }: BoardProps) {
+export default function Board({ tasks, users, reviewCount, canAssign, onCollapse, metrics }: BoardProps) {
   const lanes = swimlanes(tasks.filter((t) => t.status !== 'done' || isRecent(t)), users);
   return (
     <section aria-label="Board" className="flex flex-col gap-3 p-3">
@@ -44,6 +70,7 @@ export default function Board({ tasks, users, reviewCount, canAssign, onCollapse
           )}
         </span>
       </div>
+      {metrics && <MetricsStrip metrics={metrics} />}
       {lanes.length === 0 && <p className="text-xs text-slate-600">No tasks yet.</p>}
       {lanes.map((lane) => (
         <div key={lane.ownerId ?? 'system'} aria-label={`Lane ${lane.label}`} className="rounded-lg border-l-2 bg-slate-900/40 p-2" style={{ borderLeftColor: lane.color }}>

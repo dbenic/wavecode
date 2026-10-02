@@ -82,6 +82,41 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       client.put(`/rooms/${encodeURIComponent(String(args.room))}/docs/${String(args.path).split('/').map(encodeURIComponent).join('/')}`, { content: args.content }),
   },
 
+  // --- Retro loop (spec §5f) ---
+  {
+    name: 'list_feedback',
+    description: "Feedback people gave on your replies (👍/👎 and notes like \"too long\"), newest first, with the question each answered. Read it at the start of a session and before long answers; keep the lessons in SEAT.md. Without agent: your own seat's feedback.",
+    schema: {
+      agent: z.string().optional().describe('Agent alias, name or ID (default: your seat)'),
+      limit: z.number().int().min(1).max(200).optional(),
+    },
+    handler: (client, args) => {
+      const params = new URLSearchParams();
+      if (args.agent) params.set('agent', String(args.agent));
+      if (args.limit) params.set('limit', String(args.limit));
+      const qs = params.toString();
+      return client.get(`/feedback${qs ? `?${qs}` : ''}`);
+    },
+  },
+  {
+    name: 'get_room_metrics',
+    description: 'Per-template metrics for a room: first-pass PASS rate (verdict pass on fix round 0), mean fix rounds, questions-back rate, mean time to first RESULT.',
+    schema: { room: z.string() },
+    handler: (client, args) => client.get(`/rooms/${encodeURIComponent(String(args.room))}/metrics`),
+  },
+  {
+    name: 'propose_room_change',
+    description: 'Propose a change to a room file (TEMPLATES/<kind>.md, ROOM.md, SPEC.md) with the evidence for it. It goes to the review queue; a person promotes it and WaveCode applies it. Use this for template and vocabulary changes — seats never edit TEMPLATES/ or SPEC.md directly.',
+    schema: {
+      room: z.string(),
+      path: z.string().describe('e.g. TEMPLATES/build.md or ROOM.md'),
+      content: z.string().describe('The full new file'),
+      evidence: z.string().describe('What in the tasks, verdicts or feedback justifies it, with numbers'),
+    },
+    handler: (client, args) =>
+      client.post(`/rooms/${encodeURIComponent(String(args.room))}/proposals`, { path: args.path, content: args.content, evidence: args.evidence }),
+  },
+
   // --- Agents ---
   {
     name: 'list_agents',
