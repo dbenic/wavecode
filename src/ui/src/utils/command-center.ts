@@ -281,3 +281,33 @@ export function itemsForAgent<T extends { kind: string; agent_id: string | null;
     || aboutPromptIds.has(i.event_id)
     || (i.kind === 'reply' && i.refs.prompt_event_id !== undefined && aboutPromptIds.has(i.refs.prompt_event_id)));
 }
+
+// --- awaiting replies ---------------------------------------------------------------
+
+/** How long the server keeps trying before it posts a truncated fallback reply (spec §5b). */
+export const REPLY_WAIT_MS = 10 * 60_000;
+
+/**
+ * Prompts that are still waiting for the agent's reply: the latest prompt per
+ * agent with no reply referencing it (refs.prompt_event_id), younger than the
+ * server's fallback window. Returns event ids.
+ */
+export function awaitingReplyPromptIds<T extends { kind: string; agent_id: string | null; event_id: number; at: string; refs: { prompt_event_id?: number } }>(
+  items: T[],
+  now: number = Date.now(),
+): Set<number> {
+  const answered = new Set(items.filter((i) => i.kind === 'reply' && i.refs.prompt_event_id !== undefined).map((i) => i.refs.prompt_event_id as number));
+  const latestPerAgent = new Map<string, T>();
+  for (const i of items) {
+    if (i.kind !== 'prompt' || !i.agent_id) continue;
+    const prev = latestPerAgent.get(i.agent_id);
+    if (!prev || i.event_id > prev.event_id) latestPerAgent.set(i.agent_id, i);
+  }
+  const out = new Set<number>();
+  for (const p of latestPerAgent.values()) {
+    if (answered.has(p.event_id)) continue;
+    const sent = new Date(p.at.includes('T') || p.at.endsWith('Z') ? p.at : `${p.at.replace(' ', 'T')}Z`).getTime();
+    if (Number.isFinite(sent) && now - sent < REPLY_WAIT_MS) out.add(p.event_id);
+  }
+  return out;
+}

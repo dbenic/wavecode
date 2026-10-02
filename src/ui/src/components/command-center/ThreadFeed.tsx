@@ -1,4 +1,5 @@
 import { renderMarkdown } from '../../utils/markdown';
+import { awaitingReplyPromptIds } from '../../utils/command-center';
 import { useEffect, useRef, useState } from 'react';
 import type { ThreadAction, ThreadItem, ThreadKind, User } from '../../types';
 import { agentColor, userColor } from '../../utils/command-center';
@@ -45,6 +46,15 @@ function time(at: string): string {
 export default function ThreadFeed(props: ThreadFeedProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const visible = props.attentionOnly ? props.items.filter((i) => i.needs_attention) : props.items;
+
+  // "Waiting for an answer": tick once a second while any prompt is unanswered
+  const [now, setNow] = useState(() => Date.now());
+  const awaiting = awaitingReplyPromptIds(props.items, now);
+  useEffect(() => {
+    if (awaiting.size === 0) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [awaiting.size]);
 
   // Newest at the bottom: keep the latest item in view as the feed grows.
   useEffect(() => {
@@ -113,6 +123,14 @@ export default function ThreadFeed(props: ThreadFeedProps) {
             )}
             {props.expanded[item.id] && (
               <pre className="mt-1.5 max-h-60 overflow-auto rounded bg-slate-950 p-2 text-[11px] text-slate-400">{props.expanded[item.id]}</pre>
+            )}
+            {item.kind === 'prompt' && awaiting.has(item.event_id) && (
+              <AwaitingReply
+                agentName={item.agent_id ? props.agentNames.get(item.agent_id) ?? item.agent_id : 'agent'}
+                color={item.agent_id ? props.agentColors?.get(item.agent_id) : undefined}
+                sentAt={item.at}
+                now={now}
+              />
             )}
           </li>
         ))}
@@ -251,6 +269,31 @@ function FeedbackBar({ item, onFeedback }: { item: ThreadItem; onFeedback: (item
           <button type="submit" className="rounded border border-slate-600 px-1.5 py-0.5 text-slate-300">Send</button>
         </form>
       )}
+    </div>
+  );
+}
+
+
+/** Typing-indicator bubble shown under a prompt until the agent's reply is captured. */
+function AwaitingReply({ agentName, color, sentAt, now }: { agentName: string; color?: string; sentAt: string; now: number }) {
+  const sent = new Date(sentAt.includes('T') || sentAt.endsWith('Z') ? sentAt : `${sentAt.replace(' ', 'T')}Z`).getTime();
+  const secs = Math.max(0, Math.floor((now - sent) / 1000));
+  const elapsed = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label={`${agentName} is answering`}
+      className="mt-2 inline-flex items-center gap-2 rounded-2xl rounded-tl-sm border-l-4 bg-slate-900 px-3 py-1.5 text-xs text-slate-400"
+      style={{ borderLeftColor: color ?? '#64748b' }}
+    >
+      <span className="font-semibold" style={{ color: color ?? '#94a3b8' }}>{agentName}</span>
+      <span className="inline-flex items-end gap-0.5" aria-hidden>
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:0ms]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:150ms]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:300ms]" />
+      </span>
+      <span>answering · {elapsed}</span>
     </div>
   );
 }

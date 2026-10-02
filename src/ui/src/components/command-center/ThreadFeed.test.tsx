@@ -2,7 +2,7 @@
 
 import '../../../test-setup';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ThreadFeed from './ThreadFeed';
 import type { ThreadItem, User } from '../../types';
@@ -52,6 +52,25 @@ describe('ThreadFeed', () => {
     expect(prompt.getByText('start T1')).toBeInTheDocument();
     expect(prompt.getByText('ana').style.color).toBe('rgb(37, 99, 235)');
     expect(screen.getByText('Run finished · exit 0 · RESULT: PASS')).toBeInTheDocument();
+  });
+
+  it('shows an "answering…" indicator under an unanswered prompt until its reply arrives', () => {
+    const justNow = new Date(Date.now() - 5000).toISOString().replace('T', ' ').slice(0, 19);
+    const prompt = item({ event_id: 20, kind: 'prompt', title: 'Prompt sent', agent_id: 'pm', body: 'what is @fable doing?', at: justNow });
+    renderFeed({ items: [prompt], agentNames: new Map([['pm', 'pm']]) });
+    expect(screen.getByRole('status', { name: /pm is answering/ })).toBeInTheDocument();
+    cleanup();
+
+    const reply = item({ event_id: 21, kind: 'reply', title: 'Reply', agent_id: 'pm', body: 'Fable deployed 0.440.47.', refs: { prompt_event_id: 20 }, at: justNow });
+    renderFeed({ items: [prompt, reply], agentNames: new Map([['pm', 'pm']]) });
+    expect(screen.queryByRole('status', { name: /pm is answering/ })).toBeNull();
+    expect(screen.getByText('Fable deployed 0.440.47.')).toBeInTheDocument();
+  });
+
+  it('does not show the indicator for a prompt older than the 10-minute fallback window', () => {
+    const old = item({ event_id: 30, kind: 'prompt', title: 'Prompt sent', agent_id: 'pm', at: '2026-01-01 10:00:00' });
+    renderFeed({ items: [old], agentNames: new Map([['pm', 'pm']]) });
+    expect(screen.queryByRole('status', { name: /answering/ })).toBeNull();
   });
 
   it('attention filter shows only items that need you, with the count', async () => {
