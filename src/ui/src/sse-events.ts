@@ -55,6 +55,12 @@ export const SSE_EVENT_TYPES = [
   'room.created',
   'room.doc_written',
   'room.report_added',
+  'room.integrity_restored',
+  'reply.feedback',
+  'room.proposal_created',
+  'room.proposal_promoted',
+  'room.proposal_rejected',
+  'retro.started',
 ] as const;
 
 export type KnownSSEEventType = typeof SSE_EVENT_TYPES[number];

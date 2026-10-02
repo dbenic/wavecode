@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ThreadAction, ThreadItem, ThreadKind, User } from '../../types';
 import { agentColor, userColor } from '../../utils/command-center';
 
@@ -10,6 +10,8 @@ interface ThreadFeedProps {
   personas?: Map<string, string>;
   /** agent id → bubble color override: a seat speaks in its user's color (spec §5d) */
   agentColors?: Map<string, string>;
+  /** 👍/👎 (+ optional note) on a reply (spec §5f) */
+  onFeedback?: (item: ThreadItem, score: 1 | -1, note?: string) => void;
   attentionOnly: boolean;
   onToggleAttention: () => void;
   attentionCount: number;
@@ -73,6 +75,7 @@ export default function ThreadFeed(props: ThreadFeedProps) {
             agentName={item.agent_id ? props.agentNames.get(item.agent_id) ?? item.agent_id : 'agent'}
             persona={item.agent_id ? props.personas?.get(item.agent_id) ?? null : null}
             color={item.agent_id ? props.agentColors?.get(item.agent_id) : undefined}
+            onFeedback={props.onFeedback}
             onAction={props.onAction}
           />
         ) : (
@@ -136,11 +139,12 @@ export default function ThreadFeed(props: ThreadFeedProps) {
  * time, the prose, and quick-reply chips when it ends with a question and
  * `[ ] option` lines. Tapping a chip sends that option back to the seat.
  */
-function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction }: {
+function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction, onFeedback }: {
   item: ThreadItem;
   agentName: string;
   persona?: string | null;
   color?: string;
+  onFeedback?: (item: ThreadItem, score: 1 | -1, note?: string) => void;
   onAction: (item: ThreadItem, action: ThreadAction) => void;
 }) {
   const color = colorOverride ?? agentColor(agentName);
@@ -179,6 +183,7 @@ function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction 
           ))}
         </div>
       )}
+      {item.feedback?.can_vote && onFeedback && <FeedbackBar item={item} onFeedback={onFeedback} />}
       {other.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-1.5 pl-1">
           {other.map((action) => (
@@ -189,5 +194,56 @@ function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction 
         </div>
       )}
     </li>
+  );
+}
+
+/** 👍 / 👎 under a reply; 👎 asks for an optional "better: …" note (spec §5f). */
+function FeedbackBar({ item, onFeedback }: { item: ThreadItem; onFeedback: (item: ThreadItem, score: 1 | -1, note?: string) => void }) {
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const fb = item.feedback!;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-1 text-xs">
+      <button
+        type="button"
+        aria-label="Helpful"
+        aria-pressed={fb.mine === 1}
+        onClick={() => onFeedback(item, 1)}
+        className={`rounded px-1.5 py-0.5 ${fb.mine === 1 ? 'bg-emerald-600/30 text-emerald-200' : 'text-slate-500 hover:text-slate-300'}`}
+      >
+        👍{fb.up > 0 ? ` ${fb.up}` : ''}
+      </button>
+      <button
+        type="button"
+        aria-label="Not helpful"
+        aria-pressed={fb.mine === -1}
+        onClick={() => setNoteOpen(true)}
+        className={`rounded px-1.5 py-0.5 ${fb.mine === -1 ? 'bg-red-600/30 text-red-200' : 'text-slate-500 hover:text-slate-300'}`}
+      >
+        👎{fb.down > 0 ? ` ${fb.down}` : ''}
+      </button>
+      {fb.mine_note && !noteOpen && <span className="italic text-slate-500">“{fb.mine_note}”</span>}
+      {noteOpen && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            onFeedback(item, -1, note.trim() || undefined);
+            setNoteOpen(false);
+            setNote('');
+          }}
+          className="flex items-center gap-1"
+        >
+          <input
+            aria-label="Better:"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="better: … (optional)"
+            maxLength={500}
+            className="w-48 rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-xs text-slate-100"
+          />
+          <button type="submit" className="rounded border border-slate-600 px-1.5 py-0.5 text-slate-300">Send</button>
+        </form>
+      )}
+    </div>
   );
 }

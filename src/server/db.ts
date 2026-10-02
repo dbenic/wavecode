@@ -152,6 +152,8 @@ export interface User {
   auth_via?: 'token' | 'seat';
   /** Room for tasks this user creates when the agent's workspace matches none (spec §5e). */
   default_room?: string | null;
+  /** Set on the request's user when it authenticated with a seat token (spec §5d/§5f). */
+  via_seat?: boolean;
   created_at: string;
 }
 
@@ -257,7 +259,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -397,6 +399,36 @@ const SCHEMA_SQL = `
     owner_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS reply_feedback (
+    id TEXT PRIMARY KEY,
+    reply_message_id TEXT NOT NULL,
+    prompt_event_id INTEGER,
+    agent_id TEXT,
+    user_id TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (reply_message_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_reply_feedback_agent ON reply_feedback(agent_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS room_proposals (
+    id TEXT PRIMARY KEY,
+    room TEXT NOT NULL,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    base_sha256 TEXT NOT NULL,
+    diff TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    proposed_by TEXT,
+    proposed_by_agent_id TEXT,
+    decided_by TEXT,
+    decided_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_room_proposals_room ON room_proposals(room, status);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_users_seat_token ON users(seat_token_hash) WHERE seat_token_hash IS NOT NULL;
 
   CREATE INDEX IF NOT EXISTS idx_events_entity
@@ -783,6 +815,38 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE tasks ADD COLUMN room TEXT;
     ALTER TABLE tasks ADD COLUMN template TEXT;
     ALTER TABLE users ADD COLUMN default_room TEXT;
+  `,
+  // v18 → v19: The retro loop (spec §5f) — feedback on replies, and
+  // template / ROOM.md / SPEC.md proposals that apply only on promote.
+  18: `
+    CREATE TABLE IF NOT EXISTS reply_feedback (
+      id TEXT PRIMARY KEY,
+      reply_message_id TEXT NOT NULL,
+      prompt_event_id INTEGER,
+      agent_id TEXT,
+      user_id TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (reply_message_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_reply_feedback_agent ON reply_feedback(agent_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS room_proposals (
+      id TEXT PRIMARY KEY,
+      room TEXT NOT NULL,
+      path TEXT NOT NULL,
+      content TEXT NOT NULL,
+      base_sha256 TEXT NOT NULL,
+      diff TEXT NOT NULL,
+      evidence TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      proposed_by TEXT,
+      proposed_by_agent_id TEXT,
+      decided_by TEXT,
+      decided_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_room_proposals_room ON room_proposals(room, status);
   `,
 };
 
@@ -1295,6 +1359,10 @@ export function insertEvent(event: {
   }
 }
 
+export function getEvent(id: number): WaveEvent | null {
+  return (getDb().prepare('SELECT * FROM events WHERE id = ?').get(id) as WaveEvent | undefined) ?? null;
+}
+
 export function listEvents(filters?: {
   since_id?: number;
   entity_type?: string;
@@ -1448,6 +1516,91 @@ export function listRoomRows(): Room[] {
 export function updateRoomOwner(project: string, ownerId: string | null): Result<Room> {
   getDb().prepare('UPDATE rooms SET owner_id = ? WHERE project = ?').run(ownerId, project);
   return getRoom(project);
+}
+
+// --- Retro loop (spec §5f) ---
+
+export interface ReplyFeedback {
+  id: string;
+  reply_message_id: string;
+  prompt_event_id: number | null;
+  agent_id: string | null;
+  user_id: string;
+  score: number;
+  note: string | null;
+  created_at: string;
+}
+
+/** One vote per user per reply; voting again replaces it. */
+export function upsertReplyFeedback(f: Omit<ReplyFeedback, 'id' | 'created_at'>): Result<ReplyFeedback> {
+  const id = generateId();
+  getDb().prepare(`
+    INSERT INTO reply_feedback (id, reply_message_id, prompt_event_id, agent_id, user_id, score, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (reply_message_id, user_id) DO UPDATE SET score = excluded.score, note = excluded.note, created_at = datetime('now')
+  `).run(id, f.reply_message_id, f.prompt_event_id, f.agent_id, f.user_id, f.score, f.note);
+  const row = getDb().prepare('SELECT * FROM reply_feedback WHERE reply_message_id = ? AND user_id = ?').get(f.reply_message_id, f.user_id) as ReplyFeedback;
+  return { ok: true, data: row };
+}
+
+export function listReplyFeedback(filters: { agent_id?: string; limit?: number } = {}): ReplyFeedback[] {
+  const limit = Math.min(Math.max(filters.limit ?? 20, 1), 200);
+  if (filters.agent_id) {
+    return getDb().prepare('SELECT * FROM reply_feedback WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?').all(filters.agent_id, limit) as ReplyFeedback[];
+  }
+  return getDb().prepare('SELECT * FROM reply_feedback ORDER BY created_at DESC, rowid DESC LIMIT ?').all(limit) as ReplyFeedback[];
+}
+
+export function feedbackForMessages(messageIds: string[]): ReplyFeedback[] {
+  if (messageIds.length === 0) return [];
+  return getDb().prepare(`SELECT * FROM reply_feedback WHERE reply_message_id IN (${messageIds.map(() => '?').join(',')})`).all(...messageIds) as ReplyFeedback[];
+}
+
+export interface RoomProposal {
+  id: string;
+  room: string;
+  path: string;
+  content: string;
+  base_sha256: string;
+  diff: string;
+  evidence: string;
+  status: 'pending' | 'approved' | 'rejected' | 'stale';
+  proposed_by: string | null;
+  proposed_by_agent_id: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  created_at: string;
+}
+
+export function insertRoomProposal(p: Pick<RoomProposal, 'room' | 'path' | 'content' | 'base_sha256' | 'diff' | 'evidence' | 'proposed_by' | 'proposed_by_agent_id'>): Result<RoomProposal> {
+  const id = generateId();
+  getDb().prepare(`
+    INSERT INTO room_proposals (id, room, path, content, base_sha256, diff, evidence, proposed_by, proposed_by_agent_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, p.room, p.path, p.content, p.base_sha256, p.diff, p.evidence, p.proposed_by, p.proposed_by_agent_id);
+  return getRoomProposal(id);
+}
+
+export function getRoomProposal(id: string): Result<RoomProposal> {
+  const row = getDb().prepare('SELECT * FROM room_proposals WHERE id = ?').get(id) as RoomProposal | undefined;
+  return row ? { ok: true, data: row } : { ok: false, error: `Proposal ${id} not found` };
+}
+
+export function listRoomProposals(filters: { room?: string; status?: string } = {}): RoomProposal[] {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filters.room) { where.push('room = ?'); params.push(filters.room); }
+  if (filters.status) { where.push('status = ?'); params.push(filters.status); }
+  return getDb().prepare(`SELECT * FROM room_proposals${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC, rowid DESC`).all(...params) as RoomProposal[];
+}
+
+export function decideRoomProposal(id: string, status: RoomProposal['status'], decidedBy: string | null): Result<RoomProposal> {
+  getDb().prepare("UPDATE room_proposals SET status = ?, decided_by = ?, decided_at = datetime('now') WHERE id = ?").run(status, decidedBy, id);
+  return getRoomProposal(id);
+}
+
+export function updateTaskTemplate(taskId: string, template: string): void {
+  getDb().prepare('UPDATE tasks SET template = ? WHERE id = ?').run(template, taskId);
 }
 
 export function updateTaskRoom(taskId: string, room: string): void {

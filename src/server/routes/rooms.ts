@@ -1,8 +1,9 @@
 import type { Context, Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
-import { getRoom, getUser, updateRoomOwner, updateUserDefaultRoom } from '../db.js';
+import { getRoom, updateRoomOwner, updateUserDefaultRoom, getUser } from '../db.js';
 import { userName } from '../leases.js';
 import {
+  isProtectedDoc,
   canWriteDoc,
   docErrorStatus,
   ensureRoom,
@@ -13,6 +14,13 @@ import {
   writeDoc,
 } from '../rooms.js';
 import { isAdmin, OWNER_USER_ID } from '../users.js';
+import { listRoomProposals, promoteProposal, proposeRoomChange, rejectProposal, type ProposalErrorCode } from '../proposals.js';
+import { roomMetrics } from '../metrics.js';
+import { runRetro } from '../retro.js';
+
+function proposalErrorStatus(code: ProposalErrorCode): 400 | 403 | 404 | 409 {
+  return { invalid: 400, forbidden: 403, not_found: 404, conflict: 409 }[code] as 400 | 403 | 404 | 409;
+}
 
 /** `/api/rooms/<project>/docs/<path…>` → `<path…>` (URL-decoded). */
 function docPath(c: Context<NodeAppEnv>): string {
@@ -81,12 +89,75 @@ export function registerRoomRoutes(app: Hono<NodeAppEnv>): void {
   app.put('/api/rooms/:project/docs/*', async (c) => {
     const room = getRoom(c.req.param('project'));
     if (!room.ok) return c.json({ error: room.error }, 404);
-    const body = await c.req.json<{ content?: unknown; expected_modified_at?: unknown }>().catch(() => null);
+    const body = await c.req.json<{ content?: unknown; evidence?: unknown }>().catch(() => null);
     if (!body || typeof body !== 'object') return c.json({ error: 'Body must be a JSON object with content' }, 400);
-    const expected = typeof body.expected_modified_at === 'string' ? body.expected_modified_at : undefined;
-    const written = writeDoc(room.data, docPath(c), body.content, getActingUser(c), { expectedModifiedAt: expected });
+    const user = getActingUser(c);
+    const rel = docPath(c);
+    // Spec §5f: a seat writing a protected file gets a proposal for a person to promote
+    if (user.via_seat && isProtectedDoc(rel.replace(/^\.\/+/, ''))) {
+      const proposal = proposeRoomChange(user, room.data.project, {
+        path: rel,
+        content: body.content,
+        evidence: typeof body.evidence === 'string' && body.evidence.trim() ? body.evidence : 'Proposed by the seat via write_doc',
+      });
+      if (!proposal.ok) return c.json({ error: proposal.error }, proposalErrorStatus(proposal.code));
+      return c.json({ proposed: true, proposal: proposal.data }, 202);
+    }
+    const expected = typeof (body as { expected_modified_at?: unknown }).expected_modified_at === 'string'
+      ? (body as { expected_modified_at: string }).expected_modified_at
+      : undefined;
+    const written = writeDoc(room.data, rel, body.content, user, { expectedModifiedAt: expected });
     if (!written.ok) return c.json({ error: written.error }, docErrorStatus(written.code));
     return c.json(written.data);
+  });
+
+  // --- the retro loop (spec §5f) ---
+
+  app.get('/api/rooms/:project/metrics', (c) => {
+    const room = getRoom(c.req.param('project'));
+    if (!room.ok) return c.json({ error: room.error }, 404);
+    const since = c.req.query('since');
+    return c.json({ project: room.data.project, templates: roomMetrics(room.data.project, since ? { since } : {}) });
+  });
+
+  app.get('/api/rooms/:project/proposals', (c) => {
+    const room = getRoom(c.req.param('project'));
+    if (!room.ok) return c.json({ error: room.error }, 404);
+    return c.json(listRoomProposals({ room: room.data.project, status: c.req.query('status') || undefined }));
+  });
+
+  /** All rooms' proposals — the review queue's "room proposals" section. */
+  app.get('/api/proposals', (c) => c.json(listRoomProposals({ status: c.req.query('status') || undefined })));
+
+  app.post('/api/rooms/:project/proposals', async (c) => {
+    const body = await c.req.json<{ path?: unknown; content?: unknown; evidence?: unknown }>().catch(() => ({} as Record<string, unknown>));
+    const user = getActingUser(c);
+    const created = proposeRoomChange(user, c.req.param('project'), body ?? {});
+    if (!created.ok) return c.json({ error: created.error }, proposalErrorStatus(created.code));
+    return c.json(created.data, 201);
+  });
+
+  app.post('/api/proposals/:id/promote', (c) => {
+    const result = promoteProposal(getActingUser(c), c.req.param('id'));
+    if (!result.ok) return c.json({ error: result.error }, proposalErrorStatus(result.code));
+    return c.json(result.data);
+  });
+
+  app.post('/api/proposals/:id/reject', (c) => {
+    const result = rejectProposal(getActingUser(c), c.req.param('id'));
+    if (!result.ok) return c.json({ error: result.error }, proposalErrorStatus(result.code));
+    return c.json(result.data);
+  });
+
+  /** Run the retro now (also nightly): the room's seat reads the evidence and proposes changes. */
+  app.post('/api/rooms/:project/retro', async (c) => {
+    const user = getActingUser(c);
+    const result = await runRetro(c.req.param('project'), { actorId: user.id, actor: user });
+    if (!result.ok) {
+      const status = result.code === 'not_found' ? 404 : result.code === 'forbidden' ? 403 : result.code === 'unavailable' ? 409 : 400;
+      return c.json({ error: result.error }, status);
+    }
+    return c.json(result.data, 202);
   });
 
   /** Where tasks you create go when the agent's workspace matches no project. */

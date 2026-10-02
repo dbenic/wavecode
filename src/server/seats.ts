@@ -16,6 +16,7 @@ import { getConfig } from './config.js';
 import {
   getAgent,
   getAgentByName,
+  deleteAgent,
   getUser,
   hasSeatToken,
   setAgentLease,
@@ -70,14 +71,7 @@ export function getSeatStatus(user: Pick<User, 'seat_agent_id'>): SeatStatus {
  */
 export function defaultSeatFor(viewer: Pick<User, 'id' | 'seat_agent_id'>, agents: Agent[]): Agent | null {
   if (viewer.seat_agent_id) return agents.find((a) => a.id === viewer.seat_agent_id) ?? null;
-  // The shared fallback is never another person's seat — held or orphaned
-  // (a revoked user's pm-<name> whose lease was released).
-  return resolveOrchestratorAgent(agents.filter((a) => a.lease_reason !== 'seat' && !isPersonalSeatName(a.name)));
-}
-
-/** `pm-<user>` is the naming scheme for personal seats (seatName). */
-export function isPersonalSeatName(name: string): boolean {
-  return /^pm-[a-z0-9][a-z0-9_-]*$/.test(name);
+  return resolveOrchestratorAgent(agents.filter((a) => a.lease_reason !== 'seat'));
 }
 
 /** Seat-specific part of the brief: who it serves, their rules, and its SEAT.md memory. */
@@ -139,8 +133,13 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
   if (!profile.ok) return { ok: false, code: profile.code === 'forbidden' ? 'forbidden' : 'invalid', error: profile.error };
 
   const name = seatName(me);
-  if (getAgentByName(name).ok) {
-    return { ok: false, code: 'conflict', error: `An agent named ${name} already exists — remove it or rename it first` };
+  // A leftover pm-<user> from an interrupted creation (or a lost link) is
+  // this user's seat — re-link it instead of answering 409 forever.
+  const leftover = getAgentByName(name);
+  if (leftover.ok) {
+    const mine = leftover.data.owner_id === me.id || (!leftover.data.owner_id && leftover.data.role === 'orchestrator');
+    if (!mine) return { ok: false, code: 'conflict', error: `An agent named ${name} already exists and is not your seat — rename or remove it first` };
+    return linkSeat(me, leftover.data, { recreated: current.status === 'missing', recovered: true });
   }
   const workspace = seatWorkspace(name);
   fs.mkdirSync(workspace, { recursive: true });
@@ -155,9 +154,15 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
   const spawned = sessionManager.spawnAgent({ name, runtime, workspace, profile: profile.data });
   if (!spawned.ok) return { ok: false, code: 'failed', error: spawned.error };
 
-  setAgentLease(spawned.data.id, { owner_id: me.id, reason: 'seat', expires_at: null });
-  updateAgentRole(spawned.data.id, 'orchestrator');
-  updateUserSeat(me.id, { seat_agent_id: spawned.data.id, seat_token_hash: hashToken(token) });
+  try {
+    setAgentLease(spawned.data.id, { owner_id: me.id, reason: 'seat', expires_at: null });
+    updateAgentRole(spawned.data.id, 'orchestrator');
+    updateUserSeat(me.id, { seat_agent_id: spawned.data.id, seat_token_hash: hashToken(token) });
+  } catch (e) {
+    // Never leave a half-made seat behind: it would block the retry
+    sessionManager.kill(spawned.data.id);
+    return { ok: false, code: 'failed', error: `Seat setup failed: ${(e as Error).message}` };
+  }
   const agent = getAgent(spawned.data.id);
   if (!agent.ok) return { ok: false, code: 'failed', error: agent.error };
 
@@ -165,8 +170,44 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
   void briefOrchestratorSeat(agent.data.id, me.id, { extra: seatBriefExtra(me, workspace) }).catch((err) =>
     logger.warn({ agentId: agent.data.id, error: (err as Error).message }, 'Seat brief failed'),
   );
-  // When automatic registration failed the token exists only here: hand it
-  // over once so the user can register the MCP server by hand.
+  // When automatic registration failed the token exists only here: hand it over once
+  return { ok: true, data: { agent: agent.data, mcp, ...(mcp.ok ? {} : { token }) } };
+}
+
+/**
+ * Kill and remove a user's seat (spec §5d) — on user revoke. Returns the
+ * removed agent id, or null when there was none.
+ */
+export function removeSeatOf(userId: string): string | null {
+  const user = freshUser(userId);
+  if (!user?.seat_agent_id) return null;
+  const agent = getAgent(user.seat_agent_id);
+  updateUserSeat(userId, { seat_agent_id: null, seat_token_hash: null });
+  if (!agent.ok) return null;
+  void import('./output-watcher.js').then((ow) => ow.stopWatching(agent.data.id)).catch(() => undefined);
+  const killed = agent.data.mode === 'adopted' ? sessionManager.detach(agent.data.id) : sessionManager.kill(agent.data.id);
+  if (!killed.ok) {
+    logger.warn({ agentId: agent.data.id, error: killed.error }, 'Seat removal failed — deleting the record');
+    deleteAgent(agent.data.id);
+  }
+  emit('seat.removed', 'agent', agent.data.id, { user: user.name }, null);
+  return agent.data.id;
+}
+
+/** Make an existing agent the user's seat: seat lease, orchestrator role, fresh seat token, brief. */
+function linkSeat(me: User, existing: Agent, flags: { recreated: boolean; recovered: boolean }): SeatResult<CreatedSeat> {
+  const token = generateToken();
+  const mcp = registerSeatMcp(mcpInput(me, existing, token));
+  setAgentLease(existing.id, { owner_id: me.id, reason: 'seat', expires_at: null });
+  updateAgentRole(existing.id, 'orchestrator');
+  updateUserSeat(me.id, { seat_agent_id: existing.id, seat_token_hash: hashToken(token) });
+  const agent = getAgent(existing.id);
+  if (!agent.ok) return { ok: false, code: 'failed', error: agent.error };
+  emit('seat.created', 'agent', agent.data.id, { user: me.name, runtime: agent.data.runtime, ...flags });
+  void briefOrchestratorSeat(agent.data.id, me.id, { extra: seatBriefExtra(me, agent.data.workspace ?? seatWorkspace(agent.data.name)) }).catch((err) =>
+    logger.warn({ agentId: agent.data.id, error: (err as Error).message }, 'Seat brief failed'),
+  );
+  // When automatic registration failed the token exists only here: hand it over once
   return { ok: true, data: { agent: agent.data, mcp, ...(mcp.ok ? {} : { token }) } };
 }
 
@@ -203,7 +244,11 @@ export function revokeSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<voi
 }
 
 /** Issue a new seat token and re-register it in the seat's config (the old one stops working). */
-export function rotateSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<{ mcp: SeatMcpResult; token?: string }> {
+/**
+ * A running seat keeps the MCP session it started with, so after a rotation
+ * it needs a restart (or the next relaunch) to use the new token.
+ */
+export function rotateSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<SeatMcpResult> {
   const guarded = guardUser(user);
   if (!guarded.ok) return guarded;
   const status = getSeatStatus(guarded.data);
@@ -212,6 +257,5 @@ export function rotateSeatToken(user: Pick<User, 'id' | 'role'>): SeatResult<{ m
   const mcp = registerSeatMcp(mcpInput(guarded.data, status.agent, token));
   updateUserSeat(guarded.data.id, { seat_token_hash: hashToken(token) });
   emit('seat.token_rotated', 'user', guarded.data.id, { user: guarded.data.name, mcp_registered: mcp.ok });
-  // Unregistered → the plaintext is handed over once for manual registration
-  return { ok: true, data: { mcp, ...(mcp.ok ? {} : { token }) } };
+  return { ok: true, data: mcp };
 }

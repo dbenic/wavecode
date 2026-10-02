@@ -19,7 +19,7 @@ import Composer, { type ComposerSend } from '../components/command-center/Compos
 import PresenceStrip from '../components/command-center/PresenceStrip';
 import Roster from '../components/command-center/Roster';
 import ThreadFeed from '../components/command-center/ThreadFeed';
-import type { Agent, Task, ThreadAction, ThreadItem, ThreadPage, User } from '../types';
+import type { Agent, Task, TemplateMetrics, ThreadAction, ThreadItem, ThreadPage, User } from '../types';
 import { handleOf, STATUS_PROMPT, type Plan } from '../utils/composer-grammar';
 import {
   actionPlaceholders,
@@ -60,6 +60,8 @@ export default function CommandCenter() {
   /** Main column: the thread, or the project room (spec §5e). */
   const [centerView, setCenterView] = useState<'thread' | 'room'>('thread');
   const [lastRoomEvent, setLastRoomEvent] = useState<SSEEvent | null>(null);
+  /** Per-template metrics of the viewer's room (spec §5f): Board strip + rail badge. */
+  const [metrics, setMetrics] = useState<{ room: string; templates: TemplateMetrics[] } | null>(null);
   /** null = follow the default rule (spec §4.4) until the viewer toggles; session-only React state. */
   const [boardCollapsedChoice, setBoardCollapsedChoice] = useState<boolean | null>(null);
 
@@ -76,6 +78,17 @@ export default function CommandCenter() {
 
   const loadAgents = useCallback(() => apiGet<Agent[]>('/agents').then(setAgents).catch(() => {}), []);
   const loadTasks = useCallback(() => apiGet<Task[]>('/tasks').then(setTasks).catch(() => {}), []);
+  const loadMetrics = useCallback(async () => {
+    try {
+      const rooms = await apiGet<Array<{ project: string; is_default?: boolean }>>('/rooms');
+      const room = rooms.find((r) => r.is_default) ?? rooms[0];
+      if (!room) return setMetrics(null);
+      const res = await apiGet<{ project: string; templates: TemplateMetrics[] }>(`/rooms/${encodeURIComponent(room.project)}/metrics`);
+      setMetrics({ room: res.project, templates: res.templates });
+    } catch {
+      setMetrics(null);
+    }
+  }, []);
   const loadUsers = useCallback(() => apiGet<User[]>('/users').then(setUsers).catch(() => {}), []);
   const loadReviews = useCallback(
     () => apiGet<unknown[]>('/reviews').then((r) => setReviewCount(Array.isArray(r) ? r.length : 0)).catch(() => {}),
@@ -129,7 +142,8 @@ export default function CommandCenter() {
     void loadTasks();
     void loadReviews();
     void refreshThread();
-  }, [loadUsers, loadAgents, loadTasks, loadReviews, refreshThread]);
+    void loadMetrics();
+  }, [loadMetrics, loadUsers, loadAgents, loadTasks, loadReviews, refreshThread]);
 
   // Lease countdowns are a display clock, not data polling.
   useEffect(() => {
@@ -147,6 +161,8 @@ export default function CommandCenter() {
   useSSE((event: SSEEvent) => {
     if (event.type === 'heartbeat') return;
     if (event.type.startsWith('room.')) setLastRoomEvent(event);
+    if (event.type === 'reply.feedback') void refreshThread({ full: true });
+    if (event.type.startsWith('review.') || event.type.startsWith('run.') || event.type === 'task.created') void loadMetrics();
     void refreshThread({ full: invalidatesThreadActions(event.type) });
     if (event.type.startsWith('agent.') || event.type === 'system.stop_all' || event.type === 'profile.login_started') {
       if (event.type !== 'agent.output_updated') void loadAgents();
@@ -409,6 +425,17 @@ export default function CommandCenter() {
     }
   }
 
+  /** 👍/👎 on a reply (spec §5f); the thread re-reads so counts update. */
+  async function sendFeedback(item: ThreadItem, score: 1 | -1, note?: string) {
+    if (!item.refs.message_id) return;
+    try {
+      await apiPost(`/messages/${item.refs.message_id}/feedback`, { score, ...(note ? { note } : {}) });
+      void refreshThread({ full: true });
+    } catch {
+      // ErrorBanner
+    }
+  }
+
   async function stopAll() {
     if (!window.confirm('Emergency stop: kill spawned agents, interrupt adopted ones, and disable auto-dispatch?')) return;
     try {
@@ -519,6 +546,7 @@ export default function CommandCenter() {
             agentNames={agentNames}
             personas={personas}
             agentColors={agentColors}
+            onFeedback={(item, score, note) => void sendFeedback(item, score, note)}
             attentionOnly={attentionOnly}
             onToggleAttention={() => setAttentionOnly((v) => !v)}
             attentionCount={attentionCount}
@@ -575,7 +603,7 @@ export default function CommandCenter() {
         <aside className={`${tab === 'board' ? 'block' : 'hidden'} min-h-0 overflow-y-auto border-slate-800/60 sm:block sm:border-l`}>
           {/* Phones always get the full board in their Board tab; the rail is a desktop affordance. */}
           <div className={boardCollapsed ? 'sm:hidden' : ''} data-testid="board-full">
-            <Board tasks={tasks} users={userMap} reviewCount={reviewCount} canAssign={canMutate} onCollapse={() => setBoardCollapsedChoice(true)} />
+            <Board tasks={tasks} users={userMap} reviewCount={reviewCount} canAssign={canMutate} onCollapse={() => setBoardCollapsedChoice(true)} metrics={metrics} />
           </div>
           {boardCollapsed && (
             <div className="hidden h-full sm:block" data-testid="board-rail">
@@ -583,6 +611,7 @@ export default function CommandCenter() {
                 openTasks={openTaskCount(tasks)}
                 pendingReviews={reviewCount}
                 attention={attentionCount}
+                firstPass={metrics?.templates.find((m) => m.template === 'build')?.first_pass_rate ?? null}
                 onExpand={() => setBoardCollapsedChoice(false)}
               />
             </div>

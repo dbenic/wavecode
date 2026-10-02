@@ -91,6 +91,8 @@ export interface WaveConfig {
   profiles: Record<string, ProfileConfig>;
   /** Default Command Center target: the orchestrator (PM) seat by agent name (spec §5b). */
   orchestrator_agent: string | null;
+  /** Nightly retro (spec §5f): each active room's seat proposes template / ROOM.md changes. */
+  retro: { nightly: boolean; hour_utc: number; window_days: number };
   auth: {
     method: 'tailscale' | 'token';
     fallback_token: string | null;
@@ -335,6 +337,7 @@ function buildDefaults(baseDir: string): WaveConfig {
     profiles_root: path.join(dataRoot, 'profiles'),
     profiles: {},
     orchestrator_agent: null,
+    retro: { nightly: true, hour_utc: 3, window_days: 7 },
     auth: { method: 'token', fallback_token: null, trusted_proxies: [] },
     notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },
     artifacts: { storage: path.join(dataRoot, 'artifacts'), retention_days: 30 },

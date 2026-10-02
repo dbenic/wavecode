@@ -19,6 +19,7 @@ import * as sessionManager from '../session-manager.js';
 import * as replyCapture from '../reply-capture.js';
 import { notify } from '../notifications.js';
 import { withPersona } from '../agent-identity.js';
+import { recentFeedback, recentFeedbackForSeat, recordFeedback } from '../feedback.js';
 import { OWNER_USER } from '../users.js';
 
 /** `@ana` / `ana` / a user id → that user (spec §5c people addressing). */
@@ -145,6 +146,35 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
       replyCapture.trackPrompt({ agent: recipient.data, actorId: user.id, prompt: injectedText, promptEventId: created?.id ?? null });
     }
     return c.json({ ...result.data, injected: injection.ok, ...(injection.ok ? {} : { inject_error: injection.error }) }, 201);
+  });
+
+  // --- Feedback on replies (spec §5f) ---
+  app.post('/api/messages/:id/feedback', async (c) => {
+    const body = await c.req.json<{ score?: unknown; note?: unknown }>().catch(() => ({} as { score?: unknown; note?: unknown }));
+    const result = recordFeedback(getActingUser(c), c.req.param('id'), body ?? {});
+    if (!result.ok) return c.json({ error: result.error }, result.code === 'not_found' ? 404 : result.code === 'forbidden' ? 403 : 400);
+    return c.json(result.data);
+  });
+
+  /**
+   * Recent feedback on replies. `agent` (alias/name/id) narrows it; without
+   * it, a caller with a seat gets their seat's feedback (what `list_feedback`
+   * shows a seat at the start of a session).
+   */
+  app.get('/api/feedback', (c) => {
+    const ref = c.req.query('agent');
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '20', 10) || 20, 1), 200);
+    if (ref) {
+      const agent = resolveAgent(ref);
+      if (!agent.ok) return c.json({ error: agent.error }, 404);
+      // A personal seat's feedback is scoped to what the seat itself may act on
+      return c.json(agent.data.owner_id ? recentFeedbackForSeat(agent.data, limit) : recentFeedback(agent.data.id, limit));
+    }
+    const me = getUser(getActingUser(c).id);
+    const seatId = me.ok ? me.data.seat_agent_id ?? null : null;
+    if (!seatId) return c.json([]); // no seat → nothing, never everyone's feedback
+    const seat = getAgent(seatId);
+    return c.json(seat.ok ? recentFeedbackForSeat(seat.data, limit) : []);
   });
 
   // Messages for a specific agent (sent to them or broadcast)

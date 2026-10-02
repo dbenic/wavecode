@@ -16,6 +16,7 @@ import { isFileRunnerSeat } from './file-runner.js';
 import logger from './logger.js';
 import { trackPrompt } from './reply-capture.js';
 import { roomsBriefLine } from './rooms.js';
+import { feedbackBriefLine } from './feedback.js';
 import { getRuntimeState, waitForRuntimeSettled } from './runtime-liveness.js';
 import * as sessionManager from './session-manager.js';
 import { isClaudeBypassAcceptDialog } from './output-watcher.js';
@@ -150,7 +151,8 @@ export async function briefOrchestratorSeat(
   }
 
   // Spec §5e: every seat learns where the project rooms are and to keep ROOM.md current
-  const brief = buildOrchestratorBrief(undefined, [roomsBriefLine(), opts.extra].filter(Boolean).join(' ') || null);
+  // Spec §5f: the seat's next session starts from the feedback its answers got
+  const brief = buildOrchestratorBrief(undefined, [roomsBriefLine(), feedbackBriefLine(agent), opts.extra].filter(Boolean).join(' ') || null);
   const sent = sessionManager.sendKeys(agent.id, brief);
   if (!sent.ok) return { ok: false, error: sent.error };
 

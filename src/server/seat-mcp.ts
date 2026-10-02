@@ -1,17 +1,14 @@
 /**
- * Register the `wavecode` MCP server inside an orchestrator seat's own CLI
- * config with the seat token (spec §5d), so the seat drives WaveCode as its
- * user. Only ever written where *this seat alone* reads it — the seat's own
- * workspace (project-scope config). NEVER the profile's user-scope config:
- * every worker agent spawned on that profile would inherit the user's
- * identity while executing untrusted repo content. Files are 0600, written
- * atomically; the token is never logged.
+ * Register the `wavecode` MCP server for an orchestrator seat with the seat
+ * token (spec §5d), so the seat drives WaveCode as its user. Only ever
+ * written where *this seat alone* reads it — its own workspace — never a
+ * profile or home config, where every agent on that login would inherit
+ * the user's identity. Files are 0600; the token is never logged.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from './config.js';
-import { resolveProfileEnv } from './profiles.js';
 
 export interface SeatMcpInput {
   runtime: string;
@@ -20,8 +17,6 @@ export interface SeatMcpInput {
   token: string;
   /** Daemon base URL, e.g. http://127.0.0.1:3777 */
   daemonUrl: string;
-  /** Node + CLI entry for stdio MCP (`<node> <cli> mcp`) */
-  cli?: { node: string; entry: string };
 }
 
 export type SeatMcpResult = { ok: true; file: string } | { ok: false; error: string };
@@ -33,36 +28,25 @@ export function daemonUrl(): string {
 
 function writePrivate(file: string, content: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  // tmp + rename: a reader never sees a half-written config
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  fs.renameSync(tmp, file);
+  fs.writeFileSync(file, content, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(file, 0o600);
 }
 
-/** Missing file → {}. An existing file that does not parse is an error, never silently replaced. */
 function readJson(file: string): Record<string, unknown> {
-  let raw: string;
   try {
-    raw = fs.readFileSync(file, 'utf8');
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return {};
-    throw e;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
-  if (!raw.trim()) return {};
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${file} is not a JSON object — refusing to overwrite it`);
-  }
-  return parsed;
 }
 
 /**
  * Claude Code: an HTTP MCP server with the seat token as bearer, in the seat
  * workspace's project config (`.mcp.json`, pre-approved in
- * `.claude/settings.local.json`) — profile or not. The profile's user-scope
- * `.claude.json` is shared by every agent on that profile and must never
- * carry the seat token.
+ * `.claude/settings.local.json`). Never in the profile's `.claude.json`:
+ * every worker agent on that profile loads it and would inherit the seat
+ * token. The seat runs in its own workspace, so only it picks this up.
  */
 function registerClaude(input: SeatMcpInput): SeatMcpResult {
   const server = {
@@ -81,49 +65,22 @@ function registerClaude(input: SeatMcpInput): SeatMcpResult {
   return { ok: true, file };
 }
 
-const TOML_BLOCK_RE = /^\[mcp_servers\.wavecode(?:\.[^\]]*)?\][^\n]*\n(?:(?!\[)[^\n]*\n?)*/gm;
-
-/** Codex: a stdio server (`<node> <cli> mcp`) with the seat token in its env, in `$CODEX_HOME/config.toml`. */
-function registerCodex(input: SeatMcpInput): SeatMcpResult {
-  if (!input.profile) {
-    return { ok: false, error: 'Codex seats need a credential profile — the default CODEX_HOME is shared by every Codex agent' };
-  }
-  const env = resolveProfileEnv(input.runtime, input.profile);
-  if (!env.ok) return env;
-  const home = env.data.CODEX_HOME;
-  if (!home) return { ok: false, error: `Runtime '${input.runtime}' has no CODEX_HOME for profile '${input.profile}'` };
-  const cli = input.cli ?? { node: process.execPath, entry: path.join(process.cwd(), 'dist', 'cli', 'index.js') };
-  const file = path.join(home, 'config.toml');
-  let toml = '';
-  try {
-    toml = fs.readFileSync(file, 'utf8');
-  } catch {
-    // first registration
-  }
-  toml = toml.replace(TOML_BLOCK_RE, '').replace(/\n{3,}/g, '\n\n').trimEnd();
-  const q = (s: string) => JSON.stringify(s); // TOML basic strings share JSON escaping for these values
-  const block = [
-    '[mcp_servers.wavecode]',
-    `command = ${q(cli.node)}`,
-    `args = [${q(cli.entry)}, "mcp"]`,
-    '',
-    '[mcp_servers.wavecode.env]',
-    `WAVECODE_URL = ${q(input.daemonUrl)}`,
-    `WAVECODE_TOKEN = ${q(input.token)}`,
-  ].join('\n');
-  writePrivate(file, `${toml ? `${toml}\n\n` : ''}${block}\n`);
-  return { ok: true, file };
-}
-
+/**
+ * Only runtimes with a seat-local config are registered automatically. Codex
+ * reads MCP servers from `$CODEX_HOME/config.toml`, which the whole profile
+ * shares — writing the seat token there would hand it to every Codex worker.
+ */
 const REGISTRARS: Record<string, (input: SeatMcpInput) => SeatMcpResult> = {
   'claude-code': registerClaude,
-  codex: registerCodex,
 };
 
 export function registerSeatMcp(input: SeatMcpInput): SeatMcpResult {
   const registrar = REGISTRARS[input.runtime];
   if (!registrar) {
-    return { ok: false, error: `Automatic MCP registration is not available for runtime '${input.runtime}' — register the wavecode MCP server in its config manually` };
+    return {
+      ok: false,
+      error: `Automatic MCP registration is only available for claude-code seats: '${input.runtime}' keeps MCP servers in a config shared by every agent on the profile, so the seat token is not written there — register the wavecode MCP server for this seat by hand`,
+    };
   }
   try {
     return registrar(input);

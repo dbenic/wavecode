@@ -13,10 +13,12 @@
  * Agent workspaces get `.wavecode/room` → the room folder.
  */
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from './config.js';
 import {
+  getDb,
   getRoom,
   getUser,
   insertRoom,
@@ -72,6 +74,90 @@ export function roomsRoot(): string {
   return getConfig().paths.rooms_root;
 }
 
+// --- integrity: the write rules hold on disk too ----------------------------
+//
+// Agents see the room through `.wavecode/room` and all run as one OS user, so
+// file permissions alone cannot stop them. Every file except ROOM.md and
+// REPORTS/ (the "any seat" area) is therefore *protected*: kept read-only
+// (0444), with its canonical content stored by WaveCode. An edit made outside
+// the API is detected and restored (room.integrity_restored alert).
+
+/** Files only the API (owner/admin) or WaveCode may change. */
+export function isProtectedDoc(rel: string): boolean {
+  return !(rel === 'ROOM.md' || rel.startsWith('REPORTS/'));
+}
+
+const CANON_PREFIX = 'room-doc:';
+
+function canonKey(project: string, rel: string): string {
+  return `${CANON_PREFIX}${project}:${rel}`;
+}
+
+function getCanonical(project: string, rel: string): string | null {
+  const row = getDb().prepare('SELECT value FROM kv_settings WHERE key = ?').get(canonKey(project, rel)) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+function setCanonical(project: string, rel: string, content: string): void {
+  getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(canonKey(project, rel), content);
+}
+
+/** Write a protected file: canonical copy + read-only on disk. */
+function writeProtected(room: Pick<Room, 'project' | 'root'>, rel: string, content: string): void {
+  const file = path.join(room.root, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    fs.chmodSync(file, 0o644);
+  } catch {
+    // new file
+  }
+  fs.writeFileSync(file, content, 'utf8');
+  fs.chmodSync(file, 0o444);
+  setCanonical(room.project, rel, content);
+}
+
+/**
+ * Restore protected files edited (or deleted) outside the API. Returns the
+ * restored paths; emits room.integrity_restored for each.
+ */
+export function verifyRoomIntegrity(room: Room): string[] {
+  const rows = getDb().prepare('SELECT key, value FROM kv_settings WHERE key LIKE ?').all(`${CANON_PREFIX}${room.project}:%`) as { key: string; value: string }[];
+  const restored: string[] = [];
+  for (const row of rows) {
+    const rel = row.key.slice(`${CANON_PREFIX}${room.project}:`.length);
+    const file = path.join(room.root, rel);
+    let disk: string | null = null;
+    try {
+      disk = fs.readFileSync(file, 'utf8');
+    } catch {
+      disk = null;
+    }
+    if (disk === row.value) {
+      try {
+        if ((fs.statSync(file).mode & 0o222) !== 0) fs.chmodSync(file, 0o444);
+      } catch {
+        // gone between read and stat — the next pass restores it
+      }
+      continue;
+    }
+    writeProtected(room, rel, row.value);
+    restored.push(rel);
+    emit('room.integrity_restored', 'room', room.id, { project: room.project, path: rel, deleted: disk === null }, null);
+    logger.warn({ room: room.project, path: rel }, 'Room file changed outside WaveCode — restored');
+  }
+  return restored;
+}
+
+/** Health-monitor tick: every room. */
+export function verifyAllRooms(): string[] {
+  const restored: string[] = [];
+  for (const room of listRoomRows()) {
+    for (const rel of verifyRoomIntegrity(room)) restored.push(`${room.project}/${rel}`);
+  }
+  return restored;
+}
+
 /** Create the room row and folder layout; idempotent (never overwrites an existing file). */
 export function ensureRoom(project: string, ownerId: string | null = null): Result<Room> {
   if (!ROOM_NAME_RE.test(project)) return { ok: false, error: 'room name must be 1–48 chars of [a-z0-9_.-]' };
@@ -82,7 +168,14 @@ export function ensureRoom(project: string, ownerId: string | null = null): Resu
     fs.mkdirSync(path.join(root, 'TEMPLATES'), { recursive: true });
     for (const [rel, content] of Object.entries(seedFiles(project))) {
       const file = path.join(root, rel);
-      if (!fs.existsSync(file)) fs.writeFileSync(file, content, 'utf8');
+      const key = rel.split(path.sep).join('/');
+      if (!fs.existsSync(file)) {
+        if (isProtectedDoc(key)) writeProtected({ project, root }, key, content);
+        else fs.writeFileSync(file, content, 'utf8');
+      } else if (isProtectedDoc(key) && getCanonical(project, key) === null) {
+        // a room from before integrity tracking: adopt what is on disk
+        writeProtected({ project, root }, key, fs.readFileSync(file, 'utf8'));
+      }
     }
   } catch (e) {
     return { ok: false, error: `Cannot create room folder: ${(e as Error).message}` };
@@ -140,10 +233,6 @@ export function resolveTaskRoom(opts: { explicit?: string | null; agent?: Pick<A
 export type DocErrorCode = 'invalid' | 'forbidden' | 'not_found' | 'too_large' | 'conflict' | 'failed';
 export type DocResult<T> = { ok: true; data: T } | { ok: false; error: string; code: DocErrorCode };
 
-export function docErrorStatus(code: DocErrorCode): 400 | 403 | 404 | 409 | 413 | 500 {
-  return { invalid: 400, forbidden: 403, not_found: 404, too_large: 413, conflict: 409, failed: 500 }[code] as 400 | 403 | 404 | 409 | 413 | 500;
-}
-
 /** Briefing caps: ROOM.md/SPEC.md heads, the template, and the report list are bounded so one big doc cannot bloat every dispatch. */
 export const BRIEFING_HEAD_BYTES = 4 * 1024;
 export const BRIEFING_TEMPLATE_BYTES = 8 * 1024;
@@ -155,6 +244,10 @@ function mtimeIso(file: string): string | null {
   } catch {
     return null;
   }
+}
+
+export function docErrorStatus(code: DocErrorCode): 400 | 403 | 404 | 409 | 413 | 500 {
+  return { invalid: 400, forbidden: 403, not_found: 404, too_large: 413, conflict: 409, failed: 500 }[code] as 400 | 403 | 404 | 409 | 413 | 500;
 }
 
 /**
@@ -183,7 +276,7 @@ export function resolveDocPath(room: Pick<Room, 'root'>, rel: string): DocResult
   return { ok: true, data: { rel: clean, file } };
 }
 
-type Writer = Pick<User, 'id' | 'role'>;
+type Writer = Pick<User, 'id' | 'role'> & { via_seat?: boolean };
 
 /**
  * Who may write what (spec §5e): SPEC.md and TEMPLATES/ — the room owner or
@@ -194,6 +287,8 @@ export function canWriteDoc(user: Writer, room: Pick<Room, 'owner_id'>, rel: str
   if (user.role === 'observer') return { ok: false, error: 'Observers are read-only' };
   if (rel === 'LEDGER.md' || rel === 'DECISIONS.md') return { ok: false, error: `${rel} is written by WaveCode` };
   if (rel === 'ROOM.md' || rel.startsWith('REPORTS/')) return { ok: true };
+  // Spec §5f: automated actors (seat tokens) never change SPEC.md / TEMPLATES/ directly
+  if (user.via_seat) return { ok: false, error: `Seats propose changes to ${rel} (propose_room_change); a person promotes them` };
   const privileged = user.role === 'admin' || (!!room.owner_id && room.owner_id === user.id);
   return privileged ? { ok: true } : { ok: false, error: `Only the room owner or an admin may write ${rel}` };
 }
@@ -232,9 +327,9 @@ export function listDocs(room: Room, viewer: Writer): DocEntry[] {
 export function readDoc(room: Room, rel: string): DocResult<{ path: string; content: string; modified_at: string | null }> {
   const resolved = resolveDocPath(room, rel);
   if (!resolved.ok) return resolved;
+  if (isProtectedDoc(resolved.data.rel)) verifyRoomIntegrity(room);
   try {
-    const content = fs.readFileSync(resolved.data.file, 'utf8');
-    return { ok: true, data: { path: resolved.data.rel, content, modified_at: mtimeIso(resolved.data.file) } };
+    return { ok: true, data: { path: resolved.data.rel, content: fs.readFileSync(resolved.data.file, 'utf8') , modified_at: mtimeIso(resolved.data.file) } };
   } catch {
     return { ok: false, code: 'not_found', error: `${resolved.data.rel} not found in room ${room.project}` };
   }
@@ -264,11 +359,15 @@ export function writeDoc(
   }
 
   try {
-    fs.mkdirSync(path.dirname(resolved.data.file), { recursive: true });
-    // tmp + rename: a concurrent reader or a dispatch briefing never sees a half-written doc
-    const tmp = `${resolved.data.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, content, 'utf8');
-    fs.renameSync(tmp, resolved.data.file);
+    if (isProtectedDoc(resolved.data.rel)) {
+      writeProtected(room, resolved.data.rel, content);
+    } else {
+      fs.mkdirSync(path.dirname(resolved.data.file), { recursive: true });
+      // tmp + rename: a concurrent reader or a dispatch briefing never sees a half-written doc
+      const tmp = `${resolved.data.file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, content, 'utf8');
+      fs.renameSync(tmp, resolved.data.file);
+    }
   } catch (e) {
     return { ok: false, code: 'failed', error: `Could not write ${resolved.data.rel}: ${(e as Error).message}` };
   }
@@ -290,7 +389,20 @@ function cell(text: string): string {
 /** One row in LEDGER.md. */
 export function appendLedger(room: Room, row: { task: string; agent: string; event: string; result: string; report?: string | null }): void {
   const line = `| ${stamp().when} | ${cell(row.task)} | ${cell(row.agent)} | ${cell(row.event)} | ${cell(row.result)} | ${row.report ? cell(row.report) : ''} |\n`;
-  fs.appendFileSync(path.join(room.root, 'LEDGER.md'), line, 'utf8');
+  appendProtected(room, 'LEDGER.md', line);
+}
+
+/** Append to a WaveCode-written file from its canonical copy (a tampered disk copy is discarded). */
+function appendProtected(room: Room, rel: string, text: string): void {
+  let base = getCanonical(room.project, rel);
+  if (base === null) {
+    try {
+      base = fs.readFileSync(path.join(room.root, rel), 'utf8');
+    } catch {
+      base = '';
+    }
+  }
+  writeProtected(room, rel, base + text);
 }
 
 function uniqueReportPath(room: Room, base: string): string {
@@ -390,7 +502,7 @@ export function mirrorDecision(workspace: string | null | undefined, decision: {
     const room = roomForWorkspace(workspace);
     if (!room) return;
     const detail = decision.detail?.trim() ? `\n  ${decision.detail.trim().replace(/\n/g, '\n  ')}` : '';
-    fs.appendFileSync(path.join(room.root, 'DECISIONS.md'), `\n- ${stamp().when} — ${decision.summary.trim()}${detail}\n`, 'utf8');
+    appendProtected(room, 'DECISIONS.md', `\n- ${stamp().when} — ${decision.summary.trim()}${detail}\n`);
   } catch (e) {
     logger.warn({ error: (e as Error).message }, 'Decision mirror failed');
   }
@@ -419,13 +531,12 @@ export function loadTemplate(room: Room, kind: TemplateKind): string {
   }
 }
 
+/**
+ * One pass over the template with a replacer function: a task text that
+ * itself contains `{room}` or `$&` is inserted verbatim, never re-expanded.
+ */
 export function fillTemplate(template: string, vars: { task: string; room: string; done_when: string }): string {
-  // {room} and {done_when} first, so a task text that mentions those literal
-  // tokens is never expanded by a later pass
-  const filled = template
-    .replaceAll('{room}', vars.room)
-    .replaceAll('{done_when}', vars.done_when)
-    .replaceAll('{task}', vars.task);
+  const filled = template.replace(/\{(task|room|done_when)\}/g, (_m, key: keyof typeof vars) => vars[key]);
   return template.includes('{task}') ? filled : `${filled.trimEnd()}\n\n## Task\n${vars.task}\n`;
 }
 
@@ -434,6 +545,7 @@ export function fillTemplate(template: string, vars: { task: string; room: strin
  * the top of ROOM.md and SPEC.md) and the task wrapped in its template.
  */
 export function roomBriefing(room: Room, kind: TemplateKind, task: string, viewer: Writer = { id: 'system', role: 'admin' }): string {
+  verifyRoomIntegrity(room); // brief from the real SPEC/templates, not a tampered copy
   const docs = listDocs(room, viewer);
   const topLevel = docs.filter((d) => !d.path.startsWith('REPORTS/')).map((d) => d.path);
   const reports = docs.filter((d) => d.path.startsWith('REPORTS/')).sort((a, b) => b.modified_at.localeCompare(a.modified_at));
@@ -470,15 +582,33 @@ export function linkRoomIntoWorkspace(workspace: string | null | undefined, room
       // no link yet
     }
     fs.symlinkSync(room.root, link, 'dir');
-    // keep it out of git status when the workspace is a plain repo
-    const exclude = path.join(workspace, '.git', 'info', 'exclude');
-    if (fs.existsSync(path.dirname(exclude))) {
-      const current = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
-      if (!current.split('\n').includes('.wavecode/')) fs.appendFileSync(exclude, `${current.endsWith('\n') || !current ? '' : '\n'}.wavecode/\n`);
-    }
+    excludeFromGit(workspace, '.wavecode/');
     return true;
   } catch (e) {
     logger.warn({ workspace, error: (e as Error).message }, 'Room link failed');
+    return false;
+  }
+}
+
+/**
+ * Keep `pattern` out of `git status`. Asks git for the exclude file, which
+ * also works in worktrees (where `.git` is a file and info/exclude lives in
+ * the common dir). Not a repo / no git → nothing to do.
+ */
+export function excludeFromGit(workspace: string, pattern: string): boolean {
+  let exclude: string;
+  try {
+    const out = execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    exclude = path.resolve(workspace, out);
+  } catch {
+    return false;
+  }
+  try {
+    fs.mkdirSync(path.dirname(exclude), { recursive: true });
+    const current = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
+    if (!current.split('\n').includes(pattern)) fs.appendFileSync(exclude, `${current.endsWith('\n') || !current ? '' : '\n'}${pattern}\n`);
+    return true;
+  } catch {
     return false;
   }
 }
