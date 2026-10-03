@@ -70,6 +70,8 @@ export interface WaveConfig {
     templates_root: string;
     /** Project rooms (spec §5e): `<rooms_root>/<project>/` with SPEC.md, LEDGER.md, REPORTS/ … */
     rooms_root: string;
+    /** Extra directories the file viewer may serve (e.g. a shared inbox). Rooms, worktrees, projects, transcripts and artifacts are always included. */
+    browse_roots?: string[];
   };
   /** Per-project verify/referee profiles. Unmatched workspaces keep today's behavior. */
   projects: Record<string, ProjectConfig>;

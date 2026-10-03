@@ -22,6 +22,7 @@ import { registerThreadRoutes } from './routes/thread.js';
 import { registerProfileRoutes } from './routes/profiles.js';
 import { registerSeatRoutes } from './routes/seat.js';
 import { registerRoomRoutes } from './routes/rooms.js';
+import { registerFileRoutes } from './routes/files.js';
 import { registerMcpHttpRoutes } from '../mcp/http.js';
 
 export function createApp(): Hono<NodeAppEnv> {
@@ -67,6 +68,7 @@ export function createApp(): Hono<NodeAppEnv> {
   registerProfileRoutes(app);
   registerSeatRoutes(app);
   registerRoomRoutes(app);
+  registerFileRoutes(app);
   registerMcpHttpRoutes(app);
 
   app.use('/*', serveStatic({ root: './src/ui/dist' }));

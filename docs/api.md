@@ -420,6 +420,18 @@ List AI reviews for a run.
 ### `POST /api/ai-reviews/:reviewId/send-fixes`
 Send review fixes back to the original agent.
 
+## Files
+
+### `GET /api/files/view?path=<absolute or ~/ path>`
+Read-only viewer behind "a path in an agent's reply is a link" (the UI
+turns bare paths into `/file?path=…` links). Serves text files ≤ 1 MB under
+the browsable roots only — `paths.rooms_root`, `paths.worktrees_root`,
+`paths.projects_root`, `paths.transcripts_root`, `artifacts.storage` and
+`paths.browse_roots` (extra directories, e.g. a shared inbox) — resolved
+through realpath. Returns `{ path, name, size, modified_at, kind:
+"markdown"|"text", content }`; 400 invalid, 403 outside the roots, 404
+missing, 413 too large, 415 binary.
+
 ## Specs
 
 ### `GET /api/specs`

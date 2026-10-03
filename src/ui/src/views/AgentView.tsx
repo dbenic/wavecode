@@ -5,6 +5,7 @@ import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import type { Agent, Run } from '../types';
 import { shouldRefreshAgentOutput } from '../sse-events';
 import { sanitizeHtml } from '../utils/sanitize';
+import { internalLinkClickHandler, linkifyPathsHtml } from '../utils/paths';
 import { createAgentDocSlug } from '../utils/docs';
 import StatusBadge from '../components/StatusBadge';
 import { extractMdPaths } from '../components/MdFileActions';
@@ -540,6 +541,7 @@ export default function AgentView() {
           <div
             ref={outputRef as React.RefObject<HTMLDivElement | null>}
             onScroll={handleOutputScroll}
+            onClick={internalLinkClickHandler((to) => navigate(to))}
             className="p-3 lg:px-4 lg:py-2 text-[11px] lg:text-[12px] leading-[1.6] lg:leading-[1.35] text-slate-300 font-mono overflow-x-auto overflow-y-auto max-h-[70vh] lg:max-h-[82vh] min-h-[300px] lg:min-h-[70vh] whitespace-pre-wrap break-words terminal-output"
           >
             {/* Loading more indicator */}
@@ -555,11 +557,11 @@ export default function AgentView() {
             )}
             {/* Older scrollback content */}
             {olderHtml && (
-              <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(olderHtml) }} />
+              <div dangerouslySetInnerHTML={{ __html: linkifyPathsHtml(sanitizeHtml(olderHtml)) }} />
             )}
             {/* Current output */}
             {outputHtml ? (
-              <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(outputHtml) }} />
+              <div dangerouslySetInnerHTML={{ __html: linkifyPathsHtml(sanitizeHtml(outputHtml)) }} />
             ) : (
               <pre className="whitespace-pre-wrap">
                 {output || (

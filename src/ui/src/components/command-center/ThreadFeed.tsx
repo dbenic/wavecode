@@ -1,10 +1,13 @@
 import { renderMarkdown } from '../../utils/markdown';
+import { internalLinkClickHandler } from '../../utils/paths';
 import { awaitingReplyPromptIds } from '../../utils/command-center';
 import { useEffect, useRef, useState } from 'react';
 import type { ThreadAction, ThreadItem, ThreadKind, User } from '../../types';
 import { agentColor, userColor } from '../../utils/command-center';
 
 interface ThreadFeedProps {
+  /** In-app links inside replies (file viewer, agents) navigate here instead of reloading the SPA. */
+  onNavigate?: (to: string) => void;
   items: ThreadItem[];
   users: Map<string, User>;
   agentNames: Map<string, string>;
@@ -87,6 +90,7 @@ export default function ThreadFeed(props: ThreadFeedProps) {
             persona={item.agent_id ? props.personas?.get(item.agent_id) ?? null : null}
             color={item.agent_id ? props.agentColors?.get(item.agent_id) : undefined}
             onFeedback={props.onFeedback}
+            onNavigate={props.onNavigate}
             onAction={props.onAction}
           />
         ) : (
@@ -158,7 +162,8 @@ export default function ThreadFeed(props: ThreadFeedProps) {
  * time, the prose, and quick-reply chips when it ends with a question and
  * `[ ] option` lines. Tapping a chip sends that option back to the seat.
  */
-function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction, onFeedback }: {
+function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction, onFeedback, onNavigate }: {
+  onNavigate?: (to: string) => void;
   item: ThreadItem;
   agentName: string;
   persona?: string | null;
@@ -188,6 +193,7 @@ function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction,
         {body && (
           <div
             className="reply-markdown break-words text-sm text-slate-100 [&_p]:mb-2 [&_p]:text-sm [&_p]:text-slate-100 [&_li]:text-slate-200 [&_table]:block [&_table]:overflow-x-auto"
+            onClick={onNavigate ? internalLinkClickHandler(onNavigate) : undefined}
             // renderMarkdown escapes HTML first and sanitizes the result (DOMPurify allowlist)
             dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
           />

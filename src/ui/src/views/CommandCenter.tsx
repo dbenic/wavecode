@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { apiGet, apiPatch, apiPost, apiPut, apiUpload } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import Board from '../components/command-center/Board';
@@ -41,6 +41,7 @@ const THREAD_PAGE = 200;
 const MAX_ITEMS = 1000;
 
 export default function CommandCenter() {
+  const navigate = useNavigate();
   const [me, setMe] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -555,6 +556,7 @@ export default function CommandCenter() {
             attentionCount={attentionCount}
             focusLabel={focusedAgent?.name ?? 'all'}
             onAction={(item, action) => void runAction(item, action)}
+            onNavigate={(to) => navigate(to)}
             expanded={expanded}
             terminal={focusedAgent && focusedAgent.mode !== 'file'
               ? { open: terminalOpen, output: terminalOutput, onToggle: () => setTerminalOpen((v) => !v) }

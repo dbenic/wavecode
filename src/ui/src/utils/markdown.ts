@@ -1,8 +1,10 @@
 import DOMPurify from 'dompurify';
+import { linkifyPathsHtml } from './paths';
 
 const MARKDOWN_PURIFY_CONFIG = {
   ALLOWED_TAGS: ['a', 'br', 'code', 'em', 'h1', 'h2', 'h3', 'h4', 'hr', 'li', 'p', 'pre', 'strong', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
   ALLOWED_ATTR: ['class', 'href', 'rel', 'target'],
+  ADD_ATTR: ['target'], // DOMPurify drops target unless added explicitly; external links open a new tab
   ALLOW_DATA_ATTR: false,
   ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|\/|#)/i,
 };
@@ -54,7 +56,11 @@ export function renderMarkdown(md: string): string {
     .replace(/^# (.+)$/gm, '<h1 class="text-lg font-bold text-white mt-6 mb-4">$1</h1>')
     .replace(/\*\*(.+?)\*\*/g, '<strong class="text-slate-100 font-semibold">$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="text-emerald-400 hover:text-emerald-300 underline underline-offset-2" target="_blank" rel="noopener">$1</a>')
+    // In-app links (`/file?path=…`, `/agent/…`) stay in the SPA — never a new tab, the token lives in memory
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text: string, href: string) =>
+      href.startsWith('/') && !href.startsWith('//')
+        ? `<a href="${href}" class="text-emerald-400 hover:text-emerald-300 underline underline-offset-2">${text}</a>`
+        : `<a href="${href}" class="text-emerald-400 hover:text-emerald-300 underline underline-offset-2" target="_blank" rel="noopener">${text}</a>`)
     .replace(/^---+$/gm, '<hr class="border-slate-700/40 my-6" />')
     .replace(/^(\s*)[-*] (.+)$/gm, '$1<li class="ml-4 text-slate-300 list-disc list-inside">$2</li>')
     .replace(/^(\s*)\d+[.)] (.+)$/gm, '$1<li class="ml-4 text-slate-300 list-decimal list-inside">$2</li>')
@@ -62,7 +68,7 @@ export function renderMarkdown(md: string): string {
     .replace(/\n/g, '<br/>');
 
   return String(DOMPurify.sanitize(
-    `<p class="text-slate-400 text-[12px] leading-relaxed mb-3">${rawHtml}</p>`,
+    `<p class="text-slate-400 text-[12px] leading-relaxed mb-3">${linkifyPathsHtml(rawHtml)}</p>`,
     MARKDOWN_PURIFY_CONFIG,
   ));
 }

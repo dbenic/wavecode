@@ -117,6 +117,17 @@ describe('ThreadFeed', () => {
     expect(props.onAction).toHaveBeenCalledWith(reply, reply.actions[1]);
   });
 
+  it('a file path in a reply is an in-app link to the viewer; clicking it navigates instead of reloading', async () => {
+    const onNavigate = vi.fn();
+    const reply = item({ event_id: 40, kind: 'reply', title: 'Reply', body: 'Proposal: /home/ci/inbox/codex1-three-codes-20261003.md — review it.' });
+    renderFeed({ items: [reply], onNavigate });
+    const link = within(screen.getByTestId('thread-item-40')).getByRole('link', { name: '/home/ci/inbox/codex1-three-codes-20261003.md' });
+    expect(link).toHaveAttribute('href', '/file?path=%2Fhome%2Fci%2Finbox%2Fcodex1-three-codes-20261003.md');
+    expect(link).not.toHaveAttribute('target');
+    await userEvent.click(link);
+    expect(onNavigate).toHaveBeenCalledWith('/file?path=%2Fhome%2Fci%2Finbox%2Fcodex1-three-codes-20261003.md');
+  });
+
   it('a seat\'s reply bubble uses its user\'s color (spec §5d)', () => {
     renderFeed({ items: [item({ event_id: 12, kind: 'reply', title: 'Reply', body: 'hi' })], agentColors: new Map([['a1', '#db2777']]) });
     const bubble = screen.getByTestId('thread-item-12').querySelector('div') as HTMLElement;
