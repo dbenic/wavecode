@@ -27,6 +27,8 @@ export interface Agent {
   profile_compatible?: boolean;
   /** Account label and plan of the login the agent runs on (null = unknown). */
   subscription?: { account: string | null; plan: string | null };
+  /** Model/effort from the CLI's own settings on that profile, shown when nothing is pinned. */
+  runtime_defaults?: { model: string | null; effort: string | null };
   /** 'orchestrator' = the PM seat (spec §5b). */
   role?: 'orchestrator' | null;
   /** True for the one agent the composer targets by default. */

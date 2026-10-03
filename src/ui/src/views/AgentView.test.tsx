@@ -129,7 +129,15 @@ describe('AgentView', () => {
     const badge = await screen.findByText('denis@example.com · Claude Max');
     expect(badge).toHaveAttribute('title', 'Subscription: denis@example.com · Claude Max (profile denis)');
 
-    const { subscriptionLabel } = await import('./AgentView');
+    const { subscriptionLabel, modelBadge, prettyModel } = await import('./AgentView');
+    expect(prettyModel('claude-opus-5-5')).toBe('Opus 5.5');
+    expect(prettyModel('opus')).toBe('Opus');
+    expect(prettyModel('gpt-5.3-codex')).toBe('GPT-5.3 Codex');
+    expect(prettyModel('grok-4.6')).toBe('Grok 4.6');
+    expect(prettyModel('something-else')).toBe('something-else');
+    expect(modelBadge({ model: 'claude-opus-5-5', effort: 'xhigh', runtime_defaults: { model: 'opus', effort: 'low' } })).toEqual({ label: 'Opus 5.5 · xhigh', pinned: true });
+    expect(modelBadge({ model: null, effort: null, runtime_defaults: { model: 'gpt-5.3-codex', effort: 'high' } })).toEqual({ label: 'GPT-5.3 Codex · high', pinned: false });
+    expect(modelBadge({ model: null, effort: null, runtime_defaults: { model: null, effort: null } })).toBeNull();
     expect(subscriptionLabel({ profile: 'ana', subscription: { account: null, plan: null } })).toBe('ana');
     expect(subscriptionLabel({ profile: null, subscription: { account: null, plan: 'ChatGPT Plus' } })).toBe('ChatGPT Plus');
     expect(subscriptionLabel({ profile: null, subscription: undefined })).toBeNull();

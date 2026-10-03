@@ -29,6 +29,38 @@ function subscriptionTitle(agent: Pick<Agent, 'profile' | 'subscription'>): stri
   return `Subscription: ${subscriptionLabel(agent) ?? 'unknown'} (${login})`;
 }
 
+/** Vendor model ids → what people call them: claude-opus-5-5 → "Opus 5.5", gpt-5.3-codex → "GPT-5.3 Codex". */
+export function prettyModel(id: string): string {
+  const m = id.trim();
+  let x = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?(?:-\d{8})?$/i.exec(m);
+  if (x) return `${cap(x[1])} ${x[2]}${x[3] ? `.${x[3]}` : ''}`;
+  if (/^(opus|sonnet|haiku|fable)$/i.test(m)) return cap(m);
+  x = /^gpt-([\d.]+)(?:-(codex|mini|nano|pro))?$/i.exec(m);
+  if (x) return `GPT-${x[1]}${x[2] ? ` ${cap(x[2])}` : ''}`;
+  x = /^grok-([\d.]+)(?:-(\w+))?$/i.exec(m);
+  if (x) return `Grok ${x[1]}${x[2] ? ` ${cap(x[2])}` : ''}`;
+  return m;
+}
+
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+/**
+ * The model badge: a WaveCode pin wins; otherwise what the CLI's own
+ * settings say ("Opus 5.5 · high"); nothing when neither is known.
+ */
+export function modelBadge(agent: Pick<Agent, 'model' | 'effort' | 'runtime_defaults'>): { label: string; pinned: boolean } | null {
+  if (agent.model || agent.effort) {
+    return { label: `${agent.model ? prettyModel(agent.model) : 'default model'}${agent.effort ? ` · ${agent.effort}` : ''}`, pinned: true };
+  }
+  const d = agent.runtime_defaults;
+  if (d?.model || d?.effort) {
+    return { label: `${d.model ? prettyModel(d.model) : 'default model'}${d.effort ? ` · ${d.effort}` : ''}`, pinned: false };
+  }
+  return null;
+}
+
 export default function AgentView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -462,9 +494,12 @@ export default function AgentView() {
                 <span className="rounded border border-slate-700 bg-slate-900 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-slate-300">
                   {agent.runtime}
                 </span>
-                {(agent.model || agent.effort) && (
-                  <span className="rounded border border-indigo-500/40 bg-indigo-950/60 px-1.5 py-px text-[10px] font-semibold text-indigo-200 normal-case">
-                    {agent.model ?? 'default model'}{agent.effort ? ` @${agent.effort}` : ''}
+                {modelBadge(agent) && (
+                  <span
+                    className={`rounded border px-1.5 py-px text-[10px] font-semibold normal-case ${modelBadge(agent)!.pinned ? 'border-indigo-500/40 bg-indigo-950/60 text-indigo-200' : 'border-slate-600/60 bg-slate-900 text-slate-300'}`}
+                    title={modelBadge(agent)!.pinned ? 'Pinned by WaveCode (injected at launch)' : "From the CLI's own settings on this login — not pinned"}
+                  >
+                    {modelBadge(agent)!.label}
                   </span>
                 )}
                 {subscriptionLabel(agent) && (

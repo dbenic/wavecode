@@ -143,6 +143,74 @@ function grokInfo(env: Record<string, string>): SubscriptionInfo {
   return EMPTY;
 }
 
+export interface RuntimeDefaults {
+  /** Model the CLI itself is set to (its own settings file), or null when it uses its built-in default. */
+  model: string | null;
+  /** Reasoning effort from the same settings, when the CLI stores one. */
+  effort: string | null;
+}
+
+const NO_DEFAULTS: RuntimeDefaults = { model: null, effort: null };
+
+/** Top-level `key = "value"` of a TOML file, ignoring anything after the first [section]. */
+function tomlTop(file: string, key: string): string | null {
+  let text: string;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  const top = text.split(/^\s*\[/m)[0];
+  const m = new RegExp(`^\\s*${key}\\s*=\\s*"([^"\\n]*)"`, 'm').exec(top);
+  return m ? str(m[1]) : null;
+}
+
+function claudeDefaults(env: Record<string, string>): RuntimeDefaults {
+  const configDir = env.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude');
+  const settings = readJsonCached(path.join(configDir, 'settings.json'));
+  if (!settings) return NO_DEFAULTS;
+  const envBlock = obj(settings.env);
+  return {
+    model: str(settings.model) ?? str(envBlock?.ANTHROPIC_MODEL),
+    effort: str(settings.effortLevel) ?? str(settings.effort) ?? str(envBlock?.CLAUDE_CODE_EFFORT_LEVEL),
+  };
+}
+
+function codexDefaults(env: Record<string, string>): RuntimeDefaults {
+  const home = env.CODEX_HOME ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
+  const file = path.join(home, 'config.toml');
+  return { model: tomlTop(file, 'model'), effort: tomlTop(file, 'model_reasoning_effort') };
+}
+
+function grokDefaults(env: Record<string, string>): RuntimeDefaults {
+  const home = env.HOME ?? os.homedir();
+  const json = readJsonCached(path.join(home, '.grok', 'user-settings.json'));
+  if (!json) return NO_DEFAULTS;
+  return { model: str(json.model) ?? str(obj(json.settings)?.model), effort: str(json.effort) ?? str(json.reasoning_effort) };
+}
+
+/**
+ * What the CLI will run with when WaveCode pins nothing: the model/effort in
+ * the CLI's own settings on that profile (Codex config.toml, Claude
+ * settings.json, Grok user-settings.json). Display-only; never a credential.
+ */
+export function runtimeDefaultsFor(runtime: string, profile: string | null | undefined, cfg?: WaveConfig): RuntimeDefaults {
+  try {
+    const env = runtimeEnv(runtime, profile ?? null, cfg ?? getConfig());
+    if (!env) return NO_DEFAULTS;
+    switch (runtime) {
+      case 'claude-code': return claudeDefaults(env);
+      case 'codex': return codexDefaults(env);
+      case 'grok': return grokDefaults(env);
+      default: return NO_DEFAULTS;
+    }
+  } catch {
+    return NO_DEFAULTS;
+  }
+}
+
 /**
  * Subscription an agent of `runtime` runs on: its profile's login, or the
  * service user's home-dir login when it has no profile.

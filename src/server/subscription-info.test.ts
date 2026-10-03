@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { clearSubscriptionCache, subscriptionFor } from './subscription-info.js';
+import { clearSubscriptionCache, runtimeDefaultsFor, subscriptionFor } from './subscription-info.js';
 import type { WaveConfig } from './config.js';
 
 let root: string;
@@ -85,5 +85,27 @@ describe('subscriptionFor', () => {
     const future = new Date(Date.now() + 5000);
     fs.utimesSync(path.join(root, file), future, future);
     expect(subscriptionFor('claude-code', 'denis', cfg()).plan).toBe('Claude Max');
+  });
+});
+
+describe('runtimeDefaultsFor', () => {
+  it('codex: model and reasoning effort from the profile\'s config.toml (top level only)', () => {
+    const f = path.join(root, 'profiles/ana/codex/config.toml');
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, '# codex\nmodel = "gpt-5.3-codex"\nmodel_reasoning_effort = "high"\n\n[projects."/x"]\nmodel = "other"\ntrust_level = "trusted"\n');
+    expect(runtimeDefaultsFor('codex', 'ana', cfg())).toEqual({ model: 'gpt-5.3-codex', effort: 'high' });
+  });
+
+  it('claude-code: model/effort from settings.json; nothing configured → nulls', () => {
+    write('profiles/denis/claude/settings.json', { model: 'opus', effortLevel: 'high', permissions: { allow: ['Bash'] } });
+    expect(runtimeDefaultsFor('claude-code', 'denis', cfg())).toEqual({ model: 'opus', effort: 'high' });
+    write('profiles/ana/claude/settings.json', { permissions: {} });
+    expect(runtimeDefaultsFor('claude-code', 'ana', cfg())).toEqual({ model: null, effort: null });
+    expect(runtimeDefaultsFor('claude-code', 'nobody', cfg())).toEqual({ model: null, effort: null });
+  });
+
+  it('grok: model from user-settings.json', () => {
+    write('profiles/denis/grok-home/.grok/user-settings.json', { model: 'grok-4.6', user: { email: 'd@x.ai' } });
+    expect(runtimeDefaultsFor('grok', 'denis', cfg())).toEqual({ model: 'grok-4.6', effort: null });
   });
 });

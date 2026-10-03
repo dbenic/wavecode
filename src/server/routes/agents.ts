@@ -26,7 +26,7 @@ import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
 import { defaultSeatFor } from '../seats.js';
 import { validateAlias, validatePersona, validateTag, withPersona } from '../agent-identity.js';
 import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
-import { subscriptionFor } from '../subscription-info.js';
+import { runtimeDefaultsFor, subscriptionFor } from '../subscription-info.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
@@ -475,6 +475,8 @@ function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null,
     profile_compatible: !agent.profile || isProfileCompatible(agent.profile, viewer),
     // Whose subscription this agent burns (account label + plan; never tokens).
     subscription: subscriptionFor(agent.runtime, agent.profile ?? null),
+    // What the CLI runs with when nothing is pinned (its own settings on that profile).
+    runtime_defaults: runtimeDefaultsFor(agent.runtime, agent.profile ?? null),
     lastOutputLine: outputWatcher.getLastOutputLine(agent.id),
     outputVersion: outputWatcher.getOutputVersion(agent.id),
     watching: outputWatcher.isWatching(agent.id),
