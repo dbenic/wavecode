@@ -4,7 +4,8 @@ import { linkifyPathsHtml } from './paths';
 const MARKDOWN_PURIFY_CONFIG = {
   ALLOWED_TAGS: ['a', 'br', 'code', 'em', 'h1', 'h2', 'h3', 'h4', 'hr', 'li', 'p', 'pre', 'strong', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
   ALLOWED_ATTR: ['class', 'href', 'rel', 'target'],
-  ADD_ATTR: ['target'], // DOMPurify drops target unless added explicitly; external links open a new tab
+  // A custom ALLOWED_URI_REGEXP is applied to every non-safe attribute value — target/rel would fail it
+  ADD_URI_SAFE_ATTR: ['target', 'rel'],
   ALLOW_DATA_ATTR: false,
   ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|\/|#)/i,
 };
