@@ -35,8 +35,8 @@ export function prettyModel(id: string): string {
   let x = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?(?:-\d{8})?$/i.exec(m);
   if (x) return `${cap(x[1])} ${x[2]}${x[3] ? `.${x[3]}` : ''}`;
   if (/^(opus|sonnet|haiku|fable)$/i.test(m)) return cap(m);
-  x = /^gpt-([\d.]+)(?:-(codex|mini|nano|pro))?$/i.exec(m);
-  if (x) return `GPT-${x[1]}${x[2] ? ` ${cap(x[2])}` : ''}`;
+  x = /^gpt-([\d.]+)(?:-([a-z][a-z0-9-]*))?$/i.exec(m);
+  if (x) return `GPT-${x[1]}${x[2] ? ` ${x[2].split('-').map(cap).join(' ')}` : ''}`;
   x = /^grok-([\d.]+)(?:-(\w+))?$/i.exec(m);
   if (x) return `Grok ${x[1]}${x[2] ? ` ${cap(x[2])}` : ''}`;
   return m;

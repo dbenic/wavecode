@@ -133,6 +133,7 @@ describe('AgentView', () => {
     expect(prettyModel('claude-opus-5-5')).toBe('Opus 5.5');
     expect(prettyModel('opus')).toBe('Opus');
     expect(prettyModel('gpt-5.3-codex')).toBe('GPT-5.3 Codex');
+    expect(prettyModel('gpt-6-astra')).toBe('GPT-6 Astra');
     expect(prettyModel('grok-4.6')).toBe('Grok 4.6');
     expect(prettyModel('something-else')).toBe('something-else');
     expect(modelBadge({ model: 'claude-opus-5-5', effort: 'xhigh', runtime_defaults: { model: 'opus', effort: 'low' } })).toEqual({ label: 'Opus 5.5 · xhigh', pinned: true });
