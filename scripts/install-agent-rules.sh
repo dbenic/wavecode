@@ -15,7 +15,7 @@ CFG="${HERE}/config.yaml"
 [ -f "${RULES}" ] || { echo "missing ${RULES}"; exit 1; }
 
 ROOT="$(awk '/^profiles_root:/{print $2}' "${CFG}")"
-PROFILES="$(awk '/^profiles:/{f=1;next} f&&/^  [a-zA-Z0-9_-]+:/{gsub(":","",$1);print $1} f&&/^[^ ]/{f=0}' "${CFG}")"
+PROFILES="$(awk '/^profiles:/{f=1;next} f&&/^[^ ]/{f=0} f&&/^  [a-zA-Z0-9_-]+:/{sub(":","",$1);print $1}' "${CFG}")"
 
 MARKER='installed by WaveCode (scripts/install-agent-rules.sh)'
 install_rules() { # dir file
