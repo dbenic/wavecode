@@ -136,9 +136,13 @@ grep -q "^MAILADDR" /etc/mdadm/mdadm.conf 2>/dev/null || echo "MAILADDR root" >>
 systemctl enable --now smartd >/dev/null 2>&1 || true
 
 # ───────────────────────── 3. CLIs + WaveCode ─────────────────────────
-log "Agent CLIs (latest, system-wide; logins happen per profile)"
-npm install -g --no-fund --no-audit @anthropic-ai/claude-code@latest @openai/codex@latest >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
-echo "claude $(claude --version 2>/dev/null | head -1) | $(codex --version 2>/dev/null | head -1) | grok: $(command -v grok || echo 'not installed — see ops note')"
+log "Agent CLIs (latest, installed under ${WAVE_USER}'s own npm prefix so they can self-update; logins happen per profile)"
+chown -R "${WAVE_USER}:${WAVE_USER}" "${WAVE_HOME}/.local"
+su - "${WAVE_USER}" -c "
+  npm config set prefix ${WAVE_HOME}/.local
+  npm install -g --no-fund --no-audit @anthropic-ai/claude-code@latest @openai/codex@latest >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
+  echo \"claude \$(claude --version 2>/dev/null | head -n 1) | \$(codex --version 2>/dev/null | head -n 1) | grok: \$(command -v grok || echo 'not installed — see ops note')\"
+"
 
 log "WaveCode: clone or update, build"
 su - "${WAVE_USER}" -c "
