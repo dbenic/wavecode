@@ -49,6 +49,9 @@ describe('subscriptionFor', () => {
     const token = jwt({ email: 'ana@example.com', 'https://api.openai.com/auth': { chatgpt_plan_type: 'plus', chatgpt_account_id: 'acct_x' } });
     write('profiles/ana/codex/auth.json', { tokens: { id_token: token, access_token: 'SECRET-A', refresh_token: 'SECRET-R' } });
     expect(subscriptionFor('codex', 'ana', cfg())).toEqual({ account: 'ana@example.com', plan: 'ChatGPT Plus' });
+    write('profiles/ana/codex/auth.json', { tokens: { id_token: jwt({ email: 'a@x', 'https://api.openai.com/auth': { chatgpt_plan_type: 'prolite' } }) } });
+    clearSubscriptionCache();
+    expect(subscriptionFor('codex', 'ana', cfg()).plan).toBe('ChatGPT Pro Lite');
   });
 
   it('codex logged in with an API key reports that as the plan', () => {

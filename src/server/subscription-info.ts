@@ -78,7 +78,7 @@ function jwtClaims(token: unknown): Json | null {
 }
 
 const CLAUDE_PLANS: Record<string, string> = { pro: 'Claude Pro', max: 'Claude Max', team: 'Claude Team', enterprise: 'Claude Enterprise' };
-const CHATGPT_PLANS: Record<string, string> = { free: 'ChatGPT Free', plus: 'ChatGPT Plus', pro: 'ChatGPT Pro', team: 'ChatGPT Team', business: 'ChatGPT Business', enterprise: 'ChatGPT Enterprise', edu: 'ChatGPT Edu' };
+const CHATGPT_PLANS: Record<string, string> = { free: 'ChatGPT Free', go: 'ChatGPT Go', plus: 'ChatGPT Plus', pro: 'ChatGPT Pro', prolite: 'ChatGPT Pro Lite', team: 'ChatGPT Team', business: 'ChatGPT Business', enterprise: 'ChatGPT Enterprise', edu: 'ChatGPT Edu' };
 
 function label(raw: string | null, table: Record<string, string>, vendor: string): string | null {
   if (!raw) return null;
