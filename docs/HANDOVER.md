@@ -190,10 +190,17 @@ Test-suite gotchas that will bite you:
   systemd, Tailscale, ufw (SSH + tailnet only). Then each developer runs
   `wavecode profile login <name> claude-code|codex|grok` once per CLI so their
   agents and personal seat run on *their own* subscription (spec §5).
-  Linux users: `denis` (sudo) and the `wave` service user; group `wavedev` may
-  `sudo -iu wave`. Profiles `denis dev1 dev2 dev3` (placeholders until the
-  developers are known; rename = mv dir + config key). Developers log in with
-  `wave-login <runtime> [profile]`. Ops note: `/home/wave/wavecode-ops.md`.
+  Linux users: `denis` (sudo), `sysops` (CI agent, read-only, no sudo) and
+  the `wave` service user; group `wavedev` may `sudo -iu wave`. Profiles
+  `denis` (Claude Max + ChatGPT Pro) and `denis2` (second ChatGPT account).
+  **Onboard a developer with one command**:
+  `sudo bash scripts/onboard-developer.sh <name> <key.pub>` — Linux login,
+  profile, WaveCode user (token → ops note), agent rules. They then run
+  `wave-login <runtime>` per CLI. Agents get the WaveCode rules from
+  `docs/agent-operating-rules.md`, installed as every profile's global
+  CLAUDE.md / AGENTS.md by `scripts/install-agent-rules.sh`. Ops note:
+  `/home/wave/wavecode-ops.md`. CI/test-server agent brief:
+  `docs/briefs/ci-ops-agent.md`.
 - **Old box** (136.243.8.205): becomes CI runner + staging + release host.
   Hand-offs move to GitHub PRs; the CI verdict per sha gates promote (gap F1).
 - Migration: copy `.wavecode-data/rooms/` across (docs are the source of
