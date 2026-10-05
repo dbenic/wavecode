@@ -247,6 +247,9 @@ for p in ${WAVE_PROFILES}; do
   chown "${WAVE_USER}:${WAVE_USER}" "$d/gitconfig"; chmod 600 "$d/gitconfig"
 done
 
+log "Agent operating rules → every profile's global CLAUDE.md / AGENTS.md"
+su - "${WAVE_USER}" -c "bash ~/wavecode/scripts/install-agent-rules.sh" | tail -n 1
+
 log "systemd unit"
 cat > /etc/systemd/system/wavecode.service <<CFG
 [Unit]
