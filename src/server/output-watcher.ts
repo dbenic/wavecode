@@ -385,16 +385,17 @@ export function detectStatus(output: string, runtime: string): Agent['status'] {
   // Idle: "›" prompt or status bar without working indicator
   // Approval: "Press enter to confirm or esc to cancel"
 
-  if (/gpt-[\d.]/.test(lastLine) || /gpt-[\d.]/.test(secondLast)) {
-    if (last10.includes('Working') && last10.includes('esc to interrupt')) return 'working';
+  // Codex 0.16x footer: "GPT-6-Astra high · ~/path · task" (model names are capitalised
+  // now) above "? for shortcuts …"; the prompt line is "› Ask Codex to do anything".
+  const last4 = nonEmpty.slice(-4).map((l) => l.trim());
+  const codexFooter = /\bgpt-\d/i.test(lastLine) || /\bgpt-\d/i.test(secondLast) || /^\?\s+for shortcuts/.test(lastLine);
+  const codexPrompt = last4.some((l) => /^›/.test(l));
+  if (codexFooter || codexPrompt) {
+    if (last10.includes('esc to interrupt')) return 'working';
     if (last10.includes('◦ Working')) return 'working';
-    if (last10.includes('Thinking')) return 'working';
-    if (last10.includes('Applying')) return 'working';
-    return 'idle';
-  }
-
-  if (/^›/.test(lastLine) || /^›/.test(secondLast)) {
-    if (last10.includes('Working') && last10.includes('esc to interrupt')) return 'working';
+    // "Thinking"/"Applying" only count while no turn-end marker ("Worked for 14s • 11:01 AM") follows them
+    const turnEnded = /Worked for \d+[smh]/.test(last5);
+    if (!turnEnded && (last10.includes('Thinking') || last10.includes('Applying'))) return 'working';
     return 'idle';
   }
 

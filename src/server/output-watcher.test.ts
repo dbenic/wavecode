@@ -97,6 +97,30 @@ gpt-5.4 xhigh · 47% left · ~/project
 `.trim();
       expect(detectStatus(output, 'codex')).toBe('idle');
     });
+
+    it('Codex 0.16x: finished turn ("Worked for …") with the capitalised model footer is idle, not hung', () => {
+      const output = `
+• Re-read the updated operating rules, ROOM.md, and SystemOps testing brief.
+  • Fable remains the sole production deployer.
+  RESULT: PASS
+  └ Tip: Use /vim to toggle Vim editing in the composer.
+  Worked for 14s • 11:01 AM
+› Ask Codex to do anything
+  GPT-5.6-Sol low · ~/.wavecode-data/worktrees/codex2 · Document invoice data pipeline
+  ? for shortcuts                                              ⚠ 2 warnings · f2 to view
+`.trim();
+      expect(detectStatus(output, 'codex')).toBe('idle');
+    });
+
+    it('Codex 0.16x: a running turn with the capitalised footer is working', () => {
+      const output = `
+• Thinking about the migration order
+◦ Working (31s • esc to interrupt)
+  GPT-6-Astra high · ~/.wavecode-data/seats/pm-antonio · Check source code access
+  ? for shortcuts
+`.trim();
+      expect(detectStatus(output, 'codex')).toBe('working');
+    });
   });
 
   describe('Aider', () => {
