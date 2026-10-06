@@ -461,6 +461,25 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     },
   },
 
+  // --- Peers: agents on other WaveCode instances (docs/peers.md) ---
+  {
+    name: 'ask_peer',
+    description:
+      'Ask an agent on another WaveCode instance (e.g. the deploy box: peer "deploy", agent "fable") a question. Returns at once with a question id; the answer arrives minutes later as peer.answer (await_events types=peer.*), is saved as a file under ~/inbox/answers/, and is typed into your pane when you are idle. Ask one clear question per call.',
+    schema: {
+      peer: z.string().describe('Peer name from config, e.g. "deploy"'),
+      agent: z.string().describe('Remote agent alias or name, e.g. "fable"'),
+      question: z.string().describe('The full question, with the context the answerer needs'),
+    },
+    handler: (client, args) => client.post(`/peers/${encodeURIComponent(String(args.peer))}/ask`, { agent: args.agent, question: args.question }),
+  },
+  {
+    name: 'list_peers',
+    description: 'Other WaveCode instances this one can ask questions of, with the agents allowed.',
+    schema: {},
+    handler: (client) => client.get('/peers'),
+  },
+
   // --- Messages (the wire) ---
   {
     name: 'send_message',

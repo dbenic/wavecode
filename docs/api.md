@@ -420,6 +420,21 @@ List AI reviews for a run.
 ### `POST /api/ai-reviews/:reviewId/send-fixes`
 Send review fixes back to the original agent.
 
+## Peers (docs/peers.md)
+
+### `GET /api/peers`
+Configured peers: `[{ name, url, agents }]` — never the token.
+
+### `POST /api/peers/:peer/ask`
+Body `{ agent, question, from_agent_id? }`. Delivers the question to that agent
+on the peer instance and returns 202 with the question row (`status: sent`).
+The answer is written to `~/inbox/answers/<peer>-<agent>-<id>.md`, emitted as
+`peer.answer`, and typed into `from_agent_id`'s pane when it is idle (a seat
+token's own agent is the default). 404 unknown peer/agent or not in the
+allowlist, 502 peer unreachable, 403 observers.
+
+### `GET /api/peers/questions[?status=sent|answered|delivered|failed]`, `GET /api/peers/questions/:id`
+
 ## Files
 
 ### `GET /api/files/view?path=<absolute or ~/ path>`

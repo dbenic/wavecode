@@ -41,6 +41,14 @@ describe('composer grammar (spec §5c)', () => {
       expect(parseComposer('#review #12 @nobody', ctx).kind).toBe('prompt');
     });
 
+    it('#ask deploy/fable <question> asks an agent on another WaveCode instance', () => {
+      expect(parseComposer('#ask deploy/fable is the invoices table migrated on staging?', ctx)).toEqual({
+        kind: 'ask_peer', peer: 'deploy', agent: 'fable', text: 'is the invoices table migrated on staging?',
+      });
+      expect(parseComposer('#ask deploy/@fable  hi', ctx)).toMatchObject({ kind: 'ask_peer', agent: 'fable', text: 'hi' });
+      expect(parseComposer('#ask deploy/fable', ctx).kind).toBe('prompt'); // no question → seat
+    });
+
     it('an unknown #foo goes to the orchestrator seat unchanged', () => {
       expect(parseComposer('#foo do the thing', ctx)).toEqual({ kind: 'prompt', agents: [pm], text: '#foo do the thing' });
       // even when the chip points elsewhere

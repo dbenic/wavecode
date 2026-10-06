@@ -6,7 +6,7 @@
  *   @group text        prompt every agent tagged `group`
  *   @all text          broadcast on the wire
  *   @person text       message a person (their Attention inbox + phone)
- *   #reserve @x [Nh]   #release @x   #kill @x   #tag @x name   #review #n @x
+ *   #reserve @x [Nh]   #release @x   #kill @x   #tag @x name   #review #n @x   #ask peer/agent …
  *   #task [@x] text [deps:#n,#m]     #promote #n
  *   #file @x name      share an uploaded file by name or id
  *   #status            ask the orchestrator seat for a status
@@ -37,6 +37,7 @@ export type Plan =
   | { kind: 'task'; agent: Agent | null; text: string; deps: Task[] }
   | { kind: 'promote'; task: Task }
   | { kind: 'review'; task: Task; agent: Agent }
+  | { kind: 'ask_peer'; peer: string; agent: string; text: string }
   | { kind: 'file'; agent: Agent; name: string }
   | { kind: 'status'; seat: Agent }
   | { kind: 'none'; reason: string };
@@ -51,6 +52,7 @@ export const COMMANDS: Array<{ cmd: string; usage: string }> = [
   { cmd: 'task', usage: '#task [@agent] text [deps:#n,#m]' },
   { cmd: 'promote', usage: '#promote #n' },
   { cmd: 'review', usage: '#review #n @agent' },
+  { cmd: 'ask', usage: '#ask peer/agent question' },
   { cmd: 'file', usage: '#file @agent name' },
   { cmd: 'status', usage: '#status' },
   { cmd: 'tag', usage: '#tag @agent group' },
@@ -123,6 +125,12 @@ function parseCommand(cmd: string, args: string[], text: string, ctx: GrammarCon
     case 'promote': {
       const task = args.length === 1 ? taskByRef(args[0], ctx.tasks) : null;
       return task ? { kind: 'promote', task } : null;
+    }
+    case 'ask': {
+      // `#ask deploy/fable is the invoice table migrated on staging?` → a question to an agent on another WaveCode
+      const target = /^@?([a-z][a-z0-9_-]*)\/(@?[\w.-]+)$/i.exec(args[0] ?? '');
+      const question = text.replace(/^#ask\s+\S+\s*/i, '').trim();
+      return target && question ? { kind: 'ask_peer', peer: target[1].toLowerCase(), agent: target[2].replace(/^@/, ''), text: question } : null;
     }
     case 'review': {
       // `#review #12 @opus` or `#review @opus #12`: name the reviewer for a task (ladder rung 1)

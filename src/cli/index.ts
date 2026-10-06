@@ -510,7 +510,8 @@ userCmd
   .option('--role <role>', 'admin | developer | observer', 'developer')
   .option('--color <hex>', 'UI color, e.g. #2563eb (default: derived from name)')
   .option('--profile <profile>', 'Credential profile for this user\'s agents (default: the user name)')
-  .action(async (name: string, opts: { role: string; color?: string; profile?: string }) => {
+  .option('--only-agents <refs>', 'Restrict the token to these agents (comma-separated alias/name/id) — a peer\'s ask-only token (docs/peers.md)')
+  .action(async (name: string, opts: { role: string; color?: string; profile?: string; onlyAgents?: string }) => {
     initDb();
     const { addUserCommand, formatCreatedUser } = await import('./user-command.js');
     const result = addUserCommand(name, opts);

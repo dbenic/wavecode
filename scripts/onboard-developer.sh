@@ -3,7 +3,9 @@
 # Onboard a developer on a WaveCode dev box, end to end:
 #   Linux login (group wavedev, no sudo) · credential profile · WaveCode user + token · agent rules.
 #
-#   sudo bash scripts/onboard-developer.sh <name> <ssh-public-key-file> [admin|developer|observer]
+#   sudo bash scripts/onboard-developer.sh <name> <ssh-public-key-file|-> [admin|developer|observer]
+#   ("-" = no SSH key yet; the login is created locked and a key can be added later with
+#    sudo bash scripts/onboard-developer.sh <name> <key-file> — re-running only adds the key)
 #
 # Safe to re-run. Restarts the daemon only when no run is in flight. Prints the
 # developer's hand-over text; their token is appended to the ops note (never printed).
@@ -18,8 +20,10 @@ OPS="${WAVE_HOME}/wavecode-ops.md"
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo"; exit 1; }
 [[ "${NAME}" =~ ^[a-z][a-z0-9_-]{1,31}$ ]] || { echo "name must be lowercase letters/digits/-/_"; exit 1; }
-[ -s "${KEYFILE}" ] || { echo "missing key file ${KEYFILE}"; exit 1; }
-grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com) ' "${KEYFILE}" || { echo "not an SSH public key: ${KEYFILE}"; exit 1; }
+if [ "${KEYFILE}" != "-" ]; then
+  [ -s "${KEYFILE}" ] || { echo "missing key file ${KEYFILE}"; exit 1; }
+  grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com) ' "${KEYFILE}" || { echo "not an SSH public key: ${KEYFILE}"; exit 1; }
+fi
 case "${ROLE}" in admin|developer|observer) ;; *) echo "role must be admin|developer|observer"; exit 1;; esac
 
 echo "▸ Linux login ${NAME} (group wavedev: may 'sudo -iu ${WAVE_USER}' for logins and tmux; no sudo otherwise)"
@@ -27,7 +31,11 @@ id "${NAME}" >/dev/null 2>&1 || adduser --disabled-password --gecos "WaveCode de
 usermod -aG wavedev "${NAME}"
 install -d -o "${NAME}" -g "${NAME}" -m 0700 "/home/${NAME}/.ssh"
 touch "/home/${NAME}/.ssh/authorized_keys"
-grep -qxF "$(cat "${KEYFILE}")" "/home/${NAME}/.ssh/authorized_keys" || cat "${KEYFILE}" >> "/home/${NAME}/.ssh/authorized_keys"
+if [ "${KEYFILE}" != "-" ]; then
+  grep -qxF "$(cat "${KEYFILE}")" "/home/${NAME}/.ssh/authorized_keys" || cat "${KEYFILE}" >> "/home/${NAME}/.ssh/authorized_keys"
+else
+  echo "  (no SSH key yet — add one later by re-running with the key file)"
+fi
 chown "${NAME}:${NAME}" "/home/${NAME}/.ssh/authorized_keys"; chmod 600 "/home/${NAME}/.ssh/authorized_keys"
 
 echo "▸ Credential profile ${NAME} (one subscription per CLI; logs in with wave-login)"
@@ -52,8 +60,12 @@ if [ "${RESTART}" -eq 1 ]; then
 fi
 
 echo "▸ WaveCode user ${NAME} (${ROLE}, profile ${NAME}); token → ${OPS}"
-OUT=$(su - "${WAVE_USER}" -c "cd ~/wavecode && ~/.local/bin/wavecode user add ${NAME} --role ${ROLE} --profile ${NAME}" 2>&1) || true
-if echo "${OUT}" | grep -qi token; then
+if su - "${WAVE_USER}" -c "cd ~/wavecode && sqlite3 wavecode.db \"select 1 from users where name='${NAME}'\"" | grep -q 1; then
+  OUT="exists (token unchanged; see ${OPS})"
+else
+  OUT=$(su - "${WAVE_USER}" -c "cd ~/wavecode && ~/.local/bin/wavecode user add ${NAME} --role ${ROLE} --profile ${NAME}" 2>&1) || true
+fi
+if echo "${OUT}" | grep -qi "token"; then
   printf '\n## user %s (%s, profile %s) — onboarded %s\n%s\n' "${NAME}" "${ROLE}" "${NAME}" "$(date -u +%F)" "${OUT}" >> "${OPS}"
   echo "  token recorded"
 else

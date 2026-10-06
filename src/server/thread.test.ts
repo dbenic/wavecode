@@ -216,6 +216,18 @@ describe('thread.ts', () => {
       expect(needs.actions).toEqual([{ id: 'pick_reviewer', label: `Review with @${free.name}`, method: 'POST', path: `/api/reviews/${run.id}/ai-review`, body: { reviewer_agent_id: free.id } }]);
     });
 
+    it('peer.question / peer.answer / peer.failed ← questions to agents on another WaveCode', () => {
+      const q = item(ev('peer.question', 'peer', 'deploy/fable', { question_id: 'pq1', peer: 'deploy', agent: 'fable', from_agent_id: seat.id, question: 'is staging migrated?' }));
+      expect(q).toMatchObject({ kind: 'prompt', agent_id: seat.id, title: 'Question → deploy/fable', body: 'is staging migrated?' });
+      const a = item(ev('peer.answer', 'peer', 'deploy/fable', { question_id: 'pq1', peer: 'deploy', agent: 'fable', from_agent_id: seat.id, answer: 'yes, v3', answer_path: '/home/wave/inbox/answers/deploy-fable-pq1.md' }));
+      expect(a).toMatchObject({ kind: 'reply', agent_id: seat.id, title: 'Answer ← deploy/fable', needs_attention: false });
+      expect(a.body).toBe('yes, v3\n\nFull text: /home/wave/inbox/answers/deploy-fable-pq1.md');
+      // asked by a person → the answer needs their attention
+      expect(item(ev('peer.answer', 'peer', 'deploy/fable', { peer: 'deploy', agent: 'fable', from_agent_id: null, answer: 'x' })).needs_attention).toBe(true);
+      const f = item(ev('peer.failed', 'peer', 'deploy/fable', { peer: 'deploy', agent: 'fable', error: 'no answer within 30 minutes' }));
+      expect(f).toMatchObject({ kind: 'alert', title: 'No answer from deploy/fable', body: 'no answer within 30 minutes', needs_attention: true });
+    });
+
     it('task ← task.created/dispatched/completed/blocked/waiting_for_agent/failed', () => {
       const created = item(ev('task.created', 'task', 't1', { prompt: 'build auth', agent_id: null }));
       expect(created).toMatchObject({ kind: 'task', title: 'Task created', body: 'build auth', needs_attention: false, actions: [] });

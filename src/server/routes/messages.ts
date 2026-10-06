@@ -20,7 +20,7 @@ import * as replyCapture from '../reply-capture.js';
 import { notify } from '../notifications.js';
 import { withPersona } from '../agent-identity.js';
 import { recentFeedback, recentFeedbackForSeat, recordFeedback } from '../feedback.js';
-import { OWNER_USER } from '../users.js';
+import { OWNER_USER, isRestrictedUser, agentAllowedFor } from '../users.js';
 
 /** `@ana` / `ana` / a user id → that user (spec §5c people addressing). */
 function resolveUserRef(ref: string) {
@@ -51,6 +51,12 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
       limit,
     });
 
+    // A restricted token (docs/peers.md) reads only messages from/to its named agents
+    const viewer = getActingUser(c);
+    if (isRestrictedUser(viewer)) {
+      const allowed = (id: string | null | undefined) => { if (!id) return false; const a = getAgent(id); return a.ok && agentAllowedFor(viewer, a.data); };
+      return c.json(messages.filter((m) => allowed(m.from_agent_id) || allowed(m.to_agent_id)));
+    }
     return c.json(messages);
   });
 

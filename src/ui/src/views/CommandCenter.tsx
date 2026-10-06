@@ -374,6 +374,9 @@ export default function CommandCenter() {
       case 'review':
         await apiPost(`/tasks/${plan.task.id}/reviewer`, { reviewer: plan.agent.id });
         return;
+      case 'ask_peer':
+        await apiPost(`/peers/${encodeURIComponent(plan.peer)}/ask`, { agent: plan.agent, question: plan.text });
+        return;
       case 'task':
         await apiPost('/tasks', {
           prompt: plan.text,

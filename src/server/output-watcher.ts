@@ -5,6 +5,7 @@ import { emit } from './event-bus.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
 import { onAnyAgentIdle, onAuthorAgentIdle } from './code-review.js';
+import * as peers from './peers.js';
 import { projectRequiresReferee } from './project-gate.js';
 import * as runner from './runner.js';
 import { isFileRunnerSeat } from './file-runner.js';
@@ -289,6 +290,7 @@ function tickInner(agentId: string, state: WatcherState): void {
       closeAllIfIdle = true;
       notifyReviewLoopAgentIdle(agentId);
       onAnyAgentIdle(); // a run waiting for a reviewer may now have one
+      peers.onAgentIdle(agentId); // answers from other WaveCode instances that arrived while it worked
     }
   } else if (outputChanged) {
     emit('agent.output_updated', 'agent', agentId, {

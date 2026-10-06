@@ -1,7 +1,7 @@
 import type { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { getConfig, updateConfig, getProviderStatus, type WaveConfig } from '../config.js';
-import { listEvents } from '../db.js';
+import { listEvents, getAgent } from '../db.js';
 import * as validate from '../validate.js';
 import { emit, subscribe, unsubscribe } from '../event-bus.js';
 import { getResolvedLlmConfig, isLlmConfigured, maskLlmApiKey } from '../llm-provider.js';
@@ -10,7 +10,7 @@ import * as sessionManager from '../session-manager.js';
 import * as outputWatcher from '../output-watcher.js';
 import logger from '../logger.js';
 import { getActingUser, getPublicAuthStatus, type NodeAppEnv } from '../auth.js';
-import { isAdmin } from '../users.js';
+import { isAdmin, isRestrictedUser, agentAllowedFor } from '../users.js';
 
 export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/auth/status', (c) => {
@@ -178,6 +178,20 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
       ? typesParam.split(',').map((t) => t.trim()).filter(Boolean)
       : null;
 
+    const viewer = getActingUser(c);
+    const restricted = isRestrictedUser(viewer);
+    const allowedAgent = (id: unknown): boolean => {
+      if (typeof id !== 'string') return false;
+      const a = getAgent(id);
+      return a.ok && agentAllowedFor(viewer, a.data);
+    };
+    // A restricted token (docs/peers.md) sees only events about its named agents
+    const visible = (e: { type: string; entity_type: string; entity_id: string; payload_json: string | null }): boolean => {
+      if (!restricted) return true;
+      if (e.entity_type === 'agent') return allowedAgent(e.entity_id);
+      const p = e.payload_json ? (JSON.parse(e.payload_json) as Record<string, unknown>) : {};
+      return allowedAgent(p.from_agent_id) || allowedAgent(p.to_agent_id) || allowedAgent(p.agent_id);
+    };
     const matchesType = (type: string): boolean =>
       !types || types.some((t) => (t.endsWith('*') ? type.startsWith(t.slice(0, -1)) : type === t));
 
@@ -185,7 +199,7 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
     let cursor = since;
     for (;;) {
       const raw = listEvents({ since_id: cursor || undefined, limit });
-      const matched = raw.filter((e) => matchesType(e.type));
+      const matched = raw.filter((e) => matchesType(e.type) && visible(e));
 
       // A full page of non-matching events: advance the cursor so a burst of
       // unrelated events can never stall the poll window.

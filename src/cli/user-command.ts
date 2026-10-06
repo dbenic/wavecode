@@ -12,10 +12,12 @@ export interface AddUserOptions {
   role?: string;
   color?: string;
   profile?: string;
+  /** Comma-separated agent refs: the token may only ask/read these (a peer's ask-only token). */
+  onlyAgents?: string;
 }
 
 export function addUserCommand(name: string, opts: AddUserOptions = {}): Result<CreatedUser> {
-  return createUser({ name, role: opts.role, color: opts.color, profile: opts.profile });
+  return createUser({ name, role: opts.role, color: opts.color, profile: opts.profile, only_agents: opts.onlyAgents });
 }
 
 export function formatCreatedUser({ user, token }: CreatedUser): string {

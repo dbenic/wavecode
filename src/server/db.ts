@@ -156,6 +156,8 @@ export interface User {
   default_room?: string | null;
   /** Set on the request's user when it authenticated with a seat token (spec §5d/§5f). */
   via_seat?: boolean;
+  /** JSON array of agent refs this token is limited to (restricted user, docs/peers.md); null = unrestricted. */
+  allowed_agents?: string | null;
   created_at: string;
 }
 
@@ -261,7 +263,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 20;
+export const SCHEMA_VERSION = 21;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -392,6 +394,7 @@ const SCHEMA_SQL = `
     seat_token_hash TEXT,
     seat_rules TEXT,
     default_room TEXT,
+    allowed_agents TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -855,6 +858,11 @@ const MIGRATIONS: Record<number, string> = {
   // An agent id; resolution alias → name → id happens at the API edge.
   19: `
     ALTER TABLE tasks ADD COLUMN reviewer TEXT;
+  `,
+  // v20 → v21: restricted users (docs/peers.md): a token limited to named agents.
+  // JSON array of agent refs (id, name or alias); NULL = unrestricted.
+  20: `
+    ALTER TABLE users ADD COLUMN allowed_agents TEXT;
   `,
 };
 
@@ -1443,7 +1451,7 @@ export function listAgentsOwnedBy(userId: string): Agent[] {
 
 // --- User helpers ---
 
-const USER_COLUMNS = 'id, name, role, color, profile, seat_agent_id, seat_rules, default_room, created_at';
+const USER_COLUMNS = 'id, name, role, color, profile, seat_agent_id, seat_rules, default_room, allowed_agents, created_at';
 
 /** Insert a user. `token_hash` is the sha256 of the bearer token — never the plaintext. */
 export function insertUser(user: {
@@ -1452,13 +1460,15 @@ export function insertUser(user: {
   color: string;
   token_hash: string;
   profile?: string | null;
+  allowed_agents?: string[] | null;
 }): Result<User> {
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO users (id, name, role, color, token_hash, profile)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, user.name, user.role, user.color, user.token_hash, user.profile === undefined ? user.name : user.profile);
+      INSERT INTO users (id, name, role, color, token_hash, profile, allowed_agents)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, user.name, user.role, user.color, user.token_hash, user.profile === undefined ? user.name : user.profile,
+      user.allowed_agents?.length ? JSON.stringify(user.allowed_agents) : null);
     return getUser(id);
   } catch (e) {
     const msg = (e as Error).message;

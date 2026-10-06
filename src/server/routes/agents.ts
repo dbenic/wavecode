@@ -26,11 +26,14 @@ import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
 import { defaultSeatFor } from '../seats.js';
 import { validateAlias, validatePersona, validateTag, withPersona } from '../agent-identity.js';
 import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
+import { agentAllowedFor } from '../users.js';
 import { runtimeDefaultsFor, subscriptionFor } from '../subscription-info.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
-    const agents = listAgents();
+    const viewer = getActingUser(c);
+    // A restricted token (docs/peers.md) sees only its named agents
+    const agents = listAgents().filter((a) => agentAllowedFor(viewer, a));
     // Spec §5d: the default (Ask) target is the viewer's own seat, else the shared one
     const orchestratorId = defaultSeatFor(getActingUser(c), agents)?.id ?? null;
     const tags = safeAllTags();
@@ -40,6 +43,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents/:id', (c) => {
     const result = sessionManager.get(c.req.param('id'));
     if (!result.ok) return c.json({ error: result.error }, 404);
+    if (!agentAllowedFor(getActingUser(c), result.data)) return c.json({ error: 'Forbidden: not one of this token\'s agents' }, 403);
     return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
@@ -126,12 +130,14 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       });
     }
 
-    return c.json({ ok: true });
+    // prompt_event_id lets a caller (a peer WaveCode, an MCP seat) match the captured reply to this prompt
+    return c.json({ ok: true, prompt_event_id: sent?.id ?? null });
   });
 
   app.get('/api/agents/:id/output', async (c) => {
     const agentResult = sessionManager.get(c.req.param('id'));
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    if (!agentAllowedFor(getActingUser(c), agentResult.data)) return c.json({ error: 'Forbidden: not one of this token\'s agents' }, 403);
 
     const lines = validate.validateIntParam(c.req.query('lines'), { min: 1, max: 500, default: 50 });
     const useAnsi = c.req.query('ansi') === 'true';

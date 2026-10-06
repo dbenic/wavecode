@@ -167,6 +167,8 @@ Same immutable hashed store as the PWA. No second store. No chat bridge.
 | `await_events` | **Block until something happens** — long-poll the audit log with a cursor (`since_id`) and type filters (`run.*`, `review.*`, `message.created`, …) |
 | `send_message` | Post to the persistent agent wire (broadcast or addressed) |
 | `list_messages` | Read the wire, filtered by recipient/workspace |
+| `ask_peer` | Ask an agent on **another WaveCode instance** (e.g. `deploy`/`fable`) a question; the answer comes back as `peer.answer`, a file under `~/inbox/answers/`, and a prompt into your pane (docs/peers.md) |
+| `list_peers` | The peers this instance may ask, with their allowed agents |
 
 ## The orchestration loop
 

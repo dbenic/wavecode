@@ -3,12 +3,13 @@ import type { NodeAppEnv } from '../auth.js';
 import { listUsers } from '../db.js';
 import { emit } from '../event-bus.js';
 import logger from '../logger.js';
-import { createUser, isAdmin, OWNER_USER, revokeUser } from '../users.js';
+import { createUser, isAdmin, OWNER_USER, revokeUser, restrictedAgentRefs } from '../users.js';
 import { getSeatStatus, removeSeatOf } from '../seats.js';
 import { releaseLeasesOf } from '../leases.js';
 
-function publicUser(user: { id: string; name: string; role: string; color: string; profile: string | null }) {
-  return { id: user.id, name: user.name, role: user.role, color: user.color, profile: user.profile };
+function publicUser(user: { id: string; name: string; role: string; color: string; profile: string | null; allowed_agents?: string | null }) {
+  const refs = restrictedAgentRefs(user);
+  return { id: user.id, name: user.name, role: user.role, color: user.color, profile: user.profile, ...(refs ? { allowed_agents: refs } : {}) };
 }
 
 export function registerUserRoutes(app: Hono<NodeAppEnv>): void {

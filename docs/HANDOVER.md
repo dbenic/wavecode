@@ -53,6 +53,16 @@ Read in this order:
 
 ## Recently landed (see git log for detail)
 
+-2. **Peering + restricted tokens** (`peers.ts`, `docs/peers.md`, 2026-10-06):
+   `#ask deploy/fable …` / MCP `ask_peer` sends a question to an agent on
+   another WaveCode instance; the answer comes back as a file under
+   `~/inbox/answers/`, a `peer.answer` thread item, and a prompt into the
+   asking agent when idle. The peer token is a **restricted user**
+   (`wavecode user add x --only-agents fable`): it can list/read/prompt only
+   its named agents and read their messages/events; every other route is
+   403 (auth middleware allowlist). `tasks.reviewer`-style schema bump: v21
+   adds `users.allowed_agents`.
+
 -1. **Reviewer assignment ladder** (`reviewer-ladder.ts`, 2026-10-02):
    explicit → task → `default_reviewer` → free tagged `review` → any free
    agent → "needs a reviewer" (pending placeholder, retried whenever an

@@ -17,6 +17,7 @@ import {
   type Result,
   type User,
   type UserRole,
+  type Agent,
 } from './db.js';
 
 export const OWNER_USER_ID = 'owner';
@@ -88,6 +89,8 @@ export interface CreateUserInput {
   color?: unknown;
   /** Credential profile (spec §5); defaults to the user name. */
   profile?: unknown;
+  /** Restrict this token to these agents (refs: id, name or alias) — a peer's "ask-only" token (docs/peers.md). */
+  only_agents?: unknown;
 }
 
 export interface CreatedUser {
@@ -127,10 +130,44 @@ export function createUser(input: CreateUserInput): Result<CreatedUser> {
     profile = input.profile;
   }
 
+  let allowedAgents: string[] | null = null;
+  if (input.only_agents !== undefined && input.only_agents !== null) {
+    const list = Array.isArray(input.only_agents) ? input.only_agents : typeof input.only_agents === 'string' ? input.only_agents.split(',') : null;
+    const refs = list?.map((r) => (typeof r === 'string' ? r.trim().replace(/^@/, '') : '')).filter(Boolean) ?? [];
+    if (!list || refs.length === 0 || refs.some((r) => r.length > 64)) {
+      return { ok: false, error: 'only_agents must be a non-empty list of agent refs (id, name or alias)' };
+    }
+    if (role === 'admin') return { ok: false, error: 'an admin cannot be restricted to agents — use role developer' };
+    allowedAgents = refs;
+  }
+
   const token = generateToken();
-  const inserted = insertUser({ name, role, color, token_hash: hashToken(token), profile });
+  const inserted = insertUser({ name, role, color, token_hash: hashToken(token), profile, allowed_agents: allowedAgents });
   if (!inserted.ok) return inserted;
   return { ok: true, data: { user: inserted.data, token } };
+}
+
+/** Agent refs a restricted user may touch; null = unrestricted. */
+export function restrictedAgentRefs(user: Pick<User, 'allowed_agents'> | null | undefined): string[] | null {
+  const raw = user?.allowed_agents;
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length ? parsed.filter((r): r is string => typeof r === 'string') : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isRestrictedUser(user: Pick<User, 'allowed_agents'> | null | undefined): boolean {
+  return restrictedAgentRefs(user) !== null;
+}
+
+/** May this user touch this agent? Unrestricted users: yes (leases decide). Restricted: only the named ones. */
+export function agentAllowedFor(user: Pick<User, 'allowed_agents'>, agent: Pick<Agent, 'id' | 'name' | 'alias'>): boolean {
+  const refs = restrictedAgentRefs(user);
+  if (!refs) return true;
+  return refs.includes(agent.id) || refs.includes(agent.name) || (!!agent.alias && refs.includes(agent.alias));
 }
 
 /** Revoke a user (deletes the row, so its token stops resolving). */

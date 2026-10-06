@@ -318,6 +318,29 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
     return item;
   }
 
+  // --- questions to / answers from agents on other WaveCode instances (peers)
+  if (t === 'peer.question' || t === 'peer.answer' || t === 'peer.failed') {
+    const where = `${str(p.peer) ?? 'peer'}/${str(p.agent) ?? 'agent'}`;
+    const from = str(p.from_agent_id);
+    if (t === 'peer.question') {
+      const item = base(event, 'prompt', from, `Question → ${where}`);
+      item.body = str(p.question);
+      return item;
+    }
+    if (t === 'peer.answer') {
+      const item = base(event, 'reply', from, `Answer ← ${where}`);
+      const answer = str(p.answer);
+      const file = str(p.answer_path);
+      item.body = [answer, file ? `Full text: ${file}` : null].filter(Boolean).join('\n\n') || null;
+      item.needs_attention = !from; // a person asked: it is for them to read
+      return item;
+    }
+    const item = base(event, 'alert', from, `No answer from ${where}`);
+    item.body = str(p.error);
+    item.needs_attention = true;
+    return item;
+  }
+
   // --- reviewer assignment (ladder): who got the review and why; "Change" chips
   if (t === 'review.ai_started' && p.rung) {
     const run = ctx.run(event.entity_id);

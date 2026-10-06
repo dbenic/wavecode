@@ -2,6 +2,7 @@ import { listAgents } from './db.js';
 import { getConfig } from './config.js';
 import * as commandChat from './command-chat.js';
 import * as codeReview from './code-review.js';
+import * as peers from './peers.js';
 import * as teamManager from './team-manager.js';
 import * as fileSharing from './file-sharing.js';
 import * as notifications from './notifications.js';
@@ -29,6 +30,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
 
   commandChat.ensureChatTable();
   codeReview.ensureReviewTable();
+  peers.ensurePeerTables();
   teamManager.ensureTeamTables();
   fileSharing.ensureFileSharingTable();
   teamManager.startAllCommsWatchers();
@@ -37,6 +39,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   const startupReconciliation = await reconcileStartupState();
 
   startHealthMonitor();
+  peers.startPeerPollers();
 
   return {
     agentCount: listAgents().length,
@@ -46,6 +49,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
 
 export function shutdownApplication(): void {
   stopHealthMonitor();
+  peers.stopPeerPollers();
   outputWatcher.stopAll();
   teamManager.stopAllCommsWatchers();
 

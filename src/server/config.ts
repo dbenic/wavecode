@@ -51,6 +51,15 @@ export interface ProjectConfig {
   agent_branches?: Record<string, string>;
 }
 
+export interface PeerConfig {
+  /** Base URL of the peer daemon, reachable over the tailnet (http://100.x.y.z:3777). */
+  url: string;
+  /** Bearer token of a user on the peer. Never printed; never the peer's admin token. */
+  token: string;
+  /** Optional allowlist of remote agent handles (alias or name) that may be asked. */
+  agents?: string[];
+}
+
 export interface ProfileConfig {
   /** Shared profiles (referee-style service seats) are admin-only. */
   shared?: boolean;
@@ -110,6 +119,12 @@ export interface WaveConfig {
     storage: string;
     retention_days: number;
   };
+  /**
+   * Other WaveCode instances agents may ask questions of (e.g. the deploy
+   * box). `token` is a user on THAT instance; scope it there with a profile
+   * so it can reach only the answering agent (docs/peers.md).
+   */
+  peers: Record<string, PeerConfig>;
   review: {
     auto_review: boolean;
     default_reviewer: string;
@@ -171,6 +186,16 @@ export function validateConfig(cfg: WaveConfig): void {
   const profileErrors = validateProfilesConfig(cfg);
   if (profileErrors.length > 0) {
     throw new Error(`Invalid credential profile config:\n  ${profileErrors.join('\n  ')}`);
+  }
+  for (const [name, peer] of Object.entries(cfg.peers ?? {})) {
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) throw new Error(`peers.${name}: name must be lowercase letters, digits, - or _`);
+    if (!peer || typeof peer.url !== 'string' || !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(peer.url)) {
+      throw new Error(`peers.${name}.url must be an http(s) origin like http://100.1.2.3:3777`);
+    }
+    if (typeof peer.token !== 'string' || peer.token.trim().length < 16) throw new Error(`peers.${name}.token is required`);
+    if (peer.agents !== undefined && (!Array.isArray(peer.agents) || peer.agents.some((a) => typeof a !== 'string' || !a.trim()))) {
+      throw new Error(`peers.${name}.agents must be a list of agent handles`);
+    }
   }
 
   const storageDir = cfg.artifacts.storage;
@@ -345,6 +370,7 @@ function buildDefaults(baseDir: string): WaveConfig {
     profiles_root: path.join(dataRoot, 'profiles'),
     profiles: {},
     orchestrator_agent: null,
+    peers: {},
     retro: { nightly: true, hour_utc: 3, window_days: 7 },
     auth: { method: 'token', fallback_token: null, trusted_proxies: [] },
     notifications: { web_push: false, ntfy_topic: null, telegram_bot_token: null, telegram_chat_id: null },

@@ -4,7 +4,7 @@ import type { MiddlewareHandler } from 'hono';
 import { getConfig, type WaveConfig } from './config.js';
 import type { User } from './db.js';
 import { runWithActor } from './request-context.js';
-import { canMutate, OWNER_USER, resolveUserByToken } from './users.js';
+import { canMutate, OWNER_USER, resolveUserByToken, isRestrictedUser, restrictedAgentRefs } from './users.js';
 
 export interface NodeAppBindings {
   incoming?: IncomingMessage | Http2ServerRequest | {
@@ -242,7 +242,28 @@ export function createAuthMiddleware(
       if (user.role === 'admin') user = { ...user, role: 'developer' };
     }
 
+    // docs/peers.md: a token limited to named agents (a peer's ask-only token)
+    // gets exactly the surface needed to ask them and read their answers.
+    if (isRestrictedUser(user) && c.req.path.startsWith('/api/') && !restrictedPathAllowed(c.req.method, c.req.path)) {
+      return c.json({ error: `Forbidden: this token is limited to asking ${restrictedAgentRefs(user)!.join(', ')}` }, 403);
+    }
+
     c.set('user', user);
     await runWithActor(user.id, () => next());
   };
+}
+
+const RESTRICTED_ALLOW: Array<[string, RegExp]> = [
+  ['GET', /^\/api\/me$/],
+  ['GET', /^\/api\/agents$/],
+  ['GET', /^\/api\/agents\/[^/]+$/],
+  ['GET', /^\/api\/agents\/[^/]+\/output$/],
+  ['POST', /^\/api\/agents\/[^/]+\/send$/],
+  ['GET', /^\/api\/events\/log$/],
+  ['GET', /^\/api\/messages$/],
+];
+
+/** Exported for tests. */
+export function restrictedPathAllowed(method: string, path: string): boolean {
+  return RESTRICTED_ALLOW.some(([m, re]) => m === method && re.test(path));
 }

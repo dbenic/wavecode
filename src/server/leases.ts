@@ -22,7 +22,7 @@ import {
 } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
-import { OWNER_USER, OWNER_USER_ID } from './users.js';
+import { OWNER_USER, OWNER_USER_ID, agentAllowedFor, restrictedAgentRefs } from './users.js';
 import { isProfileCompatible, lookupActor } from './profiles.js';
 
 export const DEFAULT_RESERVE_HOURS = 4;
@@ -59,7 +59,11 @@ export function isFree(agent: Pick<Agent, 'owner_id'>): boolean {
 }
 
 /** Rule 2: free, own, or admin. The error names the owner. */
-export function checkAgentAccess(agent: Agent, user: Pick<User, 'id' | 'role'>): LeaseResult<void> {
+export function checkAgentAccess(agent: Agent, user: Pick<User, 'id' | 'role'> & { allowed_agents?: string | null }): LeaseResult<void> {
+  // A restricted token (docs/peers.md) reaches only its named agents, whatever the leases say.
+  if (!agentAllowedFor(user, agent)) {
+    return { ok: false, code: 'forbidden', error: `This token is limited to: ${restrictedAgentRefs(user)!.join(', ')}` };
+  }
   if (!agent.owner_id || agent.owner_id === user.id || user.role === 'admin') {
     return { ok: true, data: undefined };
   }
