@@ -54,7 +54,7 @@ AGENTS.md, and win when they conflict.
   verdict is NEEDS FIXES, the issues are typed into your terminal: fix them on
   the same branch, re-run the tests, finish again with a RESULT line. If you
   disagree with a point, say why in one line — do not argue at length.
-- When **you** review: run the tests yourself, never trust the author's
+- When **you** review: run the tests yourself (§4), never trust the author's
   summary, check that new tests actually fail without the change, check the
   diff against `SPEC.md`. Answer in the fixed format, ending with a standalone
   line `VERDICT: PASS`, `VERDICT: NEEDS FIXES` or `VERDICT: REJECT`.
@@ -105,13 +105,36 @@ same way, as `[Message from @claude1] …`.
 
 ## 4. Testing and running things
 
-- Run the project's test command in your worktree before finishing (for
-  Wavepulse: `npm test`, or the gate the task names). Docker is available for
+- Every change ships with tests, and new tests must fail without the change.
+  New `*.test.ts(x)` files under the project's test folders are picked up by
+  the full suite automatically; there is nothing to register.
+- On this box run only the test files you touched (`npx vitest run <files>`;
+  `npm run lint` is fine). **Never run the full suite or the gate here**
+  (`npm test`, `npm run test:api*`, `test:accounting`, `scripts/gate.mjs`):
+  it is slow and starves the other agents. Docker is available for
   testcontainers. Use the project's `.env.example`; never production values.
+- Before any hand-off or Promote: `git merge origin/main`, commit, then from
+  your worktree run the **remote full suite on the testing server**:
+  `countix-remote-test full-tuned 2>&1 | tee /tmp/rt-<branch>.log`
+  (lint, gate checks, unit, conformance, frontend, build, real-PG API; about
+  4 minutes; uncommitted changes are not tested). Runs are a FIFO queue, one
+  at a time: check `countix-remote-test status` first and never queue the
+  same SHA twice. Put the run id, the exact SHA and the
+  `=== RESULT GREEN|RED …` line in your hand-off. RED blocks the hand-off.
+- A run that is RED only on a test the team has listed as flaky on `main`
+  may be re-run once — say so in the hand-off. Never skip, weaken or delete
+  tests to get green.
 - Do not start long-running servers on fixed ports unless the task names the
   port. Stop anything you started before you finish.
 - Do not install global packages, do not use `sudo`, do not change anything
-  outside your worktree except the hand-off locations above.
+  outside your worktree except the hand-off locations above. The WaveCode
+  install (`~/wavecode`, including these rules) is not yours to edit —
+  propose rule changes as a file in `~/inbox/` and name it in your summary.
+- Deploys: Fable on the deploy box is the final gate and the only deployer.
+  The GO comes from a person's Promote (see §3b). Files for Fable go through
+  the `agentdrop` channel described in
+  `~/inbox/agentdrop-brief-for-dev-agents-20261006.md`; the full testing
+  brief is `~/inbox/systemops-brief-deploy-test-staging-20261006.md`.
 
 ## 5. Never
 
