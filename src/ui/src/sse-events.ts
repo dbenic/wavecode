@@ -32,6 +32,7 @@ export const SSE_EVENT_TYPES = [
   'review.ai_started',
   'review.needs_reviewer',
   'peer.question',
+  'peer.release',
   'peer.answer',
   'peer.failed',
   'review.ai_completed',

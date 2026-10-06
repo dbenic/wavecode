@@ -217,3 +217,32 @@ describe('ASK lines in agent output', () => {
     expect(typed).toMatch(/^\[ASK staging\/fable failed: Unknown peer 'staging'/);
   });
 });
+
+describe('one open prompt per remote agent', () => {
+  it('a second question to the same agent waits until the first is answered, then is sent', async () => {
+    const fp = fakePeer();
+    peers.setPeerFetchForTest(fp.fetchImpl);
+    const a = await peers.askPeer({ peer: 'deploy', agent: 'fable', question: 'first: which migration is current?' });
+    const b = await peers.askPeer({ peer: 'deploy', agent: 'fable', question: 'second: how many invoices yesterday?' });
+    if (!a.ok || !b.ok) throw new Error('ask failed');
+    expect(a.data.status).toBe('sent');
+    expect(b.data.status).toBe('queued');
+    expect(fp.state.sends).toHaveLength(1);
+    fp.answer(a.data.remote_prompt_event_id!, 'v3');
+    await flush(); await flush();
+    expect(peers.getPeerQuestion(a.data.id)!.status).toBe('answered');
+    expect(fp.state.sends).toHaveLength(2);
+    expect(fp.state.sends[1].text).toContain('second: how many invoices yesterday?');
+    expect(peers.getPeerQuestion(b.data.id)!.status).toBe('sent');
+  });
+
+  it('a release GO carries the human attribution header, never the question header', async () => {
+    const fp = fakePeer();
+    peers.setPeerFetchForTest(fp.fetchImpl);
+    const r = await peers.askPeer({ peer: 'deploy', agent: 'fable', question: 'Release request — run r1, lane wc-claude1 at abc123.', fromLabel: 'denis', kind: 'release' });
+    if (!r.ok) throw new Error(r.error);
+    expect(fp.state.sends[0].text).toMatch(/^\[Release GO from denis via WaveCode Promote on /);
+    expect(fp.state.sends[0].text).not.toContain('[Question ');
+    expect(vi.mocked(emit).mock.calls.some((c) => c[0] === 'peer.release')).toBe(true);
+  });
+});

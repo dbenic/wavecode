@@ -14,15 +14,17 @@
  * (docs/peers.md). No credentials cross the wire; only text.
  */
 
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfig, type PeerConfig } from './config.js';
-import { generateId, getAgent, getDb, type Agent, type Result } from './db.js';
+import { generateId, getAgent, getDb, type Agent, type Result, type Run } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import * as sessionManager from './session-manager.js';
+import { workspaceMatches } from './project-gate.js';
 
 export interface PeerQuestion {
   id: string;
@@ -33,7 +35,9 @@ export interface PeerQuestion {
   from_agent_id: string | null;
   actor_id: string | null;
   question: string;
-  status: 'sent' | 'answered' | 'delivered' | 'failed';
+  status: 'queued' | 'sent' | 'answered' | 'delivered' | 'failed';
+  /** 'question' (default) or 'release' — a human's Promote GO relayed to the deployer. */
+  kind?: 'question' | 'release';
   answer_path: string | null;
   error: string | null;
   created_at: string;
@@ -70,6 +74,8 @@ export function ensurePeerTables(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_peer_questions_status ON peer_questions(status, peer);
   `);
+  try { getDb().exec(`ALTER TABLE peer_questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'question'`); } catch { /* exists */ }
+  try { getDb().exec(`ALTER TABLE peer_questions ADD COLUMN header TEXT`); } catch { /* exists */ }
 }
 
 /** Peers as the UI may see them: never the token. */
@@ -136,6 +142,8 @@ export async function askPeer(opts: {
   fromAgentId?: string | null;
   actorId?: string | null;
   fromLabel?: string | null;
+  /** 'release': a person's Promote GO to the deployer (header says so); default 'question'. */
+  kind?: 'question' | 'release';
 }): Promise<Result<PeerQuestion>> {
   const cfg = getConfig();
   const peer = cfg.peers?.[opts.peer];
@@ -152,29 +160,86 @@ export async function askPeer(opts: {
   if (!remote.ok) return remote;
 
   const id = generateId();
+  const kind = opts.kind ?? 'question';
   const from = opts.fromLabel ?? (opts.fromAgentId ? agentName(opts.fromAgentId) : 'a person');
-  const text = [
-    `[Question ${id} from ${os.hostname()}/${from} via WaveCode peering — answer in full in this turn; your reply is relayed verbatim as a file, nobody retypes it]`,
-    '',
-    question,
-  ].join('\n');
-
-  const sent = await peerApi<{ ok: boolean; prompt_event_id?: number | null }>(peer, 'POST', `/agents/${remote.data.id}/send`, { text });
-  if (!sent.ok) return { ok: false, error: `Could not deliver to ${opts.peer}/${handle}: ${sent.error}` };
+  const header = kind === 'release'
+    ? `[Release GO from ${from} via WaveCode Promote on ${os.hostname()} — ${id}. This is a human's authorization; act on it per your deploy rules and answer in full in this turn; the reply is relayed verbatim.]`
+    : `[Question ${id} from ${os.hostname()}/${from} via WaveCode peering — answer in full in this turn; your reply is relayed verbatim as a file, nobody retypes it]`;
 
   getDb().prepare(`
-    INSERT INTO peer_questions (id, peer, agent, remote_agent_id, remote_prompt_event_id, from_agent_id, actor_id, question, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent')
-  `).run(id, opts.peer, remote.data.name, remote.data.id, sent.data.prompt_event_id ?? null, opts.fromAgentId ?? null, opts.actorId ?? null, question);
+    INSERT INTO peer_questions (id, peer, agent, remote_agent_id, remote_prompt_event_id, from_agent_id, actor_id, question, status, kind, header)
+    VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'queued', ?, ?)
+  `).run(id, opts.peer, remote.data.name, remote.data.id, opts.fromAgentId ?? null, opts.actorId ?? null, question, kind, header);
 
-  emit('peer.question', 'peer', `${opts.peer}/${remote.data.name}`, {
+  emit(kind === 'release' ? 'peer.release' : 'peer.question', 'peer', `${opts.peer}/${remote.data.name}`, {
     question_id: id, peer: opts.peer, agent: remote.data.name, from_agent_id: opts.fromAgentId ?? null,
-    question: question.substring(0, 2000),
+    question: question.substring(0, 2000), kind,
   }, opts.actorId ?? null);
-  logger.info({ questionId: id, peer: opts.peer, agent: remote.data.name }, 'Peer question sent');
 
+  // One open prompt per remote agent: a second prompt typed while the first is
+  // unanswered gets captured as the first one's "answer" (its echo). Queue it.
+  const open = getDb().prepare(`SELECT 1 FROM peer_questions WHERE remote_agent_id = ? AND status = 'sent' LIMIT 1`).get(remote.data.id);
+  if (!open) {
+    const sent = await sendQueued(peer, getPeerQuestion(id)!);
+    if (!sent.ok) return sent;
+  } else {
+    logger.info({ questionId: id, peer: opts.peer, agent: remote.data.name }, 'Peer question queued behind an open one');
+  }
   ensurePoller(opts.peer);
   return { ok: true, data: getPeerQuestion(id)! };
+}
+
+/** Type a queued question into the remote agent and mark it sent. */
+async function sendQueued(peer: PeerConfig, q: PeerQuestion): Promise<Result<PeerQuestion>> {
+  // Claim first: the answer handler and the poll loop may both try to send the next queued question
+  const claimed = getDb().prepare(`UPDATE peer_questions SET status = 'sent', created_at = datetime('now') WHERE id = ? AND status = 'queued'`).run(q.id);
+  if (claimed.changes === 0) return { ok: true, data: getPeerQuestion(q.id)! };
+  const header = (q as PeerQuestion & { header?: string | null }).header ?? `[Question ${q.id} via WaveCode peering]`;
+  const text = [header, '', q.question].join('\n');
+  const sent = await peerApi<{ ok: boolean; prompt_event_id?: number | null }>(peer, 'POST', `/agents/${q.remote_agent_id}/send`, { text });
+  if (!sent.ok) {
+    fail(q, `Could not deliver to ${q.peer}/${q.agent}: ${sent.error}`);
+    return { ok: false, error: `Could not deliver to ${q.peer}/${q.agent}: ${sent.error}` };
+  }
+  getDb().prepare(`UPDATE peer_questions SET remote_prompt_event_id = ? WHERE id = ?`).run(sent.data.prompt_event_id ?? null, q.id);
+  logger.info({ questionId: q.id, peer: q.peer, agent: q.agent, kind: q.kind }, 'Peer question sent');
+  return { ok: true, data: getPeerQuestion(q.id)! };
+}
+
+/** After an answer or failure: send the next queued question for that remote agent, if any. */
+async function sendNextQueued(peerName: string, remoteAgentId: string): Promise<void> {
+  const peer = getConfig().peers?.[peerName];
+  if (!peer) return;
+  const open = getDb().prepare(`SELECT 1 FROM peer_questions WHERE remote_agent_id = ? AND status = 'sent' LIMIT 1`).get(remoteAgentId);
+  if (open) return;
+  const next = getDb().prepare(`SELECT * FROM peer_questions WHERE remote_agent_id = ? AND status = 'queued' ORDER BY created_at ASC LIMIT 1`).get(remoteAgentId) as PeerQuestion | undefined;
+  if (next) await sendQueued(peer, next);
+}
+
+/**
+ * A person promoted a run: tell the project's release peer (deploy/fable),
+ * attributed to that person. Agents cannot trigger this — only Promote does.
+ */
+export async function onRunPromoted(run: Pick<Run, 'id' | 'agent_id' | 'task_id'> & { summary?: string | null }, actorName: string | null): Promise<void> {
+  const cfg = getConfig();
+  const agent = getAgent(run.agent_id);
+  if (!agent.ok || !agent.data.workspace) return;
+  const project = Object.entries(cfg.projects ?? {}).find(([, p]) => p.release_peer && workspaceMatches(agent.data.workspace!, p.workspace_match));
+  if (!project) return;
+  const [, p] = project;
+  const [peerName, remoteHandle] = p.release_peer!.split('/');
+  let head = 'unknown';
+  try { head = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', 'HEAD'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
+  let branch = 'unknown';
+  try { branch = execFileSync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
+  const summary = (run.summary ?? '').trim().substring(0, 1500);
+  const question = [
+    `Release request — run ${run.id}, task ${run.task_id}, lane branch ${branch} at ${head} (pushed by @${agent.data.alias ?? agent.data.name}).`,
+    'Gate the exact SHA, assign the version and deploy per your runbook. Report the deployed SHA and version, or why not.',
+    summary ? `\nAuthor's summary:\n${summary}` : '',
+  ].join('\n').trim();
+  const r = await askPeer({ peer: peerName, agent: remoteHandle, question, fromAgentId: agent.data.id, fromLabel: actorName ?? 'admin', kind: 'release' });
+  if (!r.ok) logger.warn({ runId: run.id, error: r.error }, 'Release GO could not be relayed to the deploy peer');
 }
 
 // --- Answers ---
@@ -218,6 +283,7 @@ function recordAnswer(q: PeerQuestion, answer: string): void {
   }, null);
   logger.info({ questionId: q.id, file }, 'Peer answer stored');
   if (q.from_agent_id) deliverOrQueue(q.id, q.from_agent_id);
+  void sendNextQueued(q.peer, q.remote_agent_id);
 }
 
 function deliverOrQueue(questionId: string, agentId: string): void {
@@ -262,6 +328,7 @@ export function onAgentIdle(agentId: string): void {
 function fail(q: PeerQuestion, error: string): void {
   getDb().prepare(`UPDATE peer_questions SET status = 'failed', error = ? WHERE id = ?`).run(error, q.id);
   emit('peer.failed', 'peer', `${q.peer}/${q.agent}`, { question_id: q.id, peer: q.peer, agent: q.agent, from_agent_id: q.from_agent_id, error }, null);
+  void sendNextQueued(q.peer, q.remote_agent_id);
 }
 
 // --- Agents without MCP ask by printing a line: `ASK deploy/fable: <question>` ---
@@ -323,6 +390,10 @@ function openQuestions(peer: string): PeerQuestion[] {
   return getDb().prepare(`SELECT * FROM peer_questions WHERE peer = ? AND status = 'sent' ORDER BY created_at ASC`).all(peer) as PeerQuestion[];
 }
 
+function queuedCount(peer: string): number {
+  return (getDb().prepare(`SELECT count(*) c FROM peer_questions WHERE peer = ? AND status = 'queued'`).get(peer) as { c: number }).c;
+}
+
 export function ensurePoller(peer: string): void {
   if (pollers.has(peer)) return;
   const state = { stop: false };
@@ -339,7 +410,14 @@ async function pollLoop(peerName: string, state: { stop: boolean }): Promise<voi
   let cursor: number | null = null;
   while (!state.stop) {
     const open = openQuestions(peerName);
-    if (open.length === 0) return;
+    if (open.length === 0) {
+      if (queuedCount(peerName) === 0) return;
+      // queued but nothing sent (e.g. after a restart): send the next one
+      const next = getDb().prepare(`SELECT * FROM peer_questions WHERE peer = ? AND status = 'queued' ORDER BY created_at ASC LIMIT 1`).get(peerName) as PeerQuestion | undefined;
+      if (next) await sendNextQueued(peerName, next.remote_agent_id);
+      await sleep(pollIdleMs);
+      continue;
+    }
 
     // time out stale questions
     const now = Date.now();
@@ -396,7 +474,7 @@ function sleep(ms: number): Promise<void> {
 
 /** Boot: resume polling for any question still open after a restart. */
 export function startPeerPollers(): void {
-  const peers = (getDb().prepare(`SELECT DISTINCT peer FROM peer_questions WHERE status = 'sent'`).all() as Array<{ peer: string }>).map((r) => r.peer);
+  const peers = (getDb().prepare(`SELECT DISTINCT peer FROM peer_questions WHERE status IN ('sent','queued')`).all() as Array<{ peer: string }>).map((r) => r.peer);
   for (const p of peers) ensurePoller(p);
 }
 

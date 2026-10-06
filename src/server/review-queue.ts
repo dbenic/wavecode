@@ -12,6 +12,7 @@ import {
   type Task,
   type Artifact,
   type Result,
+  getUser,
 } from './db.js';
 import { emit } from './event-bus.js';
 import { getConfig } from './config.js';
@@ -20,6 +21,9 @@ import { getLatestCompletedReview, type CodeReview } from './code-review.js';
 import { evaluateRefereeForPromote } from './project-gate.js';
 import { resultPathForRun, settleRunResultFile } from './run-result.js';
 import logger from './logger.js';
+import * as peers from './peers.js';
+import { currentActorId } from './request-context.js';
+import { OWNER_USER_ID } from './users.js';
 
 export interface ReviewItem {
   run: Run;
@@ -108,6 +112,16 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
 
   if (overrideReason) {
     logger.warn({ runId, overrideReason }, 'Run promoted with verdict override');
+  }
+
+  // projects.<name>.release_peer: the person's Promote is the GO the deployer acts on
+  try {
+    const actor = currentActorId();
+    const actorUser = actor && actor !== OWNER_USER_ID ? getUser(actor) : null;
+    const actorName = actor ? (actor === OWNER_USER_ID ? 'owner' : actorUser?.ok ? actorUser.data.name : actor) : null;
+    void peers.onRunPromoted(runResult.data, actorName).catch((e) => logger.warn({ runId, error: (e as Error).message }, 'release relay failed'));
+  } catch (e) {
+    logger.warn({ runId, error: (e as Error).message }, 'release relay failed');
   }
 
   // With approval-gated dependents, downstream tasks wait for this moment.

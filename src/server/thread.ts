@@ -331,9 +331,14 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
   }
 
   // --- questions to / answers from agents on other WaveCode instances (peers)
-  if (t === 'peer.question' || t === 'peer.answer' || t === 'peer.failed') {
+  if (t === 'peer.question' || t === 'peer.release' || t === 'peer.answer' || t === 'peer.failed') {
     const where = `${str(p.peer) ?? 'peer'}/${str(p.agent) ?? 'agent'}`;
     const from = str(p.from_agent_id);
+    if (t === 'peer.release') {
+      const item = base(event, 'command', from, `Release GO → ${where}`);
+      item.body = str(p.question);
+      return item;
+    }
     if (t === 'peer.question') {
       const item = base(event, 'prompt', from, `Question → ${where}`);
       item.body = str(p.question);

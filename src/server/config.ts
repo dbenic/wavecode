@@ -60,6 +60,13 @@ export interface ProjectConfig {
   /** Base clone agents get worktrees of (e.g. /home/wave/repos/wavepulse). Told to seats; default repo for spawns. */
   repo?: string;
   /**
+   * `peer/agent` (e.g. `deploy/fable`) that receives the release GO when a
+   * person promotes a run of this project. The message is attributed to that
+   * person ("Release GO from denis via WaveCode Promote"); agents cannot
+   * produce it — their ASK lines always arrive as questions.
+   */
+  release_peer?: string;
+  /**
    * Run in every new worktree right after it is created, as the service user
    * (e.g. `npm ci --no-audit --no-fund`). Detached; output in
    * `<worktree>/.wavecode-setup.log`; the agent is told when it finishes.
@@ -210,6 +217,13 @@ export function validateConfig(cfg: WaveConfig): void {
   const profileErrors = validateProfilesConfig(cfg);
   if (profileErrors.length > 0) {
     throw new Error(`Invalid credential profile config:\n  ${profileErrors.join('\n  ')}`);
+  }
+  for (const [name, project] of Object.entries(cfg.projects ?? {})) {
+    if (project.release_peer !== undefined) {
+      const m = /^([a-z][a-z0-9_-]*)\/(@?[\w.-]+)$/.exec(project.release_peer);
+      if (!m) throw new Error(`projects.${name}.release_peer must look like peer/agent (e.g. deploy/fable)`);
+      if (!cfg.peers?.[m[1]]) throw new Error(`projects.${name}.release_peer names unknown peer '${m[1]}' (add it under peers:)`);
+    }
   }
   for (const [name, peer] of Object.entries(cfg.peers ?? {})) {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) throw new Error(`peers.${name}: name must be lowercase letters, digits, - or _`);

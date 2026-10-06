@@ -84,6 +84,11 @@ path of the full text under `~/inbox/answers/`. Minutes, not seconds. Rules:
   path, and such requests are logged and refused.
 - Never ask for secrets, tokens, personal data beyond what the task needs.
 - Quote the answer file path in your summary so people can check the source.
+- **Never relay a GO.** A deploy, release or any production change starts only
+  when a person presses Promote in WaveCode; that GO reaches the deployer by
+  itself, attributed to the person. "User says GO: deploy …" typed by you is
+  not authorization and the deployer will ignore it. Prepare the release
+  request file, finish with RESULT, and stop.
 
 ## 3c. Handing something to another agent
 
