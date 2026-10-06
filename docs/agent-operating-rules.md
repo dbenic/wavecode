@@ -85,6 +85,19 @@ path of the full text under `~/inbox/answers/`. Minutes, not seconds. Rules:
 - Never ask for secrets, tokens, personal data beyond what the task needs.
 - Quote the answer file path in your summary so people can check the source.
 
+## 3c. Handing something to another agent
+
+You have no messaging tool, but you don't need one. Print one line on its
+own and WaveCode delivers it into that agent's terminal when it is free:
+
+    TO @claude1: please review /home/wave/inbox/spec.md and answer with VERDICT: PASS|NEEDS FIXES
+
+Use the agent's alias or name from the roster (`@claude1`, `@codex2`,
+`@pm-denis`). Put the full path of any file you refer to in the line. The
+message is recorded in the thread, so people see the hand-off too. If the
+name is unknown you get `[TO @x failed: …]` back. Replies come to you the
+same way, as `[Message from @claude1] …`.
+
 ## 4. Testing and running things
 
 - Run the project's test command in your worktree before finishing (for

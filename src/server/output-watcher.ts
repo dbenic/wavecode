@@ -6,6 +6,7 @@ import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
 import { onAnyAgentIdle, onAuthorAgentIdle } from './code-review.js';
 import * as peers from './peers.js';
+import * as wireLines from './wire-lines.js';
 import { projectRequiresReferee } from './project-gate.js';
 import * as runner from './runner.js';
 import { isFileRunnerSeat } from './file-runner.js';
@@ -291,6 +292,7 @@ function tickInner(agentId: string, state: WatcherState): void {
       notifyReviewLoopAgentIdle(agentId);
       onAnyAgentIdle(); // a run waiting for a reviewer may now have one
       peers.onAgentIdle(agentId); // answers from other WaveCode instances that arrived while it worked
+      wireLines.onAgentIdle(agentId); // TO-line messages from other agents that waited for this pane
     }
   } else if (outputChanged) {
     emit('agent.output_updated', 'agent', agentId, {
@@ -307,6 +309,8 @@ function tickInner(agentId: string, state: WatcherState): void {
       replyCapture.onAgentIdle(agentId, { transitioned: idleEdge, outputChanged });
       // docs/peers.md: an `ASK peer/agent: …` line the agent printed → a question to that peer
       peers.detectAskLines(agentId, output);
+      // agent-operating-rules §3c: a `TO @agent: …` line → a message delivered to that agent
+      wireLines.detectWireLines(agentId, output);
     } else {
       // Still working: accept an answer that has stopped changing (spec §5b)
       replyCapture.onAgentTick(agentId);
