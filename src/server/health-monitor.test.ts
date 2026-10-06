@@ -238,7 +238,7 @@ describe('health-monitor.ts', () => {
     expect(sessionManager.ensureSpawnedAgentSession).not.toHaveBeenCalled();
   });
 
-  it('kills hung spawned agents and restarts them on the next monitor cycle', async () => {
+  it('hang_action=restart: kills a hung spawned agent WITH an open run and restarts it on the next monitor cycle', async () => {
     const db = await import('./db.js');
     const config = await import('./config.js');
     const events = await import('./event-bus.js');
@@ -259,6 +259,7 @@ describe('health-monitor.ts', () => {
       auto_dispatch: false,
       auto_restart: true,
       hang_timeout_min: 0,
+      hang_action: 'restart',
     }));
     vi.mocked(db.listAgents).mockReturnValue([agent]);
     vi.mocked(db.listRuns).mockReturnValue([
@@ -305,6 +306,50 @@ describe('health-monitor.ts', () => {
     );
   });
 
+  it('default hang_action=alert: a quiet working agent gets ONE agent.hung alert and is never killed', async () => {
+    const db = await import('./db.js');
+    const config = await import('./config.js');
+    const events = await import('./event-bus.js');
+    const sessionManager = await import('./session-manager.js');
+    const tmux = await import('./tmux.js');
+
+    const agent = makeAgent({ id: 'agent-5', name: 'codex1', mode: 'spawned', status: 'working', tmux_session: 'wc-codex1' });
+    vi.mocked(config.getConfig).mockReturnValue(makeConfig({ auto_dispatch: true, auto_restart: true, hang_timeout_min: 0 }));
+    vi.mocked(db.listAgents).mockReturnValue([agent]);
+    vi.mocked(db.listRuns).mockReturnValue([{ id: 'run-5', task_id: 'task-5' }] as never);
+    vi.mocked(tmux.hasSession).mockReturnValue(true);
+    vi.mocked(sessionManager.capturePane).mockReturnValue({ ok: true, data: 'same quiet output' } as never);
+
+    const monitor = await import('./health-monitor.js');
+    monitor.startHealthMonitor();
+    await vi.advanceTimersByTimeAsync(30000 * 4);
+
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(sessionManager.ensureSpawnedAgentSession).not.toHaveBeenCalled();
+    const hung = vi.mocked(events.emit).mock.calls.filter((c) => c[0] === 'agent.hung');
+    expect(hung).toHaveLength(1);
+    expect(hung[0][3]).toMatchObject({ name: 'codex1', action: 'alert', task_driven: true });
+  });
+
+  it('hang_action=restart never kills an agent without an open run (interactive session)', async () => {
+    const db = await import('./db.js');
+    const config = await import('./config.js');
+    const sessionManager = await import('./session-manager.js');
+    const tmux = await import('./tmux.js');
+
+    const agent = makeAgent({ id: 'agent-6', name: 'claude1', mode: 'spawned', status: 'working', tmux_session: 'wc-claude1' });
+    vi.mocked(config.getConfig).mockReturnValue(makeConfig({ auto_dispatch: true, auto_restart: true, hang_timeout_min: 0, hang_action: 'restart' }));
+    vi.mocked(db.listAgents).mockReturnValue([agent]);
+    vi.mocked(db.listRuns).mockReturnValue([] as never);
+    vi.mocked(tmux.hasSession).mockReturnValue(true);
+    vi.mocked(sessionManager.capturePane).mockReturnValue({ ok: true, data: 'same quiet output' } as never);
+
+    const monitor = await import('./health-monitor.js');
+    monitor.startHealthMonitor();
+    await vi.advanceTimersByTimeAsync(30000 * 3);
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
   it('emits hung events for adopted agents without killing or restarting them', async () => {
     const db = await import('./db.js');
     const config = await import('./config.js');
@@ -343,7 +388,7 @@ describe('health-monitor.ts', () => {
       'agent.hung',
       'agent',
       'agent-4',
-      { name: 'observer', stale_minutes: 0 },
+      expect.objectContaining({ name: 'observer', stale_minutes: 0, action: 'alert' }),
     );
     expect(notifications.notifyAgentCrashed).not.toHaveBeenCalled();
     expect(tmux.killSession).not.toHaveBeenCalled();
@@ -355,12 +400,14 @@ function makeConfig(overrides: {
   auto_dispatch: boolean;
   auto_restart: boolean;
   hang_timeout_min: number;
+  hang_action?: 'alert' | 'restart';
 }) {
   return {
     autonomy: {
       auto_dispatch: overrides.auto_dispatch,
       auto_restart: overrides.auto_restart,
       hang_timeout_min: overrides.hang_timeout_min,
+      hang_action: overrides.hang_action ?? 'alert',
     },
   } as never;
 }

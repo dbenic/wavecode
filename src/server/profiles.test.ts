@@ -198,7 +198,8 @@ describe('credential profiles', () => {
       const agent = db.insertAgent({ name: 'a', runtime: 'claude-code', tmux_session: 'wc-a', workspace: null, mode: 'spawned', status: 'idle', profile: 'ana' });
       if (!agent.ok) throw new Error(agent.error);
       expect(liveness.relaunchRuntime(agent.data, 'manual').ok).toBe(true);
-      expect(tmuxHarness.typed.at(-1)?.text).toBe(`env CLAUDE_CONFIG_DIR=${root}/ana/claude claude --dangerously-skip-permissions`);
+      // first relaunch resumes the previous conversation (resume_args), still under the profile env
+      expect(tmuxHarness.typed.at(-1)?.text).toBe(`env CLAUDE_CONFIG_DIR=${root}/ana/claude claude --dangerously-skip-permissions --continue`);
     });
   });
 

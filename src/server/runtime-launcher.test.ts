@@ -139,6 +139,16 @@ describe('runtime-launcher.ts', () => {
       expect(buildRuntimeCommand(base, { model: 'grok-4.6' })).toBe('codex --full-auto');
     });
 
+    it('appends resume_args only when asked to resume; refuses odd values', async () => {
+      const { buildRuntimeCommand } = await import('./runtime-launcher.js');
+      const codex = { command: 'codex --dangerously-bypass-approvals-and-sandbox', idle_pattern: '>', effort_flag: '-c model_reasoning_effort=', resume_args: 'resume --last' };
+      expect(buildRuntimeCommand(codex, { effort: 'high', resume: true })).toBe('codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high resume --last');
+      expect(buildRuntimeCommand(codex, { effort: 'high' })).toBe('codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high');
+      const claude = { command: 'claude --dangerously-skip-permissions', idle_pattern: '$', model_flag: '--model', resume_args: '--continue' };
+      expect(buildRuntimeCommand(claude, { model: 'claude-opus-5-5', resume: true })).toBe('claude --dangerously-skip-permissions --model claude-opus-5-5 --continue');
+      expect(buildRuntimeCommand({ ...claude, resume_args: '--continue; rm -rf /' }, { resume: true })).toBe('claude --dangerously-skip-permissions');
+    });
+
     it('never embeds unsafe model values or unknown efforts', async () => {
       const { buildRuntimeCommand } = await import('./runtime-launcher.js');
       expect(buildRuntimeCommand({ ...base, model_flag: '-m' }, { model: 'x; rm -rf /' }))

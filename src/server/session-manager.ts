@@ -287,6 +287,7 @@ export function ensureSpawnedAgentSession(agentId: string): Result<{ agent: Agen
       model: agent.model,
       effort: agent.effort,
       profile: agent.profile ?? null,
+      resume: true, // this agent ran here before: continue its conversation, don't start blank
     });
     if (!launchResult.ok) {
       return { ok: false, error: launchResult.error };

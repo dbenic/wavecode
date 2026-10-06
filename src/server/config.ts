@@ -12,6 +12,14 @@ export interface RuntimeConfig {
   /** CLI flag used to pass a pinned reasoning effort (e.g. '--effort'). Unset = pin is recorded but not injected. */
   effort_flag?: string;
   /**
+   * Appended when WaveCode relaunches a runtime that ran before in this
+   * worktree, so the CLI resumes its previous conversation instead of
+   * starting blank (`--continue` for Claude Code, `resume --last` for Codex).
+   * The first relaunch attempt resumes; if the runtime dies again it is
+   * launched plain, so a missing session can never loop.
+   */
+  resume_args?: string;
+  /**
    * Env injected at launch when the agent runs on a credential profile
    * (spec §5). Values are templates; `{profile_dir}` → `<profiles_root>/<profile>`.
    */
@@ -88,6 +96,14 @@ export interface WaveConfig {
     auto_dispatch: boolean;
     auto_restart: boolean;
     hang_timeout_min: number;
+    /**
+     * What a quiet "working" pane after hang_timeout_min means. 'alert' (default):
+     * agent.hung + notification, nothing killed — an interactive session with a
+     * long silent step is not broken, and killing it loses its conversation.
+     * 'restart': kill + recreate, but only when a WaveCode run is open on the
+     * agent (task-driven work the dispatcher can re-queue).
+     */
+    hang_action: 'alert' | 'restart';
     max_task_retries: number;
     verify_completion: boolean;
   };
@@ -327,6 +343,7 @@ function buildDefaults(baseDir: string): WaveConfig {
       auto_dispatch: true,
       auto_restart: true,
       hang_timeout_min: 10,
+      hang_action: 'alert',
       max_task_retries: 2,
       verify_completion: false,
     },
@@ -336,6 +353,7 @@ function buildDefaults(baseDir: string): WaveConfig {
         command: 'claude --dangerously-skip-permissions',
         idle_pattern: '\\$\\s*$',
         model_flag: '--model',
+        resume_args: '--continue',
         env: { CLAUDE_CONFIG_DIR: '{profile_dir}/claude' },
         login_command: 'claude /login',
         credential_files: ['{profile_dir}/claude/.credentials.json'],
@@ -356,6 +374,7 @@ function buildDefaults(baseDir: string): WaveConfig {
         // Current Codex CLI (Rust): `-c model_reasoning_effort=xhigh`.
         // Injector concatenates without a space when the flag ends with `=`.
         effort_flag: '-c model_reasoning_effort=',
+        resume_args: 'resume --last',
         env: { CODEX_HOME: '{profile_dir}/codex' },
         login_command: 'codex login',
         credential_files: ['{profile_dir}/codex/auth.json'],

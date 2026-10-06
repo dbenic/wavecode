@@ -103,8 +103,10 @@ export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check
     return { ok: false, error: `runtime relaunch attempts exhausted (${attempts}) — check the runtime command for '${agent.runtime}'` };
   }
 
-  // Same command as spawn, including the agent's credential profile env
-  const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile });
+  // Same command as spawn, including the agent's credential profile env. The
+  // first attempt resumes the previous conversation (`resume_args`); if the
+  // runtime dies again, the next attempt launches plain.
+  const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile, resume: attempts === 0 });
   if (!command.ok) return command;
   try {
     tmux.sendTextAndEnter(agent.tmux_session, command.data);
@@ -120,6 +122,7 @@ export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check
     model: agent.model,
     effort: agent.effort,
     reason,
+    resumed: attempts === 0,
   });
   logger.warn({ agentId: agent.id, runtime: agent.runtime, reason }, 'Runtime TUI had exited — relaunched');
   return { ok: true, data: { sent: true } };

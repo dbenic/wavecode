@@ -21,6 +21,8 @@ export interface RuntimePin {
    * strict key/value alphabet is never shell-embedded.
    */
   env?: Record<string, string>;
+  /** Relaunch of a runtime that ran before here: append `resume_args` so it continues its conversation. */
+  resume?: boolean;
 }
 type EffortPin = string | null | undefined;
 
@@ -45,6 +47,10 @@ export function buildRuntimeCommand(runtimeConfig: RuntimeConfig, pin: RuntimePi
       : ` ${runtimeConfig.effort_flag} ${pin.effort}`;
   }
 
+  if (pin.resume && runtimeConfig.resume_args && /^[\w .=-]{1,64}$/.test(runtimeConfig.resume_args)) {
+    command += ` ${runtimeConfig.resume_args.trim()}`;
+  }
+
   const envPairs = Object.entries(pin.env ?? {}).filter(([k, v]) => isSafeEnvKey(k) && isSafeEnvValue(v));
   if (envPairs.length > 0) {
     // `env` scopes the vars to this process only and keeps PATH (grok's HOME override relies on it)
@@ -61,13 +67,13 @@ export function buildRuntimeCommand(runtimeConfig: RuntimeConfig, pin: RuntimePi
  */
 export function buildLaunchCommand(
   runtime: string,
-  opts: { model?: string | null; effort?: string | null; profile?: string | null },
+  opts: { model?: string | null; effort?: string | null; profile?: string | null; resume?: boolean },
 ): Result<string> {
   const runtimeConfig = getConfig().runtimes[runtime];
   if (!runtimeConfig) return { ok: false, error: `Unknown runtime '${runtime}'` };
   const env = resolveProfileEnv(runtime, opts.profile);
   if (!env.ok) return env;
-  return { ok: true, data: buildRuntimeCommand(runtimeConfig, { model: opts.model, effort: opts.effort, env: env.data }) };
+  return { ok: true, data: buildRuntimeCommand(runtimeConfig, { model: opts.model, effort: opts.effort, env: env.data, resume: opts.resume }) };
 }
 
 export function getWorktreesRoot(): string {
@@ -105,6 +111,8 @@ export function launchRuntimeInNewSession(opts: {
   model?: string | null;
   effort?: string | null;
   profile?: string | null;
+  /** Session recreated for an agent that ran before: resume its conversation. */
+  resume?: boolean;
 }): Result<void> {
   const command = buildLaunchCommand(opts.runtime, opts);
   if (!command.ok) return command;

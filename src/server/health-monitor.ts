@@ -18,6 +18,8 @@ import logger from './logger.js';
 interface AgentHealthState {
   lastOutputHash: string;
   lastChangeAt: number;
+  /** agent.hung already emitted for the current quiet stretch (reset when output changes). */
+  hungNotified?: boolean;
   consecutiveStale: number;
 }
 
@@ -159,6 +161,7 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
 
   if (outputHash !== state.lastOutputHash) {
     // Output changed — agent is alive
+    state.hungNotified = false;
     state.lastOutputHash = outputHash;
     state.lastChangeAt = now;
     state.consecutiveStale = 0;
@@ -167,21 +170,26 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
 
     // Only check hang if agent is supposedly working
     if (agent.status === 'working' && (now - state.lastChangeAt) > hangTimeoutMs) {
-      logger.warn(
-        { agentId: agent.id, name: agent.name, staleMinutes: Math.floor((now - state.lastChangeAt) / 60000) },
-        'Agent appears hung',
-      );
-
-      if (agent.mode === 'spawned' && config.autonomy.auto_restart) {
+      const staleMinutes = Math.floor((now - state.lastChangeAt) / 60000);
+      // Kill + recreate only when configured AND the work is WaveCode's to re-queue
+      // (an open run). An interactive session with a long silent step is not
+      // broken, and killing it throws its conversation away.
+      const taskDriven = listRuns({ agent_id: agent.id, status: 'running' }).length > 0;
+      const restart = config.autonomy.hang_action === 'restart' && agent.mode === 'spawned' && config.autonomy.auto_restart && taskDriven;
+      if (restart) {
+        logger.warn({ agentId: agent.id, name: agent.name, staleMinutes }, 'Agent appears hung');
         await handleHungSpawnedAgent(agent);
         state.lastChangeAt = now;
         state.consecutiveStale = 0;
-      } else {
-        // Adopted or other — the output-watcher handles status correction
-        // for adopted agents. Just emit the event for monitoring.
+      } else if (!state.hungNotified) {
+        // Once per quiet stretch: alert people, leave the session alone.
+        state.hungNotified = true;
+        logger.warn({ agentId: agent.id, name: agent.name, staleMinutes, taskDriven }, 'Agent quiet while working — alerting, not restarting');
         emit('agent.hung', 'agent', agent.id, {
           name: agent.name,
-          stale_minutes: Math.floor((now - state.lastChangeAt) / 60000),
+          stale_minutes: staleMinutes,
+          task_driven: taskDriven,
+          action: 'alert',
         });
       }
     }

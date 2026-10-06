@@ -885,6 +885,7 @@ autonomy:
   auto_dispatch: ${autoDispatch}
   auto_restart: true
   hang_timeout_min: ${hangTimeoutMin}
+  hang_action: restart
   max_task_retries: 2
 
 runtimes:

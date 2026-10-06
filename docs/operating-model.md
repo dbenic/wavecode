@@ -55,7 +55,7 @@ All checks are periodic and automatic; none rely on the agent's honesty:
 | Output watch | 2 s | `tmux capture-pane` diff + status regex per runtime | status flips on the dashboard in real time (SSE) |
 | Runner heartbeat | 30 s | ndjson events from spawned runners over Unix socket | run marked failed on exit codes |
 | Session liveness | 30 s | `tmux has-session` | spawned + `auto_restart`: session recreated; in-flight work is FAIL (not re-queued on that seat); adopted: `agent.crashed` + push/ntfy/Telegram notification |
-| Hang detection | 30 s | pane content hash unchanged for `hang_timeout_min` while `working` | spawned: session killed → auto-restart cycle, work left FAIL; adopted: `agent.hung` event |
+| Hang detection | 30 s | pane content hash unchanged for `hang_timeout_min` while `working` | default `hang_action: alert`: one `agent.hung` per quiet stretch, nothing killed. `hang_action: restart`: spawned agents **with an open run** are killed → auto-restart (resuming the CLI conversation via `resume_args`), work left FAIL; interactive sessions are never killed |
 | Completion verification | on idle | `verify_completion`: a cheap LLM judges the last 30 terminal lines against the task | adopted `failed` verdicts may re-queue (bounded by `max_task_retries`); spawned missing/FAIL does not |
 | File-runner status (host) | 1 min cron | `wavecode status --notify-if-changed` on the daemon host (localhost REST, config.yaml token). Stamp file under the data dir. Silent on no change. | Prints delta JSON + existing ntfy/Telegram one-liner on RESULT, phase `done`/`failed`/`incomplete`, or STALE (running >40 min with no `result.txt`). Orchestrators must not LLM-poll `GET /api/tasks` / `result.txt` on a timer. |
 
@@ -171,6 +171,7 @@ review:
 autonomy:
   verify_completion: true        # LLM sanity-check on task completion
   hang_timeout_min: 10
+  hang_action: alert             # alert | restart (restart only task-driven agents)
   max_task_retries: 2
 ```
 
