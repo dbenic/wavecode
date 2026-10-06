@@ -124,6 +124,11 @@ export function createWorktree(agentName: string, repo: string, branch?: string)
 
   try {
     execFileSync('mkdir', ['-p', worktreeBase], { timeout: 5000 });
+    // New lanes start from the CURRENT main, not from wherever the base clone was when it was cloned
+    // (the base clone sat 403 commits behind for a day). Best effort: offline is not an error.
+    try {
+      execFileSync('git', ['-C', repo, 'pull', '--ff-only', '--quiet'], { encoding: 'utf-8', timeout: 60000, stdio: ['ignore', 'ignore', 'ignore'] });
+    } catch { /* no network or diverged main: the worktree still gets created from what is there */ }
     execFileSync('git', ['-C', repo, 'worktree', 'add', workspace, '-b', branch ?? `wc-${agentName}`], {
       encoding: 'utf-8',
       timeout: 15000,
