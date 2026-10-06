@@ -305,6 +305,8 @@ function tickInner(agentId: string, state: WatcherState): void {
   try {
     if (idleEdge !== null) {
       replyCapture.onAgentIdle(agentId, { transitioned: idleEdge, outputChanged });
+      // docs/peers.md: an `ASK peer/agent: …` line the agent printed → a question to that peer
+      peers.detectAskLines(agentId, output);
     } else {
       // Still working: accept an answer that has stopped changing (spec §5b)
       replyCapture.onAgentTick(agentId);

@@ -50,6 +50,10 @@ Restart the daemon. Check with `GET /api/peers` (no token is ever shown).
 
 ## Asking
 
+- From an agent without MCP (any CLI): print a line `ASK deploy/fable: <question>`
+  on its own. The output watcher detects it when the agent goes idle, sends it
+  with `from_agent_id` = that agent, and types the answer back when it is idle
+  again. One question per line; duplicates within 24 h are ignored.
 - From the Command Center: `#ask deploy/fable Is the invoices table migrated on staging?`
 - From a seat or agent with MCP: `ask_peer(peer="deploy", agent="fable", question=…)`;
   the answer arrives as `peer.answer` (`await_events` with `types=peer.*`).

@@ -62,11 +62,13 @@ beforeEach(() => {
   homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(tmp);
   db.initDb(path.join(tmp, 't.db'));
   peers.ensurePeerTables();
+  peers.setPollIdleMsForTest(5);
   for (const k of Object.keys(peersCfg)) delete peersCfg[k];
   peersCfg.deploy = { url: 'http://100.100.165.71:3777', token: 'peer-token-0123456789' };
 });
 afterEach(() => {
   peers.stopPeerPollers();
+  peers.setPollIdleMsForTest(null);
   peers.setPeerFetchForTest(null);
   homeSpy.mockRestore();
   db.resetDbForTest();
@@ -79,7 +81,7 @@ function localAgent(name: string, status: 'idle' | 'working' = 'idle'): db.Agent
   return r.data;
 }
 
-const flush = () => new Promise((r) => setTimeout(r, 30));
+const flush = () => new Promise((r) => setTimeout(r, 120));
 
 describe('askPeer', () => {
   it('resolves the remote agent by alias, delivers the question with the peer token, records it, emits peer.question', async () => {
@@ -174,5 +176,44 @@ describe('answers', () => {
     await flush();
     expect(peers.getPeerQuestion(r.data.id)!.status).toBe('failed');
     expect(vi.mocked(emit).mock.calls.find((c) => c[0] === 'peer.failed')?.[3]).toMatchObject({ question_id: r.data.id });
+  });
+});
+
+describe('ASK lines in agent output', () => {
+  it('an "ASK deploy/fable: …" line becomes a question from that agent, once; the docs example and malformed lines are ignored', async () => {
+    peers.resetAskDetectionForTest();
+    const fp = fakePeer();
+    peers.setPeerFetchForTest(fp.fetchImpl);
+    const asker = localAgent('codex1');
+    const pane = [
+      '• Checking the invoice flow…',
+      '    ASK deploy/fable: How many invoices were booked for tenant X in September 2026, and with which VAT codes?', // the rules example
+      'ASK deploy/fable: How many invoices has tenant GenePlanet booked in September 2026, by VAT code?',
+      'ASK nowhere: nothing',
+      '› ',
+    ].join('\n');
+    peers.detectAskLines(asker.id, pane);
+    peers.detectAskLines(asker.id, pane); // same screen on the next tick
+    await flush();
+    expect(fp.state.sends).toHaveLength(1);
+    expect(fp.state.sends[0].text).toContain('How many invoices has tenant GenePlanet booked in September 2026, by VAT code?');
+    const qs = peers.listPeerQuestions();
+    expect(qs).toHaveLength(1);
+    expect(qs[0]).toMatchObject({ from_agent_id: asker.id, peer: 'deploy', agent: 'fable', status: 'sent' });
+
+    // after a restart (memory cleared) the 24h db check still prevents a repeat
+    peers.resetAskDetectionForTest();
+    peers.detectAskLines(asker.id, pane);
+    await flush();
+    expect(fp.state.sends).toHaveLength(1);
+  });
+
+  it('a failing ASK (unknown peer) is typed back to the agent so it does not wait forever', async () => {
+    peers.resetAskDetectionForTest();
+    const asker = localAgent('codex1');
+    peers.detectAskLines(asker.id, 'ASK staging/fable: is the db migrated?');
+    await flush();
+    const typed = vi.mocked(sessionManager.sendKeys).mock.calls.find((c) => c[0] === asker.id)?.[1] as string;
+    expect(typed).toMatch(/^\[ASK staging\/fable failed: Unknown peer 'staging'/);
   });
 });

@@ -14,6 +14,7 @@
  * (docs/peers.md). No credentials cross the wire; only text.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -42,6 +43,11 @@ export interface PeerQuestion {
 export const QUESTION_TIMEOUT_MS = 30 * 60_000;
 const POLL_WAIT_MS = 30_000;
 const POLL_RETRY_MS = 5_000;
+let pollIdleMs = 1_000;
+/** Test hook: shorten the pause between empty polls. */
+export function setPollIdleMsForTest(ms: number | null): void {
+  pollIdleMs = ms ?? 1_000;
+}
 const MAX_QUESTION_CHARS = 8_000;
 const DELIVER_CHARS = 3_000;
 
@@ -258,6 +264,57 @@ function fail(q: PeerQuestion, error: string): void {
   emit('peer.failed', 'peer', `${q.peer}/${q.agent}`, { question_id: q.id, peer: q.peer, agent: q.agent, from_agent_id: q.from_agent_id, error }, null);
 }
 
+// --- Agents without MCP ask by printing a line: `ASK deploy/fable: <question>` ---
+
+const ASK_LINE_RE = /^[\s•>›⏺*-]*ASK\s+([a-z][a-z0-9_-]*)\/(@?[\w.-]+):\s*(.{8,})$/;
+/** The example in docs/agent-operating-rules.md — never a real question, even when an agent cats the file. */
+const RULES_EXAMPLE_QUESTION = 'How many invoices were booked for tenant X in September 2026, and with which VAT codes?';
+const ASK_SCAN_LINES = 80;
+const seenAsks = new Map<string, Set<string>>(); // agentId → hashes of ASK lines already acted on
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+/**
+ * Output-watcher hook on an idle tick: an `ASK peer/agent: question` line the
+ * agent printed becomes a peer question from that agent. Deduplicated per
+ * agent (memory) and against questions it asked in the last 24h (db), so a
+ * line that stays on screen fires once. Errors are typed back so the agent
+ * learns what went wrong instead of waiting forever.
+ */
+export function detectAskLines(agentId: string, output: string): void {
+  if (!Object.keys(getConfig().peers ?? {}).length) return;
+  const lines = stripAnsi(output).split('\n').slice(-ASK_SCAN_LINES);
+  for (const raw of lines) {
+    const m = ASK_LINE_RE.exec(raw.trimEnd());
+    if (!m) continue;
+    const [, peer, agentHandle, questionRaw] = m;
+    const question = questionRaw.trim();
+    if (question === RULES_EXAMPLE_QUESTION) continue;
+    const key = createHash('sha1').update(`${peer}/${agentHandle}:${question}`).digest('hex');
+    const seen = seenAsks.get(agentId) ?? new Set<string>();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    seenAsks.set(agentId, seen);
+    const recent = getDb().prepare(`
+      SELECT 1 FROM peer_questions WHERE from_agent_id = ? AND question = ? AND created_at > datetime('now', '-1 day') LIMIT 1
+    `).get(agentId, question);
+    if (recent) continue;
+    void askPeer({ peer, agent: agentHandle, question, fromAgentId: agentId, actorId: null }).then((r) => {
+      if (!r.ok) {
+        logger.warn({ agentId, peer, agent: agentHandle, error: r.error }, 'ASK line could not be sent');
+        sessionManager.sendKeys(agentId, `[ASK ${peer}/${agentHandle} failed: ${r.error}]`);
+      }
+    });
+  }
+}
+
+/** Test hook. */
+export function resetAskDetectionForTest(): void {
+  seenAsks.clear();
+}
+
 // --- Polling the peer's event log (one loop per peer while questions are open) ---
 
 const pollers = new Map<string, { stop: boolean }>();
@@ -306,7 +363,11 @@ async function pollLoop(peerName: string, state: { stop: boolean }): Promise<voi
     cursor = res.data.last_id ?? cursor;
 
     const replies = res.data.events.filter((e) => e.payload?.message_type === 'reply');
-    if (replies.length === 0) continue;
+    if (replies.length === 0) {
+      // A peer that answers the long-poll immediately (short wait_ms, old version) must not be hammered
+      await sleep(pollIdleMs);
+      continue;
+    }
     const byPrompt = new Map<number, RemoteEvent>();
     for (const e of replies) {
       const ref = e.payload?.ref_prompt_event_id;

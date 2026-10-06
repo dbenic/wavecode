@@ -65,6 +65,26 @@ AGENTS.md, and win when they conflict.
   lines, then stop and wait. Never poll, loop, sleep or re-check on a timer;
   WaveCode wakes you when there is something to do.
 
+## 3b. Asking the deploy box (production data, read-only)
+
+You cannot reach production. A separate agent on the deploy box can read it
+and answers questions through WaveCode (docs/peers.md). To ask, print one
+line on its own, exactly like this, and then stop and wait:
+
+    ASK deploy/fable: How many invoices were booked for tenant X in September 2026, and with which VAT codes?
+
+WaveCode picks the line up, sends the question, and when the answer arrives
+it is typed into your terminal as `[Answer from deploy/fable …]` with the
+path of the full text under `~/inbox/answers/`. Minutes, not seconds. Rules:
+
+- One clear, self-contained question per line; include the context the
+  answerer needs (tenant, period, table or screen). Follow-ups are new lines.
+- Ask only for facts to read: counts, examples, schema, current values.
+  Never ask it to change, delete, deploy or run migrations — it is a read
+  path, and such requests are logged and refused.
+- Never ask for secrets, tokens, personal data beyond what the task needs.
+- Quote the answer file path in your summary so people can check the source.
+
 ## 4. Testing and running things
 
 - Run the project's test command in your worktree before finishing (for
