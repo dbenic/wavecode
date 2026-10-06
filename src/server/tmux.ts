@@ -96,7 +96,10 @@ export function listSessions(): Result<Array<{ name: string; created: number; la
   }
 }
 
-export const SPAWN_COLS = 200;
+// 140 columns: wide enough that prompts and tables do not wrap (reply capture),
+// narrow enough that Claude Code's TUI stays single-column — at ≥ ~160 cols it
+// opens a "changes" side panel that halves the readable width in the captured output.
+export const SPAWN_COLS = 140;
 export const SPAWN_ROWS = 80;
 
 export function newSession(sessionName: string, workDir: string, command?: string): void {
