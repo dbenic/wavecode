@@ -9,7 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getConfig } from './config.js';
+import { getConfig, type WaveConfig } from './config.js';
 import { AGENT_ROLES, getAgent, type Agent, type AgentRole, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import { isFileRunnerSeat } from './file-runner.js';
@@ -57,6 +57,17 @@ export function parseAgentRole(value: unknown): { ok: true; role: AgentRole | nu
   if (value === null) return { ok: true, role: null };
   if (typeof value === 'string' && (AGENT_ROLES as readonly string[]).includes(value)) return { ok: true, role: value as AgentRole };
   return { ok: false, error: `role must be one of: ${AGENT_ROLES.join(', ')} (or null)` };
+}
+
+/**
+ * Where the code is, for a seat whose own directory is not a checkout
+ * (pm-antonio asked three times). Built from `projects.<name>.repo` and
+ * `paths.worktrees_root`; empty when no project declares a repo.
+ */
+export function codeBriefLine(cfg: WaveConfig = getConfig()): string {
+  const repos = Object.entries(cfg.projects ?? {}).filter(([, p]) => p.repo).map(([name, p]) => `${name} → ${p.repo} (base clone, branch main — read it, never commit there)`);
+  if (repos.length === 0) return '';
+  return `• Code: ${repos.join('; ')}. Coding agents work in their own worktrees under ${cfg.paths.worktrees_root}/<agent> on lane branches wc-<agent>; your seat directory is not a checkout. To look at code, use the base clone or an agent's worktree path.`;
 }
 
 /**
@@ -152,7 +163,7 @@ export async function briefOrchestratorSeat(
 
   // Spec §5e: every seat learns where the project rooms are and to keep ROOM.md current
   // Spec §5f: the seat's next session starts from the feedback its answers got
-  const brief = buildOrchestratorBrief(undefined, [roomsBriefLine(), feedbackBriefLine(agent), opts.extra].filter(Boolean).join(' ') || null);
+  const brief = buildOrchestratorBrief(undefined, [roomsBriefLine(), codeBriefLine(), feedbackBriefLine(agent), opts.extra].filter(Boolean).join(' ') || null);
   const sent = sessionManager.sendKeys(agent.id, brief);
   if (!sent.ok) return { ok: false, error: sent.error };
 

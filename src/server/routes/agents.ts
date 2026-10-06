@@ -120,8 +120,9 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       text: body.text.substring(0, 2000),
     });
 
-    // Spec §5b: the agent's answer to this prompt is captured into the thread
-    if (!body.raw) {
+    // Spec §5b: the agent's answer to this prompt is captured into the thread.
+    // Not for TUI commands / menu picks (/model, 2.): they have no answer to capture.
+    if (!body.raw && !validate.isTuiCommand(body.text)) {
       replyCapture.trackPrompt({
         agent: agentResult.data,
         actorId: getActingUser(c).id,

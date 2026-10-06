@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from './config.js';
 import { startRunner, stopRunner } from './runner.js';
-import { createWorktree, launchRuntimeInNewSession } from './runtime-launcher.js';
+import { createWorktree, launchRuntimeInNewSession, runWorkspaceSetup } from './runtime-launcher.js';
 import { resolveProfileEnv } from './profiles.js';
 import {
   ensureClaudeMd,
@@ -128,6 +128,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
 
   // Create git worktree if repo provided
   let workspace: string | null = null;
+  let setupPending = false;
   if (opts.workspace) {
     // Explicit workspace override (e.g., from template spawn)
     workspace = opts.workspace;
@@ -135,6 +136,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     const worktree = createWorktree(opts.name, opts.repo, opts.branch ?? `wc-${opts.name}`);
     if (!worktree.ok) return worktree;
     workspace = worktree.data;
+    setupPending = true; // run the project's setup_command once the agent row exists
   }
 
   // Resolve workspace:
@@ -206,6 +208,9 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
   }
 
   const agent = agentResult.data;
+
+  // projects.<name>.setup_command (npm ci …) runs detached in the fresh worktree; the thread shows start/done
+  if (setupPending && workspace) runWorkspaceSetup(workspace, agent.id);
 
   // Start the runner for this agent
   startRunner(agent.id, sessionName, opts.runtime);

@@ -165,6 +165,11 @@ review:
   auto_review: true              # cross-review every finished run
   default_reviewer: reviewer-bot # agent name or runtime; never the author (ladder rung 3)
   auto_pick: true                # rungs 4–5: pick a free agent (tag `review` first, other vendor preferred)
+projects:
+  wavepulse:
+    workspace_match: '**/wavepulse*'
+    repo: /home/wave/repos/wavepulse          # told to PM seats; base clone for worktrees
+    setup_command: npm ci --no-audit --no-fund # runs detached in every new worktree (.wavecode-setup.log)
   max_fix_loops: 2               # bounded fix→re-review rounds
   require_pass_to_promote: true  # promote gate even without auto_review
   gate_dependents_on_approval: true  # DAG advances on approval, not 'done'

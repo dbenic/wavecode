@@ -318,6 +318,18 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
     return item;
   }
 
+  // --- worktree setup (projects.<name>.setup_command): started / done / failed
+  if (t === 'agent.workspace_setup') {
+    const status = str(p.status) ?? 'started';
+    const item = base(event, status === 'failed' ? 'alert' : 'report', event.entity_id,
+      status === 'started' ? `Workspace setup started (${str(p.command) ?? 'setup'})`
+        : status === 'done' ? 'Workspace setup done — dependencies installed'
+          : `Workspace setup failed${typeof p.exit_code === 'number' ? ` (exit ${p.exit_code})` : ''}`);
+    item.body = str(p.log) ? `Log: ${str(p.log)}` : str(p.error);
+    item.needs_attention = status === 'failed';
+    return item;
+  }
+
   // --- questions to / answers from agents on other WaveCode instances (peers)
   if (t === 'peer.question' || t === 'peer.answer' || t === 'peer.failed') {
     const where = `${str(p.peer) ?? 'peer'}/${str(p.agent) ?? 'agent'}`;

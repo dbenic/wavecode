@@ -1,5 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
+import { workspaceMatches } from './project-gate.js';
+import { emit } from './event-bus.js';
 import { getConfig, type RuntimeConfig } from './config.js';
 import { isEffortLevel, type Result } from './db.js';
 import * as tmux from './tmux.js';
@@ -86,6 +89,33 @@ export function getTranscriptsRoot(): string {
 
 export function getTeamsRoot(): string {
   return getConfig().paths.teams_root;
+}
+
+/**
+ * After a worktree is created: run the matching project's `setup_command`
+ * there (npm ci …), detached, logging to `<worktree>/.wavecode-setup.log`.
+ * Returns the command when one was started so the caller can tell the agent.
+ */
+export function runWorkspaceSetup(workspace: string, agentId: string): string | null {
+  const cfg = getConfig();
+  const project = Object.entries(cfg.projects ?? {}).find(([, p]) => p.setup_command && workspaceMatches(workspace, p.workspace_match));
+  if (!project) return null;
+  const [name, p] = project;
+  const command = p.setup_command!.trim();
+  const log = path.join(workspace, '.wavecode-setup.log');
+  try {
+    const out = fs.openSync(log, 'a');
+    const child = spawn('sh', ['-c', `${command}; echo "[wavecode-setup exit $?]"`], { cwd: workspace, detached: true, stdio: ['ignore', out, out] });
+    child.unref();
+    emit('agent.workspace_setup', 'agent', agentId, { project: name, command, log, status: 'started' });
+    child.on('exit', (code) => {
+      emit('agent.workspace_setup', 'agent', agentId, { project: name, command, log, status: code === 0 ? 'done' : 'failed', exit_code: code });
+    });
+    return command;
+  } catch (e) {
+    emit('agent.workspace_setup', 'agent', agentId, { project: name, command, log, status: 'failed', error: (e as Error).message });
+    return null;
+  }
 }
 
 export function createWorktree(agentName: string, repo: string, branch?: string): Result<string> {

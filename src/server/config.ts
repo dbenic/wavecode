@@ -57,6 +57,14 @@ export interface ProjectConfig {
   require_result_to_promote?: boolean;
   /** Optional per-agent branch override (agent name → branch). */
   agent_branches?: Record<string, string>;
+  /** Base clone agents get worktrees of (e.g. /home/wave/repos/wavepulse). Told to seats; default repo for spawns. */
+  repo?: string;
+  /**
+   * Run in every new worktree right after it is created, as the service user
+   * (e.g. `npm ci --no-audit --no-fund`). Detached; output in
+   * `<worktree>/.wavecode-setup.log`; the agent is told when it finishes.
+   */
+  setup_command?: string;
 }
 
 export interface PeerConfig {

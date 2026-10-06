@@ -185,3 +185,13 @@ export function validateIntParam(value: string | undefined, opts: {
   if (opts.max !== undefined && n > opts.max) return opts.max;
   return n;
 }
+
+/**
+ * `/model`, `/status`, `2`, `1.` — a TUI command or a menu pick, not a
+ * question the agent answers. Reply capture skips these so the thread does
+ * not fill with "(partial)" items and re-captured old screens.
+ */
+export function isTuiCommand(text: string): boolean {
+  const t = text.trim();
+  return /^\/[a-z][\w-]*(?:\s|$)/i.test(t) || /^\d{1,2}\.?$/.test(t) || /^(y|n|yes|no)\.?$/i.test(t);
+}

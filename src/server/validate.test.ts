@@ -161,3 +161,11 @@ describe('validate.ts — input validation', () => {
     });
   });
 });
+
+describe('isTuiCommand', () => {
+  it('slash commands, menu picks and yes/no are TUI input, not prompts to capture', async () => {
+    const { isTuiCommand } = await import('./validate.js');
+    for (const t of ['/model', '/status', '/compact now', '2', '2.', '12', 'y', 'No']) expect(isTuiCommand(t), t).toBe(true);
+    for (const t of ['what is the status?', '/home/wave/x.md is the file', '2 invoices failed', 'yes please run the tests']) expect(isTuiCommand(t), t).toBe(false);
+  });
+});
