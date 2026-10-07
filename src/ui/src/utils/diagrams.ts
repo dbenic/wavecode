@@ -20,7 +20,7 @@ async function mermaid() {
       // No HTML labels anywhere: Mermaid would put entity/class/state names in <foreignObject>, which the
       // SVG sanitizer removes — leaving empty boxes. Plain SVG text survives sanitizing.
       m.default.initialize({
-        startOnLoad: false, securityLevel: 'strict', theme: 'dark', htmlLabels: false,
+        startOnLoad: false, securityLevel: 'strict', theme: 'dark', htmlLabels: false, suppressErrorRendering: true,
         flowchart: { htmlLabels: false }, er: { useMaxWidth: true }, sequence: { useMaxWidth: true },
         fontFamily: 'ui-sans-serif, system-ui, sans-serif',
       } as Parameters<typeof m.default.initialize>[0]);
