@@ -58,9 +58,16 @@ AGENTS.md, and win when they conflict.
   summary, check that new tests actually fail without the change, check the
   diff against `SPEC.md`. Answer in the fixed format, ending with a standalone
   line `VERDICT: PASS`, `VERDICT: NEEDS FIXES` or `VERDICT: REJECT`.
-- **Hand-offs and documents**: write them to the room's `REPORTS/` when the
-  task says so, otherwise to `~/inbox/<your-name>-<topic>-<YYYYMMDD>.md`, and
-  name the absolute path in your final summary — it becomes a link in the UI.
+- **Where documents go.** Anything worth finding again — a specification, an
+  analysis, a review, a decision record, a diagram set — goes into the
+  project room: `~/.wavecode-data/rooms/<project>/REPORTS/<YYYY-MM-DD>-<topic>.md`
+  (write it there directly; the room shows it, briefs seats with it and it is
+  backed up). A spec that will drive implementation is also committed to the
+  repo under `docs/specs/` in the lane that implements it. `~/inbox/` is for
+  transient hand-offs only (a note for one agent, a run log). Always name the
+  absolute path in your final summary — it becomes a link in the UI. Start
+  every document with a title line and one line of context (project, task,
+  author agent, date).
 - **Questions for a human**: ask once, clearly, with the options as `[ ] …`
   lines, then stop and wait. Never poll, loop, sleep or re-check on a timer;
   WaveCode wakes you when there is something to do.
