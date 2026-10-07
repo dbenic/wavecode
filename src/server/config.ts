@@ -139,6 +139,12 @@ export interface WaveConfig {
     method: 'tailscale' | 'token';
     fallback_token: string | null;
     trusted_proxies: string[];
+    /**
+     * tailscale mode only: a token-less caller on the loopback socket is NOT
+     * made owner unless this is true — behind `tailscale serve` or any local
+     * proxy every client looks like 127.0.0.1. Prefer token mode.
+     */
+    allow_loopback_owner?: boolean;
   };
   notifications: {
     web_push: boolean;

@@ -158,6 +158,8 @@ export interface User {
   via_seat?: boolean;
   /** JSON array of agent refs this token is limited to (restricted user, docs/peers.md); null = unrestricted. */
   allowed_agents?: string | null;
+  /** ISO UTC instant after which the token (and its seat token) no longer authenticates; null = never. */
+  expires_at?: string | null;
   created_at: string;
 }
 
@@ -263,7 +265,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 21;
+export const SCHEMA_VERSION = 22;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -395,6 +397,7 @@ const SCHEMA_SQL = `
     seat_rules TEXT,
     default_room TEXT,
     allowed_agents TEXT,
+    expires_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -863,6 +866,10 @@ const MIGRATIONS: Record<number, string> = {
   // JSON array of agent refs (id, name or alias); NULL = unrestricted.
   20: `
     ALTER TABLE users ADD COLUMN allowed_agents TEXT;
+  `,
+  // v21 → v22: token expiry (ISO UTC). A user whose token has expired resolves to nobody.
+  21: `
+    ALTER TABLE users ADD COLUMN expires_at TEXT;
   `,
 };
 
@@ -1451,7 +1458,7 @@ export function listAgentsOwnedBy(userId: string): Agent[] {
 
 // --- User helpers ---
 
-const USER_COLUMNS = 'id, name, role, color, profile, seat_agent_id, seat_rules, default_room, allowed_agents, created_at';
+const USER_COLUMNS = 'id, name, role, color, profile, seat_agent_id, seat_rules, default_room, allowed_agents, expires_at, created_at';
 
 /** Insert a user. `token_hash` is the sha256 of the bearer token — never the plaintext. */
 export function insertUser(user: {
@@ -1461,14 +1468,15 @@ export function insertUser(user: {
   token_hash: string;
   profile?: string | null;
   allowed_agents?: string[] | null;
+  expires_at?: string | null;
 }): Result<User> {
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO users (id, name, role, color, token_hash, profile, allowed_agents)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (id, name, role, color, token_hash, profile, allowed_agents, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, user.name, user.role, user.color, user.token_hash, user.profile === undefined ? user.name : user.profile,
-      user.allowed_agents?.length ? JSON.stringify(user.allowed_agents) : null);
+      user.allowed_agents?.length ? JSON.stringify(user.allowed_agents) : null, user.expires_at ?? null);
     return getUser(id);
   } catch (e) {
     const msg = (e as Error).message;

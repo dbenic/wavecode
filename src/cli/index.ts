@@ -511,7 +511,8 @@ userCmd
   .option('--color <hex>', 'UI color, e.g. #2563eb (default: derived from name)')
   .option('--profile <profile>', 'Credential profile for this user\'s agents (default: the user name)')
   .option('--only-agents <refs>', 'Restrict the token to these agents (comma-separated alias/name/id) — a peer\'s ask-only token (docs/peers.md)')
-  .action(async (name: string, opts: { role: string; color?: string; profile?: string; onlyAgents?: string }) => {
+  .option('--expires <when>', 'Token lifetime: "30d", "12h", "90m" or an ISO instant (default: never)')
+  .action(async (name: string, opts: { role: string; color?: string; profile?: string; onlyAgents?: string; expires?: string }) => {
     initDb();
     const { addUserCommand, formatCreatedUser } = await import('./user-command.js');
     const result = addUserCommand(name, opts);

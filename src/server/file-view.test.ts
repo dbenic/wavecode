@@ -51,3 +51,23 @@ describe('readViewableFile', () => {
     expect(readViewableFile(big, cfg())).toMatchObject({ ok: false, code: 'too_large' });
   });
 });
+
+describe('confinement', () => {
+  it('a symlinked file inside an allowed root is refused (O_NOFOLLOW), even when it points inside another allowed root', () => {
+    const target = write('inbox/real.md', '# real');
+    fs.mkdirSync(path.join(root, 'rooms'), { recursive: true });
+    fs.symlinkSync(target, path.join(root, 'rooms', 'link.md'));
+    expect(readViewableFile(path.join(root, 'rooms', 'link.md'), cfg())).toMatchObject({ ok: false, code: 'forbidden' });
+    // the real file itself is fine
+    expect(readViewableFile(target, cfg())).toMatchObject({ ok: true });
+  });
+
+  it('a symlinked directory that leads into another allowed root is refused: the root is chosen from the requested path', () => {
+    write('inbox/secret-ish.md', 'x');
+    fs.mkdirSync(path.join(root, 'rooms'), { recursive: true });
+    fs.symlinkSync(path.join(root, 'inbox'), path.join(root, 'rooms', 'jump'));
+    expect(readViewableFile(path.join(root, 'rooms', 'jump', 'secret-ish.md'), cfg())).toMatchObject({ ok: false, code: 'forbidden' });
+    // a literal `..` in the request (path.join would already collapse it) is refused outright
+    expect(readViewableFile(`${root}/rooms/../inbox/secret-ish.md`, cfg())).toMatchObject({ ok: false, code: 'invalid' });
+  });
+});

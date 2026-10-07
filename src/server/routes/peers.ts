@@ -1,20 +1,27 @@
 import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
-import { canMutate } from '../users.js';
+import { canMutate, isAdmin } from '../users.js';
+import { getAgent } from '../db.js';
+import * as leases from '../leases.js';
 import { askPeer, getPeerQuestion, listPeerQuestions, listPeers } from '../peers.js';
 
 /** Questions to agents on other WaveCode instances (docs/peers.md). */
 export function registerPeerRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/peers', (c) => c.json(listPeers()));
 
+  // Questions are bound to the caller who asked: others see nothing (admins see all)
   app.get('/api/peers/questions', (c) => {
+    const user = getActingUser(c);
     const status = c.req.query('status') ?? undefined;
-    return c.json(listPeerQuestions({ status }));
+    const all = listPeerQuestions({ status, limit: 200 });
+    return c.json(isAdmin(user) ? all : all.filter((q) => q.actor_id === user.id));
   });
 
   app.get('/api/peers/questions/:id', (c) => {
+    const user = getActingUser(c);
     const q = getPeerQuestion(c.req.param('id'));
-    return q ? c.json(q) : c.json({ error: 'Question not found' }, 404);
+    if (!q || (!isAdmin(user) && q.actor_id !== user.id)) return c.json({ error: 'Question not found' }, 404);
+    return c.json(q);
   });
 
   app.post('/api/peers/:peer/ask', async (c) => {
@@ -26,8 +33,15 @@ export function registerPeerRoutes(app: Hono<NodeAppEnv>): void {
     if (body.from_agent_id !== undefined && body.from_agent_id !== null && typeof body.from_agent_id !== 'string') {
       return c.json({ error: 'from_agent_id must be an agent id' }, 400);
     }
-    // A seat asking on its own behalf gets the answer typed back into its pane
-    const fromAgentId = typeof body.from_agent_id === 'string' ? body.from_agent_id : user.via_seat ? user.seat_agent_id ?? null : null;
+    // The answer is typed into from_agent_id: only an agent the caller may act on (never someone else's pane)
+    let fromAgentId: string | null = user.via_seat ? user.seat_agent_id ?? null : null;
+    if (typeof body.from_agent_id === 'string') {
+      const target = getAgent(body.from_agent_id);
+      if (!target.ok) return c.json({ error: 'from_agent_id: no such agent' }, 404);
+      const access = leases.checkAgentAccess(target.data, user);
+      if (!access.ok) return c.json({ error: `from_agent_id: ${access.error}` }, 403);
+      fromAgentId = target.data.id;
+    }
     const result = await askPeer({
       peer: c.req.param('peer'),
       agent: body.agent.trim(),

@@ -270,6 +270,8 @@ LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=wavecode
+# Only the daemon dies on stop/restart: agent tmux sessions it spawned live in this cgroup and must survive updates
+KillMode=process
 NoNewPrivileges=true
 
 [Install]

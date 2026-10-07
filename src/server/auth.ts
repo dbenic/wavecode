@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import type { MiddlewareHandler } from 'hono';
 import { getConfig, type WaveConfig } from './config.js';
+import { emit } from './event-bus.js';
 import type { User } from './db.js';
 import { runWithActor } from './request-context.js';
 import { canMutate, OWNER_USER, resolveUserByToken, isRestrictedUser, restrictedAgentRefs } from './users.js';
@@ -193,6 +194,14 @@ export function createAuthMiddleware(
     const config = getConfigFn();
     const expectedToken = config.auth.fallback_token;
     const token = resolveRequestToken(c.req.path, c.req.raw.headers, c.req.query('access_token'));
+    // Socket address is best effort: embedded/test apps have no Node bindings
+    let socketIp: string | null = null;
+    try { socketIp = resolveSocketIp(c.env); } catch { socketIp = null; }
+    const proxyTrusted = socketIp !== null && isTrustedProxyIp(socketIp, config.auth.trusted_proxies);
+    const clientIp = proxyTrusted ? resolveClientIp(c.env, c.req.raw.headers, config.auth.trusted_proxies) : socketIp;
+    // Every refusal is an audit row with the resolved actor (never the bearer value)
+    const deny = (status: 401 | 403 | 500, reason: string, actor: User | null = null) =>
+      denyRequest(c, status, reason, actor, clientIp);
 
     let user: User | null = null;
     try {
@@ -203,54 +212,75 @@ export function createAuthMiddleware(
     }
 
     if (!user && token) {
-      return c.json({ error: 'Unauthorized' }, 401);
+      return deny(401, 'token unknown, revoked or expired');
     }
 
     if (!user) {
       if (config.auth.method === 'token') {
         if (!expectedToken) {
-          return c.json({ error: 'Token auth is enabled but no fallback token is configured' }, 500);
+          return deny(500, 'token auth enabled but no fallback token configured');
         }
-        return c.json({ error: 'Unauthorized' }, 401);
+        return deny(401, 'no token');
       }
 
-      const socketIp = resolveSocketIp(c.env);
-      const proxyTrusted = isTrustedProxyIp(socketIp, config.auth.trusted_proxies);
       if (!proxyTrusted && hasForwardingHeaders(c.req.raw.headers)) {
-        return c.json({ error: 'Unauthorized: untrusted proxy' }, 401);
+        return deny(401, 'forwarded headers from an untrusted proxy');
       }
-
-      const clientIp = proxyTrusted
-        ? resolveClientIp(c.env, c.req.raw.headers, config.auth.trusted_proxies)
-        : socketIp;
       if (!isPrivateOrTailnetIp(clientIp)) {
-        return c.json({ error: 'Unauthorized: not on tailnet' }, 401);
+        return deny(401, 'token-less caller not on the tailnet');
+      }
+      // Behind `tailscale serve` or any local proxy every client is 127.0.0.1:
+      // a token-less loopback caller is not the owner unless explicitly allowed.
+      if (socketIp !== null && isLoopback(socketIp) && !proxyTrusted && !config.auth.allow_loopback_owner) {
+        return deny(401, 'token-less loopback caller (set auth.allow_loopback_owner or use token mode)');
       }
 
       user = OWNER_USER;
     }
 
     if (!canMutate(user) && c.req.path.startsWith('/api/') && !READ_ONLY_METHODS.has(c.req.method)) {
-      return c.json({ error: `Forbidden: '${user.name}' is an observer (read-only)` }, 403);
+      return deny(403, `'${user.name}' is an observer (read-only)`, user);
     }
 
     // Spec §5d: a seat token is narrower than its person's login — it never
     // carries admin powers and cannot manage people, seats, settings or the system.
     if (user.via_seat) {
       const denied = seatTokenDenied(c.req.method, c.req.path);
-      if (denied) return c.json({ error: `Forbidden: a seat token cannot ${denied} — use your own login` }, 403);
+      if (denied) return deny(403, `a seat token cannot ${denied} — use your own login`, user);
       if (user.role === 'admin') user = { ...user, role: 'developer' };
     }
 
     // docs/peers.md: a token limited to named agents (a peer's ask-only token)
     // gets exactly the surface needed to ask them and read their answers.
     if (isRestrictedUser(user) && c.req.path.startsWith('/api/') && !restrictedPathAllowed(c.req.method, c.req.path)) {
-      return c.json({ error: `Forbidden: this token is limited to asking ${restrictedAgentRefs(user)!.join(', ')}` }, 403);
+      return deny(403, `token limited to agents ${restrictedAgentRefs(user)!.join(', ') || '(none)'}`, user);
     }
 
     c.set('user', user);
     await runWithActor(user.id, () => next());
   };
+}
+
+/**
+ * Refuse a request and record it: `auth.denied` with method, path, status,
+ * reason, the resolved actor name (if any) and the client IP. Never the
+ * bearer value, never the body. Audit is best effort — no DB, no row.
+ */
+export function denyRequest(
+  c: { req: { method: string; path: string }; json: (body: unknown, status: 401 | 403 | 500) => Response },
+  status: 401 | 403 | 500,
+  reason: string,
+  actor: User | null,
+  clientIp: string | null,
+): Response {
+  try {
+    emit('auth.denied', 'auth', c.req.path, {
+      method: c.req.method, path: c.req.path, status, reason,
+      actor: actor?.name ?? null, actor_id: actor?.id ?? null, via_seat: actor?.via_seat ?? false, ip: clientIp,
+    }, actor?.id ?? null);
+  } catch { /* events table not available (tests / embedded) */ }
+  const message = status === 500 ? reason : status === 401 ? 'Unauthorized' : `Forbidden: ${reason}`;
+  return c.json({ error: message }, status);
 }
 
 const RESTRICTED_ALLOW: Array<[string, RegExp]> = [

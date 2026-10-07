@@ -26,7 +26,7 @@ import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
 import { defaultSeatFor } from '../seats.js';
 import { validateAlias, validatePersona, validateTag, withPersona } from '../agent-identity.js';
 import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
-import { agentAllowedFor } from '../users.js';
+import { agentAllowedFor, isRestrictedUser } from '../users.js';
 import { runtimeDefaultsFor, subscriptionFor } from '../subscription-info.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
@@ -100,14 +100,21 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!access.ok) return c.json({ error: access.error }, 403);
 
     let typed = body.text;
+    const user = getActingUser(c);
     if (body.raw) {
-      // Raw keys (C-c, Escape, Enter) are how a stuck shell gets fixed — never gated.
+      // Raw keys (C-c, Escape, Enter) fix a stuck shell — a person's own, unrestricted
+      // token only. A peer's ask-only token or a seat must never interrupt an agent.
+      if (isRestrictedUser(user) || user.via_seat) {
+        return c.json({ error: 'Forbidden: raw keys need a person\'s own unrestricted token' }, 403);
+      }
       const result = sessionManager.sendRawKeys(agentResult.data.id, body.text);
       if (!result.ok) return c.json({ error: result.error }, 500);
     } else {
-      // T0: a prompt typed into a bare shell executes as commands.
-      if (runtimeLiveness.getRuntimeState(agentResult.data) === 'dead') {
-        return c.json({ error: `${runtimeLiveness.RUNTIME_NOT_RUNNING} — relaunch it (or send raw keys) first` }, 409);
+      // T0: a prompt typed into a bare shell executes as commands; an unknown
+      // state (no session, capture failed) is not a running runtime either.
+      const state = runtimeLiveness.getRuntimeState(agentResult.data);
+      if (state !== 'alive') {
+        return c.json({ error: `${runtimeLiveness.RUNTIME_NOT_RUNNING} (${state}) — relaunch it (or send raw keys) first` }, 409);
       }
       // Spec §5c: `[you are @toni — frontend lead] …` when the agent has a persona
       typed = withPersona(agentResult.data, body.text);

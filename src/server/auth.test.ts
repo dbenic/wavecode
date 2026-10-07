@@ -240,6 +240,15 @@ describe('auth.ts — user resolution (spec §1)', () => {
     expect(await res.json()).toMatchObject({ id: 'owner', role: 'admin' });
   });
 
+  it('tailscale mode: a token-less LOOPBACK caller is not the owner unless auth.allow_loopback_owner is set', async () => {
+    const strict = makeUserApp(makeConfig({ method: 'tailscale' }));
+    const res = await strict.request('/api/whoami', {}, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+    expect(res.status).toBe(401);
+    const lenient = makeUserApp({ ...makeConfig({ method: 'tailscale' }), auth: { ...makeConfig({ method: 'tailscale' }).auth, allow_loopback_owner: true } });
+    const ok = await lenient.request('/api/whoami', {}, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+    expect(ok.status).toBe(200);
+  });
+
   it('rejects an unknown or revoked token in tailscale mode instead of falling back to owner', async () => {
     const app = makeUserApp(makeConfig({ method: 'tailscale', fallback_token: 'secret' }));
     const tailnet = { incoming: { socket: { remoteAddress: '100.64.0.5' } } };

@@ -20,7 +20,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfig, type PeerConfig } from './config.js';
-import { generateId, getAgent, getDb, type Agent, type Result, type Run } from './db.js';
+import { generateId, getAgent, getDb, getUser, type Agent, type Result, type Run } from './db.js';
+import { checkAgentAccess } from './leases.js';
+import { OWNER_USER_ID } from './users.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import * as sessionManager from './session-manager.js';
@@ -268,7 +270,8 @@ function writeAnswerFile(q: PeerQuestion, answer: string): string {
     answer.trim(),
     '',
   ].join('\n');
-  fs.writeFileSync(file, body, { mode: 0o600 });
+  // Exclusive create: never overwrite or follow a pre-planted path (ids are unique, so this only guards tampering)
+  fs.writeFileSync(file, body, { mode: 0o600, flag: 'wx' });
   return file;
 }
 
@@ -298,9 +301,21 @@ function deliverOrQueue(questionId: string, agentId: string): void {
   deliver(questionId, agent.data);
 }
 
+/** The asker (if a person) must still be allowed to act on the target pane when the answer lands. */
+function deliveryStillAllowed(q: PeerQuestion, agent: Agent): boolean {
+  if (!q.actor_id || q.actor_id === OWNER_USER_ID) return true;
+  const user = getUser(q.actor_id);
+  if (!user.ok) return false; // revoked meanwhile
+  return checkAgentAccess(agent, user.data).ok;
+}
+
 function deliver(questionId: string, agent: Agent): void {
   const q = getPeerQuestion(questionId);
   if (!q || q.status !== 'answered' || !q.answer_path) return;
+  if (!deliveryStillAllowed(q, agent)) {
+    logger.warn({ questionId, agentId: agent.id, actorId: q.actor_id }, 'Peer answer not typed: asker no longer allowed on that agent (file kept)');
+    return;
+  }
   let answer = '';
   try {
     answer = fs.readFileSync(q.answer_path, 'utf8').split('## Answer\n\n')[1] ?? '';

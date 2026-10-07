@@ -19,6 +19,8 @@ StandardError=journal
 SyslogIdentifier=wavecode
 
 # Baseline hardening
+# Only the daemon dies on stop/restart: agent tmux sessions it spawned live in this cgroup and must survive updates
+KillMode=process
 NoNewPrivileges=true
 
 # Optional stronger hardening:

@@ -14,10 +14,12 @@ export interface AddUserOptions {
   profile?: string;
   /** Comma-separated agent refs: the token may only ask/read these (a peer's ask-only token). */
   onlyAgents?: string;
+  /** "30d" / "12h" / ISO instant — the token stops authenticating then. */
+  expires?: string;
 }
 
 export function addUserCommand(name: string, opts: AddUserOptions = {}): Result<CreatedUser> {
-  return createUser({ name, role: opts.role, color: opts.color, profile: opts.profile, only_agents: opts.onlyAgents });
+  return createUser({ name, role: opts.role, color: opts.color, profile: opts.profile, only_agents: opts.onlyAgents, expires: opts.expires });
 }
 
 export function formatCreatedUser({ user, token }: CreatedUser): string {

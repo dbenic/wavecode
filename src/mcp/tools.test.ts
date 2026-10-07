@@ -33,6 +33,11 @@ vi.mock('../server/session-manager.js', async () => {
   };
 });
 
+// Agents in this harness have a mocked pane: treat their runtime as alive (send refuses 'unknown' since the 2026-10-07 hardening)
+vi.mock('../server/runtime-liveness.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../server/runtime-liveness.js')>();
+  return { ...actual, getRuntimeState: vi.fn(() => 'alive') };
+});
 vi.mock('../server/output-watcher.js', () => ({
   startWatching: vi.fn(),
   stopWatching: vi.fn(),

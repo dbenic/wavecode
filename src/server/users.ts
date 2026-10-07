@@ -70,9 +70,39 @@ export function resolveUserByToken(token: string | null, fallbackToken: string |
   // acts under that user's role and lease rules, and can be revoked alone.
   // It is marked, so a seat can be held to "propose, don't edit" (spec §5f).
   const person = getUserByTokenHash(hash);
-  if (person) return person;
+  if (person) return isExpired(person) ? null : person;
   const seatUser = getUserBySeatTokenHash(hash);
-  return seatUser ? { ...seatUser, via_seat: true } : null;
+  if (!seatUser || isExpired(seatUser)) return null; // the seat expires with its person
+  return { ...seatUser, via_seat: true };
+}
+
+/**
+ * Token expiry, exact UTC instant: at `expires_at` the token is already
+ * invalid. An unparseable value fails closed (expired).
+ */
+export function isExpired(user: Pick<User, 'expires_at'>, now: number = Date.now()): boolean {
+  const raw = user.expires_at;
+  if (raw === undefined || raw === null || raw === '') return false;
+  const t = Date.parse(raw);
+  if (Number.isNaN(t)) return true;
+  return now >= t;
+}
+
+/** "30d" / "12h" / "90m" or an ISO instant → ISO UTC; null = never. */
+export function parseExpiry(input: unknown, now: number = Date.now()): Result<string | null> {
+  if (input === undefined || input === null || input === '') return { ok: true, data: null };
+  if (typeof input !== 'string') return { ok: false, error: 'expires must be "30d", "12h", "90m" or an ISO date' };
+  const rel = /^(\d+)([mhd])$/.exec(input.trim());
+  if (rel) {
+    const n = Number(rel[1]);
+    const ms = rel[2] === 'm' ? n * 60_000 : rel[2] === 'h' ? n * 3_600_000 : n * 86_400_000;
+    if (n <= 0 || ms > 366 * 86_400_000) return { ok: false, error: 'expires must be between 1m and 366d' };
+    return { ok: true, data: new Date(now + ms).toISOString() };
+  }
+  const t = Date.parse(input);
+  if (Number.isNaN(t)) return { ok: false, error: 'expires must be "30d", "12h", "90m" or an ISO date' };
+  if (t <= now) return { ok: false, error: 'expires is already in the past' };
+  return { ok: true, data: new Date(t).toISOString() };
 }
 
 export function canMutate(user: Pick<User, 'role'>): boolean {
@@ -91,6 +121,8 @@ export interface CreateUserInput {
   profile?: unknown;
   /** Restrict this token to these agents (refs: id, name or alias) — a peer's "ask-only" token (docs/peers.md). */
   only_agents?: unknown;
+  /** Token lifetime: "30d", "12h", "90m" or an ISO instant; default never. */
+  expires?: unknown;
 }
 
 export interface CreatedUser {
@@ -141,21 +173,30 @@ export function createUser(input: CreateUserInput): Result<CreatedUser> {
     allowedAgents = refs;
   }
 
+  const expiry = parseExpiry(input.expires);
+  if (!expiry.ok) return expiry;
+
   const token = generateToken();
-  const inserted = insertUser({ name, role, color, token_hash: hashToken(token), profile, allowed_agents: allowedAgents });
+  const inserted = insertUser({ name, role, color, token_hash: hashToken(token), profile, allowed_agents: allowedAgents, expires_at: expiry.data });
   if (!inserted.ok) return inserted;
   return { ok: true, data: { user: inserted.data, token } };
 }
 
-/** Agent refs a restricted user may touch; null = unrestricted. */
+/**
+ * Agent refs a restricted user may touch; null = unrestricted. FAIL CLOSED:
+ * a restriction that is present but malformed, empty or not an array denies
+ * every agent (empty list) rather than lifting the restriction.
+ */
 export function restrictedAgentRefs(user: Pick<User, 'allowed_agents'> | null | undefined): string[] | null {
   const raw = user?.allowed_agents;
-  if (!raw) return null;
+  if (raw === undefined || raw === null) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length ? parsed.filter((r): r is string => typeof r === 'string') : null;
+    if (!Array.isArray(parsed)) return [];
+    const refs = parsed.filter((r): r is string => typeof r === 'string' && r.trim().length > 0);
+    return refs; // [] when nothing valid remains → restricted to nothing
   } catch {
-    return null;
+    return [];
   }
 }
 

@@ -53,6 +53,19 @@ Read in this order:
 
 ## Recently landed (see git log for detail)
 
+-3. **Security hardening (review of 2026-10-07)**: restrictions fail closed
+   (malformed `allowed_agents` denies all); token expiry (`users.expires_at`,
+   `user add --expires 30d`, exact UTC boundary, seats expire with their
+   person); every auth denial is an `auth.denied` event (actor, reason, IP,
+   never the bearer); raw keys only for a person's own unrestricted token and
+   unknown runtime state refuses typed prompts; peer questions bound to their
+   caller (reply target must pass `checkAgentAccess`, re-checked at delivery);
+   file viewer confines to the root of the requested path, refuses symlinks on
+   the final component (O_NOFOLLOW) and reads from the descriptor it stat'ed;
+   tailscale mode refuses token-less loopback callers unless
+   `auth.allow_loopback_owner`; systemd `KillMode=process` so a daemon restart
+   never kills agent tmux sessions. Schema v22.
+
 -2. **Peering + restricted tokens** (`peers.ts`, `docs/peers.md`, 2026-10-06):
    `#ask deploy/fable …` / MCP `ask_peer` sends a question to an agent on
    another WaveCode instance; the answer comes back as a file under
