@@ -29,3 +29,14 @@ describe('path links', () => {
     expect(out).toMatch(/<a href="https:\/\/example\.com\/a"[^>]*target="_blank"/);
   });
 });
+
+describe('diagram source recovery', () => {
+  it('rebuilds newlines from <br> and decodes entities so Mermaid gets the block as written', async () => {
+    const { renderMarkdown } = await import('./markdown');
+    const { diagramSourceFromHtml } = await import('./diagrams');
+    const md = '```mermaid\nflowchart LR\n  UI[Chat] -->|question| GW[Gateway]\n  GW --> RT[src/server/advisor]\n```';
+    const html = renderMarkdown(md);
+    const pre = /<pre class="diagram diagram-mermaid[^"]*">([\s\S]*?)<\/pre>/.exec(html)![1];
+    expect(diagramSourceFromHtml(pre)).toBe('flowchart LR\n  UI[Chat] -->|question| GW[Gateway]\n  GW --> RT[src/server/advisor]');
+  });
+});

@@ -17,7 +17,13 @@ let seq = 0;
 async function mermaid() {
   if (!mermaidReady) {
     mermaidReady = import('mermaid').then((m) => {
-      m.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', flowchart: { htmlLabels: false }, fontFamily: 'ui-sans-serif, system-ui, sans-serif' });
+      // No HTML labels anywhere: Mermaid would put entity/class/state names in <foreignObject>, which the
+      // SVG sanitizer removes — leaving empty boxes. Plain SVG text survives sanitizing.
+      m.default.initialize({
+        startOnLoad: false, securityLevel: 'strict', theme: 'dark', htmlLabels: false,
+        flowchart: { htmlLabels: false }, er: { useMaxWidth: true }, sequence: { useMaxWidth: true },
+        fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+      } as Parameters<typeof m.default.initialize>[0]);
       return m.default;
     });
   }
@@ -41,13 +47,26 @@ export function sanitizeSvg(svg: string): string {
   return String(DOMPurify.sanitize(svg, SVG_PURIFY));
 }
 
+/**
+ * The diagram source as the agent wrote it. renderMarkdown turns newlines into
+ * <br> for display and escapes `<`/`&`, so textContent would be one long line
+ * with entities decoded: rebuild from the HTML instead (br → newline, then
+ * decode entities through a textarea).
+ */
+export function diagramSourceFromHtml(html: string): string {
+  const withBreaks = html.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '');
+  const ta = document.createElement('textarea');
+  ta.innerHTML = withBreaks;
+  return ta.value.replace(/\u00a0/g, ' ').trim();
+}
+
 /** Render every pending diagram block under `root`. Idempotent: rendered blocks are marked. */
 export async function renderDiagramsIn(root: ParentNode): Promise<void> {
   const blocks = Array.from(root.querySelectorAll<HTMLElement>('pre.diagram:not([data-rendered])'));
   await Promise.all(blocks.map(async (pre) => {
     pre.setAttribute('data-rendered', 'pending');
     const lang = Array.from(pre.classList).find((c) => c.startsWith('diagram-'))?.slice('diagram-'.length) ?? 'mermaid';
-    const source = pre.textContent ?? '';
+    const source = diagramSourceFromHtml(pre.innerHTML);
     try {
       const svg = await renderDiagram(lang, source);
       const box = document.createElement('div');
