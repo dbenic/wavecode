@@ -195,6 +195,8 @@ function GuideViewer({ guideId, agents, onClose }: { guideId: string; agents: Ag
   const [detail, setDetail] = useState<GuideDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAttach, setShowAttach] = useState(false);
+  const docRef = useRef<HTMLDivElement>(null);
+  useDiagrams(docRef, [detail?.content]);
 
   useEffect(() => {
     setLoading(true);
@@ -216,8 +218,6 @@ function GuideViewer({ guideId, agents, onClose }: { guideId: string; agents: Ag
     );
   }
 
-  const docRef = useRef<HTMLDivElement>(null);
-  useDiagrams(docRef, [detail?.content]);
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-4">
