@@ -144,11 +144,12 @@ it, as a fenced block:
   (lint, gate checks, unit, conformance, frontend, build, real-PG API; about
   4 minutes; uncommitted changes are not tested). Runs are a FIFO queue, one
   at a time: check `countix-remote-test status` first and never queue the
-  same SHA twice. Put the run id, the exact SHA and the
+  same SHA twice; `countix-remote-test history` lists recent finished runs.
+  Put the run id, the exact SHA and the
   `=== RESULT GREEN|RED …` line in your hand-off. RED blocks the hand-off.
-- A run that is RED only on a test the team has listed as flaky on `main`
-  may be re-run once — say so in the hand-off. Never skip, weaken or delete
-  tests to get green.
+- A run that is RED only on a test the room lists as flaky on `main`
+  (ROOM.md, "Known flaky") may be re-run once — say so in the hand-off. Never
+  skip, weaken or delete tests to get green.
 - Do not start long-running servers on fixed ports unless the task names the
   port. Stop anything you started before you finish.
 - Do not install global packages, do not use `sudo`, do not change anything
