@@ -45,7 +45,7 @@ describe('readViewableFile', () => {
     expect(readViewableFile(path.join(root, 'rooms', 'nope.md'), cfg())).toMatchObject({ ok: false, code: 'not_found' });
     fs.mkdirSync(path.join(root, 'rooms', 'dir'), { recursive: true });
     expect(readViewableFile(path.join(root, 'rooms', 'dir'), cfg())).toMatchObject({ ok: false, code: 'not_found' });
-    const bin = write('rooms/x.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d]));
+    const bin = write('rooms/x.bin', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d]));
     expect(readViewableFile(bin, cfg())).toMatchObject({ ok: false, code: 'binary' });
     const big = write('rooms/big.log', 'a'.repeat(MAX_VIEW_BYTES + 1));
     expect(readViewableFile(big, cfg())).toMatchObject({ ok: false, code: 'too_large' });
@@ -69,5 +69,18 @@ describe('confinement', () => {
     expect(readViewableFile(path.join(root, 'rooms', 'jump', 'secret-ish.md'), cfg())).toMatchObject({ ok: false, code: 'forbidden' });
     // a literal `..` in the request (path.join would already collapse it) is refused outright
     expect(readViewableFile(`${root}/rooms/../inbox/secret-ish.md`, cfg())).toMatchObject({ ok: false, code: 'invalid' });
+  });
+});
+
+describe('diagram, svg and image kinds', () => {
+  it('.d2/.mmd/.puml are diagrams with a language, .svg is svg text, .png is a base64 image with mime', () => {
+    expect(readViewableFile(write('rooms/arch.d2', 'a -> b'), cfg())).toMatchObject({ ok: true, data: { kind: 'diagram', lang: 'd2', content: 'a -> b' } });
+    expect(readViewableFile(write('rooms/flow.mmd', 'flowchart TD'), cfg())).toMatchObject({ ok: true, data: { kind: 'diagram', lang: 'mermaid' } });
+    expect(readViewableFile(write('rooms/seq.puml', '@startuml'), cfg())).toMatchObject({ ok: true, data: { kind: 'diagram', lang: 'plantuml' } });
+    expect(readViewableFile(write('rooms/pic.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>'), cfg())).toMatchObject({ ok: true, data: { kind: 'svg' } });
+    const png = write('rooms/shot.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]));
+    const r = readViewableFile(png, cfg());
+    expect(r).toMatchObject({ ok: true, data: { kind: 'image', mime: 'image/png' } });
+    expect(r.ok && Buffer.from(r.data.content, 'base64')[0]).toBe(0x89);
   });
 });

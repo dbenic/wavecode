@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useDiagrams } from '../hooks/useDiagrams';
 import { useNavigate, useParams } from 'react-router-dom';
 import { apiGet, apiPost, apiDelete } from '../hooks/useApi';
 import type { Agent } from '../types';
@@ -215,6 +216,8 @@ function GuideViewer({ guideId, agents, onClose }: { guideId: string; agents: Ag
     );
   }
 
+  const docRef = useRef<HTMLDivElement>(null);
+  useDiagrams(docRef, [detail?.content]);
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-4">
@@ -230,7 +233,7 @@ function GuideViewer({ guideId, agents, onClose }: { guideId: string; agents: Ag
         <h2 className="text-base font-bold text-slate-100">{detail.title}</h2>
         <span className="text-[9px] text-slate-700 font-mono shrink-0 truncate max-w-[50%]">{detail.slug}</span>
       </div>
-      <div className="prose-invert max-w-none" dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.content) }} />
+      <div ref={docRef} className="prose-invert max-w-none" dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.content) }} />
       {showAttach && (
         <AttachModal
           guide={detail}

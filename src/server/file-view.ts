@@ -15,14 +15,22 @@ import path from 'node:path';
 import { getConfig, type WaveConfig } from './config.js';
 
 export const MAX_VIEW_BYTES = 1024 * 1024;
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+/** Diagram-as-code files render in the viewer (Mermaid in the browser, the rest via Kroki). */
+const DIAGRAM_LANG: Record<string, string> = { '.mmd': 'mermaid', '.mermaid': 'mermaid', '.d2': 'd2', '.puml': 'plantuml', '.plantuml': 'plantuml', '.dot': 'graphviz', '.gv': 'graphviz', '.erd': 'erd', '.dbml': 'dbml' };
+const IMAGE_MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 
 export interface ViewableFile {
   path: string;
   name: string;
   size: number;
   modified_at: string;
-  kind: 'markdown' | 'text';
+  kind: 'markdown' | 'text' | 'diagram' | 'svg' | 'image';
+  /** text for markdown/text/diagram/svg; base64 for image */
   content: string;
+  /** diagram language for kind 'diagram'; mime for kind 'image' */
+  lang?: string;
+  mime?: string;
 }
 
 export type FileViewCode = 'invalid' | 'forbidden' | 'not_found' | 'too_large' | 'binary';
@@ -93,21 +101,22 @@ export function readViewableFile(requested: string, cfg: WaveConfig = getConfig(
   try {
     const st = fs.fstatSync(fd);
     if (!st.isFile()) return { ok: false, code: 'not_found', error: 'Not a file' };
-    if (st.size > MAX_VIEW_BYTES) return { ok: false, code: 'too_large', error: `File is larger than ${MAX_VIEW_BYTES / 1024} KB` };
+    const isImage = Boolean(IMAGE_MIME[path.extname(target).toLowerCase()]);
+    if (!isImage && st.size > MAX_VIEW_BYTES) return { ok: false, code: 'too_large', error: `File is larger than ${MAX_VIEW_BYTES / 1024} KB` };
     const buf = fs.readFileSync(fd);
-    if (buf.subarray(0, 8192).includes(0)) return { ok: false, code: 'binary', error: 'Binary file' };
     const ext = path.extname(target).toLowerCase();
-    return {
-      ok: true,
-      data: {
-        path: requested,
-        name: path.basename(target),
-        size: st.size,
-        modified_at: st.mtime.toISOString(),
-        kind: ext === '.md' || ext === '.markdown' ? 'markdown' : 'text',
-        content: buf.toString('utf8'),
-      },
-    };
+    const base = { path: requested, name: path.basename(target), size: st.size, modified_at: st.mtime.toISOString() };
+    const imageMime = IMAGE_MIME[ext];
+    if (imageMime) {
+      if (st.size > MAX_IMAGE_BYTES) return { ok: false, code: 'too_large', error: `Image is larger than ${MAX_IMAGE_BYTES / 1024} KB` };
+      return { ok: true, data: { ...base, kind: 'image', mime: imageMime, content: buf.toString('base64') } };
+    }
+    if (buf.subarray(0, 8192).includes(0)) return { ok: false, code: 'binary', error: 'Binary file' };
+    const text = buf.toString('utf8');
+    if (ext === '.svg') return { ok: true, data: { ...base, kind: 'svg', content: text } };
+    const lang = DIAGRAM_LANG[ext];
+    if (lang) return { ok: true, data: { ...base, kind: 'diagram', lang, content: text } };
+    return { ok: true, data: { ...base, kind: ext === '.md' || ext === '.markdown' ? 'markdown' : 'text', content: text } };
   } finally {
     fs.closeSync(fd);
   }

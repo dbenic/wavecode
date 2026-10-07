@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useDiagrams } from '../hooks/useDiagrams';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost, apiDelete } from '../hooks/useApi';
 import { useSSE } from '../hooks/useSSE';
@@ -284,6 +285,8 @@ function SpecDetail({ run, agents, onBack, onChanged }: {
     navigator.clipboard.writeText(run.output_md).catch(() => {});
   };
 
+  const docRef = useRef<HTMLDivElement>(null);
+  useDiagrams(docRef, [run.output_md]);
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-4">
@@ -334,7 +337,7 @@ function SpecDetail({ run, agents, onBack, onChanged }: {
       )}
 
       {run.output_md ? (
-        <div className="prose-invert max-w-none" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.output_md) }} />
+        <div ref={docRef} className="prose-invert max-w-none" dangerouslySetInnerHTML={{ __html: renderMarkdown(run.output_md) }} />
       ) : (
         <div className="text-[11px] text-slate-600 italic py-6 text-center">
           {run.status === 'running' ? 'Researching...' : 'No output'}

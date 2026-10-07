@@ -1,16 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiGet } from '../hooks/useApi';
 import { renderMarkdown } from '../utils/markdown';
 import { internalLinkClickHandler } from '../utils/paths';
+import { useDiagrams } from '../hooks/useDiagrams';
+import { renderDiagram, sanitizeSvg } from '../utils/diagrams';
 
 interface ViewableFile {
   path: string;
   name: string;
   size: number;
   modified_at: string;
-  kind: 'markdown' | 'text';
+  kind: 'markdown' | 'text' | 'diagram' | 'svg' | 'image';
   content: string;
+  lang?: string;
+  mime?: string;
 }
 
 /**
@@ -25,6 +29,20 @@ export default function FileView() {
   const [file, setFile] = useState<ViewableFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [svg, setSvg] = useState<string | null>(null);
+  const [svgError, setSvgError] = useState<string | null>(null);
+  const mdRef = useRef<HTMLElement>(null);
+  useDiagrams(mdRef, [file?.content]);
+
+  // Diagram-as-code files (.mmd, .d2, .puml, .dot …) and raw SVG files render as pictures
+  useEffect(() => {
+    setSvg(null); setSvgError(null);
+    if (!file) return;
+    if (file.kind === 'svg') { setSvg(sanitizeSvg(file.content)); return; }
+    if (file.kind === 'diagram') {
+      renderDiagram(file.lang ?? 'mermaid', file.content).then(setSvg).catch((e: Error) => setSvgError(e.message));
+    }
+  }, [file]);
 
   useEffect(() => {
     setFile(null);
@@ -74,8 +92,22 @@ export default function FileView() {
         </div>
       )}
       {!error && !file && <div className="text-xs text-slate-500 animate-pulse">Loading…</div>}
+      {file && (file.kind === 'diagram' || file.kind === 'svg') && (
+        <div data-testid="file-diagram" className="rounded-lg border border-slate-800/60 bg-slate-950/60 p-3 overflow-x-auto [&_svg]:max-w-full [&_svg]:h-auto">
+          {svg ? <div dangerouslySetInnerHTML={{ __html: svg }} /> : svgError
+            ? <pre className="text-[11px] text-amber-200 whitespace-pre-wrap">[could not render: {svgError}]{'\n\n'}{file.content}</pre>
+            : <div className="text-xs text-slate-500 animate-pulse">Rendering…</div>}
+          <details className="mt-2 text-[10px] text-slate-500"><summary className="cursor-pointer">source</summary><pre className="mt-1 whitespace-pre-wrap text-slate-400">{file.content}</pre></details>
+        </div>
+      )}
+      {file && file.kind === 'image' && (
+        <div data-testid="file-image" className="rounded-lg border border-slate-800/60 bg-slate-950/60 p-3 overflow-x-auto">
+          <img src={`data:${file.mime};base64,${file.content}`} alt={file.name} className="max-w-full h-auto" />
+        </div>
+      )}
       {file && file.kind === 'markdown' && (
         <article
+          ref={mdRef}
           data-testid="file-markdown"
           className="rounded-lg border border-slate-800/60 bg-slate-900/40 px-4 py-3 break-words [&_table]:block [&_table]:overflow-x-auto"
           onClick={internalLinkClickHandler((to) => navigate(to))}

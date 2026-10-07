@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { useDiagrams } from '../hooks/useDiagrams';
 import { useNavigate, useParams } from 'react-router-dom';
 import { apiGet } from '../hooks/useApi';
 import { renderMarkdown } from '../utils/markdown';
@@ -164,6 +165,8 @@ function DocList({ docs, onSelect }: { docs: DocEntry[]; onSelect: (slug: string
 function DocViewer({ slug, onBack }: { slug: string; onBack: () => void }) {
   const [doc, setDoc] = useState<DocContent | null>(null);
   const [loading, setLoading] = useState(true);
+  const docRef = useRef<HTMLDivElement>(null);
+  useDiagrams(docRef, [doc?.content]);
 
   useEffect(() => {
     setLoading(true);
@@ -221,6 +224,7 @@ function DocViewer({ slug, onBack }: { slug: string; onBack: () => void }) {
         </div>
       </div>
       <div
+        ref={docRef}
         className="prose-invert max-w-none"
         dangerouslySetInnerHTML={{ __html: renderMarkdown(doc.content) }}
       />

@@ -178,6 +178,8 @@ export interface WaveConfig {
      */
     auto_pick: boolean;
   };
+  /** Diagram rendering: a self-hosted Kroki (https://kroki.io) for D2 / PlantUML / Graphviz blocks and files. Mermaid renders in the browser. */
+  diagrams?: { kroki_url?: string | null };
   llm: {
     provider: 'anthropic' | 'openai-compatible';
     api_key: string | null;
@@ -223,6 +225,9 @@ export function validateConfig(cfg: WaveConfig): void {
   const profileErrors = validateProfilesConfig(cfg);
   if (profileErrors.length > 0) {
     throw new Error(`Invalid credential profile config:\n  ${profileErrors.join('\n  ')}`);
+  }
+  if (cfg.diagrams?.kroki_url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.diagrams.kroki_url)) {
+    throw new Error('diagrams.kroki_url must be an http(s) origin like http://127.0.0.1:8000');
   }
   for (const [name, project] of Object.entries(cfg.projects ?? {})) {
     if (project.release_peer !== undefined) {

@@ -5,7 +5,8 @@
  * Write access is decided by the server (`writable`), never here.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
+import { useDiagrams } from '../../hooks/useDiagrams';
 import { apiGet, apiPost, apiPut } from '../../hooks/useApi';
 import type { SSEEvent } from '../../hooks/useSSE';
 import type { Agent } from '../../types';
@@ -49,6 +50,8 @@ export default function RoomView({ agents, lastEvent }: RoomViewProps) {
   const [sendTo, setSendTo] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const docRef = useRef<HTMLDivElement>(null);
+  useDiagrams(docRef, [content]);
 
   const room = rooms.find((r) => r.project === project) ?? null;
 
@@ -204,6 +207,7 @@ export default function RoomView({ agents, lastEvent }: RoomViewProps) {
             ) : path ? (
               <article
                 data-testid="room-doc"
+                ref={docRef}
                 className="prose-invert text-sm text-slate-300"
                 // renderMarkdown escapes HTML first and sanitizes the result (DOMPurify)
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}

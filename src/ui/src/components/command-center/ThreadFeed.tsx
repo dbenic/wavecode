@@ -1,5 +1,6 @@
 import { renderMarkdown } from '../../utils/markdown';
 import { internalLinkClickHandler } from '../../utils/paths';
+import { useDiagrams } from '../../hooks/useDiagrams';
 import { awaitingReplyPromptIds } from '../../utils/command-center';
 import { useEffect, useRef, useState } from 'react';
 import type { ThreadAction, ThreadItem, ThreadKind, User } from '../../types';
@@ -171,6 +172,8 @@ function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction,
   onFeedback?: (item: ThreadItem, score: 1 | -1, note?: string) => void;
   onAction: (item: ThreadItem, action: ThreadAction) => void;
 }) {
+  const mdRef = useRef<HTMLDivElement>(null);
+  useDiagrams(mdRef, [item.body]);
   const color = colorOverride ?? agentColor(agentName);
   const chips = item.actions.filter((a) => a.id === 'quick_reply');
   const other = item.actions.filter((a) => a.id !== 'quick_reply');
@@ -192,6 +195,7 @@ function ReplyBubble({ item, agentName, persona, color: colorOverride, onAction,
         </div>
         {body && (
           <div
+            ref={mdRef}
             className="reply-markdown break-words text-sm text-slate-100 [&_p]:mb-2 [&_p]:text-sm [&_p]:text-slate-100 [&_li]:text-slate-200 [&_table]:block [&_table]:overflow-x-auto"
             onClick={onNavigate ? internalLinkClickHandler(onNavigate) : undefined}
             // renderMarkdown escapes HTML first and sanitizes the result (DOMPurify allowlist)

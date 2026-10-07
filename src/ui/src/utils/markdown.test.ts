@@ -30,3 +30,14 @@ describe('renderMarkdown', () => {
     expect(html).toContain('&lt;img');
   });
 });
+
+describe('diagram fences', () => {
+  it('```mermaid / ```d2 blocks become marked <pre class="diagram diagram-<lang>"> with the escaped source; other fences stay code', async () => {
+    const { renderMarkdown } = await import('./markdown');
+    const out = renderMarkdown('Flow:\n\n```mermaid\nflowchart TD\n  A[Upload] --> B{Valid?}\n```\n\n```d2\nx -> y: hi\n```\n\n```ts\nconst a = 1;\n```');
+    expect(out).toContain('<pre class="diagram diagram-mermaid text-[11px] text-slate-500">flowchart TD');
+    expect(out).toContain('A[Upload] --&gt; B{Valid?}');
+    expect(out).toContain('<pre class="diagram diagram-d2 text-[11px] text-slate-500">x -&gt; y: hi</pre>');
+    expect(out).toMatch(/<pre class="bg-slate-900\/80[^"]*"><code>const a = 1;<\/code><\/pre>/);
+  });
+});

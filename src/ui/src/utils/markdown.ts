@@ -1,6 +1,9 @@
 import DOMPurify from 'dompurify';
 import { linkifyPathsHtml } from './paths';
 
+/** Fenced languages rendered as diagrams (mermaid in the browser; the rest through the daemon's Kroki). */
+export const DIAGRAM_LANGS = new Set(['mermaid', 'd2', 'plantuml', 'c4plantuml', 'graphviz', 'dot', 'erd', 'dbml', 'nomnoml', 'seqdiag', 'blockdiag', 'excalidraw', 'structurizr']);
+
 const MARKDOWN_PURIFY_CONFIG = {
   ALLOWED_TAGS: ['a', 'br', 'code', 'em', 'h1', 'h2', 'h3', 'h4', 'hr', 'li', 'p', 'pre', 'strong', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
   ALLOWED_ATTR: ['class', 'href', 'rel', 'target'],
@@ -48,8 +51,12 @@ export function renderMarkdown(md: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
   const rawHtml = renderTables(escaped)
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) =>
-      `<pre class="bg-slate-900/80 border border-slate-700/40 rounded-lg p-3 my-3 overflow-x-auto text-[11px] leading-relaxed text-emerald-300/90"><code>${code.trim()}</code></pre>`)
+    .replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang: string, code: string) => {
+      const l = lang.toLowerCase();
+      // Diagram-as-code blocks keep their source in a marked <pre>; useDiagrams() renders them to SVG after mount
+      if (DIAGRAM_LANGS.has(l)) return `<pre class="diagram diagram-${l} text-[11px] text-slate-500">${code.trim()}</pre>`;
+      return `<pre class="bg-slate-900/80 border border-slate-700/40 rounded-lg p-3 my-3 overflow-x-auto text-[11px] leading-relaxed text-emerald-300/90"><code>${code.trim()}</code></pre>`;
+    })
     .replace(/`([^`]+)`/g, '<code class="bg-slate-800/80 px-1.5 py-0.5 rounded text-emerald-400/80 text-[11px]">$1</code>')
     .replace(/^#### (.+)$/gm, '<h4 class="text-sm font-bold text-slate-200 mt-5 mb-2">$1</h4>')
     .replace(/^### (.+)$/gm, '<h3 class="text-sm font-bold text-slate-100 mt-6 mb-2 border-b border-slate-800/40 pb-1">$1</h3>')

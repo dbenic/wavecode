@@ -103,6 +103,31 @@ message is recorded in the thread, so people see the hand-off too. If the
 name is unknown you get `[TO @x failed: …]` back. Replies come to you the
 same way, as `[Message from @claude1] …`.
 
+## 3d. Diagrams in your reports
+
+WaveCode renders diagrams written as text inside your markdown, so draw the
+structure instead of describing it. Put the diagram where the reader needs
+it, as a fenced block:
+
+    ```mermaid
+    flowchart TD
+      A[Upload] --> B{Valid?} -->|yes| C[Book]
+    ```
+
+- Use `mermaid` (flowchart, sequenceDiagram, erDiagram, stateDiagram) for
+  flows and interactions; `d2` for architecture / "how things connect";
+  `plantuml` or `c4plantuml` for C4 context/container views. Bigger diagrams
+  go in their own file next to the report (`.mmd`, `.d2`, `.puml`) and are
+  linked by absolute path — the viewer renders them too, as it does `.svg`
+  and `.png` (e.g. Playwright screenshots).
+- Keep a diagram to what one review needs: one concern, under ~40 nodes,
+  real names from the code (modules, tables, endpoints), arrows labelled
+  with what flows. Several small diagrams beat one map of everything.
+- Any task that changes a module boundary, a data flow or a schema attaches
+  a diagram of the change; reviewers check that the diagram matches the diff.
+- No HTML labels, no external images, no links inside diagrams — they are
+  stripped when rendered.
+
 ## 4. Testing and running things
 
 - Every change ships with tests, and new tests must fail without the change.
