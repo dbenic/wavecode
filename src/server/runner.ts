@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { finishRun, insertRun, updateTaskStatus, getAgent, getRun, listOpenRuns, type Run, type Result } from './db.js';
 import { emit } from './event-bus.js';
+import { getConfig } from './config.js';
 import { getTranscriptsRoot } from './runtime-launcher.js';
 import {
   appendRunResultBriefing,
@@ -179,7 +180,7 @@ export async function executeRun(
     : prompt;
 
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, briefedPrompt);
+    tmux.sendTextAndEnter(agent.tmux_session, briefedPrompt, { mode: getConfig().runtimes[agent.runtime]?.input_mode ?? 'paste' });
   } catch (e) {
     const { finalizeRun } = await import('./task-dispatcher.js');
     finalizeRun(run.id, agentId, 1, 'Failed to send prompt to agent');

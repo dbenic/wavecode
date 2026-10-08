@@ -4,6 +4,7 @@ vi.mock('./command-chat.js', () => ({
   ensureChatTable: vi.fn(),
 }));
 
+vi.mock('./inbox-watch.js', () => ({ startInboxWatchers: vi.fn(), stopInboxWatchers: vi.fn() }));
 vi.mock('./peers.js', () => ({ ensurePeerTables: vi.fn(), startPeerPollers: vi.fn(), stopPeerPollers: vi.fn() }));
 vi.mock('./code-review.js', () => ({
   ensureReviewTable: vi.fn(),

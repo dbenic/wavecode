@@ -28,6 +28,8 @@ export interface RuntimeConfig {
   login_command?: string;
   /** Files whose presence means "logged in" (templates, `{profile_dir}`). Contents are never read. */
   credential_files?: string[];
+  /** How prompts enter the TUI: 'paste' (bracketed paste + confirmed Enter, default) or 'type' (chunked keystrokes). */
+  input_mode?: 'paste' | 'type';
   // Future deploy agent fields (optional)
   scope?: string;
   claude_md?: string;
@@ -104,6 +106,8 @@ export interface WaveConfig {
     rooms_root: string;
     /** Extra directories the file viewer may serve (e.g. a shared inbox). Rooms, worktrees, projects, transcripts and artifacts are always included. */
     browse_roots?: string[];
+    /** Hand-off folders to watch: a new file is announced to its addressed agent (default ['~/inbox/from-fable']). */
+    inbox_watch?: string[];
   };
   /** Per-project verify/referee profiles. Unmatched workspaces keep today's behavior. */
   projects: Record<string, ProjectConfig>;
@@ -395,6 +399,7 @@ function buildDefaults(baseDir: string): WaveConfig {
         command: 'grok --always-approve',
         idle_pattern: '^>\\s*$',
         model_flag: '--model',
+        input_mode: 'type',
         // No profile flag: HOME override for that process only (PATH preserved by `env`)
         env: { HOME: '{profile_dir}/grok-home' },
         login_command: 'grok',

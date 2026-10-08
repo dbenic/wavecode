@@ -416,7 +416,8 @@ export function sendKeys(agentId: string, text: string): Result<void> {
   }
 
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, text);
+    const mode = getConfig().runtimes[agent.runtime]?.input_mode ?? 'paste';
+    tmux.sendTextAndEnter(agent.tmux_session, text, { mode });
     return { ok: true, data: undefined };
   } catch (e) {
     return { ok: false, error: (e as Error).message };

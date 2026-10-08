@@ -127,3 +127,62 @@ describe('sendLiteralText', () => {
     expect(literalCall![1]).toEqual(['send-keys', '-t', session, '-l', '--', chunk]);
   });
 });
+
+describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
+  it('pastes the whole text as one buffer, sends Enter after ~1 s, and re-sends Enter when the input line still holds it', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sendTextAndEnter } = await import('./tmux.js');
+      const session = 'wc-claude1';
+      const text = '[Message from @codex1] please review /home/wave/inbox/spec.md and reply with VERDICT';
+      const calls = vi.mocked(child_process.execFileSync).mock.calls;
+      // first confirm capture: text still in the box; second time (if any) it is gone
+      let captures = 0;
+      vi.mocked(child_process.execFileSync).mockImplementation((_cmd, args) => {
+        const a = args as string[];
+        if (a[0] === 'capture-pane') { captures += 1; return captures === 1 ? `older line\n❯ ${text.slice(0, 60)}\n  ⏵⏵ bypass permissions on` : 'older line\n❯ \n  ⏵⏵ bypass permissions on'; }
+        return '';
+      });
+      sendTextAndEnter(session, text);
+      const argLists = () => calls.map((c) => c[1] as string[]);
+      expect(argLists()).toContainEqual(['send-keys', '-t', session, 'C-u']);
+      expect(argLists().some((a) => a[0] === 'load-buffer' && a.includes('-'))).toBe(true);
+      const loadCall = calls.find((c) => (c[1] as string[])[0] === 'load-buffer')!;
+      expect((loadCall[2] as { input?: string }).input).toBe(text);
+      expect(argLists().some((a) => a[0] === 'paste-buffer' && a.includes('-p') && a.includes('-t') && a.includes(session))).toBe(true);
+      expect(argLists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(0); // not yet
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(argLists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(900);
+      expect(argLists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(2); // swallowed → once more
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not press Enter twice when the first one was accepted; type mode keeps chunked keystrokes', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sendTextAndEnter, paneInputHolds } = await import('./tmux.js');
+      vi.mocked(child_process.execFileSync).mockClear();
+      vi.mocked(child_process.execFileSync).mockImplementation((_cmd, args) => ((args as string[])[0] === 'capture-pane' ? '> my prompt echoed above\n❯ \n  ⏵⏵ bypass' : ''));
+      sendTextAndEnter('wc-claude1', 'my prompt text here');
+      await vi.advanceTimersByTimeAsync(2000);
+      const enters = vi.mocked(child_process.execFileSync).mock.calls.filter((c) => (c[1] as string[])[0] === 'send-keys' && (c[1] as string[]).includes('C-m'));
+      expect(enters).toHaveLength(1);
+
+      vi.mocked(child_process.execFileSync).mockClear();
+      sendTextAndEnter('wc-shell', 'env X=1 claude --continue', { mode: 'type' });
+      const lists = vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
+      expect(lists.some((a) => a[0] === 'send-keys' && a.includes('-l'))).toBe(true);
+      expect(lists.some((a) => a[0] === 'load-buffer')).toBe(false);
+      expect(lists.filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(1);
+
+      expect(paneInputHolds('❯ [Message from @codex1] please review', '[Message from @codex1] please review the spec')).toBe(true);
+      expect(paneInputHolds('> [Message from @codex1] please review\n❯ ', '[Message from @codex1] please review the spec')).toBe(false);
+      expect(paneInputHolds('› Ask Codex to do anything', 'hello there world')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

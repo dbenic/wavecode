@@ -193,14 +193,17 @@ describe('runner.ts', () => {
     expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
       'wc-script',
       expect.stringContaining("Implement 'auth' middleware"),
+      expect.objectContaining({ mode: 'paste' }),
     );
     expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
       'wc-script',
       expect.stringContaining(resultPath),
+      expect.anything(),
     );
     expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
       'wc-script',
       expect.stringContaining('RESULT: PASS'),
+      expect.anything(),
     );
     expect(tmux.sendTextAndEnter).not.toHaveBeenCalledWith(
       'wc-script',

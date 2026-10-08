@@ -89,6 +89,27 @@ function deliver(agent: Agent, text: string): void {
   if (!sent.ok) logger.warn({ agentId: agent.id, error: sent.error }, 'TO line: could not type the message into the recipient');
 }
 
+/**
+ * A line from WaveCode itself (not from another agent): persisted as a message
+ * so the thread shows it, typed into the pane when the agent is idle. Used by
+ * the hand-off folder watcher.
+ */
+export function deliverSystemLine(agent: Agent, text: string, opts: { kind?: 'handoff' | 'info'; source?: string } = {}): void {
+  const stored = insertAgentMessage({ from_agent_id: null, to_agent_id: agent.id, workspace: agent.workspace ?? null, message: text, message_type: opts.kind ?? 'info' });
+  if (stored.ok) {
+    emit('message.created', 'agent_message', stored.data.id, { from_agent_id: null, to_agent_id: agent.id, message_type: opts.kind ?? 'info', via: 'system', source: opts.source ?? null }, null);
+  }
+  const fresh = getAgent(agent.id);
+  const target = fresh.ok ? fresh.data : agent;
+  if (target.status === 'working') {
+    const list = pending.get(target.id) ?? [];
+    list.push(text);
+    pending.set(target.id, list);
+    return;
+  }
+  deliver(target, text);
+}
+
 /** Output-watcher hook: the recipient went idle — deliver what waited for it. */
 export function onAgentIdle(agentId: string): void {
   const list = pending.get(agentId);

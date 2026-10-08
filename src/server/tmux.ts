@@ -117,7 +117,7 @@ export function newSession(sessionName: string, workDir: string, command?: strin
   if (command) {
     // Small delay to let the shell initialize, then send command
     sleepSync(300);
-    sendTextAndEnter(sessionName, command);
+    sendTextAndEnter(sessionName, command, { mode: 'type' });
   }
 }
 
@@ -165,11 +165,79 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-export function sendTextAndEnter(sessionName: string, text: string): void {
-  sendLiteralText(sessionName, text);
-  // Small delay for tmux to process chunked text
-  sleepSync(300);
-  tmuxExec(['send-keys', '-t', sessionName, 'C-m']);
+export type SendMode = 'paste' | 'type';
+
+export interface SendOptions {
+  /**
+   * 'paste' (default): the whole text goes in as one bracketed paste
+   * (load-buffer + paste-buffer -p), Enter follows after ~1 s, and the pane is
+   * checked ~1 s later — if the input line still holds the text, Enter is sent
+   * once more. Claude Code / Codex sometimes swallow an Enter that arrives
+   * right behind typed chunks, leaving the message unsent in the box.
+   * 'type': the old behaviour (150-char send-keys -l chunks, Enter after
+   * 300 ms) — for shell prompts, where a launch command is typed.
+   */
+  mode?: SendMode;
+}
+
+const PASTE_ENTER_DELAY_MS = 1000;
+const PASTE_CONFIRM_DELAY_MS = 900;
+const TYPE_ENTER_DELAY_MS = 300;
+/** Pending send per session so two messages never interleave inside one input box. */
+const sendChains = new Map<string, Promise<void>>();
+
+/** Exported for tests: timers are real setTimeouts, tests use fake timers. */
+export function sendTextAndEnter(sessionName: string, text: string, opts: SendOptions = {}): void {
+  const mode = opts.mode ?? 'paste';
+  if (mode === 'type') {
+    sendLiteralText(sessionName, text);
+    sleepSync(TYPE_ENTER_DELAY_MS);
+    tmuxExec(['send-keys', '-t', sessionName, 'C-m']);
+    return;
+  }
+  // The paste itself happens now (callers expect the text to be in the pane on return);
+  // only the Enter + confirm are deferred. A send that arrives while a previous one is
+  // still waiting for its Enter is chained behind it so the two never share an input box.
+  const prev = sendChains.get(sessionName);
+  const next = prev ? prev.catch(() => undefined).then(() => pasteAndSubmit(sessionName, text)) : pasteAndSubmit(sessionName, text);
+  sendChains.set(sessionName, next);
+  void next.finally(() => { if (sendChains.get(sessionName) === next) sendChains.delete(sessionName); });
+}
+
+function pasteAndSubmit(sessionName: string, text: string): Promise<void> {
+  // Clear whatever is in the input box, then one atomic bracketed paste
+  tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
+  const buf = `wc-${process.pid}-${Date.now()}`;
+  execFileSync('tmux', ['load-buffer', '-b', buf, '-'], { input: text, timeout: TMUX_TIMEOUT, stdio: ['pipe', 'pipe', 'pipe'] });
+  tmuxExec(['paste-buffer', '-p', '-d', '-b', buf, '-t', sessionName]);
+  return new Promise<void>((resolve) => {
+    setTimeout(() => {
+      tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
+      setTimeout(() => {
+        if (inputStillHolds(sessionName, text)) tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
+        resolve();
+      }, PASTE_CONFIRM_DELAY_MS);
+    }, PASTE_ENTER_DELAY_MS);
+  });
+}
+
+/** The TUI's input line (❯ / ›) still shows the start of the text → the Enter was swallowed. */
+export function inputStillHolds(sessionName: string, text: string): boolean {
+  const pane = tmuxExecSafe(['capture-pane', '-t', sessionName, '-p', '-S', '-15']);
+  if (pane === null) return false;
+  return paneInputHolds(pane, text);
+}
+
+/** Exported for tests. */
+export function paneInputHolds(pane: string, text: string): boolean {
+  const head = text.replace(/\s+/g, ' ').trim().slice(0, 24);
+  if (head.length < 4) return false;
+  const lines = pane.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) {
+    const m = /^\s*[❯›]\s?(.*)$/.exec(lines[i]);
+    if (m) return m[1].replace(/\s+/g, ' ').trim().startsWith(head);
+  }
+  return false;
 }
 
 /**

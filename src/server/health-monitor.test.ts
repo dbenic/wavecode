@@ -90,7 +90,7 @@ describe('health-monitor.ts', () => {
 
   it('relaunches the runtime when the pane has dropped to a bare shell prompt (T0)', async () => {
     const { tmux, events } = await tickWithPane('Bye!\nci@box:~/repo$ ');
-    expect(tmux.sendTextAndEnter).toHaveBeenCalledWith('wc-builder', 'claude --model opus');
+    expect(tmux.sendTextAndEnter).toHaveBeenCalledWith('wc-builder', 'claude --model opus', { mode: 'type' });
     expect(events.emit).toHaveBeenCalledWith('agent.runtime_relaunched', 'agent', 'agent-1', expect.objectContaining({
       reason: 'health_check', runtime: 'claude-code',
     }));

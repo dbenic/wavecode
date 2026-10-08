@@ -109,7 +109,7 @@ export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check
   const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile, resume: attempts === 0 });
   if (!command.ok) return command;
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, command.data);
+    tmux.sendTextAndEnter(agent.tmux_session, command.data, { mode: 'type' }); // a shell prompt: typed, not pasted
   } catch (e) {
     return { ok: false, error: `Failed to relaunch runtime: ${(e as Error).message}` };
   }

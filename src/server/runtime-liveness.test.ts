@@ -140,6 +140,7 @@ describe('runtime-liveness.ts', () => {
       expect(tmux.sendTextAndEnter).toHaveBeenCalledWith(
         'wc-builder',
         'claude --dangerously-skip-permissions --model claude-sonnet-5 --effort high',
+        { mode: 'type' }, // a shell prompt: typed, never pasted
       );
       expect(emit).toHaveBeenCalledWith('agent.runtime_relaunched', 'agent', 'agent-1', expect.objectContaining({
         runtime: 'claude-code', model: 'claude-sonnet-5', effort: 'high', reason: 'dispatch',
