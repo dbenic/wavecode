@@ -227,7 +227,7 @@ export function onAgentTick(agentId: string, opts: { now?: number } = {}): boole
   // Still working: text that stops changing can be a pause between tool
   // calls ("Starting the baseline in the background…"), not the answer —
   // the runtime must have printed its end-of-turn marker.
-  if (!isNewAnswer(p, reply) || !turnEnded(agentResult.data.runtime, pane)) {
+  if (!isNewAnswer(p, reply) || !turnEnded(agentResult.data.runtime, pane, p.prompt)) {
     p.stableText = undefined;
     p.stableSince = undefined;
     return false;

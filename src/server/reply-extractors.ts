@@ -262,7 +262,13 @@ function findLastIndex(lines: string[], pred: (l: string) => boolean): number {
  * Extract the agent's reply to `prompt` from a pane capture. Without a
  * prompt (run summaries), the whole capture is the region.
  */
-export function extractReply(runtime: string, pane: string, prompt?: string | null): ExtractedReply {
+/**
+ * The pane lines that belong to the current turn: everything after the echo
+ * of `prompt` (the whole capture when the echo is not on screen or no prompt
+ * is given). Shared by the reply extractor and the end-of-turn check so the
+ * previous turn's "Worked for …" line above the echo never counts.
+ */
+export function replyRegion(pane: string, prompt?: string | null): { region: string[]; anchored: boolean } {
   const lines = stripAnsi(pane).replace(/\r/g, '').split('\n');
   let region = lines;
   let anchored = false;
@@ -278,6 +284,11 @@ export function extractReply(runtime: string, pane: string, prompt?: string | nu
     }
     region = withoutPromptEcho(region, prompt);
   }
+  return { region, anchored };
+}
+
+export function extractReply(runtime: string, pane: string, prompt?: string | null): ExtractedReply {
+  const { region, anchored } = replyRegion(pane, prompt);
   const extract = REPLY_EXTRACTORS[runtime] ?? REPLY_EXTRACTORS[runtime.split('-')[0]] ?? genericExtract;
   return { text: clipReply(extract(region).trim()), anchored };
 }
@@ -293,8 +304,11 @@ const TURN_END: Record<string, RegExp> = {
   codex: /(^|\n)\s*─*\s*Worked for\b/,
 };
 
-export function turnEnded(runtime: string, pane: string): boolean {
+export function turnEnded(runtime: string, pane: string, prompt?: string | null): boolean {
   const re = TURN_END[runtime] ?? TURN_END[runtime.split('-')[0]];
   if (!re) return true; // unknown runtime: no marker to wait for
-  return re.test(stripAnsi(pane));
+  // Only the current turn counts: the previous answer's marker is usually still
+  // on screen above the new prompt's echo, and must not end a turn that has
+  // only printed its preamble ("I'll update the spec…") so far.
+  return re.test(replyRegion(pane, prompt).region.join('\n'));
 }

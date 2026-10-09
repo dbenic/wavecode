@@ -142,6 +142,49 @@ describe('reply-capture.ts', () => {
     expect(replies()[0].message).toMatch(/Here is the table/);
   });
 
+  it("the previous turn's end marker above the echo does not end the new turn: a Codex preamble is not the reply", () => {
+    const ins = db.insertAgent({ name: 'codex1', runtime: 'codex', tmux_session: 'wc-codex1', workspace: '/w/codex1', mode: 'spawned', status: 'working' });
+    if (!ins.ok) throw new Error(ins.error);
+    const codex = ins.data;
+    rc.trackPrompt({ agent: codex, actorId: 'u-ana', prompt: 'Update the PD-108 spec with the review findings', promptEventId: 9, now: 1000 });
+    paneHarness.text = [
+      '• TO @claude2: Please review my response to your PD-108 findings.',
+      '',
+      '  Worked for 2m 06s • 10:03 AM',
+      '',
+      '› Update the PD-108 spec with the review findings',
+      '',
+      "• I'll update the PD-108 spec with the agreed review findings and classify every planned file.",
+      '',
+      "• Ran python3 - <<'PY' …",
+      '  └ PASS: every original inventory path retained',
+      '',
+      '  ? for shortcuts',
+    ].join('\n');
+    expect(rc.onAgentTick(codex.id, { now: 2000 })).toBe(false);
+    expect(rc.onAgentTick(codex.id, { now: 9000 })).toBe(false);   // stable 7s, but only the OLD turn's marker is on screen
+    expect(rc.onAgentTick(codex.id, { now: 16000 })).toBe(false);
+    expect(replies()).toEqual([]);
+    paneHarness.text = paneHarness.text.replace('  ? for shortcuts', [
+      '• Updated PD-108 specification — revision 2 (/home/wave/.wavecode-data/rooms/wavepulse/REPORTS/2026-10-09-pd108-outgoing-line-vat-',
+      '  treatment.md).',
+      '',
+      '  RESULT: PASS',
+      '',
+      '  Worked for 6m 41s • 10:15 AM',
+      '',
+      '› Ask Codex to do anything',
+      '',
+      '  GPT-6-Astra high · ~/.wavecode-data/worktrees/codex1',
+      '  ? for shortcuts',
+    ].join('\n'));
+    expect(rc.onAgentTick(codex.id, { now: 17000 })).toBe(false);  // new text → clock restarts
+    expect(rc.onAgentTick(codex.id, { now: 24000 })).toBe(true);
+    expect(replies()).toHaveLength(1);
+    expect(replies()[0].message).toMatch(/Updated PD-108 specification/);
+    expect(replies()[0].message).not.toMatch(/I'll update/);
+  });
+
   it('a still-changing answer is not posted while working', () => {
     rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', promptEventId: 6, now: 1000 });
     paneHarness.text = ANSWER;
