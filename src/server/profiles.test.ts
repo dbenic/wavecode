@@ -203,6 +203,17 @@ describe('credential profiles', () => {
     });
   });
 
+  describe('public (pool) profiles', () => {
+    it('agents on a public profile are usable by every user; spawning on it still needs an admin', () => {
+      const cfg = { profiles: { denis: {}, pool: { public: true } }, profiles_root: '/p', runtimes: {} } as never;
+      const ana = { role: 'developer' as const, profile: 'ana' };
+      expect(profiles.isProfileCompatible('pool', ana, cfg)).toBe(true);
+      expect(profiles.isProfileCompatible('pool', null, cfg)).toBe(true);
+      expect(profiles.isProfileCompatible('denis', ana, cfg)).toBe(false);
+      expect(profiles.resolveSpawnProfile(ana, 'pool', cfg)).toMatchObject({ ok: false, code: 'forbidden' });
+    });
+  });
+
   describe('resolveSpawnProfile', () => {
     const ana = { role: 'developer' as const, profile: 'ana' };
     const admin = { role: 'admin' as const, profile: null };

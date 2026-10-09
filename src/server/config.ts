@@ -88,6 +88,12 @@ export interface PeerConfig {
 export interface ProfileConfig {
   /** Shared profiles (referee-style service seats) are admin-only. */
   shared?: boolean;
+  /**
+   * Public profiles are the opposite: agents on them may be used by every
+   * user (a pool agent paid by one subscription). Spawning on them stays
+   * admin-only; using the agents that exist is open to all.
+   */
+  public?: boolean;
 }
 
 export interface WaveConfig {

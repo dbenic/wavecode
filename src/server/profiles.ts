@@ -154,6 +154,7 @@ export function isProfileCompatible(
   cfg: WaveConfig = getConfig(),
 ): boolean {
   if (!agentProfile) return true;
+  if (cfg.profiles?.[agentProfile]?.public) return true; // pool agent: anyone may use it
   if (isSharedProfile(agentProfile, cfg)) return !actor || actor.role === 'admin';
   return !!actor && actor.profile === agentProfile;
 }
