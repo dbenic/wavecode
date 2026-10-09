@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import type { ReviewItem as ReviewItemType, Agent, CodeReview } from '../types';
+import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 
 function formatDuration(seconds: number | null): string {
   if (seconds === null) return '--:--';
@@ -20,6 +22,7 @@ export default function ReviewItem({
   onAction: () => void;
   index: number;
 }) {
+  const navigate = useNavigate();
   const [acting, setActing] = useState<string | null>(null);
   const [showHandoff, setShowHandoff] = useState(false);
   const [handoffAgent, setHandoffAgent] = useState('');
@@ -88,6 +91,18 @@ export default function ReviewItem({
   };
 
   const verdict = item.latestReview?.verdict ?? aiReviews.find((r) => r.status === 'done')?.verdict ?? null;
+  const freeze = item.freeze;
+  const freezeStale = freeze?.status === 'stale';
+  // A freeze card promotes only on an independent PASS on the exact SHA; a stale SHA never.
+  const canPromote = !freeze || (freeze.verdict === 'pass' && !freezeStale);
+  const openFile = internalLinkClickHandler(navigate);
+
+  const reject = async () => {
+    if (!freeze) return act('reject');
+    const reason = window.prompt('Reject this freeze — reason (stored with the decision):');
+    if (reason === null) return;
+    await act('reject', { reason: reason.trim() });
+  };
 
   return (
     <div
@@ -121,6 +136,39 @@ export default function ReviewItem({
           </div>
         </div>
 
+        {/* Release freeze: what was frozen, who reviewed it, where the files are */}
+        {freeze && (
+          <div className="rounded border border-slate-800/60 bg-slate-950/60 px-3 py-2 space-y-1 text-[10px]" data-testid="freeze-card">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold tracking-wider text-violet-300">RELEASE FREEZE</span>
+              {freeze.project && <span className="text-slate-300">{freeze.project}</span>}
+              {freeze.desk && <span className="text-slate-300">Desk #{freeze.desk}</span>}
+              {freeze.lane && <span className="font-mono text-slate-400">{freeze.lane}</span>}
+              {freezeStale && (
+                <span className="text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border text-slate-400 border-slate-600 bg-slate-900" title={freeze.superseded_by ? `Lane moved on to ${freeze.superseded_by.slice(0, 8)}` : 'A newer commit landed on this lane'}>
+                  STALE{freeze.superseded_by ? ` → ${freeze.superseded_by.slice(0, 8)}` : ''}
+                </span>
+              )}
+              {freeze.gate && (
+                <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${freeze.gate === 'GREEN' ? 'text-emerald-300 border-emerald-500/40' : 'text-red-300 border-red-500/40'}`}>
+                  GATE {freeze.gate}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="font-mono text-slate-200 select-all" title={freeze.sha}>{freeze.sha.slice(0, 12)}</span>
+              <span className="text-slate-400">author <span className="text-cyan-300">@{freeze.author_name ?? '?'}</span></span>
+              <span className="text-slate-400">reviewer <span className="text-cyan-300">@{freeze.reviewer_name ?? '?'}</span></span>
+              {freeze.freeze_path && (
+                <a href={fileViewHref(freeze.freeze_path)} onClick={openFile} className="text-sky-300 hover:text-sky-200 underline underline-offset-2">freeze note</a>
+              )}
+              {freeze.verdict_path && (
+                <a href={fileViewHref(freeze.verdict_path)} onClick={openFile} className="text-sky-300 hover:text-sky-200 underline underline-offset-2">verdict</a>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Meta row: agent, duration, artifacts */}
         <div className="flex items-center gap-3 text-[10px]">
           <span className="px-2 py-0.5 rounded border border-cyan-500/20 bg-cyan-500/5 text-cyan-400 font-semibold tracking-wider uppercase">
@@ -138,30 +186,41 @@ export default function ReviewItem({
 
         {/* Action buttons */}
         <div className="flex items-center gap-2 pt-1">
+          {canPromote && (
+            <button
+              onClick={promote}
+              disabled={acting !== null}
+              title={verdict !== 'pass' ? 'Requires a passing AI review (or an explicit override reason)' : freeze ? `Send the GO for ${freeze.sha.slice(0, 8)} to the deployer` : undefined}
+              className="px-2.5 py-1 rounded border border-emerald-500/30 text-[10px] font-semibold tracking-wider text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-500/50 transition-all active:scale-95 disabled:opacity-40"
+            >
+              {acting === 'promote' ? '...' : 'PROMOTE'}
+            </button>
+          )}
+          {freeze && !canPromote && (
+            <span className="text-[10px] text-slate-500" title="Promote needs an independent PASS on the exact SHA; a stale SHA must be frozen and reviewed again">
+              {freezeStale ? 'stale — not promotable' : 'no PASS — not promotable'}
+            </span>
+          )}
+          {!freeze && (
+            <button
+              onClick={() => act('retry')}
+              disabled={acting !== null}
+              className="px-2.5 py-1 rounded border border-amber-500/30 text-[10px] font-semibold tracking-wider text-amber-400 hover:bg-amber-500/10 hover:border-amber-500/50 transition-all active:scale-95 disabled:opacity-40"
+            >
+              {acting === 'retry' ? '...' : 'RETRY'}
+            </button>
+          )}
+          {!freeze && (
+            <button
+              onClick={() => setShowHandoff(!showHandoff)}
+              disabled={acting !== null}
+              className="px-2.5 py-1 rounded border border-cyan-500/30 text-[10px] font-semibold tracking-wider text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-500/50 transition-all active:scale-95 disabled:opacity-40"
+            >
+              HAND OFF
+            </button>
+          )}
           <button
-            onClick={promote}
-            disabled={acting !== null}
-            title={verdict !== 'pass' ? 'Requires a passing AI review (or an explicit override reason)' : undefined}
-            className="px-2.5 py-1 rounded border border-emerald-500/30 text-[10px] font-semibold tracking-wider text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-500/50 transition-all active:scale-95 disabled:opacity-40"
-          >
-            {acting === 'promote' ? '...' : 'PROMOTE'}
-          </button>
-          <button
-            onClick={() => act('retry')}
-            disabled={acting !== null}
-            className="px-2.5 py-1 rounded border border-amber-500/30 text-[10px] font-semibold tracking-wider text-amber-400 hover:bg-amber-500/10 hover:border-amber-500/50 transition-all active:scale-95 disabled:opacity-40"
-          >
-            {acting === 'retry' ? '...' : 'RETRY'}
-          </button>
-          <button
-            onClick={() => setShowHandoff(!showHandoff)}
-            disabled={acting !== null}
-            className="px-2.5 py-1 rounded border border-cyan-500/30 text-[10px] font-semibold tracking-wider text-cyan-400 hover:bg-cyan-500/10 hover:border-cyan-500/50 transition-all active:scale-95 disabled:opacity-40"
-          >
-            HAND OFF
-          </button>
-          <button
-            onClick={() => act('reject')}
+            onClick={reject}
             disabled={acting !== null}
             className="px-2.5 py-1 rounded border border-red-500/30 text-[10px] font-semibold tracking-wider text-red-400 hover:bg-red-500/10 hover:border-red-500/50 transition-all active:scale-95 disabled:opacity-40 ml-auto"
           >

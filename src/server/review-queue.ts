@@ -24,6 +24,7 @@ import logger from './logger.js';
 import * as peers from './peers.js';
 import { currentActorId } from './request-context.js';
 import { OWNER_USER_ID } from './users.js';
+import * as freezes from './release-freezes.js';
 
 export interface ReviewItem {
   run: Run;
@@ -33,6 +34,8 @@ export interface ReviewItem {
   duration: number | null;
   /** Latest completed AI review, so the queue UI can show the verdict inline */
   latestReview: Pick<CodeReview, 'id' | 'verdict' | 'issues_found' | 'fix_round' | 'created_at'> | null;
+  /** Set when this run stands for an externally reviewed release freeze (release-freezes.ts). */
+  freeze: freezes.FreezeCard | null;
 }
 
 /**
@@ -70,17 +73,26 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
 
   const config = getConfig();
   const author = getAgent(runResult.data.agent_id);
-  const referee = evaluateRefereeForPromote(
-    runId,
-    author.ok ? author.data.workspace : null,
-  );
-  if (!referee.ok) return referee;
+  const overrideReason = opts.overrideReason?.trim() || null;
+
+  // A release freeze has its own rules (PASS on the exact SHA, independent
+  // reviewer, lane unchanged); the referee result file belongs to WaveCode runs.
+  const freeze = freezes.getFreezeByRun(runId);
+  if (freeze) {
+    const rule = freezes.checkPromotable(freeze, { overrideReason });
+    if (!rule.ok) return rule;
+  } else {
+    const referee = evaluateRefereeForPromote(
+      runId,
+      author.ok ? author.data.workspace : null,
+    );
+    if (!referee.ok) return referee;
+  }
 
   const gated = config.review.require_pass_to_promote || config.review.auto_review;
   const latestReview = getLatestCompletedReview(runId);
-  const overrideReason = opts.overrideReason?.trim() || null;
 
-  if (gated && latestReview?.verdict !== 'pass' && !overrideReason) {
+  if (!freeze && gated && latestReview?.verdict !== 'pass' && !overrideReason) {
     const state = latestReview
       ? `latest review verdict is '${latestReview.verdict}'`
       : 'no completed review exists for this run';
@@ -104,22 +116,25 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
     return { ok: false, error: (e as Error).message };
   }
 
+  const actor = currentActorId();
+  const actorUser = actor && actor !== OWNER_USER_ID ? getUser(actor) : null;
+  const actorName = actor ? (actor === OWNER_USER_ID ? 'owner' : actorUser?.ok ? actorUser.data.name : actor) : null;
+
   emit('review.promoted', 'run', runId, {
     task_id: runResult.data.task_id,
-    verdict: latestReview?.verdict ?? null,
+    verdict: freeze ? freeze.verdict : latestReview?.verdict ?? null,
     override_reason: overrideReason,
+    ...(freeze ? { freeze: { sha: freeze.sha, project: freeze.project, desk: freeze.desk, lane: freeze.lane, reviewer: freeze.reviewer_name, author: freeze.author_name, promoted_by: actorName } } : {}),
   });
 
   if (overrideReason) {
     logger.warn({ runId, overrideReason }, 'Run promoted with verdict override');
   }
+  if (freeze) freezes.markPromoted(runId, actorName);
 
   // projects.<name>.release_peer: the person's Promote is the GO the deployer acts on
   try {
-    const actor = currentActorId();
-    const actorUser = actor && actor !== OWNER_USER_ID ? getUser(actor) : null;
-    const actorName = actor ? (actor === OWNER_USER_ID ? 'owner' : actorUser?.ok ? actorUser.data.name : actor) : null;
-    void peers.onRunPromoted(runResult.data, actorName).catch((e) => logger.warn({ runId, error: (e as Error).message }, 'release relay failed'));
+    void peers.onRunPromoted(runResult.data, actorName, freeze ?? undefined).catch((e) => logger.warn({ runId, error: (e as Error).message }, 'release relay failed'));
   } catch (e) {
     logger.warn({ runId, error: (e as Error).message }, 'release relay failed');
   }
@@ -139,6 +154,7 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
 export function retry(runId: string): Result<Run> {
   const runResult = getRun(runId);
   if (!runResult.ok) return runResult;
+  if (freezes.getFreezeByRun(runId)) return { ok: false, error: 'A release freeze is not a WaveCode run: there is nothing to retry. Reject it, or wait for a new freeze.' };
 
   const run = runResult.data;
 
@@ -174,6 +190,7 @@ export function retry(runId: string): Result<Run> {
 export function handOff(runId: string, targetAgentId: string): Result<Run> {
   const runResult = getRun(runId);
   if (!runResult.ok) return runResult;
+  if (freezes.getFreezeByRun(runId)) return { ok: false, error: 'A release freeze is not a WaveCode run: it cannot be handed off.' };
 
   const run = runResult.data;
 
@@ -214,11 +231,12 @@ export function handOff(runId: string, targetAgentId: string): Result<Run> {
 /**
  * Reject: mark the work as rejected. Block dependents.
  */
-export function reject(runId: string): Result<Run> {
+export function reject(runId: string, opts: { reason?: string | null } = {}): Result<Run> {
   const runResult = getRun(runId);
   if (!runResult.ok) return runResult;
 
   const run = runResult.data;
+  const reason = opts.reason?.trim() || null;
   const author = getAgent(run.agent_id);
   settleRunResultFile(
     resultPathForRun(run, author.ok ? author.data.workspace : null),
@@ -245,9 +263,17 @@ export function reject(runId: string): Result<Run> {
     return { ok: false, error: (e as Error).message };
   }
 
+  const freeze = freezes.getFreezeByRun(runId);
   emit('review.rejected', 'run', runId, {
     task_id: run.task_id,
+    reason,
+    ...(freeze ? { freeze: { sha: freeze.sha, project: freeze.project, desk: freeze.desk } } : {}),
   });
+  if (freeze) {
+    const actor = currentActorId();
+    const actorUser = actor && actor !== OWNER_USER_ID ? getUser(actor) : null;
+    freezes.markRejected(runId, actor ? (actor === OWNER_USER_ID ? 'owner' : actorUser?.ok ? actorUser.data.name : actor) : null, reason);
+  }
 
   void onRunComplete(runId, run.agent_id);
 
@@ -282,8 +308,10 @@ function runToReviewItem(run: Run): ReviewItem | null {
   }
 
   const latest = getLatestCompletedReview(run.id);
+  const freeze = freezes.getFreezeByRun(run.id);
 
   return {
+    freeze: freeze ? freezes.toCard(freeze) : null,
     run,
     task: taskResult.data,
     agentName,

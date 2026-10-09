@@ -1,0 +1,360 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fakePeer } from './peers.test-helpers.js';
+
+vi.mock('./event-bus.js', () => ({ emit: vi.fn() }));
+vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data: undefined })) }));
+vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
+vi.mock('./task-dispatcher.js', () => ({
+  dispatchNext: vi.fn(),
+  unblockDependentsPublic: vi.fn(),
+  onRunComplete: vi.fn(),
+  finalizeRun: vi.fn(),
+}));
+
+const reviewConfig: Record<string, unknown> = {
+  auto_review: false,
+  default_reviewer: 'aider',
+  self_review: true,
+  max_fix_loops: 2,
+  require_pass_to_promote: false,
+  gate_dependents_on_approval: false,
+  auto_pick: true,
+  freeze_inbox: [] as string[],
+};
+const projectsConfig: Record<string, { workspace_match: string; release_peer?: string }> = {};
+const peersConfig: Record<string, { url: string; token: string; agents?: string[] }> = {};
+
+vi.mock('./config.js', () => ({
+  getConfig: vi.fn(() => ({ review: reviewConfig, projects: projectsConfig, peers: peersConfig, paths: {} })),
+}));
+
+import { emit } from './event-bus.js';
+
+const SHA_A = '2431f684b9e960b84e73a4e98b5068869664ffb4';
+const SHA_B = 'e65a2ab5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const SHA_C = '3562f0404cfc19de7ea6946ec57aa381055f8479';
+
+const DESK91_FREEZE = `# Desk #91 freeze note — issued credit notes (review PASS)
+
+Project: wavepulse (Countix) · Task: Desk #91 freeze for release · Author: claude2 · Date: 2026-10-09
+
+## Candidate
+- **Lane:** \`wc-claude2\` (pushed)
+- **Freeze SHA:** \`${SHA_A}\`
+- **Base:** \`origin/main\` \`3b277571\` (up to date)
+- **Review:** @codex3 **VERDICT: PASS** on this exact SHA: \`/home/wave/.wavecode-data/rooms/wavepulse/REPORTS/2026-10-09-desk91-${SHA_A.slice(0, 8)}-code-review-codex3.md\`
+- **Review history:** fe423261 NEEDS FIXES (R1–R5) → 47c9dd0a → e65a2ab5 NEEDS FIXES (F1) → 2431f684 PASS.
+
+## Preflight on the exact SHA
+- Remote full-tuned: GREEN
+`;
+
+const VERDICT_PASS = `# Verdict: Claude2 Desk #91 issued credit notes (exact SHA ${SHA_A})
+Countix / wavepulse · review of /home/wave/inbox/desk91-freeze-${SHA_A.slice(0, 8)}.md · reviewer Codex3 · 2026-10-09
+
+## Checked
+- Lint and tests on the exact SHA: 212/212 pass.
+
+VERDICT: PASS
+`;
+
+const VERDICT_NEEDS_FIXES = `# Verdict: Codex2 SI AOP retained earnings by sign (exact SHA ${SHA_C})
+Countix / wavepulse · review of /home/wave/inbox/codex2-freeze-si-aop-retained-${SHA_C.slice(0, 8)}-20261009.md · reviewer Claude1 · 2026-10-09
+
+## B1 (blocking): the legacy rule depends on account presence, not balance
+- [HIGH] usesSplitRetainedAccounts must test the balance.
+
+VERDICT: NEEDS FIXES
+`;
+
+const FREEZE_REQUEST_ONLY = `# Codex2 freeze — SI AOP retained earnings by sign
+
+WavePulse, SI AOP 0.442.9 correction, Codex2, 2026-10-09. Independent reviewer: Claude1.
+
+## Frozen candidate
+
+- Exact SHA: \`${SHA_C}\`
+- Base: \`3b277571260d7d6c45a87937175c8b372408524c\` (\`origin/main\`, release 0.442.9)
+- Branch: \`wc-codex2-wavenetic-04420-composition\`
+
+Please review the exact SHA and issue \`VERDICT: PASS\` or \`VERDICT: NEEDS FIXES\` on the exact SHA.
+
+VERDICT requested: \`PASS\` or \`NEEDS FIXES\`.
+`;
+
+describe('release-freezes.ts', () => {
+  let tmp: string;
+  let inbox: string;
+  let db: typeof import('./db.js');
+  let rf: typeof import('./release-freezes.js');
+  let rq: typeof import('./review-queue.js');
+  let peers: typeof import('./peers.js');
+
+  const write = (name: string, text: string, mtimeMs?: number): string => {
+    const file = path.join(inbox, name);
+    fs.writeFileSync(file, text);
+    if (mtimeMs !== undefined) fs.utimesSync(file, mtimeMs / 1000, mtimeMs / 1000);
+    return file;
+  };
+  const agent = (name: string, runtime = 'codex') => {
+    const r = db.insertAgent({ name, runtime, tmux_session: `wc-${name}`, workspace: path.join(tmp, 'ws', name), mode: 'spawned', status: 'idle' });
+    if (!r.ok) throw new Error(r.error);
+    return r.data;
+  };
+  const reviewRows = (runId: string) => db.getDb().prepare('SELECT * FROM code_reviews WHERE run_id = ?').all(runId) as Array<{ verdict: string }>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.mocked(emit).mockClear();
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-freezes-'));
+    inbox = path.join(tmp, 'inbox');
+    fs.mkdirSync(inbox);
+    reviewConfig.freeze_inbox = [inbox];
+    reviewConfig.require_pass_to_promote = false;
+    for (const k of Object.keys(projectsConfig)) delete projectsConfig[k];
+    for (const k of Object.keys(peersConfig)) delete peersConfig[k];
+    projectsConfig.wavepulse = { workspace_match: '**/ws/*' };
+    db = await import('./db.js');
+    db.initDb(path.join(tmp, 't.db'));
+    rf = await import('./release-freezes.js');
+    rq = await import('./review-queue.js');
+    peers = await import('./peers.js');
+    const codeReview = await import('./code-review.js');
+    codeReview.ensureReviewTable();
+    peers.ensurePeerTables();
+    rf.ensureReleaseFreezeTable();
+    rf.resetFreezesForTest();
+    agent('claude2', 'claude-code');
+    agent('codex3');
+    agent('codex2');
+    agent('claude1', 'claude-code');
+  });
+
+  afterEach(() => {
+    rf.resetFreezesForTest();
+    peers.stopPeerPollers();
+    peers.setPeerFetchForTest(null);
+    db.resetDbForTest();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  describe('parseFreezeFile', () => {
+    it('reads a freeze note: exact SHA, lane, author, desk, inline reviewer PASS with the verdict path, gate', () => {
+      const p = rf.parseFreezeFile(DESK91_FREEZE, `desk91-freeze-${SHA_A.slice(0, 8)}.md`);
+      expect(p).toMatchObject({ kind: 'freeze', sha: SHA_A, verdict: 'pass', desk: 91, lane: 'wc-claude2', project: 'wavepulse', gate: 'GREEN' });
+      expect(p!.authorCandidates[0]).toBe('claude2');
+      expect(p!.reviewerCandidates[0]).toBe('codex3');
+      expect(p!.verdictPath).toContain('/REPORTS/2026-10-09-desk91-');
+    });
+
+    it('reads a verdict file: SHA from the title, reviewer from the file name, author from the reviewed freeze path', () => {
+      const p = rf.parseFreezeFile(VERDICT_NEEDS_FIXES, `claude1-verdict-codex2-si-aop-retained-${SHA_C.slice(0, 8)}-20261009.md`);
+      expect(p).toMatchObject({ kind: 'verdict', sha: SHA_C, verdict: 'needs-fixes' });
+      expect(p!.reviewerCandidates[0]).toBe('claude1');
+      expect(p!.authorCandidates).toContain('codex2');
+    });
+
+    it('a freeze note that only REQUESTS a verdict has none (base SHA is not the candidate)', () => {
+      const p = rf.parseFreezeFile(FREEZE_REQUEST_ONLY, `codex2-freeze-si-aop-retained-${SHA_C.slice(0, 8)}-20261009.md`);
+      expect(p).toMatchObject({ kind: 'freeze', sha: SHA_C, verdict: null, lane: 'wc-codex2-wavenetic-04420-composition' });
+      expect(p!.authorCandidates).toContain('codex2');
+      expect(p!.reviewerCandidates[0]).toBe('claude1');
+    });
+
+    it('ignores files that are neither', () => {
+      expect(rf.parseFreezeFile('# Proposal\n\nsome text', 'proposal-testing-host.md')).toBeNull();
+    });
+  });
+
+  describe('ingest', () => {
+    it('a PASS verdict file creates a Review-queue card with Promote (an independent PASS on the exact SHA)', () => {
+      const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
+      const r = rf.ingestFreezeFile(file);
+      expect(r.ok && r.data.effect).toBe('card');
+      const items = rq.listPendingReviews();
+      expect(items).toHaveLength(1);
+      expect(items[0].freeze).toMatchObject({ sha: SHA_A, verdict: 'pass', reviewer_name: 'codex3', author_name: 'claude2', project: 'wavepulse', desk: 91, verdict_path: file, status: 'open' });
+      expect(items[0].latestReview?.verdict).toBe('pass');
+      expect(items[0].agentName).toBe('claude2');
+      expect(items[0].task.prompt).toMatch(/Release freeze wavepulse Desk #91 @ 2431f684/);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('review.ai_completed', 'run', items[0].run.id,
+        expect.objectContaining({ verdict: 'pass', reviewer_agent: 'codex3', freeze: expect.objectContaining({ sha: SHA_A }) }), null);
+    });
+
+    it('a freeze note carrying the reviewer PASS inline (Desk #91) creates the card and links both files', () => {
+      const file = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
+      const r = rf.ingestFreezeFile(file);
+      expect(r.ok && r.data.effect).toBe('card');
+      const [item] = rq.listPendingReviews();
+      expect(item.freeze).toMatchObject({ sha: SHA_A, verdict: 'pass', reviewer_name: 'codex3', author_name: 'claude2', lane: 'wc-claude2', gate: 'GREEN', freeze_path: file });
+      expect(item.freeze!.verdict_path).toContain('code-review-codex3.md');
+    });
+
+    it('NEEDS FIXES creates a card without Promote: the server refuses to promote it', () => {
+      const file = write(`claude1-verdict-codex2-si-aop-${SHA_C.slice(0, 8)}-20261009.md`, VERDICT_NEEDS_FIXES);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      const [item] = rq.listPendingReviews();
+      expect(item.freeze).toMatchObject({ sha: SHA_C, verdict: 'needs-fixes', reviewer_name: 'claude1', author_name: 'codex2' });
+      const promoted = rq.promote(item.run.id);
+      expect(promoted.ok).toBe(false);
+      expect(!promoted.ok && promoted.error).toMatch(/Promotion blocked: verdict is 'needs-fixes'/);
+      expect(vi.mocked(emit).mock.calls.some((c) => c[0] === 'review.promoted')).toBe(false);
+    });
+
+    it('a self-review is refused: no card when the reviewer is the author', () => {
+      const text = VERDICT_PASS.replace('reviewer Codex3', 'reviewer Claude2');
+      const file = write(`claude2-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, text);
+      const r = rf.ingestFreezeFile(file);
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.error).toMatch(/self-review refused/);
+      expect(rq.listPendingReviews()).toHaveLength(0);
+      expect(rf.getFreeze(SHA_A)).toBeNull();
+    });
+
+    it('a freeze note without a verdict is stored, and the later verdict file completes the card with both links', () => {
+      const note = write(`codex2-freeze-si-aop-retained-${SHA_C.slice(0, 8)}-20261009.md`, FREEZE_REQUEST_ONLY);
+      const stored = rf.ingestFreezeFile(note);
+      expect(stored.ok && stored.data.effect).toBe('stored');
+      expect(rq.listPendingReviews()).toHaveLength(0);
+      const verdict = write(`claude1-verdict-codex2-si-aop-retained-${SHA_C.slice(0, 8)}-20261009.md`, VERDICT_NEEDS_FIXES.replace('VERDICT: NEEDS FIXES', 'VERDICT: PASS'));
+      const r = rf.ingestFreezeFile(verdict);
+      expect(r.ok && r.data.effect).toBe('card');
+      const [item] = rq.listPendingReviews();
+      expect(item.freeze).toMatchObject({ sha: SHA_C, verdict: 'pass', freeze_path: note, verdict_path: verdict, lane: 'wc-codex2-wavenetic-04420-composition', author_name: 'codex2', reviewer_name: 'claude1' });
+    });
+
+    it('a re-delivered file is idempotent: one card, one review row, no second event', () => {
+      const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      const again = rf.ingestFreezeFile(file);
+      expect(again.ok && again.data.effect).toBe('noop');
+      const items = rq.listPendingReviews();
+      expect(items).toHaveLength(1);
+      expect(reviewRows(items[0].run.id)).toHaveLength(1);
+      expect(vi.mocked(emit).mock.calls.filter((c) => c[0] === 'review.ai_completed')).toHaveLength(1);
+    });
+
+    it('a changed verdict on the same SHA (second reviewer, or a re-review) adds a review row, same card', () => {
+      write(`claude1-verdict-x-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES);
+      expect(rf.ingestFreezeFile(path.join(inbox, `claude1-verdict-x-${SHA_C.slice(0, 8)}.md`)).ok).toBe(true);
+      const file = write(`claude1-verdict-x-r2-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES.replace('VERDICT: NEEDS FIXES', 'VERDICT: PASS'));
+      const r = rf.ingestFreezeFile(file);
+      expect(r.ok && r.data.effect).toBe('updated');
+      const items = rq.listPendingReviews();
+      expect(items).toHaveLength(1);
+      expect(items[0].freeze?.verdict).toBe('pass');
+      expect(items[0].latestReview?.verdict).toBe('pass');
+      expect(reviewRows(items[0].run.id)).toHaveLength(2);
+    });
+  });
+
+  describe('rules', () => {
+    it('a newer commit on the same lane invalidates the older PASS: stale SHA is refused, even with an override reason', () => {
+      const old = write(`desk91-freeze-${SHA_B.slice(0, 8)}.md`, DESK91_FREEZE.replaceAll(SHA_A, SHA_B));
+      expect(rf.ingestFreezeFile(old).ok).toBe(true);
+      const [oldItem] = rq.listPendingReviews();
+      const newer = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
+      expect(rf.ingestFreezeFile(newer).ok).toBe(true);
+      expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('review.superseded', 'run', oldItem.run.id, expect.objectContaining({ sha: SHA_B, superseded_by: SHA_A }), null);
+      const r = rq.promote(oldItem.run.id, { overrideReason: 'ship it anyway' });
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.error).toMatch(/stale/);
+      const items = rq.listPendingReviews();
+      expect(items.map((i) => i.freeze?.status).sort()).toEqual(['open', 'stale']);
+    });
+
+    it('retry and hand-off do not apply to a freeze card', () => {
+      const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      const [item] = rq.listPendingReviews();
+      expect(rq.retry(item.run.id).ok).toBe(false);
+      expect(rq.handOff(item.run.id, 'codex2').ok).toBe(false);
+    });
+  });
+
+  describe('promote and reject', () => {
+    it('Promote emits review.promoted with the freeze and delivers the GO (SHA, reviewer, person) to the deployer', async () => {
+      peersConfig.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      projectsConfig.wavepulse.release_peer = 'deploy/fable';
+      const fp = fakePeer();
+      peers.setPeerFetchForTest(fp.fetchImpl);
+      const file = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      const [item] = rq.listPendingReviews();
+
+      const r = rq.promote(item.run.id);
+      expect(r.ok).toBe(true);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('review.promoted', 'run', item.run.id,
+        expect.objectContaining({ verdict: 'pass', override_reason: null, freeze: expect.objectContaining({ sha: SHA_A, reviewer: 'codex3', author: 'claude2', desk: 91 }) }));
+      for (let i = 0; i < 5; i++) await new Promise((res) => setImmediate(res));
+      expect(fp.state.sends).toHaveLength(1);
+      const go = fp.state.sends[0].text;
+      expect(go).toMatch(/^\[Release GO from admin via WaveCode Promote on /);
+      expect(go).toContain(`exact SHA ${SHA_A}`);
+      expect(go).toContain('lane wc-claude2');
+      expect(go).toContain('independent review by @codex3: VERDICT: PASS');
+      expect(go).toContain('Desk #91');
+      expect(go).toContain(`Freeze note: ${file}`);
+      expect(rf.getFreeze(SHA_A)).toMatchObject({ status: 'promoted' });
+      expect(rq.listPendingReviews()).toHaveLength(0);
+      // the pane of the author is never typed into — only the deployer gets the GO
+      expect(vi.mocked(emit).mock.calls.some((c) => c[0] === 'peer.release')).toBe(true);
+    });
+
+    it('Promote never bypasses the rules through require_pass_to_promote=false', () => {
+      reviewConfig.require_pass_to_promote = false;
+      const file = write(`claude1-verdict-codex2-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      const [item] = rq.listPendingReviews();
+      expect(rq.promote(item.run.id).ok).toBe(false);
+      // an admin override with a stored reason still works for a non-PASS (the route checks the role)
+      const r = rq.promote(item.run.id, { overrideReason: 'hotfix agreed with Denis' });
+      expect(r.ok).toBe(true);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('review.promoted', 'run', item.run.id, expect.objectContaining({ override_reason: 'hotfix agreed with Denis' }));
+    });
+
+    it('Reject removes the card with a reason, and a re-delivered file does not revive it', () => {
+      const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      const [item] = rq.listPendingReviews();
+      const r = rq.reject(item.run.id, { reason: 'wrong base, refreeze on main' });
+      expect(r.ok).toBe(true);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('review.rejected', 'run', item.run.id, expect.objectContaining({ reason: 'wrong base, refreeze on main', freeze: expect.objectContaining({ sha: SHA_A }) }));
+      expect(rf.getFreeze(SHA_A)).toMatchObject({ status: 'rejected', decision_reason: 'wrong base, refreeze on main' });
+      expect(rq.listPendingReviews()).toHaveLength(0);
+      const again = rf.ingestFreezeFile(file);
+      expect(again.ok && again.data.effect).toBe('noop');
+      expect(rq.listPendingReviews()).toHaveLength(0);
+    });
+  });
+
+  describe('inbox watcher and backfill', () => {
+    it('backfill imports today\'s PASS verdicts and freezes only: yesterday\'s files and NEEDS FIXES stay out', () => {
+      const yesterday = Date.now() - 36 * 3600 * 1000;
+      write(`desk91-freeze-${SHA_B.slice(0, 8)}.md`, DESK91_FREEZE.replaceAll(SHA_A, SHA_B).replace('wc-claude2', 'wc-old-lane'), yesterday);
+      write(`claude1-verdict-codex2-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES);
+      write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
+      write('notes.md', 'unrelated');
+      rf.backfillFreezes();
+      const items = rq.listPendingReviews();
+      expect(items.map((i) => i.freeze?.sha)).toEqual([SHA_A]);
+      expect(rf.getFreeze(SHA_B)).toBeNull();
+      expect(rf.getFreeze(SHA_C)).not.toBeNull(); // known, but no card until a PASS or a live delivery
+    });
+
+    it('a verdict file dropped into the watched inbox becomes a card', async () => {
+      rf.startFreezeWatchers();
+      write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
+      // settle delay is 1.2 s; under a loaded full-suite run fs.watch can lag, so poll instead of a fixed wait
+      const deadline = Date.now() + 8000;
+      while (rq.listPendingReviews().length === 0 && Date.now() < deadline) await new Promise((res) => setTimeout(res, 100));
+      const items = rq.listPendingReviews();
+      expect(items).toHaveLength(1);
+      expect(items[0].freeze?.sha).toBe(SHA_A);
+    }, 10000);
+  });
+});

@@ -1,5 +1,6 @@
 import type { Hono } from 'hono';
 import fs from 'node:fs';
+import path from 'node:path';
 import { getAgent, getRun, getRunArtifacts, resolveAgent } from '../db.js';
 import * as reviewQueue from '../review-queue.js';
 import * as codeReview from '../code-review.js';
@@ -8,6 +9,7 @@ import { presentFileRun } from '../file-runner.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
 import { canMutate, isAdmin } from '../users.js';
+import * as freezes from '../release-freezes.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/reviews/:runId/ai-review', async (c) => {
@@ -117,8 +119,28 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result.data);
   });
 
-  app.post('/api/reviews/:runId/reject', (c) => {
-    const result = reviewQueue.reject(c.req.param('runId'));
+  app.post('/api/reviews/:runId/reject', async (c) => {
+    const body = await c.req.json<{ reason?: string }>().catch(() => ({} as { reason?: string }));
+    const result = reviewQueue.reject(c.req.param('runId'), { reason: typeof body.reason === 'string' ? body.reason : null });
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json(result.data);
+  });
+
+  // Release freezes reviewed by files (release-freezes.ts). The watcher ingests
+  // the freeze inbox on its own; a reviewer may also hand a file in directly.
+  app.get('/api/reviews/freezes', (c) => c.json(freezes.listFreezes().map(freezes.toCard)));
+
+  app.post('/api/reviews/freezes/ingest', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ path?: string }>().catch(() => ({} as { path?: string }));
+    const file = typeof body.path === 'string' ? body.path.trim() : '';
+    const dirs = freezes.freezeInboxDirs();
+    const inside = dirs.some((d) => pathInside(file, d));
+    if (!file || !inside) {
+      return c.json({ error: `path must be a file inside the freeze inbox (${dirs.join(', ') || 'review.freeze_inbox is not configured'})` }, 400);
+    }
+    const result = freezes.ingestFreezeFile(file);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
   });
@@ -145,4 +167,10 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
       prompt_path: fileRun.prompt_path,
     });
   });
+}
+
+function pathInside(file: string, dir: string): boolean {
+  if (!path.isAbsolute(file) || file.includes('..')) return false;
+  const rel = path.relative(dir, file);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep);
 }

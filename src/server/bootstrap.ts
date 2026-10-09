@@ -4,6 +4,7 @@ import * as commandChat from './command-chat.js';
 import * as codeReview from './code-review.js';
 import * as peers from './peers.js';
 import * as inboxWatch from './inbox-watch.js';
+import * as releaseFreezes from './release-freezes.js';
 import * as usageProbe from './usage-probe.js';
 import * as teamManager from './team-manager.js';
 import * as fileSharing from './file-sharing.js';
@@ -33,6 +34,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   commandChat.ensureChatTable();
   codeReview.ensureReviewTable();
   peers.ensurePeerTables();
+  releaseFreezes.ensureReleaseFreezeTable();
   usageProbe.ensureUsageTable();
   teamManager.ensureTeamTables();
   fileSharing.ensureFileSharingTable();
@@ -44,6 +46,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   startHealthMonitor();
   peers.startPeerPollers();
   inboxWatch.startInboxWatchers();
+  releaseFreezes.startFreezeWatchers();
   usageProbe.startUsageProbe();
 
   return {
@@ -56,6 +59,7 @@ export function shutdownApplication(): void {
   stopHealthMonitor();
   peers.stopPeerPollers();
   inboxWatch.stopInboxWatchers();
+  releaseFreezes.stopFreezeWatchers();
   usageProbe.stopUsageProbe();
   outputWatcher.stopAll();
   teamManager.stopAllCommsWatchers();

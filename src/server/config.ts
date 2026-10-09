@@ -187,6 +187,13 @@ export interface WaveConfig {
      * the run waits with a "needs a reviewer" item until someone picks.
      */
     auto_pick: boolean;
+    /**
+     * Folders where authors drop freeze notes and reviewers drop verdict files
+     * (`*freeze*.md`, `*verdict*.md` with an exact SHA and `VERDICT: PASS|NEEDS FIXES`).
+     * Each reviewed SHA becomes a Review-queue card whose Promote relays the GO.
+     * Unset = off (a deploy box's inbox holds GO files, not freezes).
+     */
+    freeze_inbox?: string[];
   };
   /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
   usage?: { probe_interval_min?: number };
@@ -240,6 +247,11 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   if (cfg.diagrams?.kroki_url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.diagrams.kroki_url)) {
     throw new Error('diagrams.kroki_url must be an http(s) origin like http://127.0.0.1:8000');
+  }
+  if (cfg.review.freeze_inbox !== undefined) {
+    if (!Array.isArray(cfg.review.freeze_inbox) || cfg.review.freeze_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
+      throw new Error('review.freeze_inbox must be a list of directory paths');
+    }
   }
   for (const [name, project] of Object.entries(cfg.projects ?? {})) {
     if (project.release_peer !== undefined) {

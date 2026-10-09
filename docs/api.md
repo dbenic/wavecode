@@ -420,6 +420,34 @@ List AI reviews for a run.
 ### `POST /api/ai-reviews/:reviewId/send-fixes`
 Send review fixes back to the original agent.
 
+### Release freezes (reviewed by files)
+
+Countix lanes are frozen and reviewed outside WaveCode's own runs: the author drops a
+freeze note and an independent reviewer drops a verdict file into the freeze inbox
+(`review.freeze_inbox`, e.g. `/home/wave/inbox`). WaveCode watches that folder and turns
+every reviewed SHA into a normal Review-queue card (a synthetic done run for the author
+plus a completed `code_reviews` row for the reviewer, announced as `review.ai_completed`
+with a `freeze` payload). `ReviewItem.freeze` carries: `sha`, `project`, `desk`, `lane`,
+`author_name`, `reviewer_name`, `verdict`, `freeze_path`, `verdict_path`, `gate`,
+`status` (`open | promoted | rejected | stale`), `superseded_by`.
+
+File rules (file name contains `freeze` or `verdict`, `.md`/`.txt`):
+- the exact 40-character SHA on an `Exact SHA:` / `Freeze SHA:` / `Candidate:` line or in the title;
+- a line `VERDICT: PASS` or `VERDICT: NEEDS FIXES` (a line naming both is a request, not a verdict);
+- `Author: @x`, `reviewer X` / `Independent reviewer: X`, `Lane:`/`Branch:`, `Project:`, `Desk #n`;
+- a freeze note may carry the reviewer's verdict inline: `@codex3 **VERDICT: PASS** on this exact SHA: /path/to/review.md`.
+
+Server rules on `POST /api/reviews/:runId/promote` for a freeze card:
+- only an independent `PASS` on the exact SHA promotes (non-PASS needs an admin `overrideReason`, stored in `review.promoted`);
+- the reviewer must differ from the author (a self-review file is refused at ingest);
+- a newer freeze on the same lane, or a lane tip that moved, marks the older SHA `stale` (`review.superseded`); a stale SHA is refused, override or not;
+- Promote relays the GO to `projects.<p>.release_peer` with the freeze SHA, lane, reviewer, the person who pressed it and both file paths. Nothing deploys by itself.
+- `POST /api/reviews/:runId/reject` accepts `{ reason?: string }` (stored; `review.rejected.reason`). Retry and hand-off do not apply to freeze cards.
+- On startup, today's files in the inbox are backfilled; only PASS verdicts create cards then.
+
+`GET /api/reviews/freezes` lists all known freezes (cards and decided ones).
+`POST /api/reviews/freezes/ingest` with `{ path }` (a file inside the freeze inbox) ingests a file on demand, for a reviewer that cannot wait for the watcher.
+
 ## Peers (docs/peers.md)
 
 ### `GET /api/peers`

@@ -72,6 +72,21 @@ AGENTS.md, and win when they conflict.
   lines, then stop and wait. Never poll, loop, sleep or re-check on a timer;
   WaveCode wakes you when there is something to do.
 
+## 3a. Freezes and verdicts are files WaveCode reads
+
+A lane is released from the Review queue, not from chat. The queue reads the agentdrop inbox
+(`/home/wave/inbox` on the dev box), so write these exactly:
+
+- **Freeze note** `<you>-<topic>-freeze-<sha8>-<date>.md`: a line `Exact SHA: \`<40-char sha>\``
+  (or `Freeze SHA:`), `Lane:`/`Branch:` with the branch name, `Author: @you`, `Project: <name>`,
+  `Desk #n` when there is one, and `Independent reviewer: @x`. Never put `VERDICT:` in it unless
+  you are quoting a reviewer's verdict (`@x **VERDICT: PASS** on this exact SHA: <path>`).
+- **Verdict file** `<you>-verdict-<topic>-<sha8>-<date>.md`: the exact 40-char SHA in the title
+  (`(exact SHA …)`), `reviewer @you`, which freeze note you reviewed, and the **last line**
+  `VERDICT: PASS` or `VERDICT: NEEDS FIXES`. One verdict per file. You may not review your own SHA.
+- A new commit on the lane invalidates every earlier verdict on that lane: refreeze and re-review
+  the new SHA. The person's Promote on the card is the only GO; you never relay one (§3b).
+
 ## 3b. Asking the deploy box (production data, read-only)
 
 You cannot reach production. A separate agent on the deploy box can read it

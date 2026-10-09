@@ -414,7 +414,17 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
       ...(reviewId ? { review_id: reviewId } : {}),
       ...(run?.task_id ? { task_id: run.task_id } : {}),
     };
-    item.body = typeof p.fix_round === 'number' ? `Fix round ${p.fix_round}` : null;
+    const fz = p.freeze && typeof p.freeze === 'object' ? p.freeze as Record<string, unknown> : null;
+    if (fz && typeof fz.sha === 'string') {
+      item.title = `Release freeze ${fz.project ? `${fz.project} ` : ''}${fz.desk ? `Desk #${fz.desk} ` : ''}@ ${fz.sha.slice(0, 8)}: ${item.title}`;
+      item.body = [
+        fz.lane ? `lane ${fz.lane}` : null,
+        str(p.reviewer_agent) ? `reviewed by @${str(p.reviewer_agent)}` : null,
+        typeof fz.file === 'string' ? fz.file : null,
+      ].filter(Boolean).join(' · ') || null;
+    } else {
+      item.body = typeof p.fix_round === 'number' ? `Fix round ${p.fix_round}` : null;
+    }
     item.needs_attention = verdict !== 'pass';
     if (ctx.canMutate) {
       const promote = `/api/reviews/${event.entity_id}/promote`;

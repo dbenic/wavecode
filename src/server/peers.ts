@@ -222,24 +222,57 @@ async function sendNextQueued(peerName: string, remoteAgentId: string): Promise<
  * A person promoted a run: tell the project's release peer (deploy/fable),
  * attributed to that person. Agents cannot trigger this — only Promote does.
  */
-export async function onRunPromoted(run: Pick<Run, 'id' | 'agent_id' | 'task_id'> & { summary?: string | null }, actorName: string | null): Promise<void> {
+export interface PromotedFreeze {
+  sha: string;
+  lane: string | null;
+  project: string | null;
+  desk: number | null;
+  reviewer_name: string | null;
+  author_name: string | null;
+  freeze_path: string | null;
+  verdict_path: string | null;
+  gate: string | null;
+}
+
+export async function onRunPromoted(
+  run: Pick<Run, 'id' | 'agent_id' | 'task_id'> & { summary?: string | null },
+  actorName: string | null,
+  freeze?: PromotedFreeze,
+): Promise<void> {
   const cfg = getConfig();
   const agent = getAgent(run.agent_id);
-  if (!agent.ok || !agent.data.workspace) return;
-  const project = Object.entries(cfg.projects ?? {}).find(([, p]) => p.release_peer && workspaceMatches(agent.data.workspace!, p.workspace_match));
+  if (!agent.ok) return;
+  // A freeze names its project; a WaveCode run is matched by the author's workspace.
+  const project = freeze?.project && cfg.projects?.[freeze.project]?.release_peer
+    ? [freeze.project, cfg.projects[freeze.project]] as const
+    : agent.data.workspace
+      ? Object.entries(cfg.projects ?? {}).find(([, p]) => p.release_peer && workspaceMatches(agent.data.workspace!, p.workspace_match))
+      : undefined;
   if (!project) return;
   const [, p] = project;
   const [peerName, remoteHandle] = p.release_peer!.split('/');
-  let head = 'unknown';
-  try { head = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', 'HEAD'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
-  let branch = 'unknown';
-  try { branch = execFileSync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
+  let head = freeze?.sha ?? 'unknown';
+  let branch = freeze?.lane ?? 'unknown';
+  if (!freeze && agent.data.workspace) {
+    try { head = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', 'HEAD'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
+    try { branch = execFileSync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
+  }
   const summary = (run.summary ?? '').trim().substring(0, 1500);
-  const question = [
-    `Release request — run ${run.id}, task ${run.task_id}, lane branch ${branch} at ${head} (pushed by @${agent.data.alias ?? agent.data.name}).`,
-    'Gate the exact SHA, assign the version and deploy per your runbook. Report the deployed SHA and version, or why not.',
-    summary ? `\nAuthor's summary:\n${summary}` : '',
-  ].join('\n').trim();
+  const question = freeze
+    ? [
+        `Release GO — ${freeze.project ?? 'project'}${freeze.desk ? ` Desk #${freeze.desk}` : ''}: lane ${branch} at exact SHA ${freeze.sha}.`,
+        `Author @${freeze.author_name ?? agent.data.name}; independent review by @${freeze.reviewer_name ?? '?'}: VERDICT: PASS on this exact SHA${freeze.gate ? `; remote gate ${freeze.gate}` : ''}.`,
+        `Promoted by ${actorName ?? 'admin'} via WaveCode Promote.`,
+        freeze.freeze_path ? `Freeze note: ${freeze.freeze_path}` : '',
+        freeze.verdict_path ? `Verdict: ${freeze.verdict_path}` : '',
+        'Deploy this exact SHA only, per your runbook. Report the deployed SHA and version, or why not.',
+        summary ? `\nFreeze note excerpt:\n${summary}` : '',
+      ].filter(Boolean).join('\n').trim()
+    : [
+        `Release request — run ${run.id}, task ${run.task_id}, lane branch ${branch} at ${head} (pushed by @${agent.data.alias ?? agent.data.name}).`,
+        'Gate the exact SHA, assign the version and deploy per your runbook. Report the deployed SHA and version, or why not.',
+        summary ? `\nAuthor's summary:\n${summary}` : '',
+      ].join('\n').trim();
   const r = await askPeer({ peer: peerName, agent: remoteHandle, question, fromAgentId: agent.data.id, fromLabel: actorName ?? 'admin', kind: 'release' });
   if (!r.ok) logger.warn({ runId: run.id, error: r.error }, 'Release GO could not be relayed to the deploy peer');
 }

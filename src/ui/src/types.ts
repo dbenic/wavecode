@@ -203,6 +203,23 @@ export interface ReviewItem {
     fix_round: number;
     created_at: string;
   } | null;
+  /** Set when the card stands for a release freeze reviewed by files (exact SHA + reviewer verdict). */
+  freeze: ReleaseFreezeCard | null;
+}
+
+export interface ReleaseFreezeCard {
+  sha: string;
+  project: string | null;
+  desk: number | null;
+  lane: string | null;
+  author_name: string | null;
+  reviewer_name: string | null;
+  verdict: ReviewVerdict | null;
+  freeze_path: string | null;
+  verdict_path: string | null;
+  gate: string | null;
+  status: 'open' | 'promoted' | 'rejected' | 'stale';
+  superseded_by: string | null;
 }
 
 export interface TmuxSession {
