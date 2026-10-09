@@ -61,6 +61,21 @@ export function modelBadge(agent: Pick<Agent, 'model' | 'effort' | 'runtime_defa
   return null;
 }
 
+/** Badge tone from what is left of the weekly allowance: green ≥ 40%, amber ≥ 15%, red below. */
+export function usageTone(usage: NonNullable<Agent['usage']>): string {
+  const weekly = usage.metrics.find((m) => m.label === 'weekly');
+  const left = weekly?.left_pct ?? null;
+  if (left === null) return 'border-slate-600/60 bg-slate-900 text-slate-300';
+  if (left >= 40) return 'border-emerald-500/40 bg-emerald-950/50 text-emerald-200';
+  if (left >= 15) return 'border-amber-500/40 bg-amber-950/50 text-amber-200';
+  return 'border-red-500/40 bg-red-950/50 text-red-200';
+}
+
+export function usageTitle(usage: NonNullable<Agent['usage']>): string {
+  const lines = usage.metrics.map((m) => `${m.label}: ${m.used_pct !== null ? `${m.used_pct}% used` : ''}${m.left_pct !== null ? ` (${m.left_pct}% left)` : ''}${m.resets ? ` · resets ${m.resets}` : ''}${m.extra ? ` · ${m.extra}` : ''}`.trim());
+  return `Plan usage (read from the CLI's status screen at ${new Date(usage.probed_at).toLocaleTimeString()})\n${lines.join('\n')}`;
+}
+
 export default function AgentView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -500,6 +515,14 @@ export default function AgentView() {
                     title={modelBadge(agent)!.pinned ? 'Pinned by WaveCode (injected at launch)' : "From the CLI's own settings on this login — not pinned"}
                   >
                     {modelBadge(agent)!.label}
+                  </span>
+                )}
+                {agent.usage?.summary && (
+                  <span
+                    className={`rounded border px-1.5 py-px text-[10px] font-semibold normal-case ${usageTone(agent.usage)}`}
+                    title={usageTitle(agent.usage)}
+                  >
+                    {agent.usage.summary}
                   </span>
                 )}
                 {subscriptionLabel(agent) && (

@@ -53,6 +53,15 @@ Read in this order:
 
 ## Recently landed (see git log for detail)
 
+-4. **Usage badge, pool profiles, paste-and-confirm sends, hand-off watcher,
+   diagrams** (2026-10-08/09): `usage-probe.ts` types `/status` (Codex) or
+   `/usage` (Claude) into one idle agent per profile every 15 min and shows
+   "65% left · resets …" in the agent header; `profiles.<p>.public: true` =
+   pool agents usable by everyone; `tmux.sendTextAndEnter` pastes
+   (load-buffer/paste-buffer -p) and confirms the Enter; `inbox-watch.ts`
+   announces files in `~/inbox/from-fable` to the addressed agent; Mermaid /
+   Kroki diagrams render in every markdown view (`diagrams.kroki_url`).
+
 -3. **Security hardening (review of 2026-10-07)**: restrictions fail closed
    (malformed `allowed_agents` denies all); token expiry (`users.expires_at`,
    `user add --expires 30d`, exact UTC boundary, seats expire with their

@@ -28,6 +28,7 @@ import { validateAlias, validatePersona, validateTag, withPersona } from '../age
 import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
 import { agentAllowedFor, isRestrictedUser } from '../users.js';
 import { runtimeDefaultsFor, subscriptionFor } from '../subscription-info.js';
+import { usageFor } from '../usage-probe.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
@@ -469,6 +470,10 @@ function safeAllTags(): Map<string, string[]> | null {
   }
 }
 
+function safeUsage(agent: Agent) {
+  try { return usageFor(agent.runtime, agent.profile ?? null); } catch { return null; }
+}
+
 function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null, tags?: string[]) {
   const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
   const defaultSeat = orchestratorId === undefined ? defaultSeatFor(viewer, listAgents())?.id ?? null : orchestratorId;
@@ -491,6 +496,8 @@ function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null,
     subscription: subscriptionFor(agent.runtime, agent.profile ?? null),
     // What the CLI runs with when nothing is pinned (its own settings on that profile).
     runtime_defaults: runtimeDefaultsFor(agent.runtime, agent.profile ?? null),
+    // Plan usage read from the CLI's own status screen (usage-probe.ts); null until the first probe
+    usage: safeUsage(agent),
     lastOutputLine: outputWatcher.getLastOutputLine(agent.id),
     outputVersion: outputWatcher.getOutputVersion(agent.id),
     watching: outputWatcher.isWatching(agent.id),

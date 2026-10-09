@@ -188,6 +188,8 @@ export interface WaveConfig {
      */
     auto_pick: boolean;
   };
+  /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
+  usage?: { probe_interval_min?: number };
   /** Diagram rendering: a self-hosted Kroki (https://kroki.io) for D2 / PlantUML / Graphviz blocks and files. Mermaid renders in the browser. */
   diagrams?: { kroki_url?: string | null };
   llm: {
