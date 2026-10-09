@@ -280,10 +280,11 @@ function projectFor(parsed: ParsedFreezeFile, text: string): string | null {
   if (parsed.project) {
     const hit = names.find((n) => n.toLowerCase() === parsed.project);
     if (hit) return hit;
-    return parsed.project;
   }
+  // "Project: Countix" names the company; the configured project is mentioned elsewhere ("Countix / wavepulse", "WavePulse")
   const mentioned = names.find((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text));
   if (mentioned) return mentioned;
+  if (parsed.project) return parsed.project;
   const withPeer = names.filter((n) => projects[n].release_peer);
   return withPeer.length === 1 ? withPeer[0] : null;
 }
@@ -582,6 +583,14 @@ export function backfillFreezes(dirs = freezeInboxDirs(), now = new Date()): num
   return n;
 }
 
+/** One fs.watch event: let the writer finish (SETTLE_MS), then ingest if the file changed since last time. */
+export function onInboxEvent(dir: string, filename: string | Buffer | null, settleMs = SETTLE_MS): void {
+  if (!filename || typeof filename !== 'string' || !isFreezeFileName(filename)) return;
+  const file = path.join(dir, filename);
+  const t = setTimeout(() => { timers.delete(t); ingestIfChanged(file); }, settleMs);
+  timers.add(t);
+}
+
 export function startFreezeWatchers(): void {
   for (const dir of freezeInboxDirs()) {
     if (watchers.has(dir)) continue;
@@ -590,12 +599,7 @@ export function startFreezeWatchers(): void {
       continue;
     }
     try {
-      const w = fs.watch(dir, (_event, filename) => {
-        if (!filename || typeof filename !== 'string' || !isFreezeFileName(filename)) return;
-        const file = path.join(dir, filename);
-        const t = setTimeout(() => { timers.delete(t); ingestIfChanged(file); }, SETTLE_MS);
-        timers.add(t);
-      });
+      const w = fs.watch(dir, (_event, filename) => onInboxEvent(dir, filename));
       w.on('error', (e) => logger.warn({ dir, error: e.message }, 'Freeze watcher error'));
       watchers.set(dir, w);
       logger.info({ dir }, 'Watching freeze inbox');

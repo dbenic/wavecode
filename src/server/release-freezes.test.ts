@@ -164,6 +164,13 @@ describe('release-freezes.ts', () => {
       expect(p!.reviewerCandidates[0]).toBe('claude1');
     });
 
+    it('"Project: Countix" (the company) maps to the configured project mentioned in the text', () => {
+      const text = VERDICT_PASS.replace('Countix / wavepulse', 'Project: Countix · WavePulse 0.442.9');
+      const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, text);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.project).toBe('wavepulse');
+    });
+
     it('ignores files that are neither', () => {
       expect(rf.parseFreezeFile('# Proposal\n\nsome text', 'proposal-testing-host.md')).toBeNull();
     });
@@ -346,15 +353,26 @@ describe('release-freezes.ts', () => {
       expect(rf.getFreeze(SHA_C)).not.toBeNull(); // known, but no card until a PASS or a live delivery
     });
 
-    it('a verdict file dropped into the watched inbox becomes a card', async () => {
-      rf.startFreezeWatchers();
-      write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
-      // settle delay is 1.2 s; under a loaded full-suite run fs.watch can lag, so poll instead of a fixed wait
-      const deadline = Date.now() + 8000;
-      while (rq.listPendingReviews().length === 0 && Date.now() < deadline) await new Promise((res) => setTimeout(res, 100));
+    it('a file event on the watched inbox ingests the file once it settled; a repeat event on an unchanged file is a no-op', async () => {
+      const name = `codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`;
+      write(name, VERDICT_PASS);
+      rf.onInboxEvent(inbox, name, 10);
+      rf.onInboxEvent(inbox, 'notes.md', 10);         // not a freeze/verdict file
+      rf.onInboxEvent(inbox, '.swp-' + name, 10);     // editor temp file
+      await new Promise((res) => setTimeout(res, 60));
       const items = rq.listPendingReviews();
       expect(items).toHaveLength(1);
       expect(items[0].freeze?.sha).toBe(SHA_A);
-    }, 10000);
+      rf.onInboxEvent(inbox, name, 10);               // fs.watch fires several events per write
+      await new Promise((res) => setTimeout(res, 60));
+      expect(reviewRows(items[0].run.id)).toHaveLength(1);
+    });
+
+    it('startFreezeWatchers watches the configured inbox and stops cleanly', () => {
+      rf.startFreezeWatchers();
+      rf.stopFreezeWatchers();
+      reviewConfig.freeze_inbox = [path.join(tmp, 'missing')];
+      rf.startFreezeWatchers(); // missing dir: warns, no throw
+    });
   });
 });
