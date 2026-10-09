@@ -13,8 +13,22 @@ export function fileViewHref(filePath: string): string {
   return `/file?path=${encodeURIComponent(filePath)}`;
 }
 
+/**
+ * Terminals wrap long paths at a hyphen or slash: `…/2026-10-09-pd108-outgoing-line-vat-`
+ * then `treatment.md` on the next line (Codex indents the continuation). Re-join such a
+ * break so the whole path is one link; the visible text keeps the break out.
+ */
+export function joinWrappedPaths(html: string): string {
+  const EXT_RE = EXT;
+  return html.replace(
+    new RegExp(`(/(?:[\\w.@+-]+/)*[\\w.@+-]*[-_/])(?:<br\\s*/?>|\\n)[ \\t]*([\\w.@+-]+(?:/[\\w.@+-]+)*\\.(?:${EXT_RE}))(?![\\w/])`, 'g'),
+    '$1$2',
+  );
+}
+
 /** Turn bare paths in already-escaped HTML into viewer links; existing anchors are left alone. */
-export function linkifyPathsHtml(html: string): string {
+export function linkifyPathsHtml(input: string): string {
+  const html = joinWrappedPaths(input);
   const segments = html.split('</a>');
   return segments
     .map((seg, i) => {

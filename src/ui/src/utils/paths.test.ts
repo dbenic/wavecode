@@ -40,3 +40,17 @@ describe('diagram source recovery', () => {
     expect(diagramSourceFromHtml(pre)).toBe('flowchart LR\n  UI[Chat] -->|question| GW[Gateway]\n  GW --> RT[src/server/advisor]');
   });
 });
+
+describe('wrapped paths', () => {
+  it('re-joins a path the terminal wrapped at a hyphen (<br> in markdown, newline in console) into one link', async () => {
+    const { linkifyPathsHtml, joinWrappedPaths, fileViewHref } = await import('./paths');
+    const wrapped = 'spec (/home/wave/.wavecode-data/rooms/wavepulse/REPORTS/2026-10-09-pd108-outgoing-line-vat-<br/>  treatment.md)';
+    expect(joinWrappedPaths(wrapped)).toBe('spec (/home/wave/.wavecode-data/rooms/wavepulse/REPORTS/2026-10-09-pd108-outgoing-line-vat-treatment.md)');
+    const html = linkifyPathsHtml(wrapped);
+    expect(html).toContain(`href="${fileViewHref('/home/wave/.wavecode-data/rooms/wavepulse/REPORTS/2026-10-09-pd108-outgoing-line-vat-treatment.md')}"`);
+    const console = 'see /home/wave/inbox/codex1-verdict-si-aop-\n    r2.md now';
+    expect(linkifyPathsHtml(console)).toContain(fileViewHref('/home/wave/inbox/codex1-verdict-si-aop-r2.md'));
+    // a line ending with a word (no hyphen/slash) is not joined with the next line
+    expect(joinWrappedPaths('path /home/wave/inbox/a<br/>  b.md')).toBe('path /home/wave/inbox/a<br/>  b.md');
+  });
+});
