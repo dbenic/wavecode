@@ -8,7 +8,7 @@ import { getConfig } from './config.js';
 import { getDb, getTask, listAgents, listAgentMessages, listRuns, type Agent, type Task } from './db.js';
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
-import { listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
+import { candidateFor, listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
 import { listReleases, type ReleaseRequest } from './releases.js';
 
 export interface AgentBoardRow {
@@ -63,6 +63,8 @@ export interface LaneBoardRow {
   status: ReleaseFreeze['status'];
   superseded_by: string | null;
   promotable: boolean;
+  /** the unreleased release candidate branch this SHA already sits in (projects.<p>.candidate_refs), if any */
+  candidate: string | null;
   /** first lines of the freeze note (scope of the change), for grouping decisions */
   summary: string | null;
   staging: { status: string; version: string | null; at: string; by: string | null } | null;
@@ -146,8 +148,9 @@ function releaseCell(r: ReleaseRequest | null): LaneBoardRow['staging'] {
   return r ? { status: r.status, version: r.version, at: iso(r.updated_at)!, by: r.requested_by } : null;
 }
 
-function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null): { next: string; promotable: boolean } {
+function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null): { next: string; promotable: boolean } {
   if (f.status === 'merged') return { next: 'on main — merged or deployed outside this pipeline', promotable: false };
+  if (candidate) return { next: `in candidate ${candidate} — ships with that release`, promotable: false };
   if (f.status === 'stale') return { next: `stale — superseded by ${f.superseded_by?.slice(0, 8) ?? 'a newer freeze'}; the new SHA carries the work`, promotable: false };
   if (f.status === 'promoted') return { next: production?.status === 'deployed' ? 'in production' : 'promoted — waiting for the deployer', promotable: false };
   if (f.status === 'rejected') return { next: 'rejected', promotable: false };
@@ -217,14 +220,16 @@ export function buildBoard(now = Date.now()): Board {
       const rels = listReleases({ sha: f.sha, limit: 20 });
       const staging = rels.find((r) => r.target === 'staging') ?? null;
       const production = rels.find((r) => r.target === 'production') ?? null;
-      const { next, promotable } = nextStep(f, staging, production);
-      if (f.status === 'stale') attention.push({ kind: 'stale', text: `${f.project ?? ''} ${f.lane ?? ''} ${f.sha.slice(0, 8)} is stale`, sha: f.sha, run_id: f.run_id! });
+      let candidate: string | null = null;
+      try { candidate = f.status === 'open' || f.status === 'stale' ? candidateFor(f.project, f.sha, now)?.name ?? null : null; } catch { candidate = null; }
+      const { next, promotable } = nextStep(f, staging, production, candidate);
+      if (f.status === 'stale' && !candidate) attention.push({ kind: 'stale', text: `${f.project ?? ''} ${f.lane ?? ''} ${f.sha.slice(0, 8)} is stale`, sha: f.sha, run_id: f.run_id! });
       if (promotable && f.status === 'open') attention.push({ kind: 'promotable', text: `${f.project ?? ''}${f.desk ? ` Desk #${f.desk}` : ''} ${f.sha.slice(0, 8)}: ${next}`, sha: f.sha, run_id: f.run_id! });
       for (const r of [staging, production]) if (r?.status === 'failed') attention.push({ kind: 'release_failed', text: `${r.target} failed for ${f.sha.slice(0, 8)}: ${r.error ?? ''}`, sha: f.sha, run_id: f.run_id! });
       const summaryRow = f.run_id ? (getDb().prepare('SELECT summary FROM runs WHERE id = ?').get(f.run_id) as { summary: string | null } | undefined) : undefined;
       return {
         sha: f.sha, run_id: f.run_id, project: f.project, desk: f.desk, lane: f.lane, author: f.author_name, reviewer: f.reviewer_name,
-        verdict: f.verdict, gate: f.gate, status: f.status, superseded_by: f.superseded_by, promotable,
+        verdict: f.verdict, gate: f.gate, status: f.status, superseded_by: f.superseded_by, promotable, candidate,
         summary: summaryRow?.summary ? summaryRow.summary.replace(/\s+/g, ' ').slice(0, 600) : null,
         staging: releaseCell(staging), production: releaseCell(production), next, updated_at: iso(f.updated_at)!,
       };
@@ -232,8 +237,10 @@ export function buildBoard(now = Date.now()): Board {
 
   // Open fixes: a lane whose latest verdict is NEEDS FIXES (and no newer freeze replaced it), a failed release, a rejected freeze with a reason
   const fixes: FixRow[] = [];
+  const inCandidate = new Set(lanes.filter((l) => l.candidate).map((l) => l.sha));
   for (const f of freezes) {
     if (!f.run_id) continue;
+    if (inCandidate.has(f.sha)) continue; // ships with the candidate: not an open fix
     const rels = listReleases({ sha: f.sha, limit: 20 });
     const failed = rels.find((r) => r.status === 'failed');
     let reason: FixRow['reason'] | null = null;

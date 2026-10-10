@@ -397,6 +397,7 @@ export default function Overview() {
                       <span className="font-mono text-[10px] text-slate-600">{l.lane ?? ''}</span>
                       <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${l.verdict === 'pass' ? 'text-emerald-300 border-emerald-500/40' : 'text-amber-300 border-amber-500/40'}`}>{(l.verdict ?? 'none').toUpperCase().replace('-', ' ')}</span>
                       {l.gate && <span className={`text-[9px] font-bold ${l.gate === 'GREEN' ? 'text-emerald-300' : 'text-red-300'}`}>{l.gate}</span>}
+                      {l.candidate && <span className="text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border text-violet-300 border-violet-500/40">IN {l.candidate.toUpperCase()}</span>}
                       <span className="text-[10px] text-slate-500">staging: {l.staging?.status ?? '—'} · prod: {l.production?.status ?? '—'}</span>
                       <span className="text-[10px] text-slate-400 ml-auto">{l.next}</span>
                     </li>

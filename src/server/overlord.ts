@@ -141,6 +141,7 @@ Release planning — the practical advice the person wants most:
 - Each lane deploys to staging on its own; that is cheap and always fine to recommend.
 - For production, propose groups: lanes that touch the same area (same desk family, same module, one depends on another, a fix on top of a feature) go out together, in dependency order, so one verification covers them and nothing ships half. Independent lanes can ship separately; say so.
 - Put a lane on hold when its verdict is not PASS, its gate is RED, it is stale, a newer freeze on the same lane is coming, or its staging run has not been verified yet.
+- A lane with "candidate" set already sits in the deployer's release candidate branch: it ships with that release. Do not recommend staging, promoting or fixing it separately; mention it only as part of that release.
 - Order groups: hotfixes and small, verified changes first; large or risky changes last and alone.
 - Use the lane summaries (scope of the change) to judge overlap; when you cannot tell, say what to check instead of guessing.
 
@@ -183,7 +184,7 @@ export function buildPrompt(board: Board, trigger: string, previous: OverlordRep
     })),
     lanes: board.lanes.map((l) => ({
       run_id: l.run_id, sha8: l.sha.slice(0, 8), sha: l.sha, project: l.project, desk: l.desk, lane: l.lane, author: l.author, reviewer: l.reviewer,
-      verdict: l.verdict, gate: l.gate, status: l.status, promotable: l.promotable, staging: l.staging?.status ?? null, production: l.production?.status ?? null, next: l.next,
+      verdict: l.verdict, gate: l.gate, status: l.status, promotable: l.promotable, candidate: l.candidate, staging: l.staging?.status ?? null, production: l.production?.status ?? null, next: l.next,
       summary: l.summary,
     })),
     attention: board.attention,

@@ -501,16 +501,67 @@ const MERGED_TTL_MS = 60_000;
 const fetchedAt = new Map<string, number>();
 const FETCH_TTL_MS = 10 * 60_000;
 
-/** Best-effort `git fetch origin main` on the base clone, at most every 10 minutes per repo. */
+/** Best-effort `git fetch --prune origin` on the base clone (main and candidate branches), at most every 10 minutes per repo. */
 function refreshMain(repo: string, now: number): void {
   const last = fetchedAt.get(repo) ?? 0;
   if (now - last < FETCH_TTL_MS) return;
   fetchedAt.set(repo, now);
   try {
-    execFileSync('git', ['-C', repo, 'fetch', '--quiet', 'origin', 'main'], { stdio: 'ignore', timeout: 20_000 });
+    execFileSync('git', ['-C', repo, 'fetch', '--quiet', '--prune', 'origin'], { stdio: 'ignore', timeout: 30_000 });
   } catch (e) {
     logger.debug({ repo, error: (e as Error).message }, 'Base clone fetch skipped');
   }
+}
+
+/** Test hook: a repo may be probed without fetching (no remote). */
+export function setFetchDisabledForTest(disabled: boolean): void {
+  fetchDisabled = disabled;
+}
+let fetchDisabled = false;
+
+function globToRe(glob: string): RegExp {
+  return new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+}
+
+const candidateCache = new Map<string, { at: number; refs: Array<{ ref: string; name: string }> }>();
+
+/** Unreleased candidate branches (newest first) matching projects.<p>.candidate_refs, as remote-tracking refs. */
+function candidateRefs(project: string, repo: string, now: number): Array<{ ref: string; name: string }> {
+  const glob = getConfig().projects?.[project]?.candidate_refs;
+  if (!glob) return [];
+  const hit = candidateCache.get(repo);
+  if (hit && now - hit.at < MERGED_TTL_MS) return hit.refs;
+  const re = globToRe(glob);
+  let refs: Array<{ ref: string; name: string }> = [];
+  try {
+    const out = execFileSync('git', ['-C', repo, 'for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/remotes/origin'], { encoding: 'utf-8', timeout: 5000 });
+    refs = out.split('\n').map((l) => l.trim()).filter(Boolean)
+      .map((short) => ({ ref: short, name: short.replace(/^origin\//, '') }))
+      .filter((r) => re.test(r.name))
+      .filter((r) => {
+        // released candidates are already on main: not "in candidate" any more
+        try { execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', r.ref, 'origin/main'], { stdio: 'ignore', timeout: 5000 }); return false; } catch { return true; }
+      });
+  } catch (e) {
+    logger.debug({ repo, error: (e as Error).message }, 'Candidate refs unavailable');
+  }
+  candidateCache.set(repo, { at: now, refs });
+  return refs;
+}
+
+/** The newest unreleased candidate that contains `sha`, or null. */
+export function candidateFor(project: string | null, sha: string, now = Date.now()): { ref: string; name: string } | null {
+  const repo = project ? getConfig().projects?.[project]?.repo : undefined;
+  if (!repo || !project) return null;
+  if (!fetchDisabled) refreshMain(repo, now);
+  if (isOnMain(project, sha, now) === true) return null; // released: on main, not "in candidate"
+  for (const c of candidateRefs(project, repo, now)) {
+    try {
+      execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', sha, c.ref], { stdio: 'ignore', timeout: 5000 });
+      return c;
+    } catch { /* not in this one */ }
+  }
+  return null;
 }
 
 /** Is `sha` an ancestor of the project's main (per the local base clone)? null = cannot tell. */
@@ -520,7 +571,7 @@ export function isOnMain(project: string | null, sha: string, now = Date.now()):
   const key = `${repo}:${sha}`;
   const hit = mergedCache.get(key);
   if (hit && now - hit.at < MERGED_TTL_MS) return hit.merged;
-  refreshMain(repo, now);
+  if (!fetchDisabled) refreshMain(repo, now);
   let merged: boolean | null = null;
   for (const ref of ['origin/main', 'main']) {
     try {
@@ -585,6 +636,7 @@ export function reconcileSuperseded(): number {
 
 export function resetMergedCacheForTest(): void {
   mergedCache.clear();
+  candidateCache.clear();
   fetchedAt.clear();
 }
 

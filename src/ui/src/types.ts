@@ -263,6 +263,7 @@ export interface LaneBoardRow {
   status: 'open' | 'promoted' | 'rejected' | 'stale' | 'merged';
   superseded_by: string | null;
   promotable: boolean;
+  candidate: string | null;
   summary: string | null;
   staging: { status: string; version: string | null; at: string; by: string | null } | null;
   production: { status: string; version: string | null; at: string; by: string | null } | null;

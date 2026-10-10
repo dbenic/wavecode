@@ -74,6 +74,12 @@ export interface ProjectConfig {
    * `<worktree>/.wavecode-setup.log`; the agent is told when it finishes.
    */
   setup_command?: string;
+  /**
+   * Glob over remote branch names (without `origin/`) that are release candidates composed by
+   * the deployer, e.g. `fable/rc-*`. A lane whose SHA sits in an unreleased candidate is
+   * "in candidate": it ships with that release, is not an open fix and is not promoted alone.
+   */
+  candidate_refs?: string;
 }
 
 export interface PeerConfig {

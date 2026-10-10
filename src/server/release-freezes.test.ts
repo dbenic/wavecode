@@ -25,7 +25,7 @@ const reviewConfig: Record<string, unknown> = {
   auto_pick: true,
   freeze_inbox: [] as string[],
 };
-const projectsConfig: Record<string, { workspace_match: string; release_peer?: string; repo?: string }> = {};
+const projectsConfig: Record<string, { workspace_match: string; release_peer?: string; repo?: string; candidate_refs?: string }> = {};
 const peersConfig: Record<string, { url: string; token: string; agents?: string[] }> = {};
 
 vi.mock('./config.js', () => ({
@@ -317,6 +317,36 @@ describe('release-freezes.ts', () => {
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
       expect(rf.getFreeze(SHA_A)!.status).toBe('open');
       expect(rf.reconcileSuperseded()).toBe(0);
+    });
+
+    it('a SHA inside an unreleased candidate branch is "in candidate"; a released candidate (on main) no longer counts', () => {
+      const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+      const repo = path.join(tmp, 'repo-rc');
+      fs.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a'); git('add', '.'); git('commit', '-q', '-m', 'base');
+      const base = git('rev-parse', 'HEAD');
+      git('checkout', '-q', '-b', 'lane'); fs.writeFileSync(path.join(repo, 'b.txt'), 'b'); git('add', '.'); git('commit', '-q', '-m', 'lane work');
+      const laneSha = git('rev-parse', 'HEAD');
+      git('checkout', '-q', '-b', 'rc'); fs.writeFileSync(path.join(repo, 'c.txt'), 'c'); git('add', '.'); git('commit', '-q', '-m', 'compose');
+      const rcSha = git('rev-parse', 'HEAD');
+      git('checkout', '-q', 'main');
+      // remote-tracking refs as a fetch would leave them
+      git('update-ref', 'refs/remotes/origin/main', base);
+      git('update-ref', 'refs/remotes/origin/fable/rc-0443-2', rcSha);
+      git('update-ref', 'refs/remotes/origin/fable/rc-0443-1', base); // released: equals main
+      projectsConfig.wavepulse.repo = repo;
+      projectsConfig.wavepulse.candidate_refs = 'fable/rc-*';
+      rf.resetMergedCacheForTest();
+      rf.setFetchDisabledForTest(true);
+      expect(rf.candidateFor('wavepulse', laneSha)).toEqual({ ref: 'origin/fable/rc-0443-2', name: 'fable/rc-0443-2' });
+      expect(rf.candidateFor('wavepulse', base)).toBeNull(); // on main already (released candidate ignored)
+      expect(rf.isOnMain('wavepulse', laneSha)).toBe(false);
+      rf.setFetchDisabledForTest(false);
+      delete projectsConfig.wavepulse.repo;
+      delete projectsConfig.wavepulse.candidate_refs;
     });
 
     it('a SHA that is already on the project main is closed as merged, its queue card approved', () => {
