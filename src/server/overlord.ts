@@ -299,12 +299,24 @@ function parseChat(raw: string): { answer: string; actions: ChatAction[] } {
   const stripped = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   const start = stripped.indexOf('{');
   const end = stripped.lastIndexOf('}');
-  if (start < 0 || end <= start) return { answer: raw.trim(), actions: [] };
+  // A truncated or malformed JSON (the model ran out of output, or prefixed prose): keep the
+  // readable part — the "answer" field when it can be found, else the prose before the JSON —
+  // and drop the actions rather than show the person a half JSON blob.
+  const salvage = (): { answer: string; actions: ChatAction[] } => {
+    const m = /"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(stripped);
+    if (m) {
+      try { return { answer: JSON.parse(`"${m[1]}"`) as string, actions: [] }; } catch { /* fall through */ }
+    }
+    const jsonAt = stripped.search(/\{\s*"answer"/);
+    const prose = jsonAt > 0 ? stripped.slice(0, jsonAt).trim() : stripped.replace(/\{[\s\S]*$/, '').trim();
+    return { answer: prose || raw.trim(), actions: [] };
+  };
+  if (start < 0 || end <= start) return salvage();
   let o: Record<string, unknown>;
   try {
     o = JSON.parse(stripped.slice(start, end + 1)) as Record<string, unknown>;
   } catch {
-    return { answer: raw.trim(), actions: [] };
+    return salvage();
   }
   const answer = typeof o.answer === 'string' && o.answer.trim() ? o.answer.trim() : raw.trim();
   const actions: ChatAction[] = Array.isArray(o.actions)
@@ -360,7 +372,8 @@ export async function chat(message: string, user: { id: string | null; name: str
     conversation: history.map((t) => ({ who: t.role === 'user' ? (t.user_name ?? 'person') : 'you', text: t.text.slice(0, 600) })),
     question: { from: user.name, text },
   });
-  const res = await completeText({ model: cfg.model, systemPrompt: CHAT_SYSTEM, userMessage, maxTokens: 2048 });
+  // prompts for agents can be long; a cut-off answer loses its actions
+  const res = await completeText({ model: cfg.model, systemPrompt: CHAT_SYSTEM, userMessage, maxTokens: 16000 });
   if (!res.ok) return { ok: false, error: res.error };
   const parsed = parseChat(res.data);
   const answer = parsed.answer.slice(0, 6000);

@@ -257,6 +257,11 @@ describe('overview board + overlord', () => {
     expect(turn.actions[2]).toMatchObject({ label: 'Verified on staging 2431f684' });
     const history = await (await app.fetch(new Request('http://x/api/overview/chat'))).json() as Array<{ role: string; actions: unknown[] }>;
     expect(history[1].actions).toHaveLength(3);
+    // a truncated JSON (the model ran out of output) keeps the readable answer and drops the actions
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: 'Send the discovery to @codex1.\n\n{"answer":"Send the discovery to @codex1.\\n- @codex1: 44% budget","actions":[{"kind":"send","agent":"@codex1","text":"Task: discovery and spec' });
+    const cut = await (await app.fetch(new Request('http://x/api/overview/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'again' }) }))).json() as { text: string; actions: unknown[] };
+    expect(cut).toMatchObject({ text: 'Send the discovery to @codex1.\n- @codex1: 44% budget', actions: [] });
+    expect(vi.mocked(completeText).mock.calls[1][0].maxTokens).toBe(16000);
     // a plain-text answer is kept as is, without actions
     vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: 'Nothing to do right now.' });
     const plain = await (await app.fetch(new Request('http://x/api/overview/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'and now?' }) }))).json() as { text: string; actions: unknown[] };
