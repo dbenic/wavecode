@@ -395,7 +395,20 @@ overlord:
   notify: true
 ```
 
+The board also carries **open fixes** (a lane whose latest verdict is NEEDS FIXES, a failed
+release, a recent rejection) with the task queued for it, if any — a fix task carries
+`[fix <sha8>]` in its prompt, so nothing stays open without a name next to it — and each agent's
+**budget** (weekly and 5-hour % left from the usage probe), which the overlord uses when it
+proposes who takes a fix (author first if idle with budget, else the idle agent on the same
+runtime with the most weekly budget; never below 10%).
+
 - `GET /api/overview` → `{ board, report, overlord: { enabled, model, heartbeat_min, max_wakes_per_hour } }`
+- `GET /api/overview/chat`, `POST /api/overview/chat` `{ message }` — talk to the overlord; it answers
+  from the board (plain text), history is kept and sent back to it. Not subject to the wake cap.
+- `POST /api/overview/fixes/assign` `{ run_id, agent_id, note? }` — queue a fix task
+  (`[fix <sha8>] …` with the verdict and freeze note paths, reviewer preset to the lane's reviewer)
+  for that agent; 409 while a fix task for the SHA is open. The thread's "Assign fix" button and
+  the overlord's `fix` recommendations call this.
 - `GET /api/overview/reports?limit=` — past reports, newest first.
 - `POST /api/overview/wake` `{ force? }` — admin: ask now (the hourly cap still applies unless `force`).
 

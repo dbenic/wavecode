@@ -408,7 +408,7 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
       ...plan.map((g) => `→ ${String(g.target ?? 'staging').toUpperCase()}: ${str(g.title) ?? ''} [${(Array.isArray(g.shas) ? g.shas as string[] : []).map((s) => s.slice(0, 8)).join(', ')}] — ${str(g.why) ?? ''}`),
       ...recs.map((r) => `• [${str(r.kind) ?? 'info'}] ${str(r.text) ?? ''}`),
     ].filter(Boolean).join('\n') || null;
-    item.needs_attention = recs.some((r) => ['promote', 'stage', 'reject', 'nudge', 'refreeze'].includes(str(r.kind) ?? ''));
+    item.needs_attention = recs.some((r) => ['promote', 'stage', 'reject', 'nudge', 'refreeze', 'fix'].includes(str(r.kind) ?? ''));
     if (ctx.canMutate) {
       let n = 0;
       for (const r of recs) {
@@ -418,6 +418,8 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         if ((kind === 'promote' || kind === 'stage' || kind === 'reject') && runId) {
           if (kind === 'promote' && !isAdmin(ctx.viewer) && !ctx.canMutate) continue;
           item.actions.push({ id: `${kind}_${n++}`, label: `${kind[0].toUpperCase()}${kind.slice(1)} ${runId.slice(-6)}`, method: 'POST', path: `/api/reviews/${runId}/${kind}` });
+        } else if (kind === 'fix' && runId && agentId && ctx.canAct(agentId)) {
+          item.actions.push({ id: `fix_${n++}`, label: `Assign fix → @${ctx.agent(agentId)?.alias ?? ctx.agent(agentId)?.name ?? 'agent'}`, method: 'POST', path: '/api/overview/fixes/assign', body: { run_id: runId, agent_id: agentId } });
         } else if (kind === 'nudge' && agentId && ctx.canAct(agentId)) {
           item.actions.push({ id: `nudge_${n++}`, label: `Nudge @${ctx.agent(agentId)?.alias ?? ctx.agent(agentId)?.name ?? 'agent'}`, method: 'POST', path: `/api/agents/${agentId}/send`, body: { text: `[Overlord] ${str(r.text) ?? 'Please report where you are and what blocks you.'}` } });
         }

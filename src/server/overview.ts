@@ -5,7 +5,7 @@
  */
 
 import { getConfig } from './config.js';
-import { getDb, getTask, listAgents, listAgentMessages, listRuns, type Agent } from './db.js';
+import { getDb, getTask, listAgents, listAgentMessages, listRuns, type Agent, type Task } from './db.js';
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
 import { listFreezes, type ReleaseFreeze } from './release-freezes.js';
@@ -27,8 +27,27 @@ export interface AgentBoardRow {
   /** 'awaiting peer answer' | 'review pending' | 'needs reviewer' | 'hung' | 'crashed' | null */
   blocked_on: string | null;
   usage: string | null;
+  /** subscription budget from the usage probe: % left of the weekly and the 5-hour window */
+  budget: { weekly_left: number | null; five_h_left: number | null; resets: string | null };
   /** release freezes this agent authored that are still open */
   open_freezes: number;
+}
+
+/** Something that needs a fix and, ideally, an agent queued to do it. */
+export interface FixRow {
+  sha: string;
+  run_id: string;
+  project: string | null;
+  desk: number | null;
+  lane: string | null;
+  author: string | null;
+  author_agent_id: string | null;
+  reviewer: string | null;
+  reason: 'needs fixes' | 'release failed' | 'rejected';
+  detail: string | null;
+  since: string;
+  /** the task queued for the fix (prompt carries `[fix <sha8>]`), or null when nobody is on it */
+  assigned: { task_id: string; num: number | null; status: Task['status']; agent_id: string | null; agent_name: string | null } | null;
 }
 
 export interface LaneBoardRow {
@@ -54,7 +73,7 @@ export interface LaneBoardRow {
 }
 
 export interface AttentionRow {
-  kind: 'needs_reviewer' | 'hung' | 'crashed' | 'stale' | 'release_failed' | 'awaiting_answer' | 'promotable' | 'idle_with_open_work';
+  kind: 'needs_reviewer' | 'hung' | 'crashed' | 'stale' | 'release_failed' | 'awaiting_answer' | 'promotable' | 'idle_with_open_work' | 'fix_unassigned';
   text: string;
   agent_id?: string;
   run_id?: string;
@@ -66,8 +85,22 @@ export interface Board {
   host: string;
   agents: AgentBoardRow[];
   lanes: LaneBoardRow[];
+  fixes: FixRow[];
   attention: AttentionRow[];
-  counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number };
+  counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number; open_fixes: number; unassigned_fixes: number };
+}
+
+/** The marker a fix task carries in its prompt so the board can tie it to the SHA. */
+export function fixMarker(sha: string): string {
+  return `[fix ${sha.slice(0, 8)}]`;
+}
+
+function assignedFixTask(sha: string, since: string): FixRow['assigned'] {
+  const row = getDb().prepare(
+    `SELECT t.id, t.num, t.status, t.agent_id, a.name AS agent_name FROM tasks t LEFT JOIN agents a ON a.id = t.agent_id
+     WHERE t.prompt LIKE ? AND t.created_at >= ? ORDER BY t.created_at DESC LIMIT 1`,
+  ).get(`%${fixMarker(sha)}%`, since.replace('T', ' ').replace('Z', '').slice(0, 19)) as { id: string; num: number | null; status: Task['status']; agent_id: string | null; agent_name: string | null } | undefined;
+  return row ? { task_id: row.id, num: row.num, status: row.status, agent_id: row.agent_id, agent_name: row.agent_name } : null;
 }
 
 const IDLE_WITH_WORK_MIN = 20;
@@ -157,6 +190,8 @@ export function buildBoard(now = Date.now()): Board {
       else if (review?.needsReviewer) blocked = 'needs reviewer';
       else if (review) blocked = 'review pending';
       const usage = usageFor(a.runtime, a.profile);
+      const weekly = usage?.metrics.find((m) => m.label === 'weekly') ?? null;
+      const fiveH = usage?.metrics.find((m) => m.label === '5h') ?? null;
       if (alert) attention.push({ kind: alert, text: `@${a.alias ?? a.name} ${alert}`, agent_id: a.id });
       if (question) attention.push({ kind: 'awaiting_answer', text: `@${a.alias ?? a.name} waits for ${question.peer}/${question.agent} (${minutesSince(iso(question.created_at), now) ?? '?'} min)`, agent_id: a.id });
       if (review?.needsReviewer) attention.push({ kind: 'needs_reviewer', text: `@${a.alias ?? a.name}'s run needs a reviewer`, agent_id: a.id, run_id: review.runId });
@@ -167,7 +202,9 @@ export function buildBoard(now = Date.now()): Board {
         id: a.id, name: a.name, alias: a.alias ?? null, runtime: a.runtime, model: (a as { model?: string | null }).model ?? null,
         status: a.status, status_since: statusSince, for_min: forMin, current,
         last_reply: reply ? { at: iso(reply.created_at)!, text: reply.message.slice(0, 240) } : null,
-        blocked_on: blocked, usage: usage?.summary ?? null, open_freezes: openFreezesByAuthor.get(a.id) ?? 0,
+        blocked_on: blocked, usage: usage?.summary ?? null,
+        budget: { weekly_left: weekly?.left_pct ?? null, five_h_left: fiveH?.left_pct ?? null, resets: weekly?.resets ?? null },
+        open_freezes: openFreezesByAuthor.get(a.id) ?? 0,
       };
     });
 
@@ -190,12 +227,32 @@ export function buildBoard(now = Date.now()): Board {
       };
     });
 
+  // Open fixes: a lane whose latest verdict is NEEDS FIXES (and no newer freeze replaced it), a failed release, a rejected freeze with a reason
+  const fixes: FixRow[] = [];
+  for (const f of freezes) {
+    if (!f.run_id) continue;
+    const rels = listReleases({ sha: f.sha, limit: 20 });
+    const failed = rels.find((r) => r.status === 'failed');
+    let reason: FixRow['reason'] | null = null;
+    let detail: string | null = null;
+    if (f.status === 'open' && (f.verdict === 'needs-fixes' || f.verdict === 'reject')) { reason = 'needs fixes'; detail = f.verdict_path; }
+    else if (f.status !== 'stale' && f.status !== 'rejected' && failed) { reason = 'release failed'; detail = `${failed.target}: ${failed.error ?? 'see report'}`; }
+    else if (f.status === 'rejected' && f.decision_reason && minutesSince(iso(f.updated_at), now)! < 7 * 24 * 60) { reason = 'rejected'; detail = f.decision_reason; }
+    if (!reason) continue;
+    const since = iso(f.updated_at)!;
+    const assigned = assignedFixTask(f.sha, since);
+    if (assigned?.status === 'done') continue; // fixed: the next freeze on the lane will show as a new card
+    fixes.push({ sha: f.sha, run_id: f.run_id, project: f.project, desk: f.desk, lane: f.lane, author: f.author_name, author_agent_id: f.author_agent_id, reviewer: f.reviewer_name, reason, detail, since, assigned });
+    if (!assigned) attention.push({ kind: 'fix_unassigned', text: `${f.project ?? ''}${f.desk ? ` Desk #${f.desk}` : ''} ${f.sha.slice(0, 8)} ${reason} — nobody assigned`, sha: f.sha, run_id: f.run_id, agent_id: f.author_agent_id ?? undefined });
+  }
+
   const releasesOpen = listReleases({ limit: 100 }).filter((r) => r.status === 'sent' || r.status === 'requested').length;
   return {
     at: atIso,
     host: cfg.server?.host ?? 'wavecode',
     agents,
     lanes,
+    fixes,
     attention,
     counts: {
       working: agents.filter((a) => a.status === 'working').length,
@@ -204,6 +261,8 @@ export function buildBoard(now = Date.now()): Board {
       open_lanes: lanes.filter((l) => l.status === 'open').length,
       promotable: lanes.filter((l) => l.promotable && l.status === 'open').length,
       releases_open: releasesOpen,
+      open_fixes: fixes.length,
+      unassigned_fixes: fixes.filter((x) => !x.assigned).length,
     },
   };
 }

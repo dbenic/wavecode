@@ -13,7 +13,7 @@
 
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
-import { getDb, listEventsBefore, getLatestEventId, type WaveEvent } from './db.js';
+import { getDb, listEventsBefore, getLatestEventId, type Result, type WaveEvent } from './db.js';
 import { emit, onEvent } from './event-bus.js';
 import { completeText, isLlmConfigured } from './llm-provider.js';
 import logger from './logger.js';
@@ -22,7 +22,7 @@ import { buildBoard, type Board } from './overview.js';
 
 export const DEFAULT_MODEL = 'claude-sonnet-5-5';
 
-export type RecommendationKind = 'promote' | 'stage' | 'reject' | 'nudge' | 'reassign' | 'refreeze' | 'info';
+export type RecommendationKind = 'promote' | 'stage' | 'reject' | 'nudge' | 'reassign' | 'refreeze' | 'fix' | 'info';
 
 export interface Recommendation {
   kind: RecommendationKind;
@@ -61,7 +61,7 @@ const TRIGGERS = new Set([
   'peer.answer', 'peer.failed',
 ]);
 
-const KINDS: RecommendationKind[] = ['promote', 'stage', 'reject', 'nudge', 'reassign', 'refreeze', 'info'];
+const KINDS: RecommendationKind[] = ['promote', 'stage', 'reject', 'nudge', 'reassign', 'refreeze', 'fix', 'info'];
 
 export function overlordConfig() {
   const o = getConfig().overlord ?? {};
@@ -85,6 +85,14 @@ export function ensureOverlordTable(): void {
       report_json TEXT NOT NULL,
       digest TEXT,
       board_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS overlord_chat (
+      id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      role TEXT NOT NULL,
+      user_id TEXT,
+      user_name TEXT,
+      text TEXT NOT NULL
     );
   `);
 }
@@ -125,6 +133,10 @@ Rules you follow:
 - Be concrete and short. Name agents as @alias, lanes by project, desk and the first 8 characters of the SHA.
 - If nothing changed that a person needs to act on, set digest to null.
 
+Fixes and budget:
+- Every NEEDS FIXES verdict, failed release or rejection is an open fix until an agent is queued on it (the board lists fixes with "assigned"). For each unassigned fix recommend kind "fix" with the agent_id to do it and the run_id of the lane: prefer the author (it knows the change) when it is idle and has weekly budget; otherwise the idle agent on the same runtime with the most weekly budget left. Never pick an agent below 10% weekly budget or one that is hung/crashed; say if nobody fits.
+- Budget: agents report weekly and 5-hour % left. Mention an agent running low; spread new work to agents with budget.
+
 Release planning — the practical advice the person wants most:
 - Each lane deploys to staging on its own; that is cheap and always fine to recommend.
 - For production, propose groups: lanes that touch the same area (same desk family, same module, one depends on another, a fix on top of a feature) go out together, in dependency order, so one verification covers them and nothing ships half. Independent lanes can ship separately; say so.
@@ -135,7 +147,7 @@ Release planning — the practical advice the person wants most:
 Answer with one JSON object and nothing else:
 {
   "agents": [{"id": "<agent id>", "note": "<one line: what it is doing / needs>"}],
-  "recommendations": [{"kind": "promote|stage|reject|nudge|reassign|refreeze|info", "run_id": "<run id for promote/stage/reject, else null>", "agent_id": "<agent id for nudge/reassign, else null>", "sha": "<sha or null>", "text": "<one or two sentences: what and why>"}],
+  "recommendations": [{"kind": "promote|stage|reject|nudge|reassign|refreeze|fix|info", "run_id": "<run id for promote/stage/reject/fix, else null>", "agent_id": "<agent id for nudge/reassign/fix, else null>", "sha": "<sha or null>", "text": "<one or two sentences: what and why>"}],
   "plan": [{"title": "<short name, e.g. 'Invoices batch: Desk #91 + #105'>", "shas": ["<full sha>", "..."], "target": "staging|production|hold", "why": "<one or two sentences: why together / why this order / what to verify first>"}],
   "digest": "<2-4 lines for the person: what to deploy now, what to wait for, or null>"
 }`;
@@ -163,7 +175,11 @@ export function buildPrompt(board: Board, trigger: string, previous: OverlordRep
       id: a.id, name: a.alias ?? a.name, runtime: a.runtime, status: a.status, for_min: a.for_min,
       current: a.current ? { num: a.current.num, run_id: a.current.run_id, prompt: a.current.prompt.slice(0, 160) } : null,
       last_reply: a.last_reply ? { at: a.last_reply.at, text: a.last_reply.text.slice(0, 160) } : null,
-      blocked_on: a.blocked_on, usage: a.usage, open_freezes: a.open_freezes,
+      blocked_on: a.blocked_on, budget: a.budget, open_freezes: a.open_freezes,
+    })),
+    fixes: board.fixes.map((f) => ({
+      run_id: f.run_id, sha8: f.sha.slice(0, 8), project: f.project, desk: f.desk, lane: f.lane, author_agent_id: f.author_agent_id, author: f.author, reviewer: f.reviewer,
+      reason: f.reason, detail: f.detail, since: f.since, assigned: f.assigned ? { task: f.assigned.num, status: f.assigned.status, agent: f.assigned.agent_name } : null,
     })),
     lanes: board.lanes.map((l) => ({
       run_id: l.run_id, sha8: l.sha.slice(0, 8), sha: l.sha, project: l.project, desk: l.desk, lane: l.lane, author: l.author, reviewer: l.reviewer,
@@ -221,6 +237,41 @@ export function parseReport(text: string): { agents: OverlordReport['agents']; r
     : [];
   const digest = typeof o.digest === 'string' && o.digest.trim() ? o.digest.trim().slice(0, 1200) : null;
   return { agents, recommendations, plan, digest };
+}
+
+// --- chat -----------------------------------------------------------------------------------------
+
+export interface ChatTurn { id: string; created_at: string; role: 'user' | 'assistant'; user_id: string | null; user_name: string | null; text: string }
+
+const CHAT_SYSTEM = `You are the coordinator of a small software team of CLI coding agents run by WaveCode, talking with one of the people who run it. You answer from the board you are given (agents, lanes, fixes, releases, budget, recent events) — never invent state. Be practical and short: what to deploy together and in what order, who should take a fix (prefer the author if idle with budget, else the idle agent on the same runtime with the most weekly budget), what is blocked and who can unblock it, where budget is running low. Name agents as @name and lanes by desk and the first 8 characters of the SHA. If the answer needs an action, say exactly which button or command: Stage, Promote, Reject on the Release page, "assign fix", or a prompt to an agent. Plain text, no JSON, at most ~12 lines.`;
+
+export function listChat(limit = 40): ChatTurn[] {
+  // insertion order: two turns can share a second, and ulids are not monotonic within a millisecond
+  return withTable(() => (getDb().prepare('SELECT * FROM overlord_chat ORDER BY rowid DESC LIMIT ?').all(limit) as ChatTurn[]).reverse());
+}
+
+export async function chat(message: string, user: { id: string | null; name: string }): Promise<Result<ChatTurn>> {
+  const text = message.trim().slice(0, 4000);
+  if (!text) return { ok: false, error: 'message is empty' };
+  if (!isLlmConfigured()) return { ok: false, error: 'No LLM API key configured (llm.anthropic_api_key)' };
+  const cfg = overlordConfig();
+  const history = listChat(12);
+  withTable(() => getDb().prepare('INSERT INTO overlord_chat (id, role, user_id, user_name, text) VALUES (?, ?, ?, ?, ?)').run(ulid(), 'user', user.id, user.name, text));
+  const board = buildBoard();
+  const previous = getLatestReport();
+  const userMessage = JSON.stringify({
+    board: JSON.parse(buildPrompt(board, 'chat', previous)) as unknown,
+    conversation: history.map((t) => ({ who: t.role === 'user' ? (t.user_name ?? 'person') : 'you', text: t.text.slice(0, 600) })),
+    question: { from: user.name, text },
+  });
+  const res = await completeText({ model: cfg.model, systemPrompt: CHAT_SYSTEM, userMessage, maxTokens: 2048 });
+  if (!res.ok) return { ok: false, error: res.error };
+  const answer = res.data.trim().slice(0, 6000);
+  const id = ulid();
+  withTable(() => getDb().prepare('INSERT INTO overlord_chat (id, role, user_id, user_name, text) VALUES (?, ?, ?, ?, ?)').run(id, 'assistant', null, 'overlord', answer));
+  emit('overlord.chat', 'overlord', id, { from: user.name, question: text.slice(0, 300), answer: answer.slice(0, 2000) }, null);
+  const turn = withTable(() => getDb().prepare('SELECT * FROM overlord_chat WHERE id = ?').get(id) as ChatTurn);
+  return { ok: true, data: turn };
 }
 
 // --- waking ---------------------------------------------------------------------------------------

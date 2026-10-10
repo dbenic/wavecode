@@ -182,6 +182,78 @@ describe('overview board + overlord', () => {
     expect(vi.mocked(completeText).mock.calls[0][0].userMessage).toContain('"trigger":"run.finished,review.ai_completed"');
   });
 
+  it('a NEEDS FIXES lane is an open fix until a task carrying its SHA is queued; assigning creates that task for the chosen agent', async () => {
+    const codex2 = agent('codex2');
+    agent('claude1');
+    const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
+    const SHA_B = 'e65a2ab5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const verdict = path.join(inbox, `claude1-verdict-codex2-desk43-${SHA_B.slice(0, 8)}.md`);
+    fs.writeFileSync(verdict, `# Verdict: Codex2 Desk #43 settlement (exact SHA ${SHA_B})\nProject: wavepulse · reviewer Claude1 · Author: codex2\n\n- [HIGH] rounding wrong\n\nVERDICT: NEEDS FIXES\n`);
+    expect(rf.ingestFreezeFile(verdict).ok).toBe(true);
+
+    let board = ov.buildBoard();
+    expect(board.fixes).toHaveLength(1);
+    expect(board.fixes[0]).toMatchObject({ sha: SHA_B, reason: 'needs fixes', author: 'codex2', reviewer: 'claude1', assigned: null });
+    expect(board.attention.some((a) => a.kind === 'fix_unassigned')).toBe(true);
+    expect(board.counts).toMatchObject({ open_fixes: 1, unassigned_fixes: 1 });
+
+    const res = await app.fetch(new Request('http://x/api/overview/fixes/assign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ run_id: board.fixes[0].run_id, agent_id: 'codex2', note: 'please today' }) }));
+    expect(res.status).toBe(201);
+    const made = await res.json() as { task: { id: string; prompt: string; agent_id: string; reviewer: string | null } };
+    expect(made.task.agent_id).toBe(codex2.id);
+    expect(made.task.prompt).toMatch(/^\[fix e65a2ab5\] Fix the review findings on lane/);
+    expect(made.task.prompt).toContain(`exact SHA ${SHA_B}`);
+    expect(made.task.prompt).toContain('From owner: please today');
+    board = ov.buildBoard();
+    expect(board.fixes[0].assigned).toMatchObject({ task_id: made.task.id, agent_name: 'codex2', status: 'pending' });
+    expect(board.counts.unassigned_fixes).toBe(0);
+    // a second assignment while the task is open is refused
+    const dup = await app.fetch(new Request('http://x/api/overview/fixes/assign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ run_id: board.fixes[0].run_id, agent_id: 'claude1' }) }));
+    expect(dup.status).toBe(409);
+    // when the task is done the fix leaves the list
+    db.updateTaskStatus(made.task.id, 'done');
+    expect(ov.buildBoard().fixes).toHaveLength(0);
+
+    // the overlord's "fix" recommendation becomes an assign button in the thread
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: JSON.stringify({ agents: [], recommendations: [{ kind: 'fix', run_id: made.task.id, agent_id: codex2.id, text: 'codex2 is idle with budget; have it fix Desk #43.' }], plan: [], digest: null }) });
+    await ol.wake('review.ai_completed');
+    const ev = db.listEvents({ entity_type: 'overlord' }).filter((e) => e.type === 'overlord.report').pop()!;
+    const item = thread.toThreadItem(ev, new thread.ThreadContext({ id: 'owner', name: 'owner', role: 'admin' } as never))!;
+    expect(item.actions[0]).toMatchObject({ path: '/api/overview/fixes/assign', body: { run_id: made.task.id, agent_id: codex2.id } });
+  });
+
+  it('budget per agent comes from the usage probe and reaches the model', async () => {
+    const claude2 = agent('claude2');
+    db.getDb().exec(`CREATE TABLE IF NOT EXISTS profile_usage (runtime TEXT NOT NULL, profile TEXT NOT NULL, data TEXT NOT NULL, probed_at TEXT NOT NULL, PRIMARY KEY (runtime, profile))`);
+    db.getDb().prepare('INSERT INTO profile_usage (runtime, profile, data, probed_at) VALUES (?, ?, ?, ?)').run('claude-code', 'home', JSON.stringify({ summary: '12% left · resets 14 Oct', metrics: [{ label: 'weekly', left_pct: 12, used_pct: 88, resets: '14 Oct' }, { label: '5h', left_pct: 70, used_pct: 30, resets: null }] }), '2026-10-10 15:00:00');
+    const row = ov.buildBoard().agents.find((a) => a.id === claude2.id)!;
+    expect(row.budget).toEqual({ weekly_left: 12, five_h_left: 70, resets: '14 Oct' });
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: JSON.stringify({ agents: [], recommendations: [], plan: [], digest: null }) });
+    await ol.wake('heartbeat');
+    const sent = JSON.parse(vi.mocked(completeText).mock.calls[0][0].userMessage) as { agents: Array<{ budget: { weekly_left: number } }> };
+    expect(sent.agents[0].budget.weekly_left).toBe(12);
+  });
+
+  it('chat answers from the board, keeps history, and is not capped like wakes', async () => {
+    agent('claude2');
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: 'Nothing to ship: no reviewed lanes. @claude2 is idle.' });
+    const res = await app.fetch(new Request('http://x/api/overview/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'what ships today?' }) }));
+    expect(res.status).toBe(201);
+    const call = vi.mocked(completeText).mock.calls[0][0];
+    expect(call.model).toBe('claude-sonnet-5-5');
+    expect(call.systemPrompt).toMatch(/talking with one of the people/);
+    const sent = JSON.parse(call.userMessage) as { question: { from: string; text: string }; board: { agents: unknown[] } };
+    expect(sent.question).toEqual({ from: 'owner', text: 'what ships today?' });
+    expect(sent.board.agents).toHaveLength(1);
+    const history = await (await app.fetch(new Request('http://x/api/overview/chat'))).json() as Array<{ role: string; text: string }>;
+    expect(history.map((h) => h.role)).toEqual(['user', 'assistant']);
+    expect(history[1].text).toMatch(/^Nothing to ship/);
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: 'Still nothing.' });
+    await app.fetch(new Request('http://x/api/overview/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'and tomorrow?' }) }));
+    const second = JSON.parse(vi.mocked(completeText).mock.calls[1][0].userMessage) as { conversation: Array<{ who: string; text: string }> };
+    expect(second.conversation.map((c) => c.who)).toEqual(['owner', 'you']);
+  });
+
   it('the routes: GET /api/overview returns board + report + settings; wake is admin only', async () => {
     agent('claude2');
     const res = await app.fetch(new Request('http://x/api/overview'));

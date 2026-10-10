@@ -229,8 +229,26 @@ export interface AgentBoardRow {
   last_reply: { at: string; text: string } | null;
   blocked_on: string | null;
   usage: string | null;
+  budget: { weekly_left: number | null; five_h_left: number | null; resets: string | null };
   open_freezes: number;
 }
+
+export interface FixRow {
+  sha: string;
+  run_id: string;
+  project: string | null;
+  desk: number | null;
+  lane: string | null;
+  author: string | null;
+  author_agent_id: string | null;
+  reviewer: string | null;
+  reason: 'needs fixes' | 'release failed' | 'rejected';
+  detail: string | null;
+  since: string;
+  assigned: { task_id: string; num: number | null; status: string; agent_id: string | null; agent_name: string | null } | null;
+}
+
+export interface ChatTurn { id: string; created_at: string; role: 'user' | 'assistant'; user_id: string | null; user_name: string | null; text: string }
 
 export interface LaneBoardRow {
   sha: string;
@@ -265,12 +283,13 @@ export interface Board {
   host: string;
   agents: AgentBoardRow[];
   lanes: LaneBoardRow[];
+  fixes: FixRow[];
   attention: AttentionRow[];
-  counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number };
+  counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number; open_fixes: number; unassigned_fixes: number };
 }
 
 export interface Recommendation {
-  kind: 'promote' | 'stage' | 'reject' | 'nudge' | 'reassign' | 'refreeze' | 'info';
+  kind: 'promote' | 'stage' | 'reject' | 'nudge' | 'reassign' | 'refreeze' | 'fix' | 'info';
   run_id?: string | null;
   agent_id?: string | null;
   sha?: string | null;
