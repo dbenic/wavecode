@@ -120,6 +120,39 @@ async function peerApi<T>(peer: PeerConfig, method: 'GET' | 'POST', apiPath: str
   }
 }
 
+function peerByName(name: string): Result<PeerConfig> {
+  const p = getConfig().peers?.[name];
+  return p ? { ok: true, data: p } : { ok: false, error: `Unknown peer '${name}'` };
+}
+
+/** GET a JSON resource on a named peer (used by the fixture import). */
+export async function peerGetJson<T>(peerName: string, apiPath: string): Promise<Result<T>> {
+  const p = peerByName(peerName);
+  if (!p.ok) return p;
+  return peerApi<T>(p.data, 'GET', apiPath);
+}
+
+/** GET a file from a named peer: bytes plus the content type and the server's file name. */
+export async function peerDownload(peerName: string, apiPath: string, maxBytes = 50 * 1024 * 1024): Promise<Result<{ buffer: Buffer; contentType: string | null; filename: string | null }>> {
+  const p = peerByName(peerName);
+  if (!p.ok) return p;
+  const url = `${p.data.url.replace(/\/$/, '')}/api${apiPath}`;
+  try {
+    const res = await peerFetch(url, { method: 'GET', headers: { Authorization: `Bearer ${p.data.token}` }, signal: AbortSignal.timeout(120_000) });
+    if (!res.ok) {
+      const json = (await res.json().catch(() => null)) as { error?: string } | null;
+      return { ok: false, error: `peer ${res.status}: ${json?.error ?? res.statusText}` };
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length > maxBytes) return { ok: false, error: `peer file is larger than ${maxBytes} bytes` };
+    const disposition = res.headers.get('content-disposition') ?? '';
+    const fn = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)?.[1] ?? null;
+    return { ok: true, data: { buffer, contentType: res.headers.get('content-type'), filename: fn ? decodeURIComponent(fn) : null } };
+  } catch (e) {
+    return { ok: false, error: `peer unreachable: ${(e as Error).message}` };
+  }
+}
+
 interface RemoteAgent { id: string; name: string; alias?: string | null; runtime: string; status: string }
 
 async function resolveRemoteAgent(peer: PeerConfig, handle: string): Promise<Result<RemoteAgent>> {

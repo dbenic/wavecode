@@ -3,6 +3,7 @@ import { getRun, insertRunArtifact, listArtifacts, getArtifact, resolveAgent } f
 import * as artifactManager from '../artifact-manager.js';
 import * as leases from '../leases.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
+import { canMutate, isRestrictedUser } from '../users.js';
 import type { Artifact, Result } from '../db.js';
 
 /** alias → name → id (spec §5c); unknown refs pass through for the manager to reject. */
@@ -33,26 +34,52 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/artifacts', (c) => {
     const agentId = c.req.query('agent_id');
     const runId = c.req.query('run_id');
+    // A peer's restricted token sees the fixture library only (the dev box imports from here)
+    const restricted = isRestrictedUser(getActingUser(c));
 
     // If filtering by agent, use the combined query (created by + shared to)
-    if (agentId) {
+    if (agentId && !restricted) {
       return c.json(artifactManager.getAgentArtifacts(resolveAgentId(agentId)));
     }
 
+    const kind = c.req.query('kind');
+    const desk = c.req.query('desk');
     return c.json(listArtifacts({
       source_run_id: runId || undefined,
+      kind: restricted ? 'fixture' : kind === 'fixture' || kind === 'transient' ? kind : undefined,
+      room: c.req.query('room') || undefined,
+      desk: desk ? artifactManager.normalizeDesk(desk) ?? undefined : undefined,
+      q: c.req.query('q') || undefined,
     }));
   });
 
   app.get('/api/artifacts/:id', (c) => {
     const result = getArtifact(c.req.param('id'));
     if (!result.ok) return c.json({ error: result.error }, 404);
+    if (isRestrictedUser(getActingUser(c)) && result.data.kind !== 'fixture') return c.json({ error: 'Artifact not found' }, 404);
+    return c.json(result.data);
+  });
+
+  // Library fields: keep as fixture (never pruned), desk, room, provenance, note
+  app.patch('/api/artifacts/:id', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+    const meta: Parameters<typeof artifactManager.setArtifactMeta>[1] = {};
+    if (body.kind !== undefined) meta.kind = body.kind as 'fixture' | 'transient';
+    for (const k of ['desk', 'room', 'provenance', 'note'] as const) {
+      if (body[k] === null) meta[k] = null;
+      else if (typeof body[k] === 'string') meta[k] = (body[k] as string).trim() || null;
+    }
+    const result = artifactManager.setArtifactMeta(c.req.param('id'), meta);
+    if (!result.ok) return c.json({ error: result.error }, result.error.includes('not found') ? 404 : 400);
     return c.json(result.data);
   });
 
   app.get('/api/artifacts/:id/download', async (c) => {
     const result = getArtifact(c.req.param('id'));
     if (!result.ok) return c.json({ error: result.error }, 404);
+    if (isRestrictedUser(getActingUser(c)) && result.data.kind !== 'fixture') return c.json({ error: 'Artifact not found' }, 404);
 
     const artifact = result.data;
     const fsNode = await import('node:fs');
@@ -87,6 +114,10 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
         note?: string;
         agent_id?: string;
         run_id?: string;
+        kind?: string;
+        desk?: string;
+        room?: string;
+        provenance?: string;
       }>();
 
       if (typeof body.path === 'string' && body.path.trim()) {
@@ -117,6 +148,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
         sourceAgentId: agentId,
         sourceRunId: runId,
         note,
+        ...libraryMeta(body),
       });
 
       if (!result.ok) return c.json({ error: result.error }, 400);
@@ -141,6 +173,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
       sourceAgentId: agentId ?? undefined,
       sourceRunId: runId ?? undefined,
       note: note ?? undefined,
+      ...libraryMeta({ kind: formData.get('kind'), desk: formData.get('desk'), room: formData.get('room'), provenance: formData.get('provenance') }),
     });
 
     if (!result.ok) return c.json({ error: result.error }, 500);
@@ -224,4 +257,17 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
     if (!result.ok) return c.json({ error: result.error }, 404);
     return c.json({ ok: true });
   });
+}
+
+/** kind / desk / room / provenance from an upload body (JSON or form fields). */
+function libraryMeta(body: Record<string, unknown>): { kind?: 'fixture' | 'transient'; desk?: string | null; room?: string | null; provenance?: string | null } {
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const kind = str(body.kind);
+  const desk = str(body.desk);
+  return {
+    ...(kind === 'fixture' || kind === 'transient' ? { kind } : {}),
+    ...(desk ? { desk: artifactManager.normalizeDesk(desk) } : {}),
+    ...(str(body.room) ? { room: str(body.room) } : {}),
+    ...(str(body.provenance) ? { provenance: str(body.provenance) } : {}),
+  };
 }

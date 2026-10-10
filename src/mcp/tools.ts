@@ -294,6 +294,10 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       note: z.string().optional(),
       agent_id: z.string().optional().describe('Attach into this agent\'s workspace after upload'),
       run_id: z.string().optional().describe('Link as a run artifact (role=output on upload)'),
+      kind: z.enum(['fixture', 'transient']).optional().describe("'fixture' = keep in the development library (never pruned); default transient"),
+      desk: z.string().optional().describe('Product Desk / request number the fixture belongs to (PD-108, Desk #91)'),
+      room: z.string().optional().describe('Project room the fixture is scoped to'),
+      provenance: z.string().optional().describe('Where the bytes came from and how they were sanitized — required for anything derived from production'),
     },
     handler: async (client, args) => {
       const { readFileSync, existsSync } = await import('node:fs');
@@ -321,6 +325,10 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
         note: args.note,
         agent_id: args.agent_id,
         run_id: args.run_id,
+        kind: args.kind,
+        desk: args.desk,
+        room: args.room,
+        provenance: args.provenance,
       });
     },
   },

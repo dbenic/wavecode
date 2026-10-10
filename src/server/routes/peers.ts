@@ -4,6 +4,7 @@ import { canMutate, isAdmin } from '../users.js';
 import { getAgent } from '../db.js';
 import * as leases from '../leases.js';
 import { askPeer, getPeerQuestion, listPeerQuestions, listPeers } from '../peers.js';
+import * as fixtures from '../fixtures.js';
 
 /** Questions to agents on other WaveCode instances (docs/peers.md). */
 export function registerPeerRoutes(app: Hono<NodeAppEnv>): void {
@@ -22,6 +23,26 @@ export function registerPeerRoutes(app: Hono<NodeAppEnv>): void {
     const q = getPeerQuestion(c.req.param('id'));
     if (!q || (!isAdmin(user) && q.actor_id !== user.id)) return c.json({ error: 'Question not found' }, 404);
     return c.json(q);
+  });
+
+  // The peer's fixture library (sanitized files it offers for development) and the import of one file
+  app.get('/api/peers/:peer/artifacts', async (c) => {
+    const r = await fixtures.listPeerFixtures(c.req.param('peer'));
+    if (!r.ok) return c.json({ error: r.error }, 502);
+    return c.json(r.data);
+  });
+
+  app.post('/api/peers/:peer/artifacts/:id/import', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden: observers cannot import fixtures' }, 403);
+    const body = await c.req.json<{ room?: unknown; desk?: unknown }>().catch(() => ({} as Record<string, unknown>));
+    const r = await fixtures.importPeerFixture(c.req.param('peer'), c.req.param('id'), {
+      room: typeof body.room === 'string' ? body.room : undefined,
+      desk: typeof body.desk === 'string' ? body.desk : undefined,
+      actorName: user.name,
+    });
+    if (!r.ok) return c.json({ error: r.error }, 502);
+    return c.json(r.data, 201);
   });
 
   app.post('/api/peers/:peer/ask', async (c) => {

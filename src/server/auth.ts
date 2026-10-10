@@ -291,6 +291,10 @@ const RESTRICTED_ALLOW: Array<[string, RegExp]> = [
   ['POST', /^\/api\/agents\/[^/]+\/send$/],
   ['GET', /^\/api\/events\/log$/],
   ['GET', /^\/api\/messages$/],
+  // the fixture library (the routes serve fixtures only to a restricted token): a dev box imports sanitized files from here
+  ['GET', /^\/api\/artifacts$/],
+  ['GET', /^\/api\/artifacts\/[^/]+$/],
+  ['GET', /^\/api\/artifacts\/[^/]+\/download$/],
 ];
 
 /** Exported for tests. */

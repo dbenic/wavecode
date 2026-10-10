@@ -87,6 +87,21 @@ A lane is released from the Review queue, not from chat. The queue reads the age
 - A new commit on the lane invalidates every earlier verdict on that lane: refreeze and re-review
   the new SHA. The person's Promote on the card is the only GO; you never relay one (§3b).
 
+## 3a2. Fixtures: the Library is for sanitized files only
+
+Test files live in the Library (Artifacts page, `kind = fixture`): kept, hashed, with the desk
+number, the room and a provenance line. Use them; add to them; never put originals there.
+
+- Never request or copy a customer's original document (invoice, bank file, e-SLOG XML, AJPES
+  form). Originals stay in the Product Desk in production. If a bug needs the original, ask
+  `deploy/fable` to run the reproduction there and report the output (§3b).
+- To add a fixture, drop the file into the fixture folder (`artifacts.fixture_inbox`, e.g.
+  `~/fixtures/<room>/desk<N>/<file>`), or `upload_artifact` with `kind: fixture`, `desk`, `room`
+  and a `provenance` line that says where it came from and how it was sanitized (names, VAT IDs,
+  IBANs, addresses replaced; amounts, dates and structure kept).
+- A fixture used by a test is referenced by its sha256 in the test or the freeze note, so the
+  frozen SHA stays reproducible.
+
 ## 3b. Asking the deploy box (production data, read-only)
 
 You cannot reach production. A separate agent on the deploy box can read it

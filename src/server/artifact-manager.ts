@@ -17,6 +17,9 @@ import {
   countArtifactRefsForHash,
   type Artifact,
   type Result,
+  updateArtifactMeta,
+  type ArtifactKind,
+  type ArtifactMeta,
 } from './db.js';
 import { getConfig } from './config.js';
 import { emit } from './event-bus.js';
@@ -239,19 +242,38 @@ export function storeArtifact(opts: {
 /**
  * Store an artifact from a buffer (for uploads).
  */
+export interface ArtifactLibraryMeta {
+  /** 'fixture' = kept for development (never pruned), 'transient' = default, pruned after retention_days */
+  kind?: ArtifactKind;
+  desk?: string | null;
+  room?: string | null;
+  provenance?: string | null;
+  uploadedBy?: string | null;
+}
+
 export function storeArtifactFromBuffer(opts: {
   buffer: Buffer;
   filename: string;
   sourceAgentId?: string;
   sourceRunId?: string;
   note?: string;
-}): Result<Artifact> {
+} & ArtifactLibraryMeta): Result<Artifact> {
   const sha256 = computeSha256FromBuffer(opts.buffer);
   const mimeType = detectMime(opts.filename);
 
-  // Dedup
+  // Dedup. The same bytes delivered again as a fixture promote the existing row
+  // (keep it, add desk / room / provenance) instead of storing a second copy.
   const existing = findArtifactByHash(sha256);
   if (existing) {
+    if (opts.kind === 'fixture') {
+      const meta: ArtifactMeta = { kind: 'fixture' };
+      if (opts.desk && !existing.desk) meta.desk = opts.desk;
+      if (opts.room && !existing.room) meta.room = opts.room;
+      if (opts.provenance && !existing.provenance) meta.provenance = opts.provenance;
+      if (opts.note && !existing.note) meta.note = opts.note;
+      const changed = existing.kind !== 'fixture' || Object.keys(meta).length > 1;
+      if (changed) return setArtifactMeta(existing.id, meta);
+    }
     return { ok: true, data: existing };
   }
 
@@ -274,6 +296,11 @@ export function storeArtifactFromBuffer(opts: {
     source_agent_id: opts.sourceAgentId ?? null,
     source_run_id: opts.sourceRunId ?? null,
     note: opts.note ?? null,
+    kind: opts.kind ?? 'transient',
+    desk: opts.desk ?? null,
+    room: opts.room ?? null,
+    provenance: opts.provenance ?? null,
+    ...(opts.uploadedBy !== undefined ? { uploaded_by: opts.uploadedBy } : {}),
   });
 
   if (result.ok) {
@@ -285,10 +312,34 @@ export function storeArtifactFromBuffer(opts: {
       filename: opts.filename,
       sha256,
       size_bytes: opts.buffer.length,
+      kind: result.data.kind,
+      desk: result.data.desk,
+      room: result.data.room,
     });
   }
 
   return result;
+}
+
+/** Keep as fixture / edit desk, room, provenance, note. Emits artifact.updated. */
+export function setArtifactMeta(artifactId: string, meta: ArtifactMeta): Result<Artifact> {
+  if (meta.kind !== undefined && meta.kind !== 'fixture' && meta.kind !== 'transient') {
+    return { ok: false, error: "kind must be 'fixture' or 'transient'" };
+  }
+  if (meta.desk !== undefined && meta.desk !== null) meta.desk = normalizeDesk(meta.desk);
+  const r = updateArtifactMeta(artifactId, meta);
+  if (r.ok) {
+    emit('artifact.updated', 'artifact', artifactId, { kind: r.data.kind, desk: r.data.desk, room: r.data.room, filename: r.data.filename });
+  }
+  return r;
+}
+
+/** `PD-108`, `Desk #91`, `pd108`, `#43` → '108', '91', '108', '43'; anything else is kept trimmed. */
+export function normalizeDesk(raw: string): string | null {
+  const t = raw.trim();
+  if (!t) return null;
+  const m = t.match(/^(?:pd|desk|request|req)?[\s#_-]*#?(\d{1,6})$/i);
+  return m ? m[1] : t.slice(0, 40);
 }
 
 /**
@@ -456,8 +507,9 @@ export function pruneOldArtifacts(): number {
 
   const db = getDb();
 
+  // Fixtures are the development library: kept until someone deletes them.
   const oldArtifacts = db.prepare(
-    'SELECT * FROM artifacts WHERE created_at < ?'
+    "SELECT * FROM artifacts WHERE created_at < ? AND kind <> 'fixture'"
   ).all(cutoff) as import('./db.js').Artifact[];
 
   let pruned = 0;

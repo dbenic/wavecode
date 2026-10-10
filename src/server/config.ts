@@ -165,6 +165,12 @@ export interface WaveConfig {
   artifacts: {
     storage: string;
     retention_days: number;
+    /**
+     * Drop folders for development fixtures: any file put there (by a person, an agent, or
+     * scp from the deploy box) becomes a kept artifact. Sub-folders name the room and the
+     * desk (`<inbox>/wavepulse/desk91/invoice.xml`), or the file name carries them.
+     */
+    fixture_inbox?: string[];
   };
   /**
    * Other WaveCode instances agents may ask questions of (e.g. the deploy
@@ -247,6 +253,11 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   if (cfg.diagrams?.kroki_url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.diagrams.kroki_url)) {
     throw new Error('diagrams.kroki_url must be an http(s) origin like http://127.0.0.1:8000');
+  }
+  if (cfg.artifacts.fixture_inbox !== undefined) {
+    if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
+      throw new Error('artifacts.fixture_inbox must be a list of directory paths');
+    }
   }
   if (cfg.review.freeze_inbox !== undefined) {
     if (!Array.isArray(cfg.review.freeze_inbox) || cfg.review.freeze_inbox.some((d) => typeof d !== 'string' || !d.trim())) {

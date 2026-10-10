@@ -543,6 +543,29 @@ Body:
 ### `GET /api/runs/:id/artifacts`
 List artifacts attached to a run.
 
+### The library: fixtures
+
+An artifact is `transient` (pruned after `artifacts.retention_days`) or a `fixture`: a kept
+file for development, never pruned, with `desk` (Product Desk / request number, normalized to
+digits: `PD-108` → `108`), `room` (project), `provenance` (where the bytes came from and how
+they were sanitized) and `uploaded_by`. Customer originals never become fixtures: they stay in
+the Product Desk in production; a fixture is a sanitized derivative, and `provenance` says so.
+
+- `GET /api/artifacts?kind=fixture|transient&room=&desk=&q=` — `q` searches filename, note,
+  desk and provenance. A restricted (peer) token only ever sees fixtures.
+- `POST /api/artifacts/upload` also takes `kind`, `desk`, `room`, `provenance` (JSON or form
+  fields). The same bytes uploaded again as a fixture promote the existing artifact instead of
+  storing a copy.
+- `PATCH /api/artifacts/:id` `{ kind?, desk?, room?, provenance?, note? }` — keep as fixture /
+  edit the library fields (`null` clears). Emits `artifact.updated`.
+- Drop folders: every file put under an `artifacts.fixture_inbox` directory becomes a fixture;
+  `<inbox>/<room>/<desk>/<file>` names the room and the desk, or the file name does
+  (`desk91-…`, `pd108-…`).
+- Import from a peer: `GET /api/peers/:peer/artifacts` lists what the peer marks as fixtures;
+  `POST /api/peers/:peer/artifacts/:id/import` `{ room?, desk? }` pulls one over the peer link,
+  verifies its sha256 against the peer's record and stores it with a provenance line naming the
+  peer, the remote artifact, the importer and the peer's own provenance. Non-fixtures are refused.
+
 ## Guides And Templates
 
 ### `GET /api/guide-sources`

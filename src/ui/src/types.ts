@@ -185,6 +185,14 @@ export interface Artifact {
   source_agent_id: string | null;
   source_run_id: string | null;
   note: string | null;
+  /** 'fixture' = kept in the development library (never pruned); 'transient' = pruned after retention */
+  kind: 'fixture' | 'transient';
+  /** Product Desk / request number ('108', '91') */
+  desk: string | null;
+  room: string | null;
+  /** where the bytes came from and how they were sanitized */
+  provenance: string | null;
+  uploaded_by: string | null;
   created_at: string;
 }
 

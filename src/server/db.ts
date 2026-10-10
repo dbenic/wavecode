@@ -118,8 +118,20 @@ export interface Artifact {
   source_agent_id: string | null;
   source_run_id: string | null;
   note: string | null;
+  /** v23 'transient' (pruned after artifacts.retention_days) | 'fixture' (kept: a sanitized file for development, never pruned) */
+  kind: ArtifactKind;
+  /** v23 Product Desk / request reference the fixture belongs to (`PD-108`, `Desk #91` → '108', '91') */
+  desk: string | null;
+  /** v23 project room the fixture is scoped to */
+  room: string | null;
+  /** v23 where the bytes came from and how they were sanitized (`redacted export of PD-108 attachment by fable, 2026-10-10`) */
+  provenance: string | null;
+  /** v23 user id who uploaded / imported it (null = system or agent) */
+  uploaded_by: string | null;
   created_at: string;
 }
+
+export type ArtifactKind = 'transient' | 'fixture';
 
 export interface WaveEvent {
   id: number;
@@ -265,7 +277,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 22;
+export const SCHEMA_VERSION = 23;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -360,6 +372,11 @@ const SCHEMA_SQL = `
     source_agent_id TEXT,
     source_run_id TEXT,
     note TEXT,
+    kind TEXT NOT NULL DEFAULT 'transient',
+    desk TEXT,
+    room TEXT,
+    provenance TEXT,
+    uploaded_by TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -870,6 +887,19 @@ const MIGRATIONS: Record<number, string> = {
   // v21 → v22: token expiry (ISO UTC). A user whose token has expired resolves to nobody.
   21: `
     ALTER TABLE users ADD COLUMN expires_at TEXT;
+  `,
+  // v22 → v23: artifacts as a development library — fixtures (kept, never pruned) with desk / room / provenance.
+  22: `
+    CREATE TABLE IF NOT EXISTS artifacts (
+      id TEXT PRIMARY KEY, filename TEXT NOT NULL, mime_type TEXT NOT NULL, sha256 TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL, storage_path TEXT NOT NULL, preview_path TEXT, source_agent_id TEXT,
+      source_run_id TEXT, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    ALTER TABLE artifacts ADD COLUMN kind TEXT NOT NULL DEFAULT 'transient';
+    ALTER TABLE artifacts ADD COLUMN desk TEXT;
+    ALTER TABLE artifacts ADD COLUMN room TEXT;
+    ALTER TABLE artifacts ADD COLUMN provenance TEXT;
+    ALTER TABLE artifacts ADD COLUMN uploaded_by TEXT;
   `,
 };
 
@@ -1683,15 +1713,22 @@ export function getAgentMessage(id: string): Result<AgentMessage> {
 
 // --- Artifact helpers ---
 
-export function insertArtifact(artifact: Omit<Artifact, 'id' | 'created_at'>): Result<Artifact> {
+export type ArtifactMeta = Partial<Pick<Artifact, 'kind' | 'desk' | 'room' | 'provenance' | 'note'>>;
+
+export function insertArtifact(
+  artifact: Omit<Artifact, 'id' | 'created_at' | 'kind' | 'desk' | 'room' | 'provenance' | 'uploaded_by'>
+    & Partial<Pick<Artifact, 'kind' | 'desk' | 'room' | 'provenance' | 'uploaded_by'>>,
+): Result<Artifact> {
   const id = generateId();
+  const uploadedBy = artifact.uploaded_by === undefined ? currentActorId() : artifact.uploaded_by;
   try {
     getDb().prepare(`
-      INSERT INTO artifacts (id, filename, mime_type, sha256, size_bytes, storage_path, preview_path, source_agent_id, source_run_id, note)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO artifacts (id, filename, mime_type, sha256, size_bytes, storage_path, preview_path, source_agent_id, source_run_id, note, kind, desk, room, provenance, uploaded_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, artifact.filename, artifact.mime_type, artifact.sha256, artifact.size_bytes,
            artifact.storage_path, artifact.preview_path, artifact.source_agent_id,
-           artifact.source_run_id, artifact.note);
+           artifact.source_run_id, artifact.note, artifact.kind ?? 'transient', artifact.desk ?? null,
+           artifact.room ?? null, artifact.provenance ?? null, uploadedBy);
     const row = getDb().prepare('SELECT * FROM artifacts WHERE id = ?').get(id) as Artifact;
     return { ok: true, data: row };
   } catch (e) {
@@ -1708,6 +1745,11 @@ export function getArtifact(id: string): Result<Artifact> {
 export function listArtifacts(filters?: {
   source_agent_id?: string;
   source_run_id?: string;
+  kind?: ArtifactKind;
+  room?: string;
+  desk?: string;
+  /** case-insensitive substring over filename, note, desk, provenance */
+  q?: string;
 }): Artifact[] {
   let sql = 'SELECT * FROM artifacts';
   const conditions: string[] = [];
@@ -1715,11 +1757,32 @@ export function listArtifacts(filters?: {
 
   if (filters?.source_agent_id) { conditions.push('source_agent_id = ?'); params.push(filters.source_agent_id); }
   if (filters?.source_run_id) { conditions.push('source_run_id = ?'); params.push(filters.source_run_id); }
+  if (filters?.kind) { conditions.push('kind = ?'); params.push(filters.kind); }
+  if (filters?.room) { conditions.push('room = ?'); params.push(filters.room); }
+  if (filters?.desk) { conditions.push('desk = ?'); params.push(filters.desk); }
+  if (filters?.q?.trim()) {
+    const like = `%${filters.q.trim().toLowerCase()}%`;
+    conditions.push("(lower(filename) LIKE ? OR lower(coalesce(note,'')) LIKE ? OR lower(coalesce(desk,'')) LIKE ? OR lower(coalesce(provenance,'')) LIKE ?)");
+    params.push(like, like, like, like);
+  }
 
   if (conditions.length > 0) sql += ' WHERE ' + conditions.join(' AND ');
   sql += ' ORDER BY created_at DESC';
 
   return getDb().prepare(sql).all(...params) as Artifact[];
+}
+
+/** Edit the library fields of an artifact (keep as fixture, desk, room, provenance, note). Unset fields are left alone. */
+export function updateArtifactMeta(id: string, meta: ArtifactMeta): Result<Artifact> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  for (const k of ['kind', 'desk', 'room', 'provenance', 'note'] as const) {
+    if (meta[k] !== undefined) { sets.push(`${k} = ?`); params.push(meta[k]); }
+  }
+  if (sets.length === 0) return getArtifact(id);
+  const info = getDb().prepare(`UPDATE artifacts SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+  if (info.changes === 0) return { ok: false, error: `Artifact ${id} not found` };
+  return getArtifact(id);
 }
 
 export function findArtifactByHash(sha256: string): Artifact | null {

@@ -25,6 +25,7 @@ export const SSE_EVENT_TYPES = [
   'heartbeat',
   'artifact.created',
   'artifact.shared',
+  'artifact.updated',
   'review.promoted',
   'review.retried',
   'review.handed_off',
