@@ -17,6 +17,7 @@ const cfg = {
   review: { auto_review: false, default_reviewer: 'x', self_review: true, max_fix_loops: 2, require_pass_to_promote: false, gate_dependents_on_approval: false, auto_pick: true, freeze_inbox: [] as string[] },
   artifacts: { storage: '', retention_days: 30 },
   server: { host: 'countix-dev' },
+  autonomy: { auto_dispatch: false },
   paths: {},
 };
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => cfg) }));

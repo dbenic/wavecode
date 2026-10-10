@@ -67,7 +67,7 @@ export function registerOverviewRoutes(app: Hono<NodeAppEnv>): void {
     const task = insertTask({ prompt, agent_id: agent.data.id, priority: 1, ...(freeze.project ? { room: freeze.project } : {}), ...(freeze.reviewer_agent_id && freeze.reviewer_agent_id !== agent.data.id ? { reviewer: freeze.reviewer_agent_id } : {}) });
     if (!task.ok) return c.json({ error: task.error }, 400);
     emit('task.created', 'task', task.data.id, { agent_id: agent.data.id, prompt: prompt.slice(0, 300), fix_sha: freeze.sha, run_id: body.run_id, via: 'overview_fix' });
-    setTimeout(() => taskDispatcher.dispatchNext(), 500);
+    setTimeout(() => { void taskDispatcher.dispatchNext().catch(() => { /* dispatcher logs */ }); }, 500);
     return c.json({ task: task.data, sha: freeze.sha, agent: { id: agent.data.id, name: agent.data.name } }, 201);
   });
 
