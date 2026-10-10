@@ -279,11 +279,24 @@ export interface AttentionRow {
   sha?: string;
 }
 
+export interface CandidateRow {
+  project: string;
+  name: string;
+  tip: string;
+  committed_at: string | null;
+  lanes: Array<{ sha: string; desk: number | null; lane: string | null; verdict: string | null; author: string | null }>;
+  staging: LaneBoardRow['staging'];
+  production: LaneBoardRow['production'];
+  verified: { by: string; at: string; note: string | null } | null;
+  next: string;
+}
+
 export interface Board {
   at: string;
   host: string;
   agents: AgentBoardRow[];
   lanes: LaneBoardRow[];
+  candidates: CandidateRow[];
   fixes: FixRow[];
   attention: AttentionRow[];
   counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number; open_fixes: number; unassigned_fixes: number };

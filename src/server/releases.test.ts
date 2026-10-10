@@ -11,7 +11,7 @@ vi.mock('./notifications.js', () => ({ notify: vi.fn(async () => undefined) }));
 vi.mock('./task-dispatcher.js', () => ({ dispatchNext: vi.fn(), unblockDependentsPublic: vi.fn(), onRunComplete: vi.fn(), finalizeRun: vi.fn() }));
 
 const cfg = {
-  projects: {} as Record<string, { workspace_match: string; release_peer?: string }>,
+  projects: {} as Record<string, { workspace_match: string; release_peer?: string; repo?: string; candidate_refs?: string }>,
   peers: {} as Record<string, { url: string; token: string; agents?: string[] }>,
   releases: {} as { deploy_agent?: string | null },
   review: { auto_review: false, default_reviewer: 'x', self_review: true, max_fix_loops: 2, require_pass_to_promote: false, gate_dependents_on_approval: false, auto_pick: true, freeze_inbox: [] as string[] },
@@ -164,11 +164,61 @@ describe('releases.ts', () => {
       const ok = await app.fetch(new Request(`http://x/api/releases/${r.data.id}/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ note: 'credit note PDF and e-SLOG checked' }) }));
       expect(ok.status).toBe(200);
       expect(rel.getRelease(r.data.id)).toMatchObject({ verified_by: 'antonio', verification_note: 'credit note PDF and e-SLOG checked' });
-      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.verified', 'release', r.data.id, expect.objectContaining({ sha: SHA, verified_by: 'antonio' }));
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.verified', 'release', SHA, expect.objectContaining({ sha: SHA, verified_by: 'antonio' }));
       const trail = rel.auditTrail();
       expect(trail.map((e) => [e.action, e.who]).sort()).toEqual([['deployed', expect.stringMatching(/^deployer/)], ['stage', 'denis'], ['verify', 'antonio']]);
       const viaRoute = await (await app.fetch(new Request('http://x/api/releases/audit'))).json() as Array<{ action: string }>;
       expect(viaRoute).toHaveLength(3);
+    });
+
+    it('a candidate branch is the unit of production: its tip gets the GO with the contained lanes in the note, and verification is keyed by SHA', async () => {
+      const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a'); git('add', '.'); git('commit', '-q', '-m', 'base');
+      const base = git('rev-parse', 'HEAD');
+      git('checkout', '-q', '-b', 'lane'); fs.writeFileSync(path.join(repo, 'b.txt'), 'b'); git('add', '.'); git('commit', '-q', '-m', 'desk 91');
+      const laneSha = git('rev-parse', 'HEAD');
+      git('checkout', '-q', '-b', 'rc'); fs.writeFileSync(path.join(repo, 'c.txt'), 'c'); git('add', '.'); git('commit', '-q', '-m', 'compose');
+      const tip = git('rev-parse', 'HEAD');
+      git('checkout', '-q', 'main');
+      git('update-ref', 'refs/remotes/origin/main', base);
+      git('update-ref', 'refs/remotes/origin/fable/rc-0443-2', tip);
+      (cfg.projects as Record<string, Record<string, unknown>>).wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable', repo, candidate_refs: 'fable/rc-*' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const rfz = await import('./release-freezes.js');
+      rfz.resetMergedCacheForTest();
+      rfz.setFetchDisabledForTest(true);
+      // a reviewed lane that sits in the candidate
+      agent('claude2'); agent('codex3');
+      const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
+      fs.writeFileSync(path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`), `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${laneSha}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
+      expect(rf.ingestFreezeFile(path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`)).ok).toBe(true);
+
+      const ov = await import('./overview.js');
+      const board = ov.buildBoard();
+      expect(board.candidates).toHaveLength(1);
+      expect(board.candidates[0]).toMatchObject({ name: 'fable/rc-0443-2', tip, verified: null, lanes: [{ sha: laneSha, desk: 91 }] });
+      expect(board.lanes[0]).toMatchObject({ candidate: 'fable/rc-0443-2', promotable: false });
+
+      // verification keyed by the candidate tip
+      const v = await app.fetch(new Request('http://x/api/releases/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: tip, project: 'wavepulse', note: 'smoke ok' }) }));
+      expect(v.status).toBe(200);
+      expect(ov.buildBoard().candidates[0].verified).toMatchObject({ by: 'owner', note: 'smoke ok' });
+
+      // the GO for the candidate: production request for the tip, lanes named in the note
+      const go = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/promote', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }) }));
+      expect(go.status).toBe(202);
+      expect(box.state.posts[0]).toMatchObject({ target: 'production', sha: tip, lane: 'fable/rc-0443-2', requested_by: 'owner', note: `contains: Desk #91 ${laneSha.slice(0, 8)}` });
+      expect(rel.auditTrail().map((e) => e.action).sort()).toEqual(['promote', 'verify']);
+      expect((await app.fetch(new Request('http://x/api/releases/candidates/nope/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }) }))).status).toBe(404);
+      rfz.setFetchDisabledForTest(false);
+      rel.stopReleasePollers();
     });
 
     it('a peer that refuses the request leaves a failed record, visible as an event', async () => {

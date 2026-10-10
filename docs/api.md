@@ -435,7 +435,14 @@ deployed_sha, report, error, created_at, updated_at, reported_at`.
   deploy side: accept a request (a peer's restricted token, or a local user; production locally is admin only).
   Idempotent while a request for the same SHA + target is open. The deploy agent receives
   `[Release GO <id> from <person> via WaveCode Promote …]` or `[Staging request <id> … Automated …]`.
-- `POST /api/releases/:id/verify` `{ note? }` — a person records that the feature works on staging
+- Candidates are the unit of production when `projects.<p>.candidate_refs` is set: the board lists each
+  unreleased candidate with its tip SHA and the lanes it contains; a lane alone is then never promotable.
+  `POST /api/releases/candidates/:name/stage` and `…/promote` `{ project }` request staging or the
+  production GO for the candidate's tip (the contained lanes go to the deployer in the note).
+- `POST /api/releases/verify` `{ sha, project?, note? }` — "verified on staging" for any SHA (a lane or a
+  candidate tip), keyed by SHA and recorded with the person's name; event `release.verified` (entity = sha).
+- `POST /api/releases/:id/verify` `{ note? }` — the same for a deployed staging record (delegates to the SHA);
+  a person records that the feature works on staging
   (`verified_by`, `verified_at`, `verification_note` on the staging record; event `release.verified`).
   The production confirmation shows whether the lane was verified and by whom; the overlord puts only
   verified lanes into production groups.

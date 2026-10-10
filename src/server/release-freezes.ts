@@ -549,6 +549,24 @@ function candidateRefs(project: string, repo: string, now: number): Array<{ ref:
   return refs;
 }
 
+export interface CandidateRef { ref: string; name: string; tip: string; committed_at: string | null }
+
+/** Unreleased candidate branches of a project with their tip SHA (newest first). */
+export function listCandidates(project: string, now = Date.now()): CandidateRef[] {
+  const repo = getConfig().projects?.[project]?.repo;
+  if (!repo) return [];
+  if (!fetchDisabled) refreshMain(repo, now);
+  return candidateRefs(project, repo, now).map((c) => {
+    let tip = '';
+    let committed: string | null = null;
+    try {
+      const out = execFileSync('git', ['-C', repo, 'log', '-1', '--format=%H %cI', c.ref], { encoding: 'utf-8', timeout: 5000 }).trim();
+      [tip, committed] = out.split(' ') as [string, string];
+    } catch { /* unreadable ref */ }
+    return { ref: c.ref, name: c.name, tip, committed_at: committed };
+  }).filter((c) => c.tip);
+}
+
 /** The newest unreleased candidate that contains `sha`, or null. */
 export function candidateFor(project: string | null, sha: string, now = Date.now()): { ref: string; name: string } | null {
   const repo = project ? getConfig().projects?.[project]?.repo : undefined;

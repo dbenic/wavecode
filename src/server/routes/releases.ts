@@ -3,6 +3,8 @@ import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { canMutate, isAdmin, isRestrictedUser } from '../users.js';
 import * as releases from '../releases.js';
 import * as reviewQueue from '../review-queue.js';
+import { listCandidates } from '../release-freezes.js';
+import { buildBoard } from '../overview.js';
 
 /** Releases as records (src/server/releases.ts, docs/peers.md "Releases"). */
 export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
@@ -39,6 +41,38 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     const r = releases.acceptRelease({ ...body, requested_by: fromPeer ? body.requested_by : user.name }, { userName: user.name, fromPeer });
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 201);
+  });
+
+  // A person confirms a SHA (a lane or a whole candidate) works on staging
+  app.post('/api/releases/verify', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ sha?: unknown; project?: unknown; note?: unknown }>().catch(() => ({} as Record<string, unknown>));
+    if (typeof body.sha !== 'string') return c.json({ error: 'sha is required' }, 400);
+    const r = releases.verifySha(body.sha, typeof body.project === 'string' ? body.project : null, { name: user.name }, typeof body.note === 'string' ? body.note : null);
+    if (!r.ok) return c.json({ error: r.error }, 400);
+    return c.json(r.data);
+  });
+
+  // A composed candidate (projects.<p>.candidate_refs) is the unit of production: stage its tip, or send the GO for it
+  app.post('/api/releases/candidates/:name/:action', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const action = c.req.param('action');
+    if (action !== 'stage' && action !== 'promote') return c.json({ error: "action must be 'stage' or 'promote'" }, 400);
+    const body = await c.req.json<{ project?: unknown }>().catch(() => ({} as { project?: unknown }));
+    const project = typeof body.project === 'string' ? body.project : '';
+    const name = decodeURIComponent(c.req.param('name'));
+    const cand = listCandidates(project).find((x) => x.name === name);
+    if (!cand) return c.json({ error: `No unreleased candidate '${name}' in project '${project}'` }, 404);
+    const lanes = buildBoard().lanes.filter((l) => l.candidate === name);
+    const r = await releases.requestRelease({
+      project, sha: cand.tip, lane: cand.name, target: action === 'promote' ? 'production' : 'staging',
+      desk: null, reviewer: null, actorName: user.name, runId: null,
+      note: lanes.length ? `contains: ${lanes.map((l) => `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`).join(', ')}` : null,
+    });
+    if (!r.ok) return c.json({ error: r.error }, 400);
+    return c.json(r.data, 202);
   });
 
   // A person confirms the feature works on staging (recorded with their name)

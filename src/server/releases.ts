@@ -101,6 +101,37 @@ export function ensureReleaseTables(): void {
   for (const col of ['verified_by TEXT', 'verified_at TEXT', 'verification_note TEXT']) {
     try { getDb().exec(`ALTER TABLE release_requests ADD COLUMN ${col}`); } catch { /* exists */ }
   }
+  getDb().exec(`
+    CREATE TABLE IF NOT EXISTS release_verifications (
+      sha TEXT PRIMARY KEY,
+      project TEXT,
+      verified_by TEXT NOT NULL,
+      verified_at TEXT NOT NULL DEFAULT (datetime('now')),
+      note TEXT
+    );
+  `);
+}
+
+export interface Verification { sha: string; project: string | null; verified_by: string; verified_at: string; note: string | null }
+
+export function verificationFor(sha: string): Verification | null {
+  return withTable(() => (getDb().prepare('SELECT * FROM release_verifications WHERE sha = ?').get(sha) as Verification | undefined) ?? null);
+}
+
+/**
+ * "Verified on staging" for a SHA — a lane or a whole candidate — recorded with the person's name.
+ * Independent of who staged it: Fable stages candidates on its own, so there may be no staging record.
+ */
+export function verifySha(sha: string, project: string | null, by: { name: string }, note: string | null): Result<Verification> {
+  const clean = sha.trim().toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(clean)) return { ok: false, error: 'sha must be a commit id' };
+  withTable(() => getDb().prepare(`INSERT INTO release_verifications (sha, project, verified_by, verified_at, note) VALUES (?, ?, ?, datetime('now'), ?)
+    ON CONFLICT(sha) DO UPDATE SET project = excluded.project, verified_by = excluded.verified_by, verified_at = excluded.verified_at, note = excluded.note`)
+    .run(clean, project, by.name, note?.trim().slice(0, 1000) || null));
+  const v = verificationFor(clean)!;
+  for (const r of listReleases({ sha: clean, target: 'staging', limit: 5 })) patch(r.id, { verified_by: v.verified_by, verified_at: v.verified_at, verification_note: v.note });
+  emit('release.verified', 'release', clean, { sha: clean, project, verified_by: by.name, note: v.note });
+  return { ok: true, data: v };
 }
 
 function withTable<T>(fn: () => T): T {
@@ -167,6 +198,8 @@ export interface RequestReleaseOpts {
   /** the person who pressed Stage / Promote */
   actorName: string | null;
   runId?: string | null;
+  /** free text forwarded to the deployer (e.g. the lanes a candidate contains) */
+  note?: string | null;
 }
 
 /**
@@ -203,7 +236,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const row = insert({ ...base, origin: 'local', peer: peerName, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
     const remote = await peerPostJson<{ id: string; status: string }>(peerName, '/releases', {
       sha: opts.sha, lane: opts.lane ?? null, target: opts.target, project: opts.project, desk: opts.desk ?? null,
-      reviewer: opts.reviewer ?? null, requested_by: opts.actorName, origin_id: id, origin_box: os.hostname(),
+      reviewer: opts.reviewer ?? null, requested_by: opts.actorName, origin_id: id, origin_box: os.hostname(), note: opts.note ?? null,
     });
     if (!remote.ok || !remote.data?.id) {
       const error = remote.ok ? 'peer returned no release id' : remote.error;
@@ -230,7 +263,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
 
 export interface IncomingRelease {
   sha?: unknown; lane?: unknown; target?: unknown; project?: unknown; desk?: unknown; reviewer?: unknown;
-  requested_by?: unknown; origin_id?: unknown; origin_box?: unknown;
+  requested_by?: unknown; origin_id?: unknown; origin_box?: unknown; note?: unknown;
 }
 
 /** A request from a peer box (or a local caller): store it and hand it to the deploy agent. */
@@ -259,7 +292,7 @@ export function acceptRelease(body: IncomingRelease, via: { userName: string; fr
     status: 'requested',
     version: null,
     deployed_sha: null,
-    report: null,
+    report: str(body.note, 2000),
     error: null,
   });
   return handToDeployAgent(row);
@@ -281,6 +314,7 @@ export function releasePromptText(r: ReleaseRequest): string {
     header,
     `Deploy exact SHA ${r.sha}${r.lane ? ` (lane ${r.lane})` : ''}${r.project ? ` of ${r.project}` : ''}${r.desk ? ` for Desk #${r.desk}` : ''} to ${r.target}.`,
     r.reviewer ? `Independent review: @${r.reviewer} VERDICT: PASS on this exact SHA.` : null,
+    r.report && r.status === 'requested' ? `Note from the requester: ${r.report}` : null,
     'Gate the exact SHA per your runbook, assign the version, deploy, verify.',
     `When done, report with the report_release tool (id ${r.id}) or print exactly one line:`,
     `RELEASED ${r.id}: deployed <sha> version <x.y.z> to ${r.target}`,
@@ -355,10 +389,9 @@ export function verifyStaging(id: string, by: { name: string }, note: string | n
   if (!r) return { ok: false, error: `Release ${id} not found` };
   if (r.target !== 'staging') return { ok: false, error: 'Only a staging release can be marked verified' };
   if (r.status !== 'deployed') return { ok: false, error: `Staging ${r.sha.slice(0, 8)} is ${r.status}, not deployed — nothing to verify yet` };
-  patch(id, { verified_by: by.name, verified_at: new Date().toISOString().replace('T', ' ').slice(0, 19), verification_note: note?.trim().slice(0, 1000) || null });
-  const done = getRelease(id)!;
-  emit('release.verified', 'release', id, { sha: done.sha, project: done.project, desk: done.desk, lane: done.lane, version: done.version, verified_by: by.name, note: done.verification_note, run_id: done.run_id });
-  return { ok: true, data: done };
+  const v = verifySha(r.sha, r.project, by, note);
+  if (!v.ok) return v;
+  return { ok: true, data: getRelease(id)! };
 }
 
 export interface AuditEntry {
@@ -383,9 +416,10 @@ export function auditTrail(limit = 200): AuditEntry[] {
     if (r.reported_at && (r.status === 'deployed' || r.status === 'failed' || r.status === 'rejected')) {
       out.push({ at: r.reported_at, who: r.deploy_agent_id ? `deployer (${r.deploy_agent_id.slice(-6)})` : (r.peer ? `deployer via ${r.peer}` : 'deployer'), action: r.status === 'deployed' ? 'deployed' : 'failed', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.status === 'deployed' ? (r.version ? `v${r.version}` : r.report) : (r.error ?? r.report), release_id: r.id, run_id: r.run_id });
     }
-    if (r.verified_at) {
-      out.push({ at: r.verified_at, who: r.verified_by ?? 'unknown', action: 'verify', target: 'staging', sha: r.sha, project: r.project, desk: r.desk, detail: r.verification_note, release_id: r.id, run_id: r.run_id });
-    }
+  }
+  const verifications = withTable(() => getDb().prepare('SELECT * FROM release_verifications ORDER BY verified_at DESC LIMIT ?').all(limit) as Verification[]);
+  for (const v of verifications) {
+    out.push({ at: v.verified_at, who: v.verified_by, action: 'verify', target: 'staging', sha: v.sha, project: v.project, desk: null, detail: v.note, release_id: null, run_id: null });
   }
   const rejects = getDb().prepare(
     `SELECT e.created_at, e.entity_id AS run_id, e.payload_json, u.name AS user_name FROM events e LEFT JOIN users u ON u.id = e.actor_id

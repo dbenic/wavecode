@@ -160,6 +160,7 @@ Release planning — the practical advice the person wants most:
 - For production, propose groups: lanes that touch the same area (same desk family, same module, one depends on another, a fix on top of a feature) go out together, in dependency order, so one verification covers them and nothing ships half. Independent lanes can ship separately; say so.
 - Put a lane on hold when its verdict is not PASS, its gate is RED, it is stale, a newer freeze on the same lane is coming, or its staging run has not been verified yet (staging.verified_by is null). A production group contains only lanes verified on staging; say who verified.
 - A lane with "candidate" set already sits in the deployer's release candidate branch: it ships with that release. Do not recommend staging, promoting or fixing it separately; mention it only as part of that release.
+- Where the board lists "candidates", those are the unit of production: the deployer composes them, gates the combined code and stages them. Your production advice is per candidate (GO on the candidate once verified on staging), and for reviewed lanes not yet in a candidate: which ones to compose into the next candidate together. Never propose promoting a single lane when candidates exist.
 - Order groups: hotfixes and small, verified changes first; large or risky changes last and alone.
 - Use the lane summaries (scope of the change) to judge overlap; when you cannot tell, say what to check instead of guessing.
 
@@ -195,6 +196,10 @@ export function buildPrompt(board: Board, trigger: string, previous: OverlordRep
       current: a.current ? { num: a.current.num, run_id: a.current.run_id, prompt: a.current.prompt.slice(0, 160) } : null,
       last_reply: a.last_reply ? { at: a.last_reply.at, text: a.last_reply.text.slice(0, 160) } : null,
       blocked_on: a.blocked_on, budget: a.budget, open_freezes: a.open_freezes,
+    })),
+    candidates: board.candidates.map((c) => ({
+      project: c.project, name: c.name, tip8: c.tip.slice(0, 8), lanes: c.lanes.map((l) => `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`),
+      staging: c.staging?.status ?? null, production: c.production?.status ?? null, verified_by: c.verified?.by ?? null, next: c.next,
     })),
     fixes: board.fixes.map((f) => ({
       run_id: f.run_id, sha8: f.sha.slice(0, 8), project: f.project, desk: f.desk, lane: f.lane, author_agent_id: f.author_agent_id, author: f.author, reviewer: f.reviewer,

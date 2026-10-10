@@ -20,6 +20,7 @@ const RESPONSE: OverviewResponse = {
       { id: 'a2', name: 'codex3', alias: null, runtime: 'codex', model: null, status: 'idle', status_since: null, for_min: 90, current: null, last_reply: null, blocked_on: 'awaiting peer answer (deploy/fable)', usage: null, budget: { weekly_left: 8, five_h_left: null, resets: null }, open_freezes: 0 },
     ],
     lanes: [{ sha: SHA, run_id: 'r1', project: 'wavepulse', desk: 91, lane: 'wc-claude2', author: 'claude2', reviewer: 'codex3', verdict: 'pass', gate: 'GREEN', status: 'open', superseded_by: null, promotable: true, candidate: null, summary: 'Desk #91 issued credit notes', staging: null, production: null, next: 'reviewed — stage it, then promote', updated_at: '' }],
+    candidates: [],
     fixes: [{ sha: 'e65a2ab5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', run_id: 'r2', project: 'wavepulse', desk: 43, lane: 'wc-codex2', author: 'codex2', author_agent_id: 'a2', reviewer: 'claude1', reason: 'needs fixes', detail: '/r/v.md', since: '', assigned: null }],
     attention: [{ kind: 'promotable', text: 'wavepulse Desk #91 2431f684: reviewed — stage it, then promote', run_id: 'r1', sha: SHA }],
     counts: { working: 1, idle: 1, error: 0, open_lanes: 1, promotable: 1, releases_open: 0, open_fixes: 1, unassigned_fixes: 1 },

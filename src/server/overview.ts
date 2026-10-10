@@ -8,8 +8,8 @@ import { getConfig } from './config.js';
 import { getDb, getTask, listAgents, listAgentMessages, listRuns, type Agent, type Task } from './db.js';
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
-import { candidateFor, listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
-import { listReleases, type ReleaseRequest } from './releases.js';
+import { candidateFor, listCandidates, listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
+import { listReleases, verificationFor, type ReleaseRequest } from './releases.js';
 
 export interface AgentBoardRow {
   id: string;
@@ -82,11 +82,26 @@ export interface AttentionRow {
   sha?: string;
 }
 
+/** A composed release candidate (projects.<p>.candidate_refs): the unit that goes to production. */
+export interface CandidateRow {
+  project: string;
+  name: string;
+  tip: string;
+  committed_at: string | null;
+  /** lanes (freeze SHAs) the candidate contains, per the board */
+  lanes: Array<{ sha: string; desk: number | null; lane: string | null; verdict: string | null; author: string | null }>;
+  staging: LaneBoardRow['staging'];
+  production: LaneBoardRow['production'];
+  verified: { by: string; at: string; note: string | null } | null;
+  next: string;
+}
+
 export interface Board {
   at: string;
   host: string;
   agents: AgentBoardRow[];
   lanes: LaneBoardRow[];
+  candidates: CandidateRow[];
   fixes: FixRow[];
   attention: AttentionRow[];
   counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number; open_fixes: number; unassigned_fixes: number };
@@ -145,12 +160,19 @@ function pendingReviewFor(agentId: string): { runId: string; needsReviewer: bool
 }
 
 function releaseCell(r: ReleaseRequest | null): LaneBoardRow['staging'] {
-  return r ? { status: r.status, version: r.version, at: iso(r.updated_at)!, by: r.requested_by, verified_by: r.verified_by ?? null, verified_at: r.verified_at ? iso(r.verified_at) : null } : null;
+  if (!r) return null;
+  const v = verificationFor(r.sha);
+  return { status: r.status, version: r.version, at: iso(r.updated_at)!, by: r.requested_by, verified_by: v?.verified_by ?? r.verified_by ?? null, verified_at: v ? iso(v.verified_at) : r.verified_at ? iso(r.verified_at) : null };
 }
 
 function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null): { next: string; promotable: boolean } {
   if (f.status === 'merged') return { next: 'on main — merged or deployed outside this pipeline', promotable: false };
   if (candidate) return { next: `in candidate ${candidate} — ships with that release`, promotable: false };
+  if (f.project && getConfig().projects?.[f.project]?.candidate_refs) {
+    if (f.status !== 'open') return { next: f.status, promotable: false };
+    if (f.verdict !== 'pass') return { next: f.verdict ? 'needs fixes — author fixes, refreezes, reviewer re-reviews' : 'waiting for an independent verdict', promotable: false };
+    return { next: 'reviewed — waiting to be composed into the next candidate', promotable: false };
+  }
   if (f.status === 'stale') return { next: `stale — superseded by ${f.superseded_by?.slice(0, 8) ?? 'a newer freeze'}; the new SHA carries the work`, promotable: false };
   if (f.status === 'promoted') return { next: production?.status === 'deployed' ? 'in production' : 'promoted — waiting for the deployer', promotable: false };
   if (f.status === 'rejected') return { next: 'rejected', promotable: false };
@@ -257,12 +279,36 @@ export function buildBoard(now = Date.now()): Board {
     if (!assigned) attention.push({ kind: 'fix_unassigned', text: `${f.project ?? ''}${f.desk ? ` Desk #${f.desk}` : ''} ${f.sha.slice(0, 8)} ${reason} — nobody assigned`, sha: f.sha, run_id: f.run_id, agent_id: f.author_agent_id ?? undefined });
   }
 
+  const candidates: CandidateRow[] = [];
+  for (const project of Object.keys(cfg.projects ?? {})) {
+    let refs: ReturnType<typeof listCandidates> = [];
+    try { refs = listCandidates(project, now); } catch { refs = []; }
+    for (const c of refs) {
+      const rels = listReleases({ sha: c.tip, limit: 20 });
+      const staging = rels.find((r) => r.target === 'staging') ?? null;
+      const production = rels.find((r) => r.target === 'production') ?? null;
+      const v = verificationFor(c.tip);
+      const contained = lanes.filter((l) => l.candidate === c.name).map((l) => ({ sha: l.sha, desk: l.desk, lane: l.lane, verdict: l.verdict, author: l.author }));
+      let next: string;
+      if (production && (production.status === 'sent' || production.status === 'requested')) next = 'production GO sent — waiting for the deployer';
+      else if (production?.status === 'deployed') next = 'deployed to production — main will catch up on merge';
+      else if (production?.status === 'failed') next = `production failed: ${production.error ?? 'see report'}`;
+      else if (v) next = `verified on staging by ${v.verified_by} — ready for the production GO`;
+      else if (staging?.status === 'deployed') next = 'on staging — verify, then GO';
+      else if (staging && (staging.status === 'sent' || staging.status === 'requested')) next = 'staging in progress';
+      else next = 'composed — staged by the deployer on its own; verify on staging, then GO';
+      candidates.push({ project, name: c.name, tip: c.tip, committed_at: c.committed_at, lanes: contained, staging: releaseCell(staging), production: releaseCell(production), verified: v ? { by: v.verified_by, at: iso(v.verified_at)!, note: v.note } : null, next });
+      if (v && !production) attention.push({ kind: 'promotable', text: `${project} ${c.name} verified on staging by ${v.verified_by} — ready for the production GO`, sha: c.tip });
+    }
+  }
+
   const releasesOpen = listReleases({ limit: 100 }).filter((r) => r.status === 'sent' || r.status === 'requested').length;
   return {
     at: atIso,
     host: cfg.server?.host ?? 'wavecode',
     agents,
     lanes,
+    candidates,
     fixes,
     attention,
     counts: {
