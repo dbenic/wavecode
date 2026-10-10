@@ -135,6 +135,7 @@ export default function Release() {
                       <td className="px-3 py-2 align-top font-mono text-slate-300" title={f.sha}>
                         {f.sha.slice(0, 10)}
                         {stale && <div className="text-[9px] text-slate-500">stale{f.superseded_by ? ` → ${f.superseded_by.slice(0, 8)}` : ''}</div>}
+                        {f.status === 'merged' && <div className="text-[9px] text-emerald-400/80">on main</div>}
                       </td>
                       <td className="px-3 py-2 align-top">
                         <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${pass ? 'text-emerald-300 border-emerald-500/40' : 'text-amber-300 border-amber-500/40'}`}>

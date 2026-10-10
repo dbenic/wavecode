@@ -519,7 +519,8 @@ File rules (file name contains `freeze` or `verdict`, `.md`/`.txt`):
 Server rules on `POST /api/reviews/:runId/promote` for a freeze card:
 - only an independent `PASS` on the exact SHA promotes (non-PASS needs an admin `overrideReason`, stored in `review.promoted`);
 - the reviewer must differ from the author (a self-review file is refused at ingest);
-- a newer freeze on the same lane, or a lane tip that moved, marks the older SHA `stale` (`review.superseded`); a stale SHA is refused, override or not;
+- a newer freeze on the same lane, or for the same desk in the same project (verdict files often carry no lane line), or a lane tip that moved, marks the older SHA `stale` (`review.superseded`, payload `by: 'lane' | 'desk'`); a stale SHA is refused, override or not;
+- a SHA that is already an ancestor of the project's main (`projects.<p>.repo`, checked with `git merge-base --is-ancestor`, the base clone fetched at most every 10 minutes) is closed as `merged` whenever the board is built: its queue card is approved and `review.superseded` carries `superseded_by: 'main'`. This is how lanes deployed or merged outside the pipeline stop counting as open work or open fixes;
 - Promote relays the GO to `projects.<p>.release_peer` with the freeze SHA, lane, reviewer, the person who pressed it and both file paths. Nothing deploys by itself.
 - `POST /api/reviews/:runId/reject` accepts `{ reason?: string }` (stored; `review.rejected.reason`). Retry and hand-off do not apply to freeze cards.
 - On startup, today's files in the inbox are backfilled; only PASS verdicts create cards then.

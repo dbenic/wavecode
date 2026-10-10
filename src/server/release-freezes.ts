@@ -40,7 +40,8 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
 
-export type FreezeStatus = 'open' | 'promoted' | 'rejected' | 'stale';
+/** merged = the SHA is an ancestor of the project's main: the lane is done, whatever its last verdict said */
+export type FreezeStatus = 'open' | 'promoted' | 'rejected' | 'stale' | 'merged';
 
 export interface ReleaseFreeze {
   sha: string;
@@ -243,7 +244,8 @@ export function parseFreezeFile(text: string, filename: string): ParsedFreezeFil
     pushUnique(reviewerCandidates, nameAfter(/\b(?:independent\s+)?reviewer\b\**\s*[:：]?\**\s*@?([A-Za-z][\w-]*)/i, head));
   }
 
-  const desk = (text.match(/\bdesk\s*#?\s*(\d{1,6})\b/i) ?? base.match(/desk[-_]?(\d{1,6})/i))?.[1];
+  // "Desk #91", "PD-108", "pd108" in the text or the file name
+  const desk = (text.match(/\b(?:desk|pd)[\s#_-]*(\d{1,6})\b/i) ?? base.match(/(?:desk|pd)[\s#_-]*(\d{1,6})/i))?.[1];
   const project = nameAfter(/\bproject\b\**\s*[:：]\**\s*([A-Za-z][\w-]*)/i, head)
     ?? head.join('\n').match(/\bCountix\s*\/\s*([A-Za-z][\w-]*)/)?.[1] ?? null;
   const lane = nameAfter(/\b(?:lane|branch)\b\**\s*[:：]?\**\s*`?(wc-[\w./-]+|[\w./-]*\/[\w./-]+|[\w.-]+)`?/i, head);
@@ -380,7 +382,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
         .run(sha, project, parsed.desk, parsed.lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
           parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
-      supersedeOlder(sha, project, parsed.lane);
+      supersedeOlder(sha, project, parsed.lane, parsed.desk);
       return { ok: true, data: { sha, effect: 'stored', run_id: null } };
     }
     const changed = Object.keys(enrich).some((k) => (existing as unknown as Record<string, unknown>)[k] !== (enrich as Record<string, unknown>)[k]);
@@ -466,22 +468,98 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
-  supersedeOlder(sha, project ?? existing?.project ?? null, parsed.lane ?? existing?.lane ?? null);
+  supersedeOlder(sha, project ?? existing?.project ?? null, parsed.lane ?? existing?.lane ?? null, parsed.desk ?? existing?.desk ?? null);
   logger.info({ sha, runId, verdict, reviewer: reviewerName, author: authorName, file: filePath }, 'Release freeze ingested');
   return { ok: true, data: { sha, effect, run_id: runId } };
 }
 
 /** A newer commit on the same lane invalidates older open freezes (spec rule 3). */
-function supersedeOlder(sha: string, project: string | null, lane: string | null): void {
-  if (!lane) return;
+/**
+ * A newer commit on the same lane — or a newer freeze for the same desk in the same project
+ * (verdict files often carry no lane line, and a desk is one unit of work) — invalidates older
+ * open freezes (spec rule 3).
+ */
+function supersedeOlder(sha: string, project: string | null, lane: string | null, desk: number | null): void {
+  if (!lane && desk == null) return;
   const rows = getDb().prepare(
-    `SELECT * FROM release_freezes WHERE lane = ? AND sha <> ? AND status = 'open' AND (project IS ? OR project = ?) AND created_at <= (SELECT created_at FROM release_freezes WHERE sha = ?)`,
-  ).all(lane, sha, project, project, sha) as ReleaseFreeze[];
+    `SELECT * FROM release_freezes WHERE sha <> ? AND status = 'open' AND (project IS ? OR project = ?)
+       AND ((? IS NOT NULL AND lane = ?) OR (? IS NOT NULL AND desk = ?))
+       AND created_at <= (SELECT created_at FROM release_freezes WHERE sha = ?)`,
+  ).all(sha, project, project, lane, lane, desk, desk, sha) as ReleaseFreeze[];
   for (const old of rows) {
+    const by = old.lane && old.lane === lane ? 'lane' : 'desk';
     patch(old.sha, { status: 'stale', superseded_by: sha });
-    if (old.run_id) emit('review.superseded', 'run', old.run_id, { sha: old.sha, superseded_by: sha, lane }, null);
-    logger.info({ sha: old.sha, superseded_by: sha, lane }, 'Release freeze superseded by a newer commit on its lane');
+    if (old.run_id) emit('review.superseded', 'run', old.run_id, { sha: old.sha, superseded_by: sha, lane, desk, by }, null);
+    logger.info({ sha: old.sha, superseded_by: sha, lane, desk, by }, 'Release freeze superseded by a newer freeze');
   }
+}
+
+// --- merged into main -------------------------------------------------------------------
+
+const mergedCache = new Map<string, { at: number; merged: boolean | null }>();
+const MERGED_TTL_MS = 60_000;
+const fetchedAt = new Map<string, number>();
+const FETCH_TTL_MS = 10 * 60_000;
+
+/** Best-effort `git fetch origin main` on the base clone, at most every 10 minutes per repo. */
+function refreshMain(repo: string, now: number): void {
+  const last = fetchedAt.get(repo) ?? 0;
+  if (now - last < FETCH_TTL_MS) return;
+  fetchedAt.set(repo, now);
+  try {
+    execFileSync('git', ['-C', repo, 'fetch', '--quiet', 'origin', 'main'], { stdio: 'ignore', timeout: 20_000 });
+  } catch (e) {
+    logger.debug({ repo, error: (e as Error).message }, 'Base clone fetch skipped');
+  }
+}
+
+/** Is `sha` an ancestor of the project's main (per the local base clone)? null = cannot tell. */
+export function isOnMain(project: string | null, sha: string, now = Date.now()): boolean | null {
+  const repo = project ? getConfig().projects?.[project]?.repo : undefined;
+  if (!repo) return null;
+  const key = `${repo}:${sha}`;
+  const hit = mergedCache.get(key);
+  if (hit && now - hit.at < MERGED_TTL_MS) return hit.merged;
+  refreshMain(repo, now);
+  let merged: boolean | null = null;
+  for (const ref of ['origin/main', 'main']) {
+    try {
+      execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', sha, ref], { stdio: 'ignore', timeout: 5000 });
+      merged = true;
+      break;
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      if (status === 1) { merged = false; break; } // known commit, not an ancestor
+      // 128: unknown sha or ref — try the next ref, else unknown
+    }
+  }
+  mergedCache.set(key, { at: now, merged });
+  return merged;
+}
+
+/**
+ * Close freezes whose SHA already sits on main (deployed or merged by other means):
+ * status 'merged', the queue card approved, a review.superseded event with superseded_by 'main'.
+ */
+export function reconcileMerged(now = Date.now()): number {
+  const open = getDb().prepare("SELECT * FROM release_freezes WHERE status IN ('open', 'stale')").all() as ReleaseFreeze[];
+  let n = 0;
+  for (const f of open) {
+    if (isOnMain(f.project, f.sha, now) !== true) continue;
+    patch(f.sha, { status: 'merged', superseded_by: 'main' });
+    if (f.run_id) {
+      getDb().prepare("UPDATE runs SET review_status = 'approved' WHERE id = ? AND review_status = 'pending'").run(f.run_id);
+      emit('review.superseded', 'run', f.run_id, { sha: f.sha, superseded_by: 'main', by: 'merged' }, null);
+    }
+    logger.info({ sha: f.sha, project: f.project }, 'Release freeze is on main: closed as merged');
+    n++;
+  }
+  return n;
+}
+
+export function resetMergedCacheForTest(): void {
+  mergedCache.clear();
+  fetchedAt.clear();
 }
 
 // --- promote / reject rules --------------------------------------------------------

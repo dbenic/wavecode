@@ -25,7 +25,7 @@ const reviewConfig: Record<string, unknown> = {
   auto_pick: true,
   freeze_inbox: [] as string[],
 };
-const projectsConfig: Record<string, { workspace_match: string; release_peer?: string }> = {};
+const projectsConfig: Record<string, { workspace_match: string; release_peer?: string; repo?: string }> = {};
 const peersConfig: Record<string, { url: string; token: string; agents?: string[] }> = {};
 
 vi.mock('./config.js', () => ({
@@ -291,6 +291,51 @@ describe('release-freezes.ts', () => {
       expect(!r.ok && r.error).toMatch(/stale/);
       const items = rq.listPendingReviews();
       expect(items.map((i) => i.freeze?.status).sort()).toEqual(['open', 'stale']);
+    });
+
+    it('a verdict-only row (no lane line) is superseded by a newer freeze for the same desk', () => {
+      // claude2's verdict file for Desk #108 carries no Lane: line → lane null
+      const v = write(`claude2-verdict-pd108-s1-${SHA_B.slice(0, 8)}.md`, `# Verdict: Codex2 PD-108 S1 (exact SHA ${SHA_B})\nProject: wavepulse · reviewer Claude2 · Author: codex2\n\n- [HIGH] renumber the migrations\n\nVERDICT: NEEDS FIXES\n`);
+      expect(rf.ingestFreezeFile(v).ok).toBe(true);
+      expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'open', lane: null, desk: 108, verdict: 'needs-fixes' });
+      // codex2's newer freeze for Desk #108 on its lane
+      const note = write(`codex2-pd108-s1-freeze-${SHA_A.slice(0, 8)}.md`, `# Codex2 freeze — PD-108 S1 r2\n\nProject: wavepulse · Author: codex2 · Desk #108\n- Branch: \`wc-codex2-pd108\`\n- Exact SHA: \`${SHA_A}\`\n\nIndependent reviewer: Claude2.\n`);
+      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('review.superseded', 'run', expect.any(String), expect.objectContaining({ sha: SHA_B, superseded_by: SHA_A, by: 'desk' }), null);
+    });
+
+    it('a SHA that is already on the project main is closed as merged, its queue card approved', () => {
+      const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.'); git('commit', '-q', '-m', 'first');
+      const merged = git('rev-parse', 'HEAD');
+      git('checkout', '-q', '-b', 'wc-x');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.'); git('commit', '-q', '-m', 'lane');
+      const unmerged = git('rev-parse', 'HEAD');
+      git('checkout', '-q', 'main');
+      projectsConfig.wavepulse.repo = repo;
+      rf.resetMergedCacheForTest();
+
+      for (const [sha, name] of [[merged, 'merged'], [unmerged, 'open']] as const) {
+        const f = write(`desk91-freeze-${name}.md`, DESK91_FREEZE.replaceAll(SHA_A, sha).replace('wc-claude2', `wc-${name}`).replace('Desk #91', `Desk #9${name.length}`));
+        expect(rf.ingestFreezeFile(f).ok).toBe(true);
+      }
+      expect(rf.isOnMain('wavepulse', merged)).toBe(true);
+      expect(rf.isOnMain('wavepulse', unmerged)).toBe(false);
+      expect(rf.isOnMain('wavepulse', 'f'.repeat(40))).toBeNull();
+      expect(rf.reconcileMerged()).toBe(1);
+      expect(rf.getFreeze(merged)).toMatchObject({ status: 'merged', superseded_by: 'main' });
+      expect(rf.getFreeze(unmerged)).toMatchObject({ status: 'open' });
+      const cards = rq.listPendingReviews();
+      expect(cards.map((c) => c.freeze?.sha)).toEqual([unmerged]);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('review.superseded', 'run', expect.any(String), expect.objectContaining({ sha: merged, superseded_by: 'main', by: 'merged' }), null);
+      delete projectsConfig.wavepulse.repo;
     });
 
     it('retry and hand-off do not apply to a freeze card', () => {

@@ -260,7 +260,7 @@ export interface LaneBoardRow {
   reviewer: string | null;
   verdict: string | null;
   gate: string | null;
-  status: 'open' | 'promoted' | 'rejected' | 'stale';
+  status: 'open' | 'promoted' | 'rejected' | 'stale' | 'merged';
   superseded_by: string | null;
   promotable: boolean;
   summary: string | null;
@@ -357,7 +357,7 @@ export interface ReleaseFreezeCard {
   freeze_path: string | null;
   verdict_path: string | null;
   gate: string | null;
-  status: 'open' | 'promoted' | 'rejected' | 'stale';
+  status: 'open' | 'promoted' | 'rejected' | 'stale' | 'merged';
   superseded_by: string | null;
 }
 

@@ -8,7 +8,7 @@ import { getConfig } from './config.js';
 import { getDb, getTask, listAgents, listAgentMessages, listRuns, type Agent, type Task } from './db.js';
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
-import { listFreezes, type ReleaseFreeze } from './release-freezes.js';
+import { listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
 import { listReleases, type ReleaseRequest } from './releases.js';
 
 export interface AgentBoardRow {
@@ -147,7 +147,8 @@ function releaseCell(r: ReleaseRequest | null): LaneBoardRow['staging'] {
 }
 
 function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null): { next: string; promotable: boolean } {
-  if (f.status === 'stale') return { next: `stale — lane moved to ${f.superseded_by?.slice(0, 8) ?? 'a newer commit'}; freeze and review the new SHA`, promotable: false };
+  if (f.status === 'merged') return { next: 'on main — merged or deployed outside this pipeline', promotable: false };
+  if (f.status === 'stale') return { next: `stale — superseded by ${f.superseded_by?.slice(0, 8) ?? 'a newer freeze'}; the new SHA carries the work`, promotable: false };
   if (f.status === 'promoted') return { next: production?.status === 'deployed' ? 'in production' : 'promoted — waiting for the deployer', promotable: false };
   if (f.status === 'rejected') return { next: 'rejected', promotable: false };
   if (production && (production.status === 'sent' || production.status === 'requested')) return { next: 'production GO sent — waiting for the deployer', promotable: false };
@@ -162,6 +163,8 @@ function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: 
 
 export function buildBoard(now = Date.now()): Board {
   const cfg = getConfig();
+  // A SHA already on main closes its lane and its fix, whatever the last verdict said
+  try { reconcileMerged(now); } catch (e) { /* git unavailable: the board still builds */ void e; }
   const atIso = new Date(now).toISOString();
   const openQuestions = listPeerQuestions({ limit: 200 }).filter((q) => q.status === 'sent' || q.status === 'queued');
   const freezes = listFreezes();
