@@ -14,6 +14,7 @@ import { insertAgentMessage, resolveAgent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
+import { archiveDocumentFile } from './fixtures.js';
 
 const watchers = new Map<string, fs.FSWatcher>();
 const seen = new Map<string, number>(); // path → mtimeMs announced
@@ -62,7 +63,15 @@ export function announceFile(file: string, label: string): void {
     head = fs.readFileSync(file, 'utf8').slice(0, 4000);
   } catch { /* unreadable: still announce by path */ }
   const recipient = recipientFor(file, head);
-  const text = `[File from ${label}] ${file} — read it and act on it as part of your current task; answer with a TO @fable: line if it asks a question.`;
+  // The hand-off stays reviewable after the inbox moves on: archive it as a library document.
+  let archive = '';
+  try {
+    const archived = archiveDocumentFile(file, { provenance: `hand-off from ${label}; archived from ${file}` });
+    if (archived.ok) archive = ` (archive ${archived.data.storage_path})`;
+  } catch (e) {
+    logger.debug({ file, error: (e as Error).message }, 'Hand-off not archived');
+  }
+  const text = `[File from ${label}] ${file}${archive} — read it and act on it as part of your current task; answer with a TO @fable: line if it asks a question.`;
   if (recipient?.ok) {
     deliverSystemLine(recipient.data, text, { kind: 'handoff', source: label });
     logger.info({ file, agent: recipient.data.name }, 'Inbox file announced to its agent');

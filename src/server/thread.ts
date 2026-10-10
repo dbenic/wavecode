@@ -421,6 +421,7 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         fz.lane ? `lane ${fz.lane}` : null,
         str(p.reviewer_agent) ? `reviewed by @${str(p.reviewer_agent)}` : null,
         typeof fz.file === 'string' ? fz.file : null,
+        typeof fz.archive === 'string' ? `archive ${fz.archive}` : null,
       ].filter(Boolean).join(' · ') || null;
     } else {
       item.body = typeof p.fix_round === 'number' ? `Fix round ${p.fix_round}` : null;

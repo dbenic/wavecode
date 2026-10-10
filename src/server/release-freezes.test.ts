@@ -14,6 +14,7 @@ vi.mock('./task-dispatcher.js', () => ({
   finalizeRun: vi.fn(),
 }));
 
+const artifactsConfig = { storage: '', retention_days: 30 };
 const reviewConfig: Record<string, unknown> = {
   auto_review: false,
   default_reviewer: 'aider',
@@ -28,7 +29,7 @@ const projectsConfig: Record<string, { workspace_match: string; release_peer?: s
 const peersConfig: Record<string, { url: string; token: string; agents?: string[] }> = {};
 
 vi.mock('./config.js', () => ({
-  getConfig: vi.fn(() => ({ review: reviewConfig, projects: projectsConfig, peers: peersConfig, paths: {} })),
+  getConfig: vi.fn(() => ({ review: reviewConfig, projects: projectsConfig, peers: peersConfig, paths: {}, artifacts: artifactsConfig })),
 }));
 
 import { emit } from './event-bus.js';
@@ -113,6 +114,7 @@ describe('release-freezes.ts', () => {
     inbox = path.join(tmp, 'inbox');
     fs.mkdirSync(inbox);
     reviewConfig.freeze_inbox = [inbox];
+    artifactsConfig.storage = path.join(tmp, 'store');
     reviewConfig.require_pass_to_promote = false;
     for (const k of Object.keys(projectsConfig)) delete projectsConfig[k];
     for (const k of Object.keys(peersConfig)) delete peersConfig[k];
@@ -189,6 +191,23 @@ describe('release-freezes.ts', () => {
       expect(items[0].task.prompt).toMatch(/Release freeze wavepulse Desk #91 @ 2431f684/);
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.ai_completed', 'run', items[0].run.id,
         expect.objectContaining({ verdict: 'pass', reviewer_agent: 'codex3', freeze: expect.objectContaining({ sha: SHA_A }) }), null);
+    });
+
+    it('every ingested freeze note or verdict is archived as a library document, linked from the event', () => {
+      const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      const docs = db.listArtifacts({ kind: 'document' });
+      expect(docs).toHaveLength(1);
+      expect(docs[0]).toMatchObject({ filename: path.basename(file), desk: '91', room: 'wavepulse' });
+      expect(docs[0].provenance).toContain(`verdict on exact SHA ${SHA_A}`);
+      expect(docs[0].provenance).toContain('reviewer @codex3');
+      expect(docs[0].note).toMatch(/^Verdict: Claude2 Desk #91/);
+      expect(fs.readFileSync(docs[0].storage_path, 'utf-8')).toBe(VERDICT_PASS);
+      const call = vi.mocked(emit).mock.calls.find((c) => c[0] === 'review.ai_completed');
+      expect((call?.[3] as { freeze: { archive: string } }).freeze.archive).toBe(docs[0].storage_path);
+      // the same file again: still one document
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(db.listArtifacts({ kind: 'document' })).toHaveLength(1);
     });
 
     it('a freeze note carrying the reviewer PASS inline (Desk #91) creates the card and links both files', () => {

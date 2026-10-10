@@ -5,7 +5,7 @@ import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import type { Agent, Artifact } from '../types';
 import ArtifactThumbnail from '../components/ArtifactThumbnail';
 
-type View = 'fixtures' | 'all';
+type View = 'fixtures' | 'documents' | 'all';
 
 interface PeerInfo { name: string; url: string }
 interface PeerFixture {
@@ -57,6 +57,7 @@ export default function Artifacts() {
   const fetchData = useCallback(() => {
     const params = new URLSearchParams();
     if (view === 'fixtures') params.set('kind', 'fixture');
+    if (view === 'documents') params.set('kind', 'document');
     if (q.trim()) params.set('q', q.trim());
     if (filterRoom) params.set('room', filterRoom);
     apiGet<Artifact[]>('/artifacts' + (params.toString() ? `?${params}` : ''))
@@ -159,6 +160,7 @@ export default function Artifacts() {
   }
 
   const fixtureCount = artifacts.filter((a) => a.kind === 'fixture').length;
+  const documentCount = artifacts.filter((a) => a.kind === 'document').length;
   const importedIds = new Set(artifacts.map((a) => a.sha256));
 
   return (
@@ -175,7 +177,7 @@ export default function Artifacts() {
             <div>
               <h1 className="text-sm font-bold tracking-[0.15em] text-slate-100 uppercase">Library</h1>
               <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">
-                {view === 'fixtures' ? `${fixtureCount} fixture${fixtureCount !== 1 ? 's' : ''}` : `${artifacts.length} file${artifacts.length !== 1 ? 's' : ''}`} &middot; Immutable Store
+                {view === 'fixtures' ? `${fixtureCount} fixture${fixtureCount !== 1 ? 's' : ''}` : view === 'documents' ? `${documentCount} document${documentCount !== 1 ? 's' : ''}` : `${artifacts.length} file${artifacts.length !== 1 ? 's' : ''}`} &middot; Immutable Store
               </p>
             </div>
           </div>
@@ -183,6 +185,7 @@ export default function Artifacts() {
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex rounded border border-slate-800/60 overflow-hidden text-[10px] font-semibold tracking-wider">
               <button onClick={() => setView('fixtures')} className={`px-2.5 py-1 ${view === 'fixtures' ? 'bg-violet-500/15 text-violet-300' : 'text-slate-500 hover:text-slate-300'}`}>FIXTURES</button>
+              <button onClick={() => setView('documents')} className={`px-2.5 py-1 ${view === 'documents' ? 'bg-sky-500/15 text-sky-300' : 'text-slate-500 hover:text-slate-300'}`}>DOCUMENTS</button>
               <button onClick={() => setView('all')} className={`px-2.5 py-1 ${view === 'all' ? 'bg-slate-700/40 text-slate-200' : 'text-slate-500 hover:text-slate-300'}`}>ALL</button>
             </div>
             <input
@@ -308,7 +311,9 @@ export default function Artifacts() {
             <span className="text-2xl text-slate-800">~</span>
             <p className="text-[11px] text-slate-600">
               {artifacts.length === 0
-                ? view === 'fixtures' ? 'No fixtures yet — upload one, drop it into the fixture folder, or import from production' : 'No artifacts yet'
+                ? view === 'fixtures' ? 'No fixtures yet — upload one, drop it into the fixture folder, or import from production'
+                  : view === 'documents' ? 'No documents yet — freeze notes, verdicts and hand-offs are archived here as they arrive'
+                    : 'No artifacts yet'
                 : 'No matches for current filters'}
             </p>
           </div>

@@ -101,6 +101,9 @@ number, the room and a provenance line. Use them; add to them; never put origina
   IBANs, addresses replaced; amounts, dates and structure kept).
 - A fixture used by a test is referenced by its sha256 in the test or the freeze note, so the
   frozen SHA stays reproducible.
+- Your freeze notes, verdicts and the hand-offs from the deploy box are archived automatically
+  as Library documents (Library → DOCUMENTS, searchable by desk, SHA and title). You do not need
+  to copy them anywhere; the inbox may be cleaned.
 
 ## 3b. Asking the deploy box (production data, read-only)
 

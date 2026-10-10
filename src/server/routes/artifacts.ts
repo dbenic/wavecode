@@ -4,7 +4,7 @@ import * as artifactManager from '../artifact-manager.js';
 import * as leases from '../leases.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { canMutate, isRestrictedUser } from '../users.js';
-import type { Artifact, Result } from '../db.js';
+import type { Artifact, ArtifactKind, Result } from '../db.js';
 
 /** alias → name → id (spec §5c); unknown refs pass through for the manager to reject. */
 function resolveAgentId(ref: string): string {
@@ -46,7 +46,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
     const desk = c.req.query('desk');
     return c.json(listArtifacts({
       source_run_id: runId || undefined,
-      kind: restricted ? 'fixture' : kind === 'fixture' || kind === 'transient' ? kind : undefined,
+      kind: restricted ? 'fixture' : kind === 'fixture' || kind === 'document' || kind === 'transient' ? kind : undefined,
       room: c.req.query('room') || undefined,
       desk: desk ? artifactManager.normalizeDesk(desk) ?? undefined : undefined,
       q: c.req.query('q') || undefined,
@@ -66,7 +66,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
     const meta: Parameters<typeof artifactManager.setArtifactMeta>[1] = {};
-    if (body.kind !== undefined) meta.kind = body.kind as 'fixture' | 'transient';
+    if (body.kind !== undefined) meta.kind = body.kind as ArtifactKind;
     for (const k of ['desk', 'room', 'provenance', 'note'] as const) {
       if (body[k] === null) meta[k] = null;
       else if (typeof body[k] === 'string') meta[k] = (body[k] as string).trim() || null;
@@ -260,12 +260,12 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
 }
 
 /** kind / desk / room / provenance from an upload body (JSON or form fields). */
-function libraryMeta(body: Record<string, unknown>): { kind?: 'fixture' | 'transient'; desk?: string | null; room?: string | null; provenance?: string | null } {
+function libraryMeta(body: Record<string, unknown>): { kind?: ArtifactKind; desk?: string | null; room?: string | null; provenance?: string | null } {
   const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
   const kind = str(body.kind);
   const desk = str(body.desk);
   return {
-    ...(kind === 'fixture' || kind === 'transient' ? { kind } : {}),
+    ...(kind === 'fixture' || kind === 'document' || kind === 'transient' ? { kind } : {}),
     ...(desk ? { desk: artifactManager.normalizeDesk(desk) } : {}),
     ...(str(body.room) ? { room: str(body.room) } : {}),
     ...(str(body.provenance) ? { provenance: str(body.provenance) } : {}),

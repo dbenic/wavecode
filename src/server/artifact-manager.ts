@@ -265,13 +265,15 @@ export function storeArtifactFromBuffer(opts: {
   // (keep it, add desk / room / provenance) instead of storing a second copy.
   const existing = findArtifactByHash(sha256);
   if (existing) {
-    if (opts.kind === 'fixture') {
-      const meta: ArtifactMeta = { kind: 'fixture' };
+    if (opts.kind && opts.kind !== 'transient') {
+      // a kept kind never downgrades: a fixture stays a fixture when the same bytes arrive as a document
+      const kind: ArtifactKind = existing.kind === 'fixture' ? 'fixture' : opts.kind;
+      const meta: ArtifactMeta = { kind };
       if (opts.desk && !existing.desk) meta.desk = opts.desk;
       if (opts.room && !existing.room) meta.room = opts.room;
       if (opts.provenance && !existing.provenance) meta.provenance = opts.provenance;
       if (opts.note && !existing.note) meta.note = opts.note;
-      const changed = existing.kind !== 'fixture' || Object.keys(meta).length > 1;
+      const changed = existing.kind !== kind || Object.keys(meta).length > 1;
       if (changed) return setArtifactMeta(existing.id, meta);
     }
     return { ok: true, data: existing };
@@ -323,8 +325,8 @@ export function storeArtifactFromBuffer(opts: {
 
 /** Keep as fixture / edit desk, room, provenance, note. Emits artifact.updated. */
 export function setArtifactMeta(artifactId: string, meta: ArtifactMeta): Result<Artifact> {
-  if (meta.kind !== undefined && meta.kind !== 'fixture' && meta.kind !== 'transient') {
-    return { ok: false, error: "kind must be 'fixture' or 'transient'" };
+  if (meta.kind !== undefined && !['fixture', 'document', 'transient'].includes(meta.kind)) {
+    return { ok: false, error: "kind must be 'fixture', 'document' or 'transient'" };
   }
   if (meta.desk !== undefined && meta.desk !== null) meta.desk = normalizeDesk(meta.desk);
   const r = updateArtifactMeta(artifactId, meta);
@@ -507,9 +509,9 @@ export function pruneOldArtifacts(): number {
 
   const db = getDb();
 
-  // Fixtures are the development library: kept until someone deletes them.
+  // Fixtures and archived documents are the library: kept until someone deletes them.
   const oldArtifacts = db.prepare(
-    "SELECT * FROM artifacts WHERE created_at < ? AND kind <> 'fixture'"
+    "SELECT * FROM artifacts WHERE created_at < ? AND kind = 'transient'"
   ).all(cutoff) as import('./db.js').Artifact[];
 
   let pruned = 0;

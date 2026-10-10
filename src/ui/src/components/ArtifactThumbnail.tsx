@@ -77,6 +77,8 @@ export default function ArtifactThumbnail({
   const [note, setNote] = useState(artifact.note ?? '');
 
   const isFixture = artifact.kind === 'fixture';
+  const isDocument = artifact.kind === 'document';
+  const isKept = isFixture || isDocument;
 
   const handleDelete = async () => {
     if (!confirmDelete) {
@@ -112,7 +114,7 @@ export default function ArtifactThumbnail({
 
   const saveMeta = async () => {
     const ok = await patch({
-      kind: 'fixture',
+      kind: artifact.kind === 'transient' ? 'fixture' : artifact.kind,
       desk: desk.trim() || null,
       room: room || null,
       provenance: provenance.trim() || null,
@@ -146,7 +148,7 @@ export default function ArtifactThumbnail({
     <>
       <div
         className={`rounded-lg border bg-gradient-to-br from-slate-900/80 to-slate-950/90 overflow-hidden transition-all duration-200 ${
-          isFixture ? 'border-violet-500/25 hover:border-violet-500/40' : 'border-slate-800/50 hover:border-slate-700/50'
+          isFixture ? 'border-violet-500/25 hover:border-violet-500/40' : isDocument ? 'border-sky-500/20 hover:border-sky-500/40' : 'border-slate-800/50 hover:border-slate-700/50'
         }`}
         style={{ animationDelay: `${index * 50}ms`, animation: 'artifactIn 0.35s ease-out both' }}
         data-testid="artifact-card"
@@ -176,6 +178,9 @@ export default function ArtifactThumbnail({
                 {isFixture && (
                   <span className="text-[8px] font-bold tracking-wider rounded px-1 py-px border border-violet-500/40 text-violet-300 bg-violet-950/40">FIXTURE</span>
                 )}
+                {isDocument && (
+                  <span className="text-[8px] font-bold tracking-wider rounded px-1 py-px border border-sky-500/40 text-sky-300 bg-sky-950/40">DOCUMENT</span>
+                )}
                 {artifact.desk && <span className="text-[9px] text-slate-300">desk #{artifact.desk}</span>}
                 {artifact.room && <span className="text-[9px] text-slate-500">{artifact.room}</span>}
                 <span className="text-[9px] text-slate-600 font-mono">{formatBytes(artifact.size_bytes)}</span>
@@ -201,7 +206,7 @@ export default function ArtifactThumbnail({
             <div className="flex items-center gap-2">
               <a href={imageUrl} download={artifact.filename} className="text-[9px] font-semibold tracking-wider text-slate-500 hover:text-slate-300 transition-colors">DL</a>
               <button onClick={() => setShowShare(!showShare)} className="text-[9px] font-semibold tracking-wider text-cyan-500 hover:text-cyan-400 transition-colors">SHARE</button>
-              {isFixture ? (
+              {isKept ? (
                 <button onClick={() => setEditing(!editing)} className="text-[9px] font-semibold tracking-wider text-violet-400 hover:text-violet-300 transition-colors">EDIT</button>
               ) : (
                 <button onClick={keep} disabled={saving} title="Keep in the library: never pruned" className="text-[9px] font-semibold tracking-wider text-violet-400 hover:text-violet-300 transition-colors disabled:opacity-40">

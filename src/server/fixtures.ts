@@ -81,6 +81,39 @@ export function ingestFixtureFile(root: string, file: string, opts: { provenance
   });
 }
 
+// --- documents: archived freeze notes, verdicts, hand-offs --------------------------------
+
+const SHA40_RE = /\b[0-9a-f]{40}\b/;
+
+/**
+ * Archive a file the daemon handled (freeze note, verdict, hand-off from the deploy box)
+ * as a kept `document` in the library, so it stays reviewable and searchable after the
+ * inbox moves on. Same bytes twice = one artifact; an edited file is a new version.
+ */
+export function archiveDocumentFile(file: string, meta: { desk?: string | null; room?: string | null; provenance: string; note?: string | null }): Result<Artifact> {
+  let buffer: Buffer;
+  try {
+    buffer = fs.readFileSync(file);
+  } catch (e) {
+    return { ok: false, error: `cannot read ${file}: ${(e as Error).message}` };
+  }
+  if (buffer.length === 0) return { ok: false, error: `${path.basename(file)} is empty` };
+  const text = buffer.toString('utf-8');
+  const title = text.split('\n').find((l) => l.trim())?.replace(/^#+\s*/, '').trim() ?? null;
+  const desk = meta.desk ?? path.basename(file).match(DESK_IN_NAME_RE)?.[1] ?? text.match(/\bdesk\s*#?\s*(\d{1,6})\b/i)?.[1] ?? null;
+  const sha = text.match(SHA40_RE)?.[0] ?? null;
+  return storeArtifactFromBuffer({
+    buffer,
+    filename: path.basename(file),
+    kind: 'document',
+    desk: desk ? normalizeDesk(desk) : null,
+    room: meta.room ?? null,
+    provenance: sha && !meta.provenance.includes(sha) ? `${meta.provenance}; exact SHA ${sha}` : meta.provenance,
+    note: meta.note ?? title ?? undefined,
+    uploadedBy: null,
+  });
+}
+
 // --- peer import --------------------------------------------------------------------
 
 export interface PeerFixture {

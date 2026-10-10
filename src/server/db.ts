@@ -118,7 +118,7 @@ export interface Artifact {
   source_agent_id: string | null;
   source_run_id: string | null;
   note: string | null;
-  /** v23 'transient' (pruned after artifacts.retention_days) | 'fixture' (kept: a sanitized file for development, never pruned) */
+  /** v23 'transient' (pruned after artifacts.retention_days) | 'fixture' | 'document' (both kept, never pruned) */
   kind: ArtifactKind;
   /** v23 Product Desk / request reference the fixture belongs to (`PD-108`, `Desk #91` → '108', '91') */
   desk: string | null;
@@ -131,7 +131,8 @@ export interface Artifact {
   created_at: string;
 }
 
-export type ArtifactKind = 'transient' | 'fixture';
+/** transient = pruned after retention; fixture = sanitized test file, kept; document = archived freeze note / verdict / hand-off, kept */
+export type ArtifactKind = 'transient' | 'fixture' | 'document';
 
 export interface WaveEvent {
   id: number;

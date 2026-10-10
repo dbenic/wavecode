@@ -167,6 +167,35 @@ describe('fixtures: the Artifacts page as a development library', () => {
     });
   });
 
+  describe('documents', () => {
+    it('archiveDocumentFile keeps a hand-off as a document with desk, SHA and title; pruning leaves documents alone', () => {
+      const file = path.join(tmp, 'fable-to-claude2-desk105-ad4d8143-ack.md');
+      const SHA = 'ad4d8143d202664f629754e72189c28d58e2e9ce';
+      fs.writeFileSync(file, `# Fable ack for Desk #105\n\nExact SHA ${SHA} gated GREEN.\n`);
+      const r = fx.archiveDocumentFile(file, { provenance: 'hand-off from deploy/fable; archived from ' + file });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.data).toMatchObject({ kind: 'document', desk: '105', note: 'Fable ack for Desk #105', filename: 'fable-to-claude2-desk105-ad4d8143-ack.md' });
+      expect(r.data.provenance).toBe(`hand-off from deploy/fable; archived from ${file}; exact SHA ${SHA}`);
+      db.getDb().prepare("UPDATE artifacts SET created_at = '2020-01-01 00:00:00'").run();
+      expect(am.pruneOldArtifacts()).toBe(0);
+      expect(db.getArtifact(r.data.id).ok).toBe(true);
+    });
+
+    it('a document never downgrades a fixture with the same bytes, and PATCH accepts kind=document', async () => {
+      const bytes = Buffer.from('same bytes');
+      const fixture = await upload({ filename: 'x.txt', content_base64: bytes.toString('base64'), kind: 'fixture' });
+      fs.writeFileSync(path.join(tmp, 'x.txt'), bytes);
+      const doc = fx.archiveDocumentFile(path.join(tmp, 'x.txt'), { provenance: 'later' });
+      expect(doc.ok && doc.data.id).toBe(fixture.json.id);
+      expect(doc.ok && doc.data.kind).toBe('fixture');
+      const other = await upload({ filename: 'y.txt', content_base64: Buffer.from('other').toString('base64') });
+      const res = await app.fetch(new Request(`http://x/api/artifacts/${other.json.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'document' }) }));
+      expect(res.status).toBe(200);
+      expect((await list('?kind=document')).map((a) => a.id)).toEqual([other.json.id]);
+    });
+  });
+
   describe('import from a peer', () => {
     const remote = {
       fixture: { id: 'r-fix', filename: 'desk91-credit-note.xml', mime_type: 'text/xml', sha256: sha(INVOICE_XML), size_bytes: INVOICE_XML.length, kind: 'fixture', desk: '91', room: 'wavepulse', provenance: 'redacted export of Desk #91 attachment by fable, 2026-10-10', note: null, created_at: '2026-10-10 08:00:00' },

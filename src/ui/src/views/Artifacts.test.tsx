@@ -60,6 +60,14 @@ describe('Artifacts (the library)', () => {
     await waitFor(() => expect(vi.mocked(api.apiPatch)).toHaveBeenCalledWith('/artifacts/a-tmp', { kind: 'fixture' }));
   });
 
+  it('DOCUMENTS asks the server for archived documents', async () => {
+    const api = await import('../hooks/useApi');
+    render(<MemoryRouter><Artifacts /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText('desk91-credit-note.xml')).toBeTruthy());
+    fireEvent.click(screen.getByText('DOCUMENTS'));
+    await waitFor(() => expect(vi.mocked(api.apiGet)).toHaveBeenCalledWith('/artifacts?kind=document'));
+  });
+
   it('search is sent to the server as q', async () => {
     const api = await import('../hooks/useApi');
     render(<MemoryRouter><Artifacts /></MemoryRouter>);

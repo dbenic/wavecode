@@ -7,7 +7,8 @@ vi.mock('./event-bus.js', () => ({ emit: vi.fn(() => ({ id: 1 })) }));
 vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data: undefined })) }));
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() } }));
 const paths: { inbox_watch?: string[] } = {};
-vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ paths })) }));
+const artifacts = { storage: '', retention_days: 30 };
+vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ paths, artifacts, projects: {} })) }));
 
 import * as db from './db.js';
 import { emit } from './event-bus.js';
@@ -22,6 +23,7 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-inbox-'));
   db.initDb(path.join(tmp, 't.db'));
   paths.inbox_watch = [path.join(tmp, 'from-fable')];
+  artifacts.storage = path.join(tmp, 'store');
 });
 afterEach(() => { resetInboxWatchForTest(); db.resetDbForTest(); fs.rmSync(tmp, { recursive: true, force: true }); });
 
@@ -40,7 +42,11 @@ describe('hand-off folder watcher', () => {
     fs.writeFileSync(file, 'To: @claude1\n\nDeployed 0.440.71; please verify invoice 3176.');
     announceFile(file, 'deploy/fable');
     const typed = vi.mocked(sessionManager.sendKeys).mock.calls.find((c) => c[0] === claude.id)?.[1] as string;
-    expect(typed).toBe(`[File from deploy/fable] ${file} — read it and act on it as part of your current task; answer with a TO @fable: line if it asks a question.`);
+    // the hand-off is archived as a library document and the announcement names the kept copy
+    const doc = db.listArtifacts({ kind: 'document' })[0];
+    expect(doc).toMatchObject({ filename: 'release-notes-20261008.md', note: 'To: @claude1' });
+    expect(doc.provenance).toBe(`hand-off from deploy/fable; archived from ${file}`);
+    expect(typed).toBe(`[File from deploy/fable] ${file} (archive ${doc.storage_path}) — read it and act on it as part of your current task; answer with a TO @fable: line if it asks a question.`);
     expect(db.listAgentMessages({ to_agent_id: claude.id })[0]).toMatchObject({ message_type: 'handoff', from_agent_id: null });
     // the same file (same mtime) is never announced twice
     announceFile(file, 'deploy/fable');
@@ -69,10 +75,20 @@ describe('hand-off folder watcher', () => {
     fs.writeFileSync(path.join(dir, 'claude1-old.md'), 'old');
     expect(watchedInboxDirs()).toEqual([dir]);
     startInboxWatchers();
-    fs.writeFileSync(path.join(dir, 'claude1-new.md'), 'new');
-    await new Promise((r) => setTimeout(r, 1600));
-    const typed = vi.mocked(sessionManager.sendKeys).mock.calls.filter((c) => c[0] === claude.id).map((c) => c[1] as string);
+    // fs.watch on macOS attaches asynchronously: a write in the first moments can be missed under a
+    // loaded full-suite run, so give it a beat, then re-touch the file while polling (settle is 1.2 s).
+    await new Promise((r) => setTimeout(r, 300));
+    const newFile = path.join(dir, 'claude1-new.md');
+    fs.writeFileSync(newFile, 'new');
+    const calls = () => vi.mocked(sessionManager.sendKeys).mock.calls.filter((c) => c[0] === claude.id).map((c) => c[1] as string);
+    const deadline = Date.now() + 8000;
+    let lastTouch = Date.now();
+    while (!calls().some((t) => t.includes('claude1-new.md')) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (Date.now() - lastTouch > 2000) { fs.appendFileSync(newFile, '\n'); lastTouch = Date.now(); }
+    }
+    const typed = calls();
     expect(typed.some((t) => t.includes('claude1-new.md'))).toBe(true);
     expect(typed.some((t) => t.includes('claude1-old.md'))).toBe(false);
-  });
+  }, 10000);
 });

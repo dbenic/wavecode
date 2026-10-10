@@ -38,6 +38,7 @@ import {
 import { countIssues, type ReviewVerdict } from './code-review.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
+import { archiveDocumentFile } from './fixtures.js';
 
 export type FreezeStatus = 'open' | 'promoted' | 'rejected' | 'stale';
 
@@ -326,6 +327,29 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   const reviewerName = reviewer?.name ?? parsed.reviewerCandidates[0] ?? null;
   const project = projectFor(parsed, text);
 
+  // Keep the file itself: the inbox is transient, the library is not.
+  let archivedPath: string | null = null;
+  if (fs.existsSync(filePath)) {
+    try {
+    const archived = archiveDocumentFile(filePath, {
+      desk: parsed.desk ? String(parsed.desk) : null,
+      room: project,
+      provenance: [
+        `${parsed.kind === 'verdict' ? 'verdict' : 'freeze note'} on exact SHA ${sha}`,
+        parsed.lane ? `lane ${parsed.lane}` : null,
+        reviewerName ? `reviewer @${reviewerName}` : null,
+        author ? `author @${author.name}` : null,
+        `archived from ${filePath}`,
+      ].filter(Boolean).join(', '),
+      note: parsed.title,
+    });
+    if (archived.ok) archivedPath = archived.data.storage_path;
+    else logger.info({ file: filePath, reason: archived.error }, 'Freeze file not archived');
+    } catch (e) {
+      logger.warn({ file: filePath, error: (e as Error).message }, 'Freeze file not archived');
+    }
+  }
+
   const existing = getFreeze(sha);
   const enrich: Partial<ReleaseFreeze> = {};
   if (parsed.kind === 'freeze') {
@@ -436,7 +460,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         fix_round: 0,
         reviewer_agent: reviewerName,
         reviewer_agent_id: reviewer?.id ?? null,
-        freeze: { sha, project, desk: parsed.desk ?? existing?.desk ?? null, lane: parsed.lane ?? existing?.lane ?? null, file: filePath },
+        freeze: { sha, project, desk: parsed.desk ?? existing?.desk ?? null, lane: parsed.lane ?? existing?.lane ?? null, file: filePath, archive: archivedPath },
       }, null);
     })();
   } catch (e) {

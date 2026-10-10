@@ -545,13 +545,18 @@ List artifacts attached to a run.
 
 ### The library: fixtures
 
-An artifact is `transient` (pruned after `artifacts.retention_days`) or a `fixture`: a kept
-file for development, never pruned, with `desk` (Product Desk / request number, normalized to
-digits: `PD-108` → `108`), `room` (project), `provenance` (where the bytes came from and how
-they were sanitized) and `uploaded_by`. Customer originals never become fixtures: they stay in
+An artifact is `transient` (pruned after `artifacts.retention_days`), a `fixture` (a kept,
+sanitized file for development) or a `document` (an archived freeze note, verdict, hand-off or
+report). Fixtures and documents are never pruned and carry `desk` (Product Desk / request
+number, normalized to digits: `PD-108` → `108`), `room` (project), `provenance` (where the bytes
+came from and how they were sanitized) and `uploaded_by`. Documents are created by the daemon:
+every freeze note or verdict the review watcher ingests and every hand-off the inbox watcher
+announces is archived with its title as `note`, the exact SHA in `provenance`, and the kept
+copy's path in the thread item (`freeze.archive` on `review.ai_completed`; `(archive …)` in the
+announcement). Same bytes twice = one document; an edited file is a new version. Customer originals never become fixtures: they stay in
 the Product Desk in production; a fixture is a sanitized derivative, and `provenance` says so.
 
-- `GET /api/artifacts?kind=fixture|transient&room=&desk=&q=` — `q` searches filename, note,
+- `GET /api/artifacts?kind=fixture|document|transient&room=&desk=&q=` — `q` searches filename, note,
   desk and provenance. A restricted (peer) token only ever sees fixtures.
 - `POST /api/artifacts/upload` also takes `kind`, `desk`, `room`, `provenance` (JSON or form
   fields). The same bytes uploaded again as a fixture promote the existing artifact instead of

@@ -186,7 +186,7 @@ export interface Artifact {
   source_run_id: string | null;
   note: string | null;
   /** 'fixture' = kept in the development library (never pruned); 'transient' = pruned after retention */
-  kind: 'fixture' | 'transient';
+  kind: 'fixture' | 'document' | 'transient';
   /** Product Desk / request number ('108', '91') */
   desk: string | null;
   room: string | null;
