@@ -245,6 +245,7 @@ export interface LaneBoardRow {
   status: 'open' | 'promoted' | 'rejected' | 'stale';
   superseded_by: string | null;
   promotable: boolean;
+  summary: string | null;
   staging: { status: string; version: string | null; at: string; by: string | null } | null;
   production: { status: string; version: string | null; at: string; by: string | null } | null;
   next: string;
@@ -276,6 +277,13 @@ export interface Recommendation {
   text: string;
 }
 
+export interface ReleaseGroup {
+  title: string;
+  shas: string[];
+  target: 'staging' | 'production' | 'hold';
+  why: string;
+}
+
 export interface OverlordReport {
   id: string;
   created_at: string;
@@ -283,6 +291,7 @@ export interface OverlordReport {
   model: string;
   agents: Array<{ id: string; note: string }>;
   recommendations: Recommendation[];
+  plan: ReleaseGroup[];
   digest: string | null;
   board_at: string;
 }

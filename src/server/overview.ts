@@ -44,6 +44,8 @@ export interface LaneBoardRow {
   status: ReleaseFreeze['status'];
   superseded_by: string | null;
   promotable: boolean;
+  /** first lines of the freeze note (scope of the change), for grouping decisions */
+  summary: string | null;
   staging: { status: string; version: string | null; at: string; by: string | null } | null;
   production: { status: string; version: string | null; at: string; by: string | null } | null;
   /** deterministic next step, before any model opinion */
@@ -179,9 +181,11 @@ export function buildBoard(now = Date.now()): Board {
       if (f.status === 'stale') attention.push({ kind: 'stale', text: `${f.project ?? ''} ${f.lane ?? ''} ${f.sha.slice(0, 8)} is stale`, sha: f.sha, run_id: f.run_id! });
       if (promotable && f.status === 'open') attention.push({ kind: 'promotable', text: `${f.project ?? ''}${f.desk ? ` Desk #${f.desk}` : ''} ${f.sha.slice(0, 8)}: ${next}`, sha: f.sha, run_id: f.run_id! });
       for (const r of [staging, production]) if (r?.status === 'failed') attention.push({ kind: 'release_failed', text: `${r.target} failed for ${f.sha.slice(0, 8)}: ${r.error ?? ''}`, sha: f.sha, run_id: f.run_id! });
+      const summaryRow = f.run_id ? (getDb().prepare('SELECT summary FROM runs WHERE id = ?').get(f.run_id) as { summary: string | null } | undefined) : undefined;
       return {
         sha: f.sha, run_id: f.run_id, project: f.project, desk: f.desk, lane: f.lane, author: f.author_name, reviewer: f.reviewer_name,
         verdict: f.verdict, gate: f.gate, status: f.status, superseded_by: f.superseded_by, promotable,
+        summary: summaryRow?.summary ? summaryRow.summary.replace(/\s+/g, ' ').slice(0, 600) : null,
         staging: releaseCell(staging), production: releaseCell(production), next, updated_at: iso(f.updated_at)!,
       };
     });

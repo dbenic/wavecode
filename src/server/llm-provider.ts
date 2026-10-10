@@ -11,6 +11,8 @@ export interface ResolvedLlmConfig {
   model: string;
   apiKey: string | null;
   baseUrl: string | null;
+  /** anthropic-workspace-id header (llm.anthropic_workspace_id or ANTHROPIC_WORKSPACE_ID) */
+  workspaceId: string | null;
 }
 
 export interface TextCompletionRequest {
@@ -105,6 +107,7 @@ export function getResolvedLlmConfig(): ResolvedLlmConfig {
     model: config.llm.model,
     apiKey: getLlmApiKey(config),
     baseUrl: getLlmBaseUrl(config),
+    workspaceId: config.llm.anthropic_workspace_id || process.env.ANTHROPIC_WORKSPACE_ID || null,
   };
 }
 
@@ -175,13 +178,15 @@ function getConfigurationError(config: ResolvedLlmConfig): string {
   return 'LLM not configured. Set an API key, or point the provider at a local OpenAI-compatible endpoint.';
 }
 
-function getAnthropicClient(apiKey: string): Anthropic {
-  if (anthropicClient && apiKey === lastAnthropicKey) {
+function getAnthropicClient(apiKey: string, workspaceId: string | null = null): Anthropic {
+  const cacheKey = `${apiKey}|${workspaceId ?? ''}`;
+  if (anthropicClient && cacheKey === lastAnthropicKey) {
     return anthropicClient;
   }
 
-  lastAnthropicKey = apiKey;
-  anthropicClient = new Anthropic({ apiKey });
+  lastAnthropicKey = cacheKey;
+  // A key that is not scoped to a workspace must name one on every request.
+  anthropicClient = new Anthropic({ apiKey, ...(workspaceId ? { defaultHeaders: { 'anthropic-workspace-id': workspaceId } } : {}) });
   return anthropicClient;
 }
 
@@ -195,7 +200,7 @@ async function completeAnthropicText(
   }
 
   try {
-    const client = getAnthropicClient(config.apiKey);
+    const client = getAnthropicClient(config.apiKey, config.workspaceId);
     const response = await client.messages.create({
       model: request.model ?? config.model,
       max_tokens: maxTokens,
@@ -245,7 +250,7 @@ async function runAnthropicToolConversation(
   }
 
   try {
-    const client = getAnthropicClient(config.apiKey);
+    const client = getAnthropicClient(config.apiKey, config.workspaceId);
     const tools: Anthropic.Tool[] = request.tools.map((tool) => ({
       name: tool.name,
       description: tool.description,

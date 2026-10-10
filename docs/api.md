@@ -375,13 +375,17 @@ The overlord (`src/server/overlord.ts`) is a coordinator on a token-based model 
 rule). It wakes on board-changing events (`run.finished`, `review.ai_completed`,
 `review.superseded`, `release.reported`, `agent.hung`, …) and on a heartbeat; wakes are debounced
 and capped per hour. Each wake it writes a report — one line per agent, recommendations
-(`promote | stage | reject | nudge | reassign | refreeze | info`) and a digest — stored, emitted as
+(`promote | stage | reject | nudge | reassign | refreeze | info`), a release plan (groups of lanes
+that go out together, in order, with target `staging | production | hold` and why — lanes that
+touch the same area or depend on each other ship together, independent ones separately, risky
+ones last and alone) and a digest — stored, emitted as
 `overlord.report`, posted as a thread item whose recommendations are buttons, and sent as a
 notification when the digest changed. It never promotes, stages or types into an agent by itself.
 
 ```yaml
 llm:
   anthropic_api_key: sk-ant-…        # or ANTHROPIC_API_KEY in the service environment
+  anthropic_workspace_id: wrkspc_…   # only for a key that is not scoped to a workspace (the API then demands the header)
 overlord:
   enabled: true
   model: claude-sonnet-5-5

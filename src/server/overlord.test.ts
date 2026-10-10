@@ -124,6 +124,7 @@ describe('overview board + overlord', () => {
         { kind: 'nudge', agent_id: claude2.id, text: 'Ask @claude2 what blocks Desk #92.' },
         { kind: 'bogus', text: 'unknown kind becomes info' },
       ],
+      plan: [{ title: 'Desk #91 alone', shas: [SHA], target: 'production', why: 'independent change, PASS, gate green' }, { title: 'bad', shas: [], target: 'hold', why: 'dropped: no shas' }],
       digest: 'One lane ready: Desk #91 2431f684 (PASS). Stage it, then promote.\nNothing else needs you.',
     }) + '\n```' });
 
@@ -139,6 +140,8 @@ describe('overview board + overlord', () => {
     expect(sent.agents.map((a) => a.name)).toContain('claude2');
 
     expect(report!.recommendations.map((r) => r.kind)).toEqual(['stage', 'nudge', 'info']);
+    expect(report!.plan).toEqual([{ title: 'Desk #91 alone', shas: [SHA], target: 'production', why: 'independent change, PASS, gate green' }]);
+    expect((JSON.parse(call.userMessage) as { lanes: Array<{ summary: string | null }> }).lanes[0].summary).toMatch(/Desk #91 freeze note/);
     expect(ol.getLatestReport()?.digest).toMatch(/^One lane ready/);
     expect(vi.mocked(notify)).toHaveBeenCalledWith(expect.objectContaining({ title: 'WaveCode overlord', url: '/overview' }));
 
@@ -147,6 +150,7 @@ describe('overview board + overlord', () => {
     const item = thread.toThreadItem(ev, new thread.ThreadContext({ id: 'owner', name: 'owner', role: 'admin' } as never))!;
     expect(item.kind).toBe('report');
     expect(item.title).toMatch(/^Overlord: One lane ready/);
+    expect(item.body).toContain('→ PRODUCTION: Desk #91 alone [2431f684] — independent change, PASS, gate green');
     expect(item.needs_attention).toBe(true);
     expect(item.actions.map((a) => a.path)).toEqual([`/api/reviews/${runId}/stage`, `/api/agents/${claude2.id}/send`]);
     expect(item.actions[1].body).toMatchObject({ text: expect.stringMatching(/^\[Overlord\] Ask @claude2/) });

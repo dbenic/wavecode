@@ -130,6 +130,19 @@ export default function Overview() {
                 {report ? <span className="text-slate-500">{report.created_at.slice(0, 16)} · {report.trigger}</span> : <span className="text-slate-600">no report yet</span>}
               </div>
               {report?.digest && <p className="text-[12px] text-slate-200 whitespace-pre-wrap">{report.digest}</p>}
+              {report && report.plan.length > 0 && (
+                <div className="space-y-1" data-testid="release-plan">
+                  <p className="text-[9px] font-semibold tracking-wider text-slate-500">RELEASE PLAN</p>
+                  {report.plan.map((g, i) => (
+                    <div key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px]">
+                      <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border uppercase ${g.target === 'production' ? 'text-emerald-300 border-emerald-500/40' : g.target === 'hold' ? 'text-amber-300 border-amber-500/40' : 'text-sky-300 border-sky-500/40'}`}>{g.target}</span>
+                      <span className="text-slate-200">{g.title}</span>
+                      <span className="font-mono text-[10px] text-slate-500">{g.shas.map((s) => s.slice(0, 8)).join(' → ')}</span>
+                      <span className="text-slate-400 basis-full">{g.why}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {report && report.recommendations.length > 0 && (
                 <ul className="space-y-1.5">
                   {report.recommendations.map((r, i) => {

@@ -19,7 +19,7 @@ const RESPONSE: OverviewResponse = {
       { id: 'a1', name: 'claude2', alias: null, runtime: 'claude-code', model: 'opus', status: 'working', status_since: null, for_min: 12, current: { task_id: 't', num: 41, prompt: 'Desk #91 credit notes', run_id: 'r1', started_at: '' }, last_reply: { at: '', text: 'Frozen 2431f684' }, blocked_on: null, usage: '83% left', open_freezes: 1 },
       { id: 'a2', name: 'codex3', alias: null, runtime: 'codex', model: null, status: 'idle', status_since: null, for_min: 90, current: null, last_reply: null, blocked_on: 'awaiting peer answer (deploy/fable)', usage: null, open_freezes: 0 },
     ],
-    lanes: [{ sha: SHA, run_id: 'r1', project: 'wavepulse', desk: 91, lane: 'wc-claude2', author: 'claude2', reviewer: 'codex3', verdict: 'pass', gate: 'GREEN', status: 'open', superseded_by: null, promotable: true, staging: null, production: null, next: 'reviewed — stage it, then promote', updated_at: '' }],
+    lanes: [{ sha: SHA, run_id: 'r1', project: 'wavepulse', desk: 91, lane: 'wc-claude2', author: 'claude2', reviewer: 'codex3', verdict: 'pass', gate: 'GREEN', status: 'open', superseded_by: null, promotable: true, summary: 'Desk #91 issued credit notes', staging: null, production: null, next: 'reviewed — stage it, then promote', updated_at: '' }],
     attention: [{ kind: 'promotable', text: 'wavepulse Desk #91 2431f684: reviewed — stage it, then promote', run_id: 'r1', sha: SHA }],
     counts: { working: 1, idle: 1, error: 0, open_lanes: 1, promotable: 1, releases_open: 0 },
   },
@@ -31,6 +31,7 @@ const RESPONSE: OverviewResponse = {
       { kind: 'nudge', agent_id: 'a2', text: 'Ask @codex3 whether Fable answered.' },
       { kind: 'info', text: 'All other lanes quiet.' },
     ],
+    plan: [{ title: 'Invoices batch: Desk #91', shas: [SHA], target: 'production', why: 'Independent, PASS, gate green; ship alone.' }],
     digest: 'One lane ready: Desk #91.',
     board_at: '2026-10-10T15:00:00Z',
   },
@@ -58,6 +59,7 @@ describe('Overview', () => {
     expect(row.textContent).toContain('83% left');
     expect(screen.getByTestId('agent-codex3').textContent).toContain('awaiting peer answer');
     expect(screen.getByTestId('lanes').textContent).toContain('reviewed — stage it, then promote');
+    expect(screen.getByTestId('release-plan').textContent).toContain('Invoices batch: Desk #91');
   });
 
   it('DO IT on a stage recommendation posts the stage; on a nudge it sends the line to the agent; ASK NOW wakes the overlord', async () => {

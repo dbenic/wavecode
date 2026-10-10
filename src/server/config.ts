@@ -228,6 +228,8 @@ export interface WaveConfig {
     provider: 'anthropic' | 'openai-compatible';
     api_key: string | null;
     anthropic_api_key: string | null;
+    /** Sent as the anthropic-workspace-id header; required when the key is not scoped to a workspace. */
+    anthropic_workspace_id?: string | null;
     openai_api_key: string | null;
     gemini_api_key: string | null;
     perplexity_api_key: string | null;
@@ -505,6 +507,7 @@ function buildDefaults(baseDir: string): WaveConfig {
       provider: 'anthropic',
       api_key: null,
       anthropic_api_key: null,
+      anthropic_workspace_id: null,
       openai_api_key: null,
       gemini_api_key: null,
       perplexity_api_key: null,

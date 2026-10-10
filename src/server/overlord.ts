@@ -32,6 +32,15 @@ export interface Recommendation {
   text: string;
 }
 
+/** A practical release plan: what goes out together, in which order, and why. */
+export interface ReleaseGroup {
+  title: string;
+  /** full SHAs of the lanes in this group, in deploy order */
+  shas: string[];
+  target: 'staging' | 'production' | 'hold';
+  why: string;
+}
+
 export interface OverlordReport {
   id: string;
   created_at: string;
@@ -39,6 +48,7 @@ export interface OverlordReport {
   model: string;
   agents: Array<{ id: string; note: string }>;
   recommendations: Recommendation[];
+  plan: ReleaseGroup[];
   digest: string | null;
   board_at: string;
 }
@@ -90,8 +100,8 @@ function withTable<T>(fn: () => T): T {
 }
 
 function rowToReport(row: { id: string; created_at: string; trigger: string; model: string; report_json: string; digest: string | null; board_at: string | null }): OverlordReport {
-  const parsed = JSON.parse(row.report_json) as { agents?: OverlordReport['agents']; recommendations?: Recommendation[] };
-  return { id: row.id, created_at: row.created_at, trigger: row.trigger, model: row.model, agents: parsed.agents ?? [], recommendations: parsed.recommendations ?? [], digest: row.digest, board_at: row.board_at ?? row.created_at };
+  const parsed = JSON.parse(row.report_json) as { agents?: OverlordReport['agents']; recommendations?: Recommendation[]; plan?: ReleaseGroup[] };
+  return { id: row.id, created_at: row.created_at, trigger: row.trigger, model: row.model, agents: parsed.agents ?? [], recommendations: parsed.recommendations ?? [], plan: parsed.plan ?? [], digest: row.digest, board_at: row.board_at ?? row.created_at };
 }
 
 export function getLatestReport(): OverlordReport | null {
@@ -115,11 +125,19 @@ Rules you follow:
 - Be concrete and short. Name agents as @alias, lanes by project, desk and the first 8 characters of the SHA.
 - If nothing changed that a person needs to act on, set digest to null.
 
+Release planning — the practical advice the person wants most:
+- Each lane deploys to staging on its own; that is cheap and always fine to recommend.
+- For production, propose groups: lanes that touch the same area (same desk family, same module, one depends on another, a fix on top of a feature) go out together, in dependency order, so one verification covers them and nothing ships half. Independent lanes can ship separately; say so.
+- Put a lane on hold when its verdict is not PASS, its gate is RED, it is stale, a newer freeze on the same lane is coming, or its staging run has not been verified yet.
+- Order groups: hotfixes and small, verified changes first; large or risky changes last and alone.
+- Use the lane summaries (scope of the change) to judge overlap; when you cannot tell, say what to check instead of guessing.
+
 Answer with one JSON object and nothing else:
 {
   "agents": [{"id": "<agent id>", "note": "<one line: what it is doing / needs>"}],
   "recommendations": [{"kind": "promote|stage|reject|nudge|reassign|refreeze|info", "run_id": "<run id for promote/stage/reject, else null>", "agent_id": "<agent id for nudge/reassign, else null>", "sha": "<sha or null>", "text": "<one or two sentences: what and why>"}],
-  "digest": "<2-4 lines for the person, or null>"
+  "plan": [{"title": "<short name, e.g. 'Invoices batch: Desk #91 + #105'>", "shas": ["<full sha>", "..."], "target": "staging|production|hold", "why": "<one or two sentences: why together / why this order / what to verify first>"}],
+  "digest": "<2-4 lines for the person: what to deploy now, what to wait for, or null>"
 }`;
 
 function recentEvents(limit = 40): Array<{ at: string; type: string; entity: string; summary: string }> {
@@ -150,6 +168,7 @@ export function buildPrompt(board: Board, trigger: string, previous: OverlordRep
     lanes: board.lanes.map((l) => ({
       run_id: l.run_id, sha8: l.sha.slice(0, 8), sha: l.sha, project: l.project, desk: l.desk, lane: l.lane, author: l.author, reviewer: l.reviewer,
       verdict: l.verdict, gate: l.gate, status: l.status, promotable: l.promotable, staging: l.staging?.status ?? null, production: l.production?.status ?? null, next: l.next,
+      summary: l.summary,
     })),
     attention: board.attention,
     recent_events: recentEvents(),
@@ -158,7 +177,7 @@ export function buildPrompt(board: Board, trigger: string, previous: OverlordRep
   return JSON.stringify(slim);
 }
 
-export function parseReport(text: string): { agents: OverlordReport['agents']; recommendations: Recommendation[]; digest: string | null } | null {
+export function parseReport(text: string): { agents: OverlordReport['agents']; recommendations: Recommendation[]; plan: ReleaseGroup[]; digest: string | null } | null {
   const stripped = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   const start = stripped.indexOf('{');
   const end = stripped.lastIndexOf('}');
@@ -190,8 +209,18 @@ export function parseReport(text: string): { agents: OverlordReport['agents']; r
         }];
       }).slice(0, 12)
     : [];
+  const plan: ReleaseGroup[] = Array.isArray(o.plan)
+    ? (o.plan as unknown[]).flatMap((g) => {
+        if (!g || typeof g !== 'object') return [];
+        const x = g as Record<string, unknown>;
+        const shas = Array.isArray(x.shas) ? (x.shas as unknown[]).filter((s): s is string => typeof s === 'string' && /^[0-9a-f]{7,40}$/i.test(s)).map((s) => s.toLowerCase()) : [];
+        if (shas.length === 0 || typeof x.title !== 'string') return [];
+        const target: ReleaseGroup['target'] = x.target === 'production' || x.target === 'hold' ? x.target : 'staging';
+        return [{ title: x.title.trim().slice(0, 120), shas, target, why: typeof x.why === 'string' ? x.why.trim().slice(0, 500) : '' }];
+      }).slice(0, 10)
+    : [];
   const digest = typeof o.digest === 'string' && o.digest.trim() ? o.digest.trim().slice(0, 1200) : null;
-  return { agents, recommendations, digest };
+  return { agents, recommendations, plan, digest };
 }
 
 // --- waking ---------------------------------------------------------------------------------------
@@ -237,9 +266,9 @@ export async function wake(trigger: string, opts: { force?: boolean; now?: numbe
     }
     const report: OverlordReport = { id: ulid(), created_at: new Date(now).toISOString().replace('T', ' ').slice(0, 19), trigger, model: cfg.model, board_at: board.at, ...parsed };
     withTable(() => getDb().prepare('INSERT INTO overlord_reports (id, created_at, trigger, model, report_json, digest, board_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(report.id, report.created_at, trigger, cfg.model, JSON.stringify({ agents: report.agents, recommendations: report.recommendations }), report.digest, board.at));
+      .run(report.id, report.created_at, trigger, cfg.model, JSON.stringify({ agents: report.agents, recommendations: report.recommendations, plan: report.plan }), report.digest, board.at));
     emit('overlord.report', 'overlord', report.id, {
-      trigger, model: cfg.model, digest: report.digest, recommendations: report.recommendations, agents: report.agents, counts: board.counts,
+      trigger, model: cfg.model, digest: report.digest, recommendations: report.recommendations, plan: report.plan, agents: report.agents, counts: board.counts,
     }, null);
     if (cfg.notify && report.digest && report.digest !== previous?.digest) {
       void notify({ title: 'WaveCode overlord', body: report.digest.slice(0, 400), url: '/overview', tag: 'overlord' }).catch(() => {});

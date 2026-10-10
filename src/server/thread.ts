@@ -402,8 +402,10 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
     const recs = Array.isArray(p.recommendations) ? (p.recommendations as Array<Record<string, unknown>>) : [];
     const digest = str(p.digest);
     const item = base(event, 'report', null, digest ? `Overlord: ${digest.split('\n')[0].slice(0, 120)}` : `Overlord: ${recs.length} recommendation${recs.length === 1 ? '' : 's'}`);
+    const plan = Array.isArray(p.plan) ? (p.plan as Array<Record<string, unknown>>) : [];
     item.body = [
       digest && digest.includes('\n') ? digest.split('\n').slice(1).join('\n') : null,
+      ...plan.map((g) => `→ ${String(g.target ?? 'staging').toUpperCase()}: ${str(g.title) ?? ''} [${(Array.isArray(g.shas) ? g.shas as string[] : []).map((s) => s.slice(0, 8)).join(', ')}] — ${str(g.why) ?? ''}`),
       ...recs.map((r) => `• [${str(r.kind) ?? 'info'}] ${str(r.text) ?? ''}`),
     ].filter(Boolean).join('\n') || null;
     item.needs_attention = recs.some((r) => ['promote', 'stage', 'reject', 'nudge', 'refreeze'].includes(str(r.kind) ?? ''));
