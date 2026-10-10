@@ -398,6 +398,32 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
   }
 
   // --- AI review verdict
+  if (t === 'overlord.report') {
+    const recs = Array.isArray(p.recommendations) ? (p.recommendations as Array<Record<string, unknown>>) : [];
+    const digest = str(p.digest);
+    const item = base(event, 'report', null, digest ? `Overlord: ${digest.split('\n')[0].slice(0, 120)}` : `Overlord: ${recs.length} recommendation${recs.length === 1 ? '' : 's'}`);
+    item.body = [
+      digest && digest.includes('\n') ? digest.split('\n').slice(1).join('\n') : null,
+      ...recs.map((r) => `• [${str(r.kind) ?? 'info'}] ${str(r.text) ?? ''}`),
+    ].filter(Boolean).join('\n') || null;
+    item.needs_attention = recs.some((r) => ['promote', 'stage', 'reject', 'nudge', 'refreeze'].includes(str(r.kind) ?? ''));
+    if (ctx.canMutate) {
+      let n = 0;
+      for (const r of recs) {
+        const kind = str(r.kind);
+        const runId = str(r.run_id);
+        const agentId = str(r.agent_id);
+        if ((kind === 'promote' || kind === 'stage' || kind === 'reject') && runId) {
+          if (kind === 'promote' && !isAdmin(ctx.viewer) && !ctx.canMutate) continue;
+          item.actions.push({ id: `${kind}_${n++}`, label: `${kind[0].toUpperCase()}${kind.slice(1)} ${runId.slice(-6)}`, method: 'POST', path: `/api/reviews/${runId}/${kind}` });
+        } else if (kind === 'nudge' && agentId && ctx.canAct(agentId)) {
+          item.actions.push({ id: `nudge_${n++}`, label: `Nudge @${ctx.agent(agentId)?.alias ?? ctx.agent(agentId)?.name ?? 'agent'}`, method: 'POST', path: `/api/agents/${agentId}/send`, body: { text: `[Overlord] ${str(r.text) ?? 'Please report where you are and what blocks you.'}` } });
+        }
+      }
+    }
+    return item;
+  }
+
   if (t === 'release.requested' || t === 'release.reported') {
     const target = str(p.target) === 'production' ? 'production' : 'staging';
     const sha = str(p.sha) ?? '';

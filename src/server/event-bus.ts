@@ -13,6 +13,19 @@ const MAX_REPLAY_EVENTS = 500;
 // Cap max subscribers to prevent resource exhaustion
 const MAX_SUBSCRIBERS = 100;
 
+type EventListener = (event: WaveEvent) => void;
+const listeners = new Set<EventListener>();
+
+/** In-process subscription (the overlord, tests). Returns the unsubscribe function. Listeners never throw out of emit. */
+export function onEvent(listener: EventListener): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+export function resetEventListenersForTest(): void {
+  listeners.clear();
+}
+
 const subscribers = new Set<SSEWriter>();
 
 export function subscribe(writer: SSEWriter, lastEventId?: number): void {
@@ -78,6 +91,9 @@ export function emit(
   if (!result.ok) return null;
 
   const event = result.data;
+  for (const l of listeners) {
+    try { l(event); } catch { /* a listener must never break emit */ }
+  }
   const message = formatSSE(event);
 
   // Collect dead writers to remove after iteration (safe Set mutation)

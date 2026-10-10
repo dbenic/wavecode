@@ -41,6 +41,7 @@ export const SSE_EVENT_TYPES = [
   'review.superseded',
   'release.requested',
   'release.reported',
+  'overlord.report',
   'queue.empty',
   'research.started',
   'research.chunk',

@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 const NAV_ITEMS = [
   // The Command Center composer replaces Chat on phones (still at /chat).
   { path: '/', label: 'Center', icon: '◎' },
+  { path: '/overview', label: 'Overview', icon: '◌' },
   { path: '/dashboard', label: 'Agents', icon: '◉' },
   { path: '/tasks', label: 'Tasks', icon: '☰' },
   { path: '/review', label: 'Review', icon: '✓' },

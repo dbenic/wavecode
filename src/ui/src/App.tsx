@@ -14,6 +14,7 @@ import Users from './views/Users';
 import MySeat from './views/MySeat';
 import FileView from './views/FileView';
 import Release from './views/Release';
+import Overview from './views/Overview';
 import BottomNav from './components/BottomNav';
 import DesktopNav from './components/DesktopNav';
 import ErrorBanner from './components/ErrorBanner';
@@ -69,6 +70,7 @@ export default function App() {
             <Route path="/settings/seat" element={<MySeat />} />
             <Route path="/file" element={<FileView />} />
             <Route path="/release" element={<Release />} />
+            <Route path="/overview" element={<Overview />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           <BottomNav />

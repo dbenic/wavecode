@@ -7,6 +7,7 @@ import * as inboxWatch from './inbox-watch.js';
 import * as releaseFreezes from './release-freezes.js';
 import * as fixtures from './fixtures.js';
 import * as releases from './releases.js';
+import * as overlord from './overlord.js';
 import * as usageProbe from './usage-probe.js';
 import * as teamManager from './team-manager.js';
 import * as fileSharing from './file-sharing.js';
@@ -38,6 +39,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   peers.ensurePeerTables();
   releaseFreezes.ensureReleaseFreezeTable();
   releases.ensureReleaseTables();
+  overlord.ensureOverlordTable();
   usageProbe.ensureUsageTable();
   teamManager.ensureTeamTables();
   fileSharing.ensureFileSharingTable();
@@ -52,6 +54,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   releaseFreezes.startFreezeWatchers();
   fixtures.startFixtureWatchers();
   releases.startReleasePollers();
+  overlord.startOverlord();
   usageProbe.startUsageProbe();
 
   return {
@@ -67,6 +70,7 @@ export function shutdownApplication(): void {
   releaseFreezes.stopFreezeWatchers();
   fixtures.stopFixtureWatchers();
   releases.stopReleasePollers();
+  overlord.stopOverlord();
   usageProbe.stopUsageProbe();
   outputWatcher.stopAll();
   teamManager.stopAllCommsWatchers();

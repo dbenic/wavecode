@@ -114,6 +114,13 @@ agent and receive `[Release GO <id> …]` or `[Staging request <id> …]`, follo
 that target only and report with `report_release` or exactly one line
 `RELEASED <id>: deployed <sha> version <x.y.z> to <target>` / `RELEASE FAILED <id>: <why>`.
 
+## 3a4. The overlord reads, people decide
+
+A coordinator reads the board (your status, task, last reply, verdicts, lanes, releases) and
+writes recommendations for the people. It never types into your pane on its own; a line starting
+with `[Overlord]` was sent by a person pressing a recommendation. Answer it like any prompt. You
+do not need to report to it: keep your replies and freeze notes clear and it sees everything.
+
 ## 3b. Asking the deploy box (production data, read-only)
 
 You cannot reach production. A separate agent on the deploy box can read it

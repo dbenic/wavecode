@@ -207,6 +207,19 @@ export interface WaveConfig {
    * `projects.<p>.release_peer`.
    */
   releases?: { deploy_agent?: string | null };
+  /**
+   * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
+   * calls `model` on the configured LLM key (llm.anthropic_api_key), posts reports with
+   * one-click recommendations. Off unless enabled. It never acts on its own.
+   */
+  overlord?: {
+    enabled?: boolean;
+    model?: string;
+    heartbeat_min?: number;
+    max_wakes_per_hour?: number;
+    debounce_s?: number;
+    notify?: boolean;
+  };
   /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
   usage?: { probe_interval_min?: number };
   /** Diagram rendering: a self-hosted Kroki (https://kroki.io) for D2 / PlantUML / Graphviz blocks and files. Mermaid renders in the browser. */
@@ -259,6 +272,13 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   if (cfg.diagrams?.kroki_url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.diagrams.kroki_url)) {
     throw new Error('diagrams.kroki_url must be an http(s) origin like http://127.0.0.1:8000');
+  }
+  if (cfg.overlord) {
+    const o = cfg.overlord;
+    if (o.model !== undefined && (typeof o.model !== 'string' || !/^[\w.-]{3,64}$/.test(o.model))) throw new Error('overlord.model must be a model id like claude-sonnet-5-5');
+    for (const k of ['heartbeat_min', 'max_wakes_per_hour', 'debounce_s'] as const) {
+      if (o[k] !== undefined && (typeof o[k] !== 'number' || !(o[k]! >= 0))) throw new Error(`overlord.${k} must be a number >= 0`);
+    }
   }
   if (cfg.releases?.deploy_agent != null && (typeof cfg.releases.deploy_agent !== 'string' || !/^@?[\w.-]{1,64}$/.test(cfg.releases.deploy_agent))) {
     throw new Error('releases.deploy_agent must be an agent alias, name or id');

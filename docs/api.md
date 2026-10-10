@@ -362,6 +362,39 @@ Preview the auto-generated workspace briefing for an agent.
 Query:
 `agent_id`
 
+## Overview and the overlord
+
+The board (`src/server/overview.ts`) is computed from the database alone — nobody asks an
+agent anything: per agent the status and how long, the running task, the last reply, what it is
+blocked on (peer answer, review pending, needs reviewer, hung, crashed), plan usage; per reviewed
+lane the exact SHA, verdict, gate, what is on staging and in production, whether it is promotable
+and the deterministic next step; plus an attention list.
+
+The overlord (`src/server/overlord.ts`) is a coordinator on a token-based model (default
+`claude-sonnet-5-5`, the one deliberate API-key exception to the "agents use CLI subscriptions"
+rule). It wakes on board-changing events (`run.finished`, `review.ai_completed`,
+`review.superseded`, `release.reported`, `agent.hung`, …) and on a heartbeat; wakes are debounced
+and capped per hour. Each wake it writes a report — one line per agent, recommendations
+(`promote | stage | reject | nudge | reassign | refreeze | info`) and a digest — stored, emitted as
+`overlord.report`, posted as a thread item whose recommendations are buttons, and sent as a
+notification when the digest changed. It never promotes, stages or types into an agent by itself.
+
+```yaml
+llm:
+  anthropic_api_key: sk-ant-…        # or ANTHROPIC_API_KEY in the service environment
+overlord:
+  enabled: true
+  model: claude-sonnet-5-5
+  heartbeat_min: 30
+  max_wakes_per_hour: 12
+  debounce_s: 45
+  notify: true
+```
+
+- `GET /api/overview` → `{ board, report, overlord: { enabled, model, heartbeat_min, max_wakes_per_hour } }`
+- `GET /api/overview/reports?limit=` — past reports, newest first.
+- `POST /api/overview/wake` `{ force? }` — admin: ask now (the hourly cap still applies unless `force`).
+
 ## Releases
 
 Releases are records, not chat (`src/server/releases.ts`). A person presses **Stage** (automated

@@ -17,6 +17,8 @@ export interface TextCompletionRequest {
   systemPrompt?: string;
   userMessage: string;
   maxTokens?: number;
+  /** Override llm.model for this call (the overlord pins its own model). */
+  model?: string;
 }
 
 export interface LlmChatMessage {
@@ -195,7 +197,7 @@ async function completeAnthropicText(
   try {
     const client = getAnthropicClient(config.apiKey);
     const response = await client.messages.create({
-      model: config.model,
+      model: request.model ?? config.model,
       max_tokens: maxTokens,
       system: request.systemPrompt,
       messages: [{ role: 'user', content: request.userMessage }],

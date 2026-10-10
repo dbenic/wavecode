@@ -2,6 +2,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Center', icon: '◎' },
+  { path: '/overview', label: 'Overview', icon: '◌' },
   { path: '/chat', label: 'Chat', icon: '▶' },
   { path: '/dashboard', label: 'Agents', icon: '◉' },
   { path: '/tasks', label: 'Tasks', icon: '☰' },

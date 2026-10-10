@@ -215,6 +215,84 @@ export interface ReviewItem {
   freeze: ReleaseFreezeCard | null;
 }
 
+/** The board (src/server/overview.ts) and the overlord's report (src/server/overlord.ts). */
+export interface AgentBoardRow {
+  id: string;
+  name: string;
+  alias: string | null;
+  runtime: string;
+  model: string | null;
+  status: 'idle' | 'working' | 'error';
+  status_since: string | null;
+  for_min: number | null;
+  current: { task_id: string; num: number | null; prompt: string; run_id: string; started_at: string } | null;
+  last_reply: { at: string; text: string } | null;
+  blocked_on: string | null;
+  usage: string | null;
+  open_freezes: number;
+}
+
+export interface LaneBoardRow {
+  sha: string;
+  run_id: string | null;
+  project: string | null;
+  desk: number | null;
+  lane: string | null;
+  author: string | null;
+  reviewer: string | null;
+  verdict: string | null;
+  gate: string | null;
+  status: 'open' | 'promoted' | 'rejected' | 'stale';
+  superseded_by: string | null;
+  promotable: boolean;
+  staging: { status: string; version: string | null; at: string; by: string | null } | null;
+  production: { status: string; version: string | null; at: string; by: string | null } | null;
+  next: string;
+  updated_at: string;
+}
+
+export interface AttentionRow {
+  kind: string;
+  text: string;
+  agent_id?: string;
+  run_id?: string;
+  sha?: string;
+}
+
+export interface Board {
+  at: string;
+  host: string;
+  agents: AgentBoardRow[];
+  lanes: LaneBoardRow[];
+  attention: AttentionRow[];
+  counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number };
+}
+
+export interface Recommendation {
+  kind: 'promote' | 'stage' | 'reject' | 'nudge' | 'reassign' | 'refreeze' | 'info';
+  run_id?: string | null;
+  agent_id?: string | null;
+  sha?: string | null;
+  text: string;
+}
+
+export interface OverlordReport {
+  id: string;
+  created_at: string;
+  trigger: string;
+  model: string;
+  agents: Array<{ id: string; note: string }>;
+  recommendations: Recommendation[];
+  digest: string | null;
+  board_at: string;
+}
+
+export interface OverviewResponse {
+  board: Board;
+  report: OverlordReport | null;
+  overlord: { enabled: boolean; model: string; heartbeat_min: number; max_wakes_per_hour: number };
+}
+
 /** A release request record (src/server/releases.ts). */
 export interface ReleaseRequest {
   id: string;

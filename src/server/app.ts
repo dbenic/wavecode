@@ -25,6 +25,7 @@ import { registerRoomRoutes } from './routes/rooms.js';
 import { registerFileRoutes } from './routes/files.js';
 import { registerPeerRoutes } from './routes/peers.js';
 import { registerReleaseRoutes } from './routes/releases.js';
+import { registerOverviewRoutes } from './routes/overview.js';
 import { registerDiagramRoutes } from './routes/diagrams.js';
 import { registerMcpHttpRoutes } from '../mcp/http.js';
 
@@ -74,6 +75,7 @@ export function createApp(): Hono<NodeAppEnv> {
   registerFileRoutes(app);
   registerPeerRoutes(app);
   registerReleaseRoutes(app);
+  registerOverviewRoutes(app);
   registerDiagramRoutes(app);
   registerMcpHttpRoutes(app);
 
