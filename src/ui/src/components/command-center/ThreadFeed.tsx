@@ -1,5 +1,5 @@
 import { renderMarkdown } from '../../utils/markdown';
-import { internalLinkClickHandler } from '../../utils/paths';
+import { internalLinkClickHandler, linkifyPathsHtml } from '../../utils/paths';
 import { useDiagrams } from '../../hooks/useDiagrams';
 import { awaitingReplyPromptIds } from '../../utils/command-center';
 import { useEffect, useRef, useState } from 'react';
@@ -111,7 +111,14 @@ export default function ThreadFeed(props: ThreadFeedProps) {
                 </span>
               )}
             </div>
-            {item.body && <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-300">{item.body}</p>}
+            {item.body && (
+              // Paths in hand-offs, verdicts and file announcements open in the viewer, like in replies
+              <p
+                className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-300"
+                onClick={props.onNavigate ? internalLinkClickHandler(props.onNavigate) : undefined}
+                dangerouslySetInnerHTML={{ __html: linkifyPathsHtml(escapeHtml(item.body)) }}
+              />
+            )}
             {item.actions.length > 0 && (
               <div className="mt-1.5 flex flex-wrap gap-1.5">
                 {item.actions.map((action) => (
@@ -306,4 +313,8 @@ function AwaitingReply({ agentName, color, sentAt, now }: { agentName: string; c
       <span>answering · {elapsed}</span>
     </div>
   );
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

@@ -54,6 +54,19 @@ describe('ThreadFeed', () => {
     expect(screen.getByText('Run finished · exit 0 · RESULT: PASS')).toBeInTheDocument();
   });
 
+  it('paths in a report or verdict body are viewer links; markup in the body is escaped', async () => {
+    const onNavigate = vi.fn();
+    renderFeed({
+      onNavigate,
+      items: [item({ kind: 'verdict', title: 'Release freeze wavepulse @ 8926dde2: PASS', body: 'lane wc-x · reviewed by @codex2 · /home/wave/inbox/codex2-verdict-peppol-8926dde23-20261010.md <b>not bold</b>' })],
+    });
+    const link = screen.getByRole('link', { name: '/home/wave/inbox/codex2-verdict-peppol-8926dde23-20261010.md' });
+    expect(link.getAttribute('href')).toBe(`/file?path=${encodeURIComponent('/home/wave/inbox/codex2-verdict-peppol-8926dde23-20261010.md')}`);
+    expect(document.querySelector('b')).toBeNull();
+    await userEvent.click(link);
+    expect(onNavigate).toHaveBeenCalledWith(`/file?path=${encodeURIComponent('/home/wave/inbox/codex2-verdict-peppol-8926dde23-20261010.md')}`);
+  });
+
   it('shows an "answering…" indicator under an unanswered prompt until its reply arrives', () => {
     const justNow = new Date(Date.now() - 5000).toISOString().replace('T', ' ').slice(0, 19);
     const prompt = item({ event_id: 20, kind: 'prompt', title: 'Prompt sent', agent_id: 'pm', body: 'what is @fable doing?', at: justNow });
