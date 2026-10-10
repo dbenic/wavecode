@@ -542,8 +542,8 @@ export function isOnMain(project: string | null, sha: string, now = Date.now()):
  * status 'merged', the queue card approved, a review.superseded event with superseded_by 'main'.
  */
 export function reconcileMerged(now = Date.now()): number {
+  let n = reconcileSuperseded();
   const open = getDb().prepare("SELECT * FROM release_freezes WHERE status IN ('open', 'stale')").all() as ReleaseFreeze[];
-  let n = 0;
   for (const f of open) {
     if (isOnMain(f.project, f.sha, now) !== true) continue;
     patch(f.sha, { status: 'merged', superseded_by: 'main' });
@@ -552,6 +552,32 @@ export function reconcileMerged(now = Date.now()): number {
       emit('review.superseded', 'run', f.run_id, { sha: f.sha, superseded_by: 'main', by: 'merged' }, null);
     }
     logger.info({ sha: f.sha, project: f.project }, 'Release freeze is on main: closed as merged');
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Among open freezes, only the newest per (project, lane) and per (project, desk) stays open;
+ * older ones are stale. Ingest applies this as files arrive; this pass covers rows created
+ * before the rule existed and freezes whose lane or desk was only learned later.
+ */
+export function reconcileSuperseded(): number {
+  const open = (getDb().prepare("SELECT * FROM release_freezes WHERE status = 'open' ORDER BY created_at ASC, rowid ASC").all() as ReleaseFreeze[]);
+  const newest = new Map<string, ReleaseFreeze>();
+  for (const f of open) {
+    if (f.lane) newest.set(`lane:${f.project ?? ''}:${f.lane}`, f);
+    if (f.desk != null) newest.set(`desk:${f.project ?? ''}:${f.desk}`, f);
+  }
+  let n = 0;
+  for (const f of open) {
+    const byLane = f.lane ? newest.get(`lane:${f.project ?? ''}:${f.lane}`) : undefined;
+    const byDesk = f.desk != null ? newest.get(`desk:${f.project ?? ''}:${f.desk}`) : undefined;
+    const winner = byLane && byLane.sha !== f.sha ? byLane : byDesk && byDesk.sha !== f.sha ? byDesk : null;
+    if (!winner) continue;
+    patch(f.sha, { status: 'stale', superseded_by: winner.sha });
+    if (f.run_id) emit('review.superseded', 'run', f.run_id, { sha: f.sha, superseded_by: winner.sha, lane: f.lane, desk: f.desk, by: byLane && byLane.sha !== f.sha ? 'lane' : 'desk' }, null);
+    logger.info({ sha: f.sha, superseded_by: winner.sha }, 'Release freeze superseded on reconcile');
     n++;
   }
   return n;

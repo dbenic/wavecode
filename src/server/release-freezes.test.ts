@@ -305,6 +305,20 @@ describe('release-freezes.ts', () => {
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.superseded', 'run', expect.any(String), expect.objectContaining({ sha: SHA_B, superseded_by: SHA_A, by: 'desk' }), null);
     });
 
+    it('reconcile marks older open freezes per desk stale even when the newer one was ingested before the rule', () => {
+      const old = write(`claude2-verdict-pd108-${SHA_B.slice(0, 8)}.md`, `# Verdict: Codex2 PD-108 (exact SHA ${SHA_B})\nProject: wavepulse · reviewer Claude2 · Author: codex2\n\nVERDICT: NEEDS FIXES\n`);
+      expect(rf.ingestFreezeFile(old).ok).toBe(true);
+      const newer = write(`codex2-pd108-freeze-${SHA_A.slice(0, 8)}.md`, `# Codex2 freeze PD-108 r2\nProject: wavepulse · Author: codex2 · Desk #108\n- Exact SHA: \`${SHA_A}\`\n`);
+      expect(rf.ingestFreezeFile(newer).ok).toBe(true);
+      // simulate rows that predate the rule: reopen the old one
+      db.getDb().prepare("UPDATE release_freezes SET status = 'open', superseded_by = NULL WHERE sha = ?").run(SHA_B);
+      expect(rf.getFreeze(SHA_B)!.status).toBe('open');
+      expect(rf.reconcileSuperseded()).toBe(1);
+      expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
+      expect(rf.getFreeze(SHA_A)!.status).toBe('open');
+      expect(rf.reconcileSuperseded()).toBe(0);
+    });
+
     it('a SHA that is already on the project main is closed as merged, its queue card approved', () => {
       const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
       const repo = path.join(tmp, 'repo');
