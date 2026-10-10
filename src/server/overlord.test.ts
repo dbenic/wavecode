@@ -11,7 +11,7 @@ vi.mock('./llm-provider.js', () => ({ completeText: vi.fn(), isLlmConfigured: vi
 
 const cfg = {
   projects: { wavepulse: { workspace_match: '**/ws/*', release_peer: 'deploy/fable' } } as Record<string, { workspace_match: string; release_peer?: string }>,
-  peers: { deploy: { url: 'http://deploy.test', token: 'peer-token-0123456789' } },
+  peers: { deploy: { url: 'http://deploy.test', token: 'peer-token-0123456789' } } as Record<string, { url: string; token: string; agents?: string[] }>,
   releases: {} as { deploy_agent?: string | null },
   overlord: { enabled: true, model: 'claude-sonnet-5-5', heartbeat_min: 0, max_wakes_per_hour: 2, debounce_s: 0, notify: true } as Record<string, unknown>,
   review: { auto_review: false, default_reviewer: 'x', self_review: true, max_fix_loops: 2, require_pass_to_promote: false, gate_dependents_on_approval: false, auto_pick: true, freeze_inbox: [] as string[] },
@@ -252,6 +252,36 @@ describe('overview board + overlord', () => {
     await app.fetch(new Request('http://x/api/overview/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'and tomorrow?' }) }));
     const second = JSON.parse(vi.mocked(completeText).mock.calls[1][0].userMessage) as { conversation: Array<{ who: string; text: string }> };
     expect(second.conversation.map((c) => c.who)).toEqual(['owner', 'you']);
+  });
+
+  it('auto-stage: on a wake every reviewed PASS lane without a staging request is staged in the overlord\'s name', async () => {
+    cfg.overlord.auto_stage = true;
+    const peersMod = await import('./peers.js');
+    const { fakePeer } = await import('./peers.test-helpers.js');
+    const fp = fakePeer();
+    peersMod.setPeerFetchForTest(fp.fetchImpl);
+    cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+    agent('claude2'); agent('codex3');
+    const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
+    const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
+    fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
+    expect(rf.ingestFreezeFile(note).ok).toBe(true);
+    vi.mocked(completeText).mockResolvedValue({ ok: true, data: JSON.stringify({ agents: [], recommendations: [], plan: [], digest: null }) });
+    await ol.wake('review.ai_completed');
+    expect(fp.state.releases).toHaveLength(1);
+    expect(fp.state.releases[0]).toMatchObject({ target: 'staging', sha: SHA, requested_by: 'overlord' });
+    const releasesMod = await import('./releases.js');
+    expect(releasesMod.listReleases({ sha: SHA })[0]).toMatchObject({ target: 'staging', requested_by: 'overlord' });
+    expect(releasesMod.auditTrail()[0]).toMatchObject({ action: 'auto-stage', who: 'overlord' });
+    // the model saw the lane as staged (board rebuilt after staging)
+    const sent = JSON.parse(vi.mocked(completeText).mock.calls[0][0].userMessage) as { lanes: Array<{ staging: { status: string } | null }> };
+    expect(sent.lanes[0].staging?.status).toBe('sent');
+    // a second wake does not stage it again
+    await ol.wake('heartbeat');
+    expect(fp.state.releases).toHaveLength(1);
+    releasesMod.stopReleasePollers();
+    peersMod.setPeerFetchForTest(null);
+    cfg.overlord.auto_stage = false;
   });
 
   it('the routes: GET /api/overview returns board + report + settings; wake is admin only', async () => {

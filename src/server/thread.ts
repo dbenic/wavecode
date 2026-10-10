@@ -428,6 +428,14 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
     return item;
   }
 
+  if (t === 'release.verified') {
+    const sha = str(p.sha) ?? '';
+    const item = base(event, 'report', null, `Verified on staging: ${[str(p.project), str(p.desk) ? `Desk #${str(p.desk)}` : null, sha ? `@ ${sha.slice(0, 8)}` : null].filter(Boolean).join(' ')}`);
+    item.body = [str(p.verified_by) ? `by ${str(p.verified_by)}` : null, str(p.note)].filter(Boolean).join(' · ') || null;
+    if (str(p.run_id)) item.refs = { run_id: str(p.run_id)! };
+    return item;
+  }
+
   if (t === 'release.requested' || t === 'release.reported') {
     const target = str(p.target) === 'production' ? 'production' : 'staging';
     const sha = str(p.sha) ?? '';

@@ -2,10 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { ReleaseRequest, ReviewItem } from '../types';
+import type { AuditEntry, ReleaseRequest, ReviewItem } from '../types';
 import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 
-/** One row per reviewed lane: the freeze, its verdict and gate, what is on staging and in production, and the two actions. */
+/** One row per reviewed lane: the freeze, its verdict and gate, what is on staging and in production, and the actions. */
 interface Lane {
   item: ReviewItem;
   staging: ReleaseRequest | null;
@@ -28,17 +28,28 @@ function when(iso: string): string {
   return iso.replace('T', ' ').slice(5, 16);
 }
 
+const ACTION_CLS: Record<AuditEntry['action'], string> = {
+  promote: 'text-emerald-300',
+  deployed: 'text-emerald-300',
+  stage: 'text-sky-300',
+  'auto-stage': 'text-sky-300',
+  verify: 'text-violet-300',
+  reject: 'text-red-300',
+  failed: 'text-red-300',
+};
+
 export default function Release() {
   const navigate = useNavigate();
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [releases, setReleases] = useState<ReleaseRequest[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchData = useCallback(() => {
-    Promise.all([apiGet<ReviewItem[]>('/reviews'), apiGet<ReleaseRequest[]>('/releases?limit=200')])
-      .then(([r, rel]) => { setItems(r.filter((i) => i.freeze)); setReleases(rel); setLoaded(true); })
+    Promise.all([apiGet<ReviewItem[]>('/reviews'), apiGet<ReleaseRequest[]>('/releases?limit=200'), apiGet<AuditEntry[]>('/releases/audit?limit=100')])
+      .then(([r, rel, au]) => { setItems(r.filter((i) => i.freeze)); setReleases(rel); setAudit(au); setLoaded(true); })
       .catch(() => setLoaded(true));
   }, []);
 
@@ -59,26 +70,53 @@ export default function Release() {
     };
   });
 
-  const act = async (lane: Lane, action: 'stage' | 'promote' | 'reject') => {
-    setActing(`${lane.item.run.id}:${action}`);
+  const run = async (key: string, fn: () => Promise<unknown>) => {
+    setActing(key);
     setError(null);
     try {
-      if (action === 'reject') {
-        const reason = window.prompt('Reject this freeze — reason:');
-        if (reason === null) return;
-        await apiPost(`/reviews/${lane.item.run.id}/reject`, { reason: reason.trim() });
-      } else if (action === 'promote') {
-        if (!window.confirm(`Send the PRODUCTION GO for ${lane.item.freeze!.sha.slice(0, 8)}${lane.item.freeze!.desk ? ` (Desk #${lane.item.freeze!.desk})` : ''}?`)) return;
-        await apiPost(`/reviews/${lane.item.run.id}/promote`);
-      } else {
-        await apiPost(`/reviews/${lane.item.run.id}/stage`);
-      }
+      await fn();
       fetchData();
     } catch (e) {
-      setError((e as Error).message || `${action} failed`);
+      setError((e as Error).message || 'action failed');
     } finally {
       setActing(null);
     }
+  };
+
+  const stage = (lane: Lane) => run(`${lane.item.run.id}:stage`, () => apiPost(`/reviews/${lane.item.run.id}/stage`));
+
+  const verify = (lane: Lane) => {
+    if (!lane.staging) return;
+    const note = window.prompt(`Verified on staging — what did you check for ${lane.item.freeze!.sha.slice(0, 8)}? (optional note)`);
+    if (note === null) return;
+    const id = lane.staging.id;
+    return run(`${lane.item.run.id}:verify`, () => apiPost(`/releases/${id}/verify`, { note: note.trim() }));
+  };
+
+  const reject = (lane: Lane) => {
+    const reason = window.prompt('Reject this freeze — reason:');
+    if (reason === null) return;
+    return run(`${lane.item.run.id}:reject`, () => apiPost(`/reviews/${lane.item.run.id}/reject`, { reason: reason.trim() }));
+  };
+
+  const deployToProduction = (lane: Lane) => {
+    const f = lane.item.freeze!;
+    const stagingText = lane.staging
+      ? `${stateLabel(lane.staging).text}${lane.staging.verified_by ? `, verified by ${lane.staging.verified_by}` : ', NOT verified'}`
+      : 'never staged';
+    const summary = [
+      'DEPLOY TO PRODUCTION',
+      '',
+      `${f.project ?? ''}${f.desk ? ` · Desk #${f.desk}` : ''}`,
+      `lane ${f.lane ?? '?'}`,
+      `exact SHA ${f.sha}`,
+      `author @${f.author_name ?? '?'} · reviewed by @${f.reviewer_name ?? '?'} (${(f.verdict ?? 'none').toUpperCase()})${f.gate ? ` · gate ${f.gate}` : ''}`,
+      `staging: ${stagingText}`,
+      '',
+      'This sends the production GO to the deployer with your name on it. Continue?',
+    ].join('\n');
+    if (!window.confirm(summary)) return;
+    return run(`${lane.item.run.id}:promote`, () => apiPost(`/reviews/${lane.item.run.id}/promote`));
   };
 
   const openFile = internalLinkClickHandler(navigate);
@@ -90,7 +128,7 @@ export default function Release() {
           <button onClick={() => navigate('/')} className="text-slate-500 hover:text-slate-300 text-sm">&larr;</button>
           <div>
             <h1 className="text-sm font-bold tracking-[0.15em] text-slate-100 uppercase">Release</h1>
-            <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">{lanes.length} reviewed lane{lanes.length !== 1 ? 's' : ''} &middot; stage is automatic, promote is the production GO</p>
+            <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">{lanes.length} reviewed lane{lanes.length !== 1 ? 's' : ''} &middot; stage is automatic &middot; verify on staging &middot; production is your click</p>
           </div>
         </div>
       </header>
@@ -124,7 +162,10 @@ export default function Release() {
                   const st = stateLabel(lane.staging);
                   const pr = stateLabel(lane.production);
                   const busy = (a: string) => acting === `${lane.item.run.id}:${a}`;
-                  const openReq = (r: ReleaseRequest | null) => r && (r.status === 'sent' || r.status === 'requested');
+                  const openReq = (r: ReleaseRequest | null) => !!r && (r.status === 'sent' || r.status === 'requested');
+                  const stagedOk = lane.staging?.status === 'deployed';
+                  const verified = !!lane.staging?.verified_by;
+                  const canDeploy = pass && !stale && !openReq(lane.production) && lane.production?.status !== 'deployed';
                   return (
                     <tr key={lane.item.run.id} className={stale ? 'opacity-60' : ''} data-testid={`lane-${f.sha.slice(0, 8)}`}>
                       <td className="px-3 py-2 align-top">
@@ -152,34 +193,46 @@ export default function Release() {
                       <td className={`px-3 py-2 align-top ${st.cls}`}>
                         {st.text}
                         {lane.staging && <div className="text-[9px] text-slate-600">{when(lane.staging.updated_at)}{lane.staging.requested_by ? ` · ${lane.staging.requested_by}` : ''}</div>}
+                        {verified && <div className="text-[9px] text-violet-300">verified by {lane.staging!.verified_by}{lane.staging!.verification_note ? ` — ${lane.staging!.verification_note}` : ''}</div>}
+                        {stagedOk && !verified && <div className="text-[9px] text-amber-300">not verified yet</div>}
                         {lane.staging?.error && <div className="text-[9px] text-red-400/80 max-w-[14rem] truncate" title={lane.staging.error}>{lane.staging.error}</div>}
                       </td>
                       <td className={`px-3 py-2 align-top ${pr.cls}`}>
                         {pr.text}
-                        {lane.production && <div className="text-[9px] text-slate-600">{when(lane.production.updated_at)}{lane.production.requested_by ? ` · ${lane.production.requested_by}` : ''}</div>}
+                        {lane.production && <div className="text-[9px] text-slate-600">{when(lane.production.updated_at)}{lane.production.requested_by ? ` · GO by ${lane.production.requested_by}` : ''}</div>}
                         {lane.production?.error && <div className="text-[9px] text-red-400/80 max-w-[14rem] truncate" title={lane.production.error}>{lane.production.error}</div>}
                       </td>
-                      <td className="px-3 py-2 align-top text-right whitespace-nowrap">
+                      <td className="px-3 py-2 align-top text-right whitespace-nowrap space-x-1.5">
                         <button
-                          onClick={() => act(lane, 'stage')}
-                          disabled={acting !== null || stale || !!openReq(lane.staging)}
+                          onClick={() => stage(lane)}
+                          disabled={acting !== null || stale || openReq(lane.staging)}
                           title={stale ? 'Stale SHA: freeze the new one' : 'Automated deploy to staging, no GO'}
                           className="px-2 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 disabled:opacity-40"
                         >
                           {busy('stage') ? '...' : 'STAGE'}
                         </button>
+                        {stagedOk && !verified && (
+                          <button
+                            onClick={() => verify(lane)}
+                            disabled={acting !== null}
+                            title="Record that you checked the feature on staging"
+                            className="px-2 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 disabled:opacity-40"
+                          >
+                            {busy('verify') ? '...' : 'VERIFIED ON STAGING'}
+                          </button>
+                        )}
                         <button
-                          onClick={() => act(lane, 'promote')}
-                          disabled={acting !== null || stale || !pass || !!openReq(lane.production) || lane.production?.status === 'deployed'}
-                          title={!pass ? 'Needs an independent PASS on the exact SHA' : stale ? 'Stale SHA' : 'Production GO — sent to the deployer with your name'}
-                          className="ml-1.5 px-2 py-1 rounded border border-emerald-500/30 text-[10px] font-semibold tracking-wider text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
+                          onClick={() => deployToProduction(lane)}
+                          disabled={acting !== null || !canDeploy}
+                          title={!pass ? 'Needs an independent PASS on the exact SHA' : stale ? 'Stale SHA' : !verified ? 'Not verified on staging yet — you can still deploy, the confirmation says so' : 'Production GO, sent to the deployer with your name'}
+                          className={`px-2.5 py-1 rounded border text-[10px] font-bold tracking-wider disabled:opacity-40 ${verified ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25' : 'border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10'}`}
                         >
-                          {busy('promote') ? '...' : 'PROMOTE'}
+                          {busy('promote') ? '...' : 'DEPLOY TO PRODUCTION'}
                         </button>
                         <button
-                          onClick={() => act(lane, 'reject')}
+                          onClick={() => reject(lane)}
                           disabled={acting !== null}
-                          className="ml-1.5 px-2 py-1 rounded border border-red-500/30 text-[10px] font-semibold tracking-wider text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                          className="px-2 py-1 rounded border border-red-500/30 text-[10px] font-semibold tracking-wider text-red-300 hover:bg-red-500/10 disabled:opacity-40"
                         >
                           {busy('reject') ? '...' : 'REJECT'}
                         </button>
@@ -192,25 +245,37 @@ export default function Release() {
           </div>
         )}
 
-        {releases.length > 0 && (
+        {audit.length > 0 && (
           <section>
-            <h2 className="text-[9px] uppercase tracking-[0.3em] text-slate-500 mb-2">History</h2>
-            <ul className="divide-y divide-slate-800/40 rounded-lg border border-slate-800/60 text-[10px]" data-testid="history">
-              {releases.slice(0, 50).map((r) => {
-                const s = stateLabel(r);
-                return (
-                  <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5">
-                    <span className="text-slate-600 tabular-nums">{when(r.created_at)}</span>
-                    <span className={`font-semibold tracking-wider ${r.target === 'production' ? 'text-emerald-400' : 'text-sky-400'}`}>{r.target.toUpperCase()}</span>
-                    <span className="text-slate-300">{r.project ?? ''}{r.desk ? ` Desk #${r.desk}` : ''}</span>
-                    <span className="font-mono text-slate-400" title={r.sha}>{r.sha.slice(0, 8)}</span>
-                    <span className={s.cls}>{s.text}</span>
-                    {r.requested_by && <span className="text-slate-500">by {r.requested_by}</span>}
-                    {(r.report ?? r.error) && <span className="text-slate-500 truncate max-w-[28rem]" title={r.report ?? r.error ?? ''}>{r.report ?? r.error}</span>}
-                  </li>
-                );
-              })}
-            </ul>
+            <h2 className="text-[9px] uppercase tracking-[0.3em] text-slate-500 mb-2">Audit trail — who did what</h2>
+            <div className="overflow-x-auto rounded-lg border border-slate-800/60">
+              <table className="w-full text-[10px]" data-testid="audit">
+                <thead className="bg-slate-900/60 text-[9px] uppercase tracking-wider text-slate-500">
+                  <tr>
+                    <th className="text-left px-3 py-1.5">When</th>
+                    <th className="text-left px-3 py-1.5">Who</th>
+                    <th className="text-left px-3 py-1.5">Action</th>
+                    <th className="text-left px-3 py-1.5">Target</th>
+                    <th className="text-left px-3 py-1.5">Lane</th>
+                    <th className="text-left px-3 py-1.5">SHA</th>
+                    <th className="text-left px-3 py-1.5">Detail</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/40">
+                  {audit.map((e, i) => (
+                    <tr key={i}>
+                      <td className="px-3 py-1 text-slate-500 tabular-nums whitespace-nowrap">{when(e.at)}</td>
+                      <td className="px-3 py-1 text-slate-200">{e.who}</td>
+                      <td className={`px-3 py-1 font-semibold tracking-wider uppercase ${ACTION_CLS[e.action]}`}>{e.action}</td>
+                      <td className="px-3 py-1 text-slate-400">{e.target ?? '—'}</td>
+                      <td className="px-3 py-1 text-slate-300">{e.project ?? ''}{e.desk ? ` Desk #${e.desk}` : ''}</td>
+                      <td className="px-3 py-1 font-mono text-slate-400" title={e.sha ?? ''}>{e.sha?.slice(0, 8) ?? '—'}</td>
+                      <td className="px-3 py-1 text-slate-500 max-w-[24rem] truncate" title={e.detail ?? ''}>{e.detail ?? ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
         )}
       </main>

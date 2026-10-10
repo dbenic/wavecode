@@ -19,6 +19,7 @@ import { completeText, isLlmConfigured } from './llm-provider.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { buildBoard, type Board } from './overview.js';
+import * as releases from './releases.js';
 
 export const DEFAULT_MODEL = 'claude-sonnet-5-5';
 
@@ -72,7 +73,24 @@ export function overlordConfig() {
     maxWakesPerHour: o.max_wakes_per_hour ?? 12,
     debounceS: o.debounce_s ?? 45,
     notify: o.notify ?? true,
+    autoStage: o.auto_stage ?? false,
   };
+}
+
+/**
+ * Auto-stage: every open lane with an independent PASS, a gate that is not RED, not inside a
+ * candidate and without a staging request yet gets a staging request in the overlord's name.
+ * Staging is automated and safe; production always stays a person's click.
+ */
+export async function autoStage(board: Board): Promise<number> {
+  let n = 0;
+  for (const l of board.lanes) {
+    if (l.status !== 'open' || l.verdict !== 'pass' || l.gate === 'RED' || l.candidate || l.staging || !l.project) continue;
+    const r = await releases.requestRelease({ project: l.project, sha: l.sha, lane: l.lane, target: 'staging', desk: l.desk != null ? String(l.desk) : null, reviewer: l.reviewer, actorName: 'overlord', runId: l.run_id });
+    if (r.ok) n++;
+    else logger.warn({ sha: l.sha, error: r.error }, 'Overlord auto-stage failed');
+  }
+  return n;
 }
 
 export function ensureOverlordTable(): void {
@@ -140,7 +158,7 @@ Fixes and budget:
 Release planning — the practical advice the person wants most:
 - Each lane deploys to staging on its own; that is cheap and always fine to recommend.
 - For production, propose groups: lanes that touch the same area (same desk family, same module, one depends on another, a fix on top of a feature) go out together, in dependency order, so one verification covers them and nothing ships half. Independent lanes can ship separately; say so.
-- Put a lane on hold when its verdict is not PASS, its gate is RED, it is stale, a newer freeze on the same lane is coming, or its staging run has not been verified yet.
+- Put a lane on hold when its verdict is not PASS, its gate is RED, it is stale, a newer freeze on the same lane is coming, or its staging run has not been verified yet (staging.verified_by is null). A production group contains only lanes verified on staging; say who verified.
 - A lane with "candidate" set already sits in the deployer's release candidate branch: it ships with that release. Do not recommend staging, promoting or fixing it separately; mention it only as part of that release.
 - Order groups: hotfixes and small, verified changes first; large or risky changes last and alone.
 - Use the lane summaries (scope of the change) to judge overlap; when you cannot tell, say what to check instead of guessing.
@@ -184,7 +202,8 @@ export function buildPrompt(board: Board, trigger: string, previous: OverlordRep
     })),
     lanes: board.lanes.map((l) => ({
       run_id: l.run_id, sha8: l.sha.slice(0, 8), sha: l.sha, project: l.project, desk: l.desk, lane: l.lane, author: l.author, reviewer: l.reviewer,
-      verdict: l.verdict, gate: l.gate, status: l.status, promotable: l.promotable, candidate: l.candidate, staging: l.staging?.status ?? null, production: l.production?.status ?? null, next: l.next,
+      verdict: l.verdict, gate: l.gate, status: l.status, promotable: l.promotable, candidate: l.candidate,
+      staging: l.staging ? { status: l.staging.status, verified_by: l.staging.verified_by } : null, production: l.production?.status ?? null, next: l.next,
       summary: l.summary,
     })),
     attention: board.attention,
@@ -304,7 +323,11 @@ export async function wake(trigger: string, opts: { force?: boolean; now?: numbe
   if (inFlight) return inFlight;
   inFlight = (async () => {
     wakeTimes.push(now);
-    const board = buildBoard(now);
+    let board = buildBoard(now);
+    if (cfg.autoStage) {
+      const staged = await autoStage(board);
+      if (staged > 0) board = buildBoard(now);
+    }
     const previous = getLatestReport();
     const res = await completeText({ model: cfg.model, systemPrompt: SYSTEM_PROMPT, userMessage: buildPrompt(board, trigger, previous), maxTokens: 4096 });
     if (!res.ok) {

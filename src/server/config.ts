@@ -225,6 +225,8 @@ export interface WaveConfig {
     max_wakes_per_hour?: number;
     debounce_s?: number;
     notify?: boolean;
+    /** Stage every reviewed PASS lane automatically (in the overlord's name). Production never. */
+    auto_stage?: boolean;
   };
   /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
   usage?: { probe_interval_min?: number };

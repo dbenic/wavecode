@@ -41,6 +41,7 @@ export const SSE_EVENT_TYPES = [
   'review.superseded',
   'release.requested',
   'release.reported',
+  'release.verified',
   'overlord.report',
   'overlord.chat',
   'queue.empty',

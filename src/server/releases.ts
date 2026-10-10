@@ -54,6 +54,10 @@ export interface ReleaseRequest {
   deployed_sha: string | null;
   report: string | null;
   error: string | null;
+  /** staging only: who confirmed the feature works on staging, when, and a note */
+  verified_by: string | null;
+  verified_at: string | null;
+  verification_note: string | null;
   created_at: string;
   updated_at: string;
   reported_at: string | null;
@@ -94,6 +98,9 @@ export function ensureReleaseTables(): void {
     CREATE INDEX IF NOT EXISTS idx_release_requests_sha ON release_requests(sha, target);
     CREATE INDEX IF NOT EXISTS idx_release_requests_status ON release_requests(status);
   `);
+  for (const col of ['verified_by TEXT', 'verified_at TEXT', 'verification_note TEXT']) {
+    try { getDb().exec(`ALTER TABLE release_requests ADD COLUMN ${col}`); } catch { /* exists */ }
+  }
 }
 
 function withTable<T>(fn: () => T): T {
@@ -137,7 +144,7 @@ function patch(id: string, fields: Partial<ReleaseRequest>): void {
     .run(...keys.map((k) => fields[k] ?? null), id);
 }
 
-function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at'>): ReleaseRequest {
+function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note'>): ReleaseRequest {
   withTable(() => getDb().prepare(`INSERT INTO release_requests (id, project, sha, lane, target, desk, reviewer, requested_by, origin, peer, peer_request_id, origin_id, run_id, deploy_agent_id, status, version, deployed_sha, report, error)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(row.id, row.project, row.sha, row.lane, row.target, row.desk, row.reviewer, row.requested_by, row.origin, row.peer, row.peer_request_id, row.origin_id, row.run_id, row.deploy_agent_id, row.status, row.version, row.deployed_sha, row.report, row.error));
@@ -337,6 +344,61 @@ function announce(r: ReleaseRequest): void {
     ? `${r.target === 'production' ? 'Production' : 'Staging'} deployed: ${r.project ?? ''} ${r.sha.slice(0, 8)}${r.version ? ` v${r.version}` : ''}`
     : `${r.target} release ${r.status}: ${r.project ?? ''} ${r.sha.slice(0, 8)}`;
   void notify({ title, body: (r.report ?? r.error ?? '').slice(0, 300), url: '/release', tag: `release-${r.id}` }).catch(() => {});
+}
+
+/**
+ * "Verified on staging": a person (or a verify task through its user) confirms the feature works
+ * on staging. Recorded on the staging release record; the production decision reads it.
+ */
+export function verifyStaging(id: string, by: { name: string }, note: string | null): Result<ReleaseRequest> {
+  const r = getRelease(id);
+  if (!r) return { ok: false, error: `Release ${id} not found` };
+  if (r.target !== 'staging') return { ok: false, error: 'Only a staging release can be marked verified' };
+  if (r.status !== 'deployed') return { ok: false, error: `Staging ${r.sha.slice(0, 8)} is ${r.status}, not deployed — nothing to verify yet` };
+  patch(id, { verified_by: by.name, verified_at: new Date().toISOString().replace('T', ' ').slice(0, 19), verification_note: note?.trim().slice(0, 1000) || null });
+  const done = getRelease(id)!;
+  emit('release.verified', 'release', id, { sha: done.sha, project: done.project, desk: done.desk, lane: done.lane, version: done.version, verified_by: by.name, note: done.verification_note, run_id: done.run_id });
+  return { ok: true, data: done };
+}
+
+export interface AuditEntry {
+  at: string;
+  who: string;
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage';
+  target: ReleaseTarget | null;
+  sha: string | null;
+  project: string | null;
+  desk: string | null;
+  detail: string | null;
+  release_id: string | null;
+  run_id: string | null;
+}
+
+/** Who did what to which lane, newest first: requests, verifications, rejects, and the deployer's outcomes. */
+export function auditTrail(limit = 200): AuditEntry[] {
+  const out: AuditEntry[] = [];
+  for (const r of listReleases({ limit })) {
+    const who = r.requested_by ?? 'unknown';
+    out.push({ at: r.created_at, who, action: who === 'overlord' ? 'auto-stage' : r.target === 'production' ? 'promote' : 'stage', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.lane ? `lane ${r.lane}` : null, release_id: r.id, run_id: r.run_id });
+    if (r.reported_at && (r.status === 'deployed' || r.status === 'failed' || r.status === 'rejected')) {
+      out.push({ at: r.reported_at, who: r.deploy_agent_id ? `deployer (${r.deploy_agent_id.slice(-6)})` : (r.peer ? `deployer via ${r.peer}` : 'deployer'), action: r.status === 'deployed' ? 'deployed' : 'failed', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.status === 'deployed' ? (r.version ? `v${r.version}` : r.report) : (r.error ?? r.report), release_id: r.id, run_id: r.run_id });
+    }
+    if (r.verified_at) {
+      out.push({ at: r.verified_at, who: r.verified_by ?? 'unknown', action: 'verify', target: 'staging', sha: r.sha, project: r.project, desk: r.desk, detail: r.verification_note, release_id: r.id, run_id: r.run_id });
+    }
+  }
+  const rejects = getDb().prepare(
+    `SELECT e.created_at, e.entity_id AS run_id, e.payload_json, u.name AS user_name FROM events e LEFT JOIN users u ON u.id = e.actor_id
+     WHERE e.type = 'review.rejected' ORDER BY e.id DESC LIMIT ?`,
+  ).all(limit) as Array<{ created_at: string; run_id: string; payload_json: string | null; user_name: string | null }>;
+  for (const e of rejects) {
+    let p: Record<string, unknown> = {};
+    try { p = e.payload_json ? JSON.parse(e.payload_json) as Record<string, unknown> : {}; } catch { /* ignore */ }
+    const fz = p.freeze && typeof p.freeze === 'object' ? p.freeze as Record<string, unknown> : null;
+    if (!fz) continue; // only release freezes belong to this trail
+    out.push({ at: e.created_at, who: e.user_name ?? 'owner', action: 'reject', target: null, sha: typeof fz.sha === 'string' ? fz.sha : null, project: typeof fz.project === 'string' ? fz.project : null, desk: fz.desk != null ? String(fz.desk) : null, detail: typeof p.reason === 'string' ? p.reason : null, release_id: null, run_id: e.run_id });
+  }
+  return out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, limit);
 }
 
 // --- RELEASED / RELEASE FAILED lines in the deploy agent's pane ---------------------------------

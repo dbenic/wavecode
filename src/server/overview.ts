@@ -67,8 +67,8 @@ export interface LaneBoardRow {
   candidate: string | null;
   /** first lines of the freeze note (scope of the change), for grouping decisions */
   summary: string | null;
-  staging: { status: string; version: string | null; at: string; by: string | null } | null;
-  production: { status: string; version: string | null; at: string; by: string | null } | null;
+  staging: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
+  production: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
   /** deterministic next step, before any model opinion */
   next: string;
   updated_at: string;
@@ -145,7 +145,7 @@ function pendingReviewFor(agentId: string): { runId: string; needsReviewer: bool
 }
 
 function releaseCell(r: ReleaseRequest | null): LaneBoardRow['staging'] {
-  return r ? { status: r.status, version: r.version, at: iso(r.updated_at)!, by: r.requested_by } : null;
+  return r ? { status: r.status, version: r.version, at: iso(r.updated_at)!, by: r.requested_by, verified_by: r.verified_by ?? null, verified_at: r.verified_at ? iso(r.verified_at) : null } : null;
 }
 
 function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null): { next: string; promotable: boolean } {
@@ -159,7 +159,8 @@ function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: 
   if (f.verdict !== 'pass') return { next: f.verdict ? 'needs fixes — author fixes, refreezes, reviewer re-reviews' : 'waiting for an independent verdict', promotable: false };
   if (f.gate === 'RED') return { next: 'PASS but the remote gate is RED — not promotable until green', promotable: false };
   if (staging && (staging.status === 'sent' || staging.status === 'requested')) return { next: 'staging in progress', promotable: true };
-  if (staging?.status === 'deployed') return { next: 'staged and reviewed — ready to promote', promotable: true };
+  if (staging?.status === 'deployed' && staging.verified_by) return { next: `verified on staging by ${staging.verified_by} — ready for production`, promotable: true };
+  if (staging?.status === 'deployed') return { next: 'on staging — verify it, then deploy to production', promotable: true };
   if (staging?.status === 'failed') return { next: `staging failed: ${staging.error ?? 'see report'}`, promotable: true };
   return { next: 'reviewed — stage it, then promote', promotable: true };
 }

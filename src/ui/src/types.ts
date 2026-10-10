@@ -265,8 +265,8 @@ export interface LaneBoardRow {
   promotable: boolean;
   candidate: string | null;
   summary: string | null;
-  staging: { status: string; version: string | null; at: string; by: string | null } | null;
-  production: { status: string; version: string | null; at: string; by: string | null } | null;
+  staging: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
+  production: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
   next: string;
   updated_at: string;
 }
@@ -342,9 +342,25 @@ export interface ReleaseRequest {
   deployed_sha: string | null;
   report: string | null;
   error: string | null;
+  verified_by: string | null;
+  verified_at: string | null;
+  verification_note: string | null;
   created_at: string;
   updated_at: string;
   reported_at: string | null;
+}
+
+export interface AuditEntry {
+  at: string;
+  who: string;
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage';
+  target: 'staging' | 'production' | null;
+  sha: string | null;
+  project: string | null;
+  desk: string | null;
+  detail: string | null;
+  release_id: string | null;
+  run_id: string | null;
 }
 
 export interface ReleaseFreezeCard {

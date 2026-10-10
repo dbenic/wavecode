@@ -148,6 +148,29 @@ describe('releases.ts', () => {
       expect(rel.releaseStateFor(SHA).production).toBeNull();
     });
 
+    it('a person marks a deployed staging as verified; the audit trail lists stage, deployer outcome and verification with names', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const r = await rel.requestRelease({ project: 'wavepulse', sha: SHA, lane: 'wc-claude2', target: 'staging', desk: '91', actorName: 'denis' });
+      if (!r.ok) throw new Error(r.error);
+      // not deployed yet: cannot verify
+      const early = await app.fetch(new Request(`http://x/api/releases/${r.data.id}/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }));
+      expect(early.status).toBe(400);
+      box.deployed(r.data.peer_request_id!, '0.442.10');
+      for (let i = 0; i < 40 && rel.getRelease(r.data.id)!.status !== 'deployed'; i++) await flush(25);
+      acting.user = { id: 'u-antonio', name: 'antonio', role: 'developer', allowed_agents: null };
+      const ok = await app.fetch(new Request(`http://x/api/releases/${r.data.id}/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ note: 'credit note PDF and e-SLOG checked' }) }));
+      expect(ok.status).toBe(200);
+      expect(rel.getRelease(r.data.id)).toMatchObject({ verified_by: 'antonio', verification_note: 'credit note PDF and e-SLOG checked' });
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.verified', 'release', r.data.id, expect.objectContaining({ sha: SHA, verified_by: 'antonio' }));
+      const trail = rel.auditTrail();
+      expect(trail.map((e) => [e.action, e.who]).sort()).toEqual([['deployed', expect.stringMatching(/^deployer/)], ['stage', 'denis'], ['verify', 'antonio']]);
+      const viaRoute = await (await app.fetch(new Request('http://x/api/releases/audit'))).json() as Array<{ action: string }>;
+      expect(viaRoute).toHaveLength(3);
+    });
+
     it('a peer that refuses the request leaves a failed record, visible as an event', async () => {
       cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
       cfg.peers.deploy = { url: 'http://deploy.test', token: 'wrong-token-000000000', agents: ['fable'] };

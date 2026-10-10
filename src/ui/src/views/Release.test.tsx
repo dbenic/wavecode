@@ -25,7 +25,8 @@ function card(sha: string, over: Partial<NonNullable<ReviewItem['freeze']>> = {}
 const STAGED: ReleaseRequest = {
   id: 'R1', project: 'wavepulse', sha: SHA_A, lane: 'wc-claude2', target: 'staging', desk: '91', reviewer: 'codex3', requested_by: 'denis',
   origin: 'local', peer: 'deploy', peer_request_id: 'X1', run_id: 'run-2431', deploy_agent_id: null, status: 'deployed', version: '0.442.10',
-  deployed_sha: SHA_A, report: 'deployed', error: null, created_at: '2026-10-10T14:00:00', updated_at: '2026-10-10T14:05:00', reported_at: '2026-10-10 14:05:00',
+  deployed_sha: SHA_A, report: 'deployed', error: null, verified_by: null, verified_at: null, verification_note: null,
+  created_at: '2026-10-10T14:00:00', updated_at: '2026-10-10T14:05:00', reported_at: '2026-10-10 14:05:00',
 };
 
 describe('Release view', () => {
@@ -34,6 +35,7 @@ describe('Release view', () => {
     const api = await import('../hooks/useApi');
     vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
       if (p === '/reviews') return [card(SHA_A), card(SHA_B, { verdict: 'needs-fixes', desk: 43, lane: 'wc-codex2' })];
+      if (p.startsWith('/releases/audit')) return [{ at: '2026-10-10T14:00:00', who: 'denis', action: 'stage', target: 'staging', sha: SHA_A, project: 'wavepulse', desk: '91', detail: 'lane wc-claude2', release_id: 'R1', run_id: 'run-2431' }];
       if (p.startsWith('/releases')) return [STAGED];
       return [];
     });
@@ -47,15 +49,28 @@ describe('Release view', () => {
     expect(a.textContent).toContain('PASS');
     expect(a.textContent).toContain('GREEN');
     expect(a.textContent).toContain('deployed v0.442.10');
-    expect((within(a).getByText('PROMOTE') as HTMLButtonElement).disabled).toBe(false);
+    expect((within(a).getByText('DEPLOY TO PRODUCTION') as HTMLButtonElement).disabled).toBe(false);
+    expect(a.textContent).toContain('not verified yet');
+    expect(within(a).getByText('VERIFIED ON STAGING')).toBeTruthy();
     const b = screen.getByTestId(`lane-${SHA_B.slice(0, 8)}`);
     expect(b.textContent).toContain('NEEDS FIXES');
-    expect((within(b).getByText('PROMOTE') as HTMLButtonElement).disabled).toBe(true);
+    expect((within(b).getByText('DEPLOY TO PRODUCTION') as HTMLButtonElement).disabled).toBe(true);
     expect((within(b).getByText('STAGE') as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByTestId('history').textContent).toContain('STAGING');
+    const audit = screen.getByTestId('audit');
+    expect(audit.textContent).toContain('denis');
+    expect(audit.textContent).toContain('stage');
   });
 
-  it('Stage posts the staging request; Promote asks for confirmation and posts the production GO', async () => {
+  it('VERIFIED ON STAGING records the check with a note', async () => {
+    const api = await import('../hooks/useApi');
+    vi.spyOn(window, 'prompt').mockReturnValueOnce('invoices PDF ok');
+    render(<MemoryRouter><Release /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId('lanes')).toBeTruthy());
+    fireEvent.click(within(screen.getByTestId(`lane-${SHA_A.slice(0, 8)}`)).getByText('VERIFIED ON STAGING'));
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/releases/R1/verify', { note: 'invoices PDF ok' }));
+  });
+
+  it('Stage posts the staging request; Deploy to production shows the facts, asks for confirmation and posts the production GO', async () => {
     const api = await import('../hooks/useApi');
     render(<MemoryRouter><Release /></MemoryRouter>);
     await waitFor(() => expect(screen.getByTestId('lanes')).toBeTruthy());
@@ -63,11 +78,12 @@ describe('Release view', () => {
     fireEvent.click(within(b).getByText('STAGE'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith(`/reviews/run-${SHA_B.slice(0, 4)}/stage`));
     const a = screen.getByTestId(`lane-${SHA_A.slice(0, 8)}`);
-    vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
-    fireEvent.click(within(a).getByText('PROMOTE'));
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
+    fireEvent.click(within(a).getByText('DEPLOY TO PRODUCTION'));
+    expect(confirm.mock.calls[0][0]).toMatch(/DEPLOY TO PRODUCTION[\s\S]*Desk #91[\s\S]*exact SHA 2431f684[\s\S]*reviewed by @codex3 \(PASS\)[\s\S]*staging: deployed v0\.442\.10, NOT verified/);
     expect(vi.mocked(api.apiPost)).not.toHaveBeenCalledWith(`/reviews/run-${SHA_A.slice(0, 4)}/promote`);
     vi.spyOn(window, 'confirm').mockReturnValueOnce(true);
-    fireEvent.click(within(a).getByText('PROMOTE'));
+    fireEvent.click(within(a).getByText('DEPLOY TO PRODUCTION'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith(`/reviews/run-${SHA_A.slice(0, 4)}/promote`));
   });
 });

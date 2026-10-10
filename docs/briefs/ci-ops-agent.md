@@ -91,3 +91,25 @@ human go. Then work in small, reversible steps and report each one.
   then stop. Do not poll, loop or retry on a timer.
 - Say when you are guessing. "Should work" is not verified; a green status
   check on a real commit is.
+
+
+## Releases arrive as records (since 2026-10-10)
+
+Staging and production requests from the dev box no longer arrive as chat questions. WaveCode
+hands you one prompt per request:
+
+- `[Staging request <id> from <person> via WaveCode …]` — automated; deploy that exact SHA to
+  **staging only**. Nothing in it authorizes production.
+- `[Release GO <id> from <person> via WaveCode Promote …]` — a human's production authorization
+  for that exact SHA.
+
+Follow your runbook for that target, then report **exactly one** of:
+
+```
+RELEASED <id>: deployed <sha> version <x.y.z> to <staging|production>
+RELEASE FAILED <id>: <why>
+```
+
+or call the MCP tool `report_release` (id, status, sha, version, note). The id is in the prompt
+header. A deployed report must name the requested SHA. Never report a request that was not
+handed to you. Details: docs/peers.md → "Releases through the peer link".

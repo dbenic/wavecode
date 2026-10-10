@@ -18,6 +18,9 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     }));
   });
 
+  // Who did what: requests, verifications, rejects, deployer outcomes
+  app.get('/api/releases/audit', (c) => c.json(releases.auditTrail(Math.min(500, Number(c.req.query('limit') ?? 200) || 200))));
+
   app.get('/api/releases/:id', (c) => {
     const r = releases.getRelease(c.req.param('id'));
     if (!r) return c.json({ error: 'Release not found' }, 404);
@@ -36,6 +39,16 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     const r = releases.acceptRelease({ ...body, requested_by: fromPeer ? body.requested_by : user.name }, { userName: user.name, fromPeer });
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 201);
+  });
+
+  // A person confirms the feature works on staging (recorded with their name)
+  app.post('/api/releases/:id/verify', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ note?: unknown }>().catch(() => ({} as { note?: unknown }));
+    const r = releases.verifyStaging(c.req.param('id'), { name: user.name }, typeof body.note === 'string' ? body.note : null);
+    if (!r.ok) return c.json({ error: r.error }, r.error.includes('not found') ? 404 : 400);
+    return c.json(r.data);
   });
 
   // The deploy agent's outcome (report_release MCP tool, or any mutating token)

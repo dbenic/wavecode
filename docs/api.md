@@ -393,6 +393,7 @@ overlord:
   max_wakes_per_hour: 12
   debounce_s: 45
   notify: true
+  auto_stage: false   # true = the overlord stages every reviewed PASS lane itself (in its own name); production never
 ```
 
 The board also carries **open fixes** (a lane whose latest verdict is NEEDS FIXES, a failed
@@ -434,6 +435,13 @@ deployed_sha, report, error, created_at, updated_at, reported_at`.
   deploy side: accept a request (a peer's restricted token, or a local user; production locally is admin only).
   Idempotent while a request for the same SHA + target is open. The deploy agent receives
   `[Release GO <id> from <person> via WaveCode Promote …]` or `[Staging request <id> … Automated …]`.
+- `POST /api/releases/:id/verify` `{ note? }` — a person records that the feature works on staging
+  (`verified_by`, `verified_at`, `verification_note` on the staging record; event `release.verified`).
+  The production confirmation shows whether the lane was verified and by whom; the overlord puts only
+  verified lanes into production groups.
+- `GET /api/releases/audit?limit=` — who did what, newest first: `stage` / `auto-stage` / `promote`
+  (the person, or `overlord` for auto-stage), `verify`, `reject` (with reason), and the deployer's
+  `deployed` / `failed` outcomes with version. Shown on the Release page.
 - `POST /api/releases/:id/report` `{ status: 'deployed'|'failed'|'rejected', sha?, version?, note? }` —
   the deploy agent's outcome (MCP `report_release`, or the pane line `RELEASED <id>: deployed <sha> version <x.y.z> to <target>`
   / `RELEASE FAILED <id>: <why>`, detected by the watcher). A deployed report must name the requested SHA.
