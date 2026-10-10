@@ -248,7 +248,17 @@ export interface FixRow {
   assigned: { task_id: string; num: number | null; status: string; agent_id: string | null; agent_name: string | null } | null;
 }
 
-export interface ChatTurn { id: string; created_at: string; role: 'user' | 'assistant'; user_id: string | null; user_name: string | null; text: string }
+export interface ChatAction {
+  kind: 'send' | 'assign_fix' | 'stage' | 'promote' | 'reject' | 'verify';
+  agent?: string | null;
+  agent_id?: string | null;
+  text?: string | null;
+  run_id?: string | null;
+  sha?: string | null;
+  label: string;
+}
+
+export interface ChatTurn { id: string; created_at: string; role: 'user' | 'assistant'; user_id: string | null; user_name: string | null; text: string; actions: ChatAction[] }
 
 export interface LaneBoardRow {
   sha: string;

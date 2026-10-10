@@ -234,6 +234,34 @@ describe('overview board + overlord', () => {
     expect(sent.agents[0].budget.weekly_left).toBe(12);
   });
 
+  it('chat answers carry actions the person can press: a prompt for an agent, a fix assignment; unknown agents and bare text are tolerated', async () => {
+    const codex1 = agent('codex1');
+    const claude1 = agent('claude1');
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: '```json\n' + JSON.stringify({
+      answer: 'Give the discovery to @codex1; assign the Desk #43 fix to @claude1.',
+      actions: [
+        { kind: 'send', agent: '@codex1', text: 'Discovery only, no code. Research the Revolut Business payments API …' },
+        { kind: 'assign_fix', agent: 'claude1', run_id: 'run-43' },
+        { kind: 'send', agent: '@nobody', text: 'dropped: unknown agent' },
+        { kind: 'verify', sha: '2431f684b9e960b84e73a4e98b5068869664ffb4' },
+      ],
+    }) + '\n```' });
+    const res = await app.fetch(new Request('http://x/api/overview/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'who does the revolut discovery?' }) }));
+    expect(res.status).toBe(201);
+    const turn = await res.json() as { text: string; actions: Array<{ kind: string; label: string; agent_id?: string; text?: string; run_id?: string; sha?: string }> };
+    expect(turn.text).toMatch(/^Give the discovery to @codex1/);
+    expect(turn.actions.map((a) => a.kind)).toEqual(['send', 'assign_fix', 'verify']);
+    expect(turn.actions[0]).toMatchObject({ label: 'Send to @codex1', agent_id: codex1.id, text: expect.stringMatching(/^Discovery only/) });
+    expect(turn.actions[1]).toMatchObject({ label: 'Assign fix → @claude1', agent_id: claude1.id, run_id: 'run-43' });
+    expect(turn.actions[2]).toMatchObject({ label: 'Verified on staging 2431f684' });
+    const history = await (await app.fetch(new Request('http://x/api/overview/chat'))).json() as Array<{ role: string; actions: unknown[] }>;
+    expect(history[1].actions).toHaveLength(3);
+    // a plain-text answer is kept as is, without actions
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: 'Nothing to do right now.' });
+    const plain = await (await app.fetch(new Request('http://x/api/overview/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'and now?' }) }))).json() as { text: string; actions: unknown[] };
+    expect(plain).toMatchObject({ text: 'Nothing to do right now.', actions: [] });
+  });
+
   it('chat answers from the board, keeps history, and is not capped like wakes', async () => {
     agent('claude2');
     vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: 'Nothing to ship: no reviewed lanes. @claude2 is idle.' });

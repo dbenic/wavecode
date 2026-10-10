@@ -405,7 +405,11 @@ runtime with the most weekly budget; never below 10%).
 
 - `GET /api/overview` → `{ board, report, overlord: { enabled, model, heartbeat_min, max_wakes_per_hour } }`
 - `GET /api/overview/chat`, `POST /api/overview/chat` `{ message }` — talk to the overlord; it answers
-  from the board (plain text), history is kept and sent back to it. Not subject to the wake cap.
+  from the board, history is kept and sent back to it. Not subject to the wake cap. An answer carries
+  `actions` the person can press — `send` (the exact prompt for an agent, resolved to its id),
+  `assign_fix`, `stage` / `promote` / `reject` (a run), `verify` (a sha) — rendered as buttons under
+  the answer; nothing runs until pressed, and a send goes through `POST /api/agents/:id/send` like any
+  prompt from that person.
 - `POST /api/overview/fixes/assign` `{ run_id, agent_id, note? }` — queue a fix task
   (`[fix <sha8>] …` with the verdict and freeze note paths, reviewer preset to the lane's reviewer)
   for that agent; 409 while a fix task for the SHA is open. The thread's "Assign fix" button and

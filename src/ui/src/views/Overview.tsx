@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Board, ChatTurn, FixRow, OverlordReport, OverviewResponse, Recommendation } from '../types';
+import type { Board, ChatAction, ChatTurn, FixRow, OverlordReport, OverviewResponse, Recommendation } from '../types';
 
 function ago(min: number | null): string {
   if (min === null) return '';
@@ -93,7 +93,7 @@ export default function Overview() {
     setAsking(true);
     setError(null);
     setDraft('');
-    setChat((c) => [...c, { id: `tmp-${Date.now()}`, created_at: new Date().toISOString(), role: 'user', user_id: null, user_name: 'you', text: message }]);
+    setChat((c) => [...c, { id: `tmp-${Date.now()}`, created_at: new Date().toISOString(), role: 'user', user_id: null, user_name: 'you', text: message, actions: [] }]);
     try {
       await apiPost('/overview/chat', { message });
       fetchChat();
@@ -101,6 +101,33 @@ export default function Overview() {
       setError((e as Error).message || 'the overlord did not answer');
     } finally {
       setAsking(false);
+    }
+  };
+
+  const runChatAction = (a: ChatAction, key: string) => {
+    if (a.kind === 'send' && a.agent_id && a.text) {
+      const agentId = a.agent_id;
+      const text = a.text;
+      if (!window.confirm(`Send this prompt to @${a.agent ?? agentId}?\n\n${text.slice(0, 1500)}${text.length > 1500 ? '…' : ''}`)) return;
+      return act(key, () => apiPost(`/agents/${agentId}/send`, { text }));
+    }
+    if (a.kind === 'assign_fix' && a.agent_id && a.run_id) {
+      const body = { run_id: a.run_id, agent_id: a.agent_id };
+      return act(key, () => apiPost('/overview/fixes/assign', body));
+    }
+    if ((a.kind === 'stage' || a.kind === 'promote' || a.kind === 'reject') && a.run_id) {
+      const runId = a.run_id;
+      if (a.kind === 'promote' && !window.confirm(`Send the PRODUCTION GO for ${a.sha?.slice(0, 8) ?? 'this lane'}?`)) return;
+      if (a.kind === 'reject') {
+        const reason = window.prompt('Reject — reason:');
+        if (reason === null) return;
+        return act(key, () => apiPost(`/reviews/${runId}/reject`, { reason: reason.trim() }));
+      }
+      return act(key, () => apiPost(`/reviews/${runId}/${a.kind}`));
+    }
+    if (a.kind === 'verify' && a.sha) {
+      const sha = a.sha;
+      return act(key, () => apiPost('/releases/verify', { sha, note: 'via overlord chat' }));
     }
   };
 
@@ -186,6 +213,21 @@ export default function Overview() {
               <div key={t.id} className={`text-[12px] whitespace-pre-wrap rounded px-2.5 py-1.5 ${t.role === 'user' ? 'bg-slate-900/60 text-slate-300' : 'bg-violet-950/30 text-slate-100 border border-violet-500/20'}`}>
                 <span className="text-[9px] uppercase tracking-wider text-slate-500 mr-2">{t.role === 'user' ? (t.user_name ?? 'you') : 'overlord'}</span>
                 {t.text}
+                {t.actions && t.actions.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5" data-testid={`chat-actions-${t.id}`}>
+                    {t.actions.map((a, i) => (
+                      <button
+                        key={i}
+                        onClick={() => runChatAction(a, `chat-${t.id}-${i}`)}
+                        disabled={acting !== null}
+                        title={a.kind === 'send' && a.text ? a.text : a.label}
+                        className="px-2 py-0.5 rounded border border-violet-400/50 bg-violet-500/10 text-[10px] font-semibold tracking-wider text-violet-100 hover:bg-violet-500/25 disabled:opacity-40"
+                      >
+                        {acting === `chat-${t.id}-${i}` ? '...' : a.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
             {asking && <p className="text-[11px] text-violet-300 animate-pulse">thinking…</p>}

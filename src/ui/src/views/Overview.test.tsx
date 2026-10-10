@@ -45,7 +45,7 @@ describe('Overview', () => {
     vi.clearAllMocks();
     const api = await import('../hooks/useApi');
     vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p.startsWith('/overview/chat')
-      ? [{ id: 'c1', created_at: '', role: 'user', user_id: 'u', user_name: 'denis', text: 'what ships today?' }, { id: 'c2', created_at: '', role: 'assistant', user_id: null, user_name: 'overlord', text: 'Desk #91 alone; stage first.' }]
+      ? [{ id: 'c1', created_at: '', role: 'user', user_id: 'u', user_name: 'denis', text: 'what ships today?', actions: [] }, { id: 'c2', created_at: '', role: 'assistant', user_id: null, user_name: 'overlord', text: 'Desk #91 alone; stage first.', actions: [{ kind: 'send', agent: 'codex1', agent_id: 'a3', text: 'Discovery only, no code …', label: 'Send to @codex1' }, { kind: 'assign_fix', agent: 'codex2', agent_id: 'a2', run_id: 'r2', label: 'Assign fix → @codex2' }] }]
       : RESPONSE));
   });
 
@@ -57,6 +57,12 @@ describe('Overview', () => {
     expect(chat.textContent).toContain('Desk #91 alone; stage first.');
     const main = document.querySelector('main')!;
     expect(main.firstElementChild?.getAttribute('data-testid')).toBe('overlord-chat');
+    // the answer's actions are buttons: the prompt goes into the agent's pane after a confirmation, the fix gets queued
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(true);
+    fireEvent.click(within(chat).getByText('Send to @codex1'));
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/agents/a3/send', { text: 'Discovery only, no code …' }));
+    fireEvent.click(within(chat).getByText('Assign fix → @codex2'));
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/overview/fixes/assign', { run_id: 'r2', agent_id: 'a2' }));
     fireEvent.change(screen.getByLabelText('Ask the overlord'), { target: { value: 'who takes the Desk #43 fix?' } });
     fireEvent.click(screen.getByText('ASK'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/overview/chat', { message: 'who takes the Desk #43 fix?' }));

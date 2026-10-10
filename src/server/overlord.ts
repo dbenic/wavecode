@@ -13,7 +13,7 @@
 
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
-import { getDb, listEventsBefore, getLatestEventId, type Result, type WaveEvent } from './db.js';
+import { getDb, listEventsBefore, getLatestEventId, resolveAgent, type Result, type WaveEvent } from './db.js';
 import { emit, onEvent } from './event-bus.js';
 import { completeText, isLlmConfigured } from './llm-provider.js';
 import logger from './logger.js';
@@ -113,6 +113,7 @@ export function ensureOverlordTable(): void {
       text TEXT NOT NULL
     );
   `);
+  try { getDb().exec('ALTER TABLE overlord_chat ADD COLUMN actions_json TEXT'); } catch { /* exists */ }
 }
 
 function withTable<T>(fn: () => T): T {
@@ -266,13 +267,83 @@ export function parseReport(text: string): { agents: OverlordReport['agents']; r
 
 // --- chat -----------------------------------------------------------------------------------------
 
-export interface ChatTurn { id: string; created_at: string; role: 'user' | 'assistant'; user_id: string | null; user_name: string | null; text: string }
+/** An action the overlord proposes in chat; the person presses it, nothing runs on its own. */
+export interface ChatAction {
+  kind: 'send' | 'assign_fix' | 'stage' | 'promote' | 'reject' | 'verify';
+  /** send / assign_fix: the agent (resolved to an id when it exists) */
+  agent?: string | null;
+  agent_id?: string | null;
+  /** send: the exact prompt to type into the agent */
+  text?: string | null;
+  /** assign_fix / stage / promote / reject: the lane's run */
+  run_id?: string | null;
+  /** verify / lane reference */
+  sha?: string | null;
+  label: string;
+}
 
-const CHAT_SYSTEM = `You are the coordinator of a small software team of CLI coding agents run by WaveCode, talking with one of the people who run it. You answer from the board you are given (agents, lanes, fixes, releases, budget, recent events) — never invent state. Be practical and short: what to deploy together and in what order, who should take a fix (prefer the author if idle with budget, else the idle agent on the same runtime with the most weekly budget), what is blocked and who can unblock it, where budget is running low. Name agents as @name and lanes by desk and the first 8 characters of the SHA. If the answer needs an action, say exactly which button or command: Stage, Promote, Reject on the Release page, "assign fix", or a prompt to an agent. Plain text, no JSON, at most ~12 lines.`;
+export interface ChatTurn { id: string; created_at: string; role: 'user' | 'assistant'; user_id: string | null; user_name: string | null; text: string; actions: ChatAction[] }
+
+const CHAT_SYSTEM = `You are the coordinator of a small software team of CLI coding agents run by WaveCode, talking with one of the people who run it. You answer from the board you are given (agents, lanes, fixes, releases, budget, recent events) — never invent state. Be practical and short: what to deploy together and in what order, who should take a fix (prefer the author if idle with budget, else the idle agent on the same runtime with the most weekly budget), what is blocked and who can unblock it, where budget is running low. Name agents as @name and lanes by desk and the first 8 characters of the SHA.
+
+When your answer involves doing something, also return it as actions the person can press — you never execute anything yourself:
+- "send": a full prompt for an agent (the exact text to type into its pane; complete and self-contained, with paths and the expected deliverable).
+- "assign_fix": queue a fix for a lane (run_id from the board's fixes) to an agent.
+- "stage" / "promote" / "reject": a lane's run_id (promote only where no candidates exist; otherwise say which candidate to GO).
+- "verify": a sha verified on staging.
+
+Answer with one JSON object and nothing else:
+{"answer": "<plain text, at most ~12 lines>", "actions": [{"kind": "send", "agent": "@codex1", "text": "<the prompt>"}, {"kind": "assign_fix", "agent": "@claude1", "run_id": "<run id>"}, {"kind": "stage|promote|reject", "run_id": "<run id>"}, {"kind": "verify", "sha": "<sha>"}]}`;
+
+function parseChat(raw: string): { answer: string; actions: ChatAction[] } {
+  const stripped = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const start = stripped.indexOf('{');
+  const end = stripped.lastIndexOf('}');
+  if (start < 0 || end <= start) return { answer: raw.trim(), actions: [] };
+  let o: Record<string, unknown>;
+  try {
+    o = JSON.parse(stripped.slice(start, end + 1)) as Record<string, unknown>;
+  } catch {
+    return { answer: raw.trim(), actions: [] };
+  }
+  const answer = typeof o.answer === 'string' && o.answer.trim() ? o.answer.trim() : raw.trim();
+  const actions: ChatAction[] = Array.isArray(o.actions)
+    ? (o.actions as unknown[]).flatMap((a) => {
+        if (!a || typeof a !== 'object') return [];
+        const x = a as Record<string, unknown>;
+        const kind = x.kind as ChatAction['kind'];
+        if (kind !== 'send' && kind !== 'assign_fix' && kind !== 'stage' && kind !== 'promote' && kind !== 'reject' && kind !== 'verify') return [];
+        const agentRef = typeof x.agent === 'string' ? x.agent.replace(/^@/, '').trim() : null;
+        const resolved = agentRef ? resolveAgent(agentRef) : null;
+        const agentName = resolved?.ok ? (resolved.data.alias ?? resolved.data.name) : agentRef;
+        const agentId = resolved?.ok ? resolved.data.id : null;
+        const text = typeof x.text === 'string' && x.text.trim() ? x.text.trim().slice(0, 8000) : null;
+        const runId = typeof x.run_id === 'string' && x.run_id.trim() ? x.run_id.trim() : null;
+        const sha = typeof x.sha === 'string' && /^[0-9a-f]{7,40}$/i.test(x.sha.trim()) ? x.sha.trim().toLowerCase() : null;
+        if (kind === 'send' && (!agentId || !text)) return [];
+        if (kind === 'assign_fix' && (!agentId || !runId)) return [];
+        if ((kind === 'stage' || kind === 'promote' || kind === 'reject') && !runId) return [];
+        if (kind === 'verify' && !sha) return [];
+        const label = kind === 'send' ? `Send to @${agentName}` : kind === 'assign_fix' ? `Assign fix → @${agentName}` : kind === 'verify' ? `Verified on staging ${sha!.slice(0, 8)}` : `${kind[0].toUpperCase()}${kind.slice(1)} ${runId!.slice(-6)}`;
+        return [{ kind, agent: agentName, agent_id: agentId, text, run_id: runId, sha, label }];
+      }).slice(0, 8)
+    : [];
+  return { answer, actions };
+}
+
+type ChatRow = Omit<ChatTurn, 'actions'> & { actions_json?: string | null };
+
+function rowToTurn(r: ChatRow): ChatTurn {
+  let actions: ChatAction[] = [];
+  try { actions = r.actions_json ? JSON.parse(r.actions_json) as ChatAction[] : []; } catch { actions = []; }
+  const { actions_json: _drop, ...rest } = r;
+  void _drop;
+  return { ...rest, actions };
+}
 
 export function listChat(limit = 40): ChatTurn[] {
   // insertion order: two turns can share a second, and ulids are not monotonic within a millisecond
-  return withTable(() => (getDb().prepare('SELECT * FROM overlord_chat ORDER BY rowid DESC LIMIT ?').all(limit) as ChatTurn[]).reverse());
+  return withTable(() => (getDb().prepare('SELECT * FROM overlord_chat ORDER BY rowid DESC LIMIT ?').all(limit) as ChatRow[]).reverse().map(rowToTurn));
 }
 
 export async function chat(message: string, user: { id: string | null; name: string }): Promise<Result<ChatTurn>> {
@@ -291,11 +362,12 @@ export async function chat(message: string, user: { id: string | null; name: str
   });
   const res = await completeText({ model: cfg.model, systemPrompt: CHAT_SYSTEM, userMessage, maxTokens: 2048 });
   if (!res.ok) return { ok: false, error: res.error };
-  const answer = res.data.trim().slice(0, 6000);
+  const parsed = parseChat(res.data);
+  const answer = parsed.answer.slice(0, 6000);
   const id = ulid();
-  withTable(() => getDb().prepare('INSERT INTO overlord_chat (id, role, user_id, user_name, text) VALUES (?, ?, ?, ?, ?)').run(id, 'assistant', null, 'overlord', answer));
-  emit('overlord.chat', 'overlord', id, { from: user.name, question: text.slice(0, 300), answer: answer.slice(0, 2000) }, null);
-  const turn = withTable(() => getDb().prepare('SELECT * FROM overlord_chat WHERE id = ?').get(id) as ChatTurn);
+  withTable(() => getDb().prepare('INSERT INTO overlord_chat (id, role, user_id, user_name, text, actions_json) VALUES (?, ?, ?, ?, ?, ?)').run(id, 'assistant', null, 'overlord', answer, JSON.stringify(parsed.actions)));
+  emit('overlord.chat', 'overlord', id, { from: user.name, question: text.slice(0, 300), answer: answer.slice(0, 2000), actions: parsed.actions.length }, null);
+  const turn = withTable(() => rowToTurn(getDb().prepare('SELECT * FROM overlord_chat WHERE id = ?').get(id) as ChatRow));
   return { ok: true, data: turn };
 }
 
