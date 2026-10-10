@@ -105,6 +105,15 @@ number, the room and a provenance line. Use them; add to them; never put origina
   as Library documents (Library → DOCUMENTS, searchable by desk, SHA and title). You do not need
   to copy them anywhere; the inbox may be cleaned.
 
+## 3a3. Staging and production are requests, not chat
+
+You never deploy and never relay a GO. A person presses **Stage** (automatic, staging only) or
+**Promote** (the production GO) on your freeze card; WaveCode sends the request as a record to
+the deploy box and shows the outcome on the Release page and in the thread. If you are the deploy
+agent and receive `[Release GO <id> …]` or `[Staging request <id> …]`, follow your runbook for
+that target only and report with `report_release` or exactly one line
+`RELEASED <id>: deployed <sha> version <x.y.z> to <target>` / `RELEASE FAILED <id>: <why>`.
+
 ## 3b. Asking the deploy box (production data, read-only)
 
 You cannot reach production. A separate agent on the deploy box can read it

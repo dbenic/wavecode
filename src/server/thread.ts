@@ -398,6 +398,27 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
   }
 
   // --- AI review verdict
+  if (t === 'release.requested' || t === 'release.reported') {
+    const target = str(p.target) === 'production' ? 'production' : 'staging';
+    const sha = str(p.sha) ?? '';
+    const where = [str(p.project), str(p.desk) ? `Desk #${str(p.desk)}` : null, sha ? `@ ${sha.slice(0, 8)}` : null].filter(Boolean).join(' ');
+    if (t === 'release.requested') {
+      const to = str(p.peer) ? `→ ${str(p.peer)}` : str(p.deploy_agent_id) ? `→ @${ctx.agent(str(p.deploy_agent_id)!)?.name ?? 'deployer'}` : '';
+      const item = base(event, 'command', str(p.deploy_agent_id) ?? null, `${target === 'production' ? 'Release GO' : 'Stage'} ${to}: ${where}`);
+      item.body = [str(p.lane) ? `lane ${str(p.lane)}` : null, str(p.requested_by) ? `by ${str(p.requested_by)}` : null].filter(Boolean).join(' · ') || null;
+      if (str(p.run_id)) item.refs = { run_id: str(p.run_id)! };
+      return item;
+    }
+    const status = str(p.status) ?? 'reported';
+    const ok = status === 'deployed';
+    const item = base(event, ok ? 'report' : 'alert', str(p.deploy_agent_id) ?? null,
+      ok ? `${target === 'production' ? 'Production' : 'Staging'} deployed: ${where}${str(p.version) ? ` v${str(p.version)}` : ''}` : `${target} release ${status}: ${where}`);
+    item.body = str(p.note) ?? str(p.error) ?? null;
+    item.needs_attention = !ok;
+    if (str(p.run_id)) item.refs = { run_id: str(p.run_id)! };
+    return item;
+  }
+
   if (t === 'review.ai_completed') {
     const run = ctx.run(event.entity_id);
     const verdict = str(p.verdict) ?? 'needs-fixes';

@@ -362,6 +362,35 @@ Preview the auto-generated workspace briefing for an agent.
 Query:
 `agent_id`
 
+## Releases
+
+Releases are records, not chat (`src/server/releases.ts`). A person presses **Stage** (automated
+staging deploy, no GO) or **Promote** (the production GO) on a freeze card or in the Release
+view; the daemon posts a release request to the project's `release_peer` box, which hands it to
+its deploy agent (`releases.deploy_agent`) as one prompt with the right header and waits for
+the agent's report. The requester mirrors the outcome, so `/release` shows what is on staging
+and in production per lane.
+
+Record fields: `id, project, sha, lane, target ('staging'|'production'), desk, reviewer,
+requested_by, origin ('local'|'peer'), peer, peer_request_id, origin_id, run_id,
+deploy_agent_id, status ('requested'|'sent'|'deployed'|'failed'|'rejected'), version,
+deployed_sha, report, error, created_at, updated_at, reported_at`.
+
+- `GET /api/releases?project=&sha=&target=&status=&limit=` — newest first.
+- `GET /api/releases/:id`
+- `POST /api/reviews/:runId/stage` — stage a freeze card (any verdict; never a stale SHA). 202 with the record.
+- `POST /api/reviews/:runId/promote` on a freeze card creates the production request (the GO) after the usual rules.
+- `POST /api/releases` `{ sha, target, project?, lane?, desk?, reviewer?, requested_by?, origin_id?, origin_box? }` —
+  deploy side: accept a request (a peer's restricted token, or a local user; production locally is admin only).
+  Idempotent while a request for the same SHA + target is open. The deploy agent receives
+  `[Release GO <id> from <person> via WaveCode Promote …]` or `[Staging request <id> … Automated …]`.
+- `POST /api/releases/:id/report` `{ status: 'deployed'|'failed'|'rejected', sha?, version?, note? }` —
+  the deploy agent's outcome (MCP `report_release`, or the pane line `RELEASED <id>: deployed <sha> version <x.y.z> to <target>`
+  / `RELEASE FAILED <id>: <why>`, detected by the watcher). A deployed report must name the requested SHA.
+  Final: a second report is a no-op.
+- Events: `release.requested`, `release.reported` (entity `release`). Both are visible to a peer's
+  restricted token so the requester can mirror them; a deployed/failed outcome also notifies (ntfy / push).
+
 ## Reviews
 
 ### `GET /api/reviews`

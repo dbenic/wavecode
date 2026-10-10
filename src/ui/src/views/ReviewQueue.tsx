@@ -28,7 +28,7 @@ export default function ReviewQueue() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSSE = useCallback((event: SSEEvent) => {
-    if (isReviewEventType(event.type) || event.type === 'run.finished') {
+    if (isReviewEventType(event.type) || event.type === 'run.finished' || event.type.startsWith('release.')) {
       fetchData();
     }
     if (event.type.startsWith('room.proposal_')) setProposalsVersion((v) => v + 1);

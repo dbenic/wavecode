@@ -7,6 +7,7 @@ import { verifyTaskCompletion } from './task-verifier.js';
 import { onAnyAgentIdle, onAuthorAgentIdle } from './code-review.js';
 import * as peers from './peers.js';
 import * as wireLines from './wire-lines.js';
+import * as releases from './releases.js';
 import { projectRequiresReferee } from './project-gate.js';
 import * as runner from './runner.js';
 import { isFileRunnerSeat } from './file-runner.js';
@@ -311,6 +312,8 @@ function tickInner(agentId: string, state: WatcherState): void {
       peers.detectAskLines(agentId, output);
       // agent-operating-rules §3c: a `TO @agent: …` line → a message delivered to that agent
       wireLines.detectWireLines(agentId, output);
+      // releases.ts: the deploy agent's `RELEASED <id>: …` / `RELEASE FAILED <id>: …` line
+      releases.detectReleaseLines(agentId, output);
     } else {
       // Still working: accept an answer that has stopped changing (spec §5b)
       replyCapture.onAgentTick(agentId);

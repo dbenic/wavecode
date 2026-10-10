@@ -215,6 +215,31 @@ export interface ReviewItem {
   freeze: ReleaseFreezeCard | null;
 }
 
+/** A release request record (src/server/releases.ts). */
+export interface ReleaseRequest {
+  id: string;
+  project: string | null;
+  sha: string;
+  lane: string | null;
+  target: 'staging' | 'production';
+  desk: string | null;
+  reviewer: string | null;
+  requested_by: string | null;
+  origin: 'local' | 'peer';
+  peer: string | null;
+  peer_request_id: string | null;
+  run_id: string | null;
+  deploy_agent_id: string | null;
+  status: 'requested' | 'sent' | 'deployed' | 'failed' | 'rejected';
+  version: string | null;
+  deployed_sha: string | null;
+  report: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  reported_at: string | null;
+}
+
 export interface ReleaseFreezeCard {
   sha: string;
   project: string | null;

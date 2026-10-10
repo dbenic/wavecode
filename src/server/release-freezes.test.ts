@@ -303,7 +303,7 @@ describe('release-freezes.ts', () => {
   });
 
   describe('promote and reject', () => {
-    it('Promote emits review.promoted with the freeze and delivers the GO (SHA, reviewer, person) to the deployer', async () => {
+    it('Promote emits review.promoted with the freeze and sends the production GO to the deploy box as a release record', async () => {
       peersConfig.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
       projectsConfig.wavepulse.release_peer = 'deploy/fable';
       const fp = fakePeer();
@@ -316,19 +316,18 @@ describe('release-freezes.ts', () => {
       expect(r.ok).toBe(true);
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.promoted', 'run', item.run.id,
         expect.objectContaining({ verdict: 'pass', override_reason: null, freeze: expect.objectContaining({ sha: SHA_A, reviewer: 'codex3', author: 'claude2', desk: 91 }) }));
-      for (let i = 0; i < 5; i++) await new Promise((res) => setImmediate(res));
-      expect(fp.state.sends).toHaveLength(1);
-      const go = fp.state.sends[0].text;
-      expect(go).toMatch(/^\[Release GO from admin via WaveCode Promote on /);
-      expect(go).toContain(`exact SHA ${SHA_A}`);
-      expect(go).toContain('lane wc-claude2');
-      expect(go).toContain('independent review by @codex3: VERDICT: PASS');
-      expect(go).toContain('Desk #91');
-      expect(go).toContain(`Freeze note: ${file}`);
+      for (let i = 0; i < 40 && fp.state.releases.length === 0; i++) await new Promise((res) => setTimeout(res, 10));
+      expect(fp.state.releases).toHaveLength(1);
+      expect(fp.state.releases[0]).toMatchObject({ target: 'production', sha: SHA_A, lane: 'wc-claude2', project: 'wavepulse', desk: '91', reviewer: 'codex3' });
+      // the GO is a record, never a line typed into a pane
+      expect(fp.state.sends).toHaveLength(0);
+      const releases = await import('./releases.js');
+      for (let i = 0; i < 40 && releases.listReleases({ sha: SHA_A })[0]?.status !== 'sent'; i++) await new Promise((res) => setTimeout(res, 10));
+      expect(releases.listReleases({ sha: SHA_A })[0]).toMatchObject({ target: 'production', status: 'sent', run_id: item.run.id, peer: 'deploy' });
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.requested', 'release', expect.any(String), expect.objectContaining({ target: 'production', sha: SHA_A, peer: 'deploy' }));
       expect(rf.getFreeze(SHA_A)).toMatchObject({ status: 'promoted' });
       expect(rq.listPendingReviews()).toHaveLength(0);
-      // the pane of the author is never typed into — only the deployer gets the GO
-      expect(vi.mocked(emit).mock.calls.some((c) => c[0] === 'peer.release')).toBe(true);
+      releases.stopReleasePollers();
     });
 
     it('Promote never bypasses the rules through require_pass_to_promote=false', () => {

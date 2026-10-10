@@ -1,6 +1,6 @@
 /** A tiny fake peer WaveCode at the fetch boundary: agents, send, event log, messages. Test-only. */
 export function fakePeer() {
-  const state = { sends: [] as Array<{ agentId: string; text: string }>, events: [] as Array<Record<string, unknown>>, messages: [] as Array<Record<string, unknown>>, nextEvent: 100 };
+  const state = { sends: [] as Array<{ agentId: string; text: string }>, events: [] as Array<Record<string, unknown>>, messages: [] as Array<Record<string, unknown>>, nextEvent: 100, releases: [] as Array<Record<string, unknown>> };
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const auth = (init?.headers as Record<string, string>)?.Authorization;
@@ -20,6 +20,18 @@ export function fakePeer() {
       return Response.json({ events, last_id: events.length ? events[events.length - 1].id : since });
     }
     if (url.pathname === '/api/messages') return Response.json(state.messages);
+    // releases as records (releases.ts): the deploy box accepts a request and serves its state
+    if (url.pathname === '/api/releases' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const id = `R${String(state.releases.length + 1).padStart(25, '0')}`;
+      state.releases.push({ id, ...body, status: 'sent' });
+      return Response.json({ id, status: 'sent' }, { status: 201 });
+    }
+    const rel = /^\/api\/releases\/([^/]+)$/.exec(url.pathname);
+    if (rel) {
+      const r = state.releases.find((x) => x.id === rel[1]);
+      return r ? Response.json(r) : new Response(JSON.stringify({ error: 'not found' }), { status: 404 });
+    }
     return new Response(JSON.stringify({ error: `no route ${url.pathname}` }), { status: 404 });
   };
   const answer = (promptEventId: number, text: string) => {

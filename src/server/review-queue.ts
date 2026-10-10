@@ -25,6 +25,7 @@ import * as peers from './peers.js';
 import { currentActorId } from './request-context.js';
 import { OWNER_USER_ID } from './users.js';
 import * as freezes from './release-freezes.js';
+import * as releases from './releases.js';
 
 export interface ReviewItem {
   run: Run;
@@ -132,9 +133,18 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
   }
   if (freeze) freezes.markPromoted(runId, actorName);
 
-  // projects.<name>.release_peer: the person's Promote is the GO the deployer acts on
+  // projects.<name>.release_peer: the person's Promote is the GO the deployer acts on.
+  // A freeze goes as a release record (releases.ts); a plain run keeps the chat relay.
   try {
-    void peers.onRunPromoted(runResult.data, actorName, freeze ?? undefined).catch((e) => logger.warn({ runId, error: (e as Error).message }, 'release relay failed'));
+    if (freeze?.project) {
+      void releases.requestRelease({
+        project: freeze.project, sha: freeze.sha, lane: freeze.lane, target: 'production', desk: freeze.desk != null ? String(freeze.desk) : null,
+        reviewer: freeze.reviewer_name, actorName, runId,
+      }).then((r) => { if (!r.ok) logger.warn({ runId, error: r.error }, 'production release request failed'); })
+        .catch((e) => logger.warn({ runId, error: (e as Error).message }, 'production release request failed'));
+    } else {
+      void peers.onRunPromoted(runResult.data, actorName, freeze ?? undefined).catch((e) => logger.warn({ runId, error: (e as Error).message }, 'release relay failed'));
+    }
   } catch (e) {
     logger.warn({ runId, error: (e as Error).message }, 'release relay failed');
   }
@@ -231,6 +241,24 @@ export function handOff(runId: string, targetAgentId: string): Result<Run> {
 /**
  * Reject: mark the work as rejected. Block dependents.
  */
+/**
+ * Stage a reviewed freeze: an automated staging deploy through the release
+ * pipeline, no human GO. Any verdict may be staged; a stale SHA may not.
+ */
+export async function stage(runId: string): Promise<Result<releases.ReleaseRequest>> {
+  const freeze = freezes.getFreezeByRun(runId);
+  if (!freeze) return { ok: false, error: 'Only a release freeze can be staged (the card must carry an exact SHA)' };
+  if (freeze.status === 'stale') return { ok: false, error: `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on; freeze the new SHA` };
+  if (!freeze.project) return { ok: false, error: 'The freeze names no project, so no release peer can be chosen' };
+  const actor = currentActorId();
+  const actorUser = actor && actor !== OWNER_USER_ID ? getUser(actor) : null;
+  const actorName = actor ? (actor === OWNER_USER_ID ? 'owner' : actorUser?.ok ? actorUser.data.name : actor) : null;
+  return releases.requestRelease({
+    project: freeze.project, sha: freeze.sha, lane: freeze.lane, target: 'staging', desk: freeze.desk != null ? String(freeze.desk) : null,
+    reviewer: freeze.verdict === 'pass' ? freeze.reviewer_name : null, actorName, runId,
+  });
+}
+
 export function reject(runId: string, opts: { reason?: string | null } = {}): Result<Run> {
   const runResult = getRun(runId);
   if (!runResult.ok) return runResult;

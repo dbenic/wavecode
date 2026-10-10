@@ -196,6 +196,16 @@ export default function ReviewItem({
               {acting === 'promote' ? '...' : 'PROMOTE'}
             </button>
           )}
+          {freeze && !freezeStale && (
+            <button
+              onClick={() => act('stage')}
+              disabled={acting !== null}
+              title="Automated deploy to staging through the release pipeline, no GO"
+              className="px-2.5 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 hover:border-sky-500/50 transition-all active:scale-95 disabled:opacity-40"
+            >
+              {acting === 'stage' ? '...' : 'STAGE'}
+            </button>
+          )}
           {freeze && !canPromote && (
             <span className="text-[10px] text-slate-500" title="Promote needs an independent PASS on the exact SHA; a stale SHA must be frozen and reviewed again">
               {freezeStale ? 'stale — not promotable' : 'no PASS — not promotable'}

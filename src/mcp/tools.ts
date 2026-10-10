@@ -471,6 +471,34 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
 
   // --- Peers: agents on other WaveCode instances (docs/peers.md) ---
   {
+    name: 'list_releases',
+    description: 'Release requests (staging / production) on this WaveCode: status, SHA, version, who asked. Filter by sha, target or status.',
+    schema: {
+      sha: z.string().optional(),
+      target: z.enum(['staging', 'production']).optional(),
+      status: z.enum(['requested', 'sent', 'deployed', 'failed', 'rejected']).optional(),
+    },
+    handler: (client, args) => {
+      const q = new URLSearchParams();
+      for (const k of ['sha', 'target', 'status'] as const) if (typeof args[k] === 'string') q.set(k, String(args[k]));
+      return client.get(`/releases${q.toString() ? `?${q}` : ''}`);
+    },
+  },
+  {
+    name: 'report_release',
+    description: 'Deploy agent only: report the outcome of a release request you were handed ([Release GO <id> …] / [Staging request <id> …]). status deployed needs the exact SHA you deployed and the version; failed/rejected needs the reason in note.',
+    schema: {
+      id: z.string().describe('The release request id from the prompt header'),
+      status: z.enum(['deployed', 'failed', 'rejected']),
+      sha: z.string().optional().describe('The exact SHA that is now deployed'),
+      version: z.string().optional().describe('The version assigned, e.g. 0.442.10'),
+      note: z.string().optional().describe('Short report, or the reason it failed'),
+    },
+    handler: (client, args) => client.post(`/releases/${encodeURIComponent(String(args.id))}/report`, {
+      status: args.status, sha: args.sha, version: args.version, note: args.note,
+    }),
+  },
+  {
     name: 'ask_peer',
     description:
       'Ask an agent on another WaveCode instance (e.g. the deploy box: peer "deploy", agent "fable") a question. Returns at once with a question id; the answer arrives minutes later as peer.answer (await_events types=peer.*), is saved as a file under ~/inbox/answers/, and is typed into your pane when you are idle. Ask one clear question per call.',

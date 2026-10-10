@@ -39,6 +39,8 @@ export const SSE_EVENT_TYPES = [
   'review.ai_completed',
   'review.fixes_sent',
   'review.superseded',
+  'release.requested',
+  'release.reported',
   'queue.empty',
   'research.started',
   'research.chunk',

@@ -8,6 +8,7 @@ vi.mock('./usage-probe.js', () => ({ ensureUsageTable: vi.fn(), startUsageProbe:
 vi.mock('./inbox-watch.js', () => ({ startInboxWatchers: vi.fn(), stopInboxWatchers: vi.fn() }));
 vi.mock('./release-freezes.js', () => ({ ensureReleaseFreezeTable: vi.fn(), startFreezeWatchers: vi.fn(), stopFreezeWatchers: vi.fn() }));
 vi.mock('./fixtures.js', () => ({ startFixtureWatchers: vi.fn(), stopFixtureWatchers: vi.fn() }));
+vi.mock('./releases.js', () => ({ ensureReleaseTables: vi.fn(), startReleasePollers: vi.fn(), stopReleasePollers: vi.fn() }));
 vi.mock('./peers.js', () => ({ ensurePeerTables: vi.fn(), startPeerPollers: vi.fn(), stopPeerPollers: vi.fn() }));
 vi.mock('./code-review.js', () => ({
   ensureReviewTable: vi.fn(),

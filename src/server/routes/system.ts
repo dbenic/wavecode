@@ -188,6 +188,7 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
     // A restricted token (docs/peers.md) sees only events about its named agents
     const visible = (e: { type: string; entity_type: string; entity_id: string; payload_json: string | null }): boolean => {
       if (!restricted) return true;
+      if (e.type.startsWith('release.')) return true; // outcomes of release requests carry no agent secrets
       if (e.entity_type === 'agent') return allowedAgent(e.entity_id);
       const p = e.payload_json ? (JSON.parse(e.payload_json) as Record<string, unknown>) : {};
       return allowedAgent(p.from_agent_id) || allowedAgent(p.to_agent_id) || allowedAgent(p.agent_id);

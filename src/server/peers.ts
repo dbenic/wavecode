@@ -132,6 +132,13 @@ export async function peerGetJson<T>(peerName: string, apiPath: string): Promise
   return peerApi<T>(p.data, 'GET', apiPath);
 }
 
+/** POST JSON to a named peer (release requests). */
+export async function peerPostJson<T>(peerName: string, apiPath: string, body: unknown): Promise<Result<T>> {
+  const p = peerByName(peerName);
+  if (!p.ok) return p;
+  return peerApi<T>(p.data, 'POST', apiPath, body);
+}
+
 /** GET a file from a named peer: bytes plus the content type and the server's file name. */
 export async function peerDownload(peerName: string, apiPath: string, maxBytes = 50 * 1024 * 1024): Promise<Result<{ buffer: Buffer; contentType: string | null; filename: string | null }>> {
   const p = peerByName(peerName);

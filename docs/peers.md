@@ -82,3 +82,31 @@ the file path as a link. A question nobody answers in 30 minutes becomes
   database); polling resumes at boot.
 - The peer token is scoped on the **answering** side (`--only-agents`), so
   even a compromised asking box can do nothing there but ask that agent.
+
+## Releases through the peer link
+
+Promote used to type a GO into the deploy agent's pane as a question. Releases are now records
+(`docs/api.md` → Releases): the dev box posts `POST /api/releases` to the deploy box with the
+exact SHA, target, lane, desk, reviewer and the person's name; the deploy box hands it to
+`releases.deploy_agent` and reports back; the dev box mirrors `release.reported`.
+
+Deploy-box setup (the old box):
+
+```yaml
+releases:
+  deploy_agent: fable      # alias, name or id of the agent that runs the runbook
+```
+
+The peer user's restricted token may `POST /api/releases` and read `GET /api/releases/:id`
+and `release.*` events; nothing else changes. The deploy agent reports with the MCP tool
+`report_release` (id, status, sha, version, note) or, without MCP, by printing one line:
+
+```
+RELEASED <id>: deployed <sha> version <x.y.z> to staging
+RELEASE FAILED <id>: <why>
+```
+
+Only the agent the request was handed to may report it. A production request always carries
+`[Release GO <id> from <person> via WaveCode Promote …]`; a staging request carries
+`[Staging request <id> … Automated: deploy to STAGING only …]` — the agent must never treat
+a staging request as a production authorization.

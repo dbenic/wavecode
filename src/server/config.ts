@@ -201,6 +201,12 @@ export interface WaveConfig {
      */
     freeze_inbox?: string[];
   };
+  /**
+   * Releases (src/server/releases.ts). On the deploy box: the agent that receives staging
+   * and production requests (alias, name or id). A box without it forwards requests to
+   * `projects.<p>.release_peer`.
+   */
+  releases?: { deploy_agent?: string | null };
   /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
   usage?: { probe_interval_min?: number };
   /** Diagram rendering: a self-hosted Kroki (https://kroki.io) for D2 / PlantUML / Graphviz blocks and files. Mermaid renders in the browser. */
@@ -253,6 +259,9 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   if (cfg.diagrams?.kroki_url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.diagrams.kroki_url)) {
     throw new Error('diagrams.kroki_url must be an http(s) origin like http://127.0.0.1:8000');
+  }
+  if (cfg.releases?.deploy_agent != null && (typeof cfg.releases.deploy_agent !== 'string' || !/^@?[\w.-]{1,64}$/.test(cfg.releases.deploy_agent))) {
+    throw new Error('releases.deploy_agent must be an agent alias, name or id');
   }
   if (cfg.artifacts.fixture_inbox !== undefined) {
     if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
