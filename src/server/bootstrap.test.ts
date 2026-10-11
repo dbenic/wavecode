@@ -10,6 +10,7 @@ vi.mock('./release-freezes.js', () => ({ ensureReleaseFreezeTable: vi.fn(), star
 vi.mock('./fixtures.js', () => ({ startFixtureWatchers: vi.fn(), stopFixtureWatchers: vi.fn() }));
 vi.mock('./releases.js', () => ({ ensureReleaseTables: vi.fn(), startReleasePollers: vi.fn(), stopReleasePollers: vi.fn() }));
 vi.mock('./overlord.js', () => ({ ensureOverlordTable: vi.fn(), startOverlord: vi.fn(), stopOverlord: vi.fn() }));
+vi.mock('./product-desk.js', () => ({ startDeskRefresh: vi.fn(), stopDeskRefresh: vi.fn() }));
 vi.mock('./peers.js', () => ({ ensurePeerTables: vi.fn(), startPeerPollers: vi.fn(), stopPeerPollers: vi.fn() }));
 vi.mock('./code-review.js', () => ({
   ensureReviewTable: vi.fn(),

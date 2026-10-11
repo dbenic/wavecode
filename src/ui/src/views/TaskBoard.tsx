@@ -5,6 +5,7 @@ import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import type { Agent, Goal, Task, TaskStatus } from '../types';
 import { isTaskEventType } from '../sse-events';
 import TaskCard from '../components/TaskCard';
+import DeskPanel from '../components/DeskPanel';
 
 interface Column {
   key: TaskStatus;
@@ -571,6 +572,7 @@ export default function TaskBoard() {
 
       {/* ─── Kanban columns ──────────────────────────────────────────── */}
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 py-4">
+        <DeskPanel agents={agents} />
         {loadError && (
           <div className="mb-4 rounded border border-red-500/30 bg-red-950/20 px-3 py-2 text-[11px] text-red-300">
             {loadError}

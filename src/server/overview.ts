@@ -10,6 +10,8 @@ import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
 import { candidateFor, listCandidates, listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
 import { listReleases, verificationFor, type ReleaseRequest } from './releases.js';
+import { deskConfig, OPEN_STATUSES, type DeskItem } from './product-desk.js';
+import * as productDesk from './product-desk.js';
 
 export interface AgentBoardRow {
   id: string;
@@ -96,12 +98,28 @@ export interface CandidateRow {
   next: string;
 }
 
+/** Open Product Desk requests as the board sees them (from the cached read; null when the desk is off). */
+export interface DeskBoardRow {
+  id: number;
+  status: string;
+  title: string;
+  area: string | null;
+  priority: string | null;
+  target_version: string | null;
+  updated_at: string | null;
+  /** lanes frozen for this desk and tasks carrying it, per the board */
+  lanes: Array<{ sha: string; verdict: string | null; status: string }>;
+  tasks: Array<{ num: number | null; status: string; agent: string | null }>;
+}
+
 export interface Board {
   at: string;
   host: string;
   agents: AgentBoardRow[];
   lanes: LaneBoardRow[];
   candidates: CandidateRow[];
+  /** null = Product Desk not configured */
+  desk: DeskBoardRow[] | null;
   fixes: FixRow[];
   attention: AttentionRow[];
   counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number; open_fixes: number; unassigned_fixes: number };
@@ -302,6 +320,20 @@ export function buildBoard(now = Date.now()): Board {
     }
   }
 
+  // Product Desk: only what is already cached (the board must not wait on the network); the panel refreshes it
+  let desk: DeskBoardRow[] | null = null;
+  if (deskConfig().enabled) {
+    const cached = productDesk.cachedBoard();
+    desk = (cached ?? []).filter((d: DeskItem) => OPEN_STATUSES.has(d.status)).map((d) => {
+      const links = productDesk.linksFor(d.id);
+      return {
+        id: d.id, status: d.status, title: d.title, area: d.area, priority: d.priority, target_version: d.target_version, updated_at: d.updated_at,
+        lanes: links.lanes.map((l) => ({ sha: l.sha, verdict: l.verdict, status: l.status })),
+        tasks: links.tasks.map((t) => ({ num: t.num, status: t.status, agent: t.agent_name })),
+      };
+    });
+  }
+
   const releasesOpen = listReleases({ limit: 100 }).filter((r) => r.status === 'sent' || r.status === 'requested').length;
   return {
     at: atIso,
@@ -309,6 +341,7 @@ export function buildBoard(now = Date.now()): Board {
     agents,
     lanes,
     candidates,
+    desk,
     fixes,
     attention,
     counts: {

@@ -289,6 +289,58 @@ export interface AttentionRow {
   sha?: string;
 }
 
+export interface DeskLink {
+  lanes: Array<{ sha: string; verdict: string | null; status: string; lane: string | null; author: string | null }>;
+  tasks: Array<{ id: string; num: number | null; status: string; agent_id: string | null; agent_name: string | null }>;
+}
+
+export interface DeskItem {
+  id: number;
+  status: string;
+  title: string;
+  area: string | null;
+  priority: string | null;
+  target_version: string | null;
+  source: string | null;
+  requester_name: string | null;
+  received_at: string | null;
+  updated_at: string | null;
+  file_count: number;
+  message_count: number;
+  last_agent: string | null;
+  last_summary: string | null;
+  merged_into_id: number | null;
+}
+
+export interface DeskItemLinked extends DeskItem { links: DeskLink }
+
+export interface DeskListResponse {
+  enabled: boolean;
+  items: DeskItemLinked[];
+  state: { enabled: boolean; cached_at: string | null; error: string | null };
+  error?: string;
+}
+
+export interface DeskDetail {
+  request: DeskItem & { candidate_sha: string | null; note: string | null; requester_email: string | null; created_at: string | null };
+  messages: Array<{ id: number | string; direction: string | null; from_name: string | null; from_email: string | null; received_at: string | null; subject: string | null; body_text: string | null }>;
+  events: Array<{ id: number | string; created_at: string | null; kind: string | null; from_status: string | null; to_status: string | null; body: string | null; version: string | null; release_sha: string | null; user_name: string | null }>;
+  files: Array<{ id: number | string; name: string; size: number | null; mime: string | null }>;
+  links: DeskLink;
+}
+
+export interface DeskBoardRow {
+  id: number;
+  status: string;
+  title: string;
+  area: string | null;
+  priority: string | null;
+  target_version: string | null;
+  updated_at: string | null;
+  lanes: Array<{ sha: string; verdict: string | null; status: string }>;
+  tasks: Array<{ num: number | null; status: string; agent: string | null }>;
+}
+
 export interface CandidateRow {
   project: string;
   name: string;
@@ -307,6 +359,7 @@ export interface Board {
   agents: AgentBoardRow[];
   lanes: LaneBoardRow[];
   candidates: CandidateRow[];
+  desk: DeskBoardRow[] | null;
   fixes: FixRow[];
   attention: AttentionRow[];
   counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number; open_fixes: number; unassigned_fixes: number };

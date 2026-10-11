@@ -362,6 +362,37 @@ Preview the auto-generated workspace briefing for an agent.
 Query:
 `agent_id`
 
+## Product Desk
+
+The Countix request board (docs/PRODUCT_DESK_AGENT_PROTOCOL.md in wavepulse) read into WaveCode
+with the per-server dev-lane token — a curl config owned by the service user, read per call,
+never logged. Off unless configured:
+
+```yaml
+product_desk:
+  enabled: true
+  url: https://countix.ai/api/product-desk
+  token_file: ~/.config/countix-desk/curl.conf   # header = "Authorization: Bearer …"
+  poll_min: 5
+  project: wavepulse                             # room for tasks created from requests
+```
+
+- `GET /api/desk?all=1&refresh=1` → `{ enabled, items, state }`. Open statuses by default
+  (`new`, `accepted`, `implementing`, `waiting_on_requester`, `in_review`); each item carries
+  `links`: the lanes frozen for that desk number and the WaveCode tasks that carry `[desk <id>]`,
+  `PD-<id>` or `Desk #<id>`. Cached `poll_min` minutes and refreshed in the background; a desk
+  error keeps the last good read and reports it in `state.error`.
+- `GET /api/desk/:id` — the card: request (with `candidate_sha`, staff `note`), messages, events,
+  file metadata, links.
+- `GET /api/desk/files/:fileId` — one retained original streamed to a person, stored nowhere,
+  recorded as `desk.file_viewed` with the viewer. Restricted (peer) tokens get 403 on every desk route.
+- `POST /api/desk/:id/task` `{ agent_id, note?, reviewer? }` — hand the request to an agent: a
+  WaveCode task whose prompt starts with `[desk <id>] <title>` and carries the request text, the
+  staff note and the attachment list (the agent fetches originals itself per the protocol; nothing
+  is copied into WaveCode). 409 while a task for that desk is open.
+- The Tasks page shows the desk above the kanban (open requests, what WaveCode has for each, hand-to-agent);
+  the board carries the open requests for the overlord, which proposes unstarted ones when asked what to pick up.
+
 ## Overview and the overlord
 
 The board (`src/server/overview.ts`) is computed from the database alone — nobody asks an

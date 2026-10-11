@@ -228,6 +228,20 @@ export interface WaveConfig {
     /** Stage every reviewed PASS lane automatically (in the overlord's name). Production never. */
     auto_stage?: boolean;
   };
+  /**
+   * Product Desk (the Countix request board) read into WaveCode with the per-server dev-lane
+   * token (docs/PRODUCT_DESK_AGENT_PROTOCOL.md). Off unless enabled. The token file is a curl
+   * config (`header = "Authorization: Bearer …"`) owned by the service user; it is read per call
+   * and never logged.
+   */
+  product_desk?: {
+    enabled?: boolean;
+    url?: string;
+    token_file?: string;
+    poll_min?: number;
+    /** project room for tasks created from desk requests */
+    project?: string | null;
+  };
   /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
   usage?: { probe_interval_min?: number };
   /** Diagram rendering: a self-hosted Kroki (https://kroki.io) for D2 / PlantUML / Graphviz blocks and files. Mermaid renders in the browser. */
@@ -283,6 +297,7 @@ export function validateConfig(cfg: WaveConfig): void {
   if (cfg.diagrams?.kroki_url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.diagrams.kroki_url)) {
     throw new Error('diagrams.kroki_url must be an http(s) origin like http://127.0.0.1:8000');
   }
+  if (cfg.product_desk?.url && !/^https?:\/\/[^\s]+$/.test(cfg.product_desk.url)) throw new Error('product_desk.url must be an http(s) URL');
   if (cfg.overlord) {
     const o = cfg.overlord;
     if (o.model !== undefined && (typeof o.model !== 'string' || !/^[\w.-]{3,64}$/.test(o.model))) throw new Error('overlord.model must be a model id like claude-sonnet-5-5');

@@ -24,7 +24,7 @@ function lane(sha: string, over: Partial<LaneBoardRow> = {}): LaneBoardRow {
 }
 
 const BOARD: Board = {
-  at: '', host: 'countix-dev', agents: [], fixes: [], attention: [],
+  at: '', host: 'countix-dev', agents: [], desk: null, fixes: [], attention: [],
   lanes: [
     lane(SHA_A, { desk: 78, lane: 'claude1/desk78-collector', author: 'claude1', reviewer: 'codex2', staging: { status: 'deployed', version: '0.443.3-rc', at: '2026-10-10T15:00:00Z', by: 'denis', verified_by: null, verified_at: null } }),
     lane(SHA_B, { desk: 88, candidate: 'fable/rc-0443-2', next: 'in candidate fable/rc-0443-2 — ships with that release' }),
