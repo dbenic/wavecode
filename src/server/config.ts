@@ -242,6 +242,8 @@ export interface WaveConfig {
     /** project room for tasks created from desk requests */
     project?: string | null;
   };
+  /** Self-service spawning: at most this many agents per non-admin user's profile (unset = no limit). */
+  spawn?: { max_per_user?: number | null };
   /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
   usage?: { probe_interval_min?: number };
   /** Diagram rendering: a self-hosted Kroki (https://kroki.io) for D2 / PlantUML / Graphviz blocks and files. Mermaid renders in the browser. */

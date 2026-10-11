@@ -105,14 +105,18 @@ describe('Dashboard', () => {
     const user = userEvent.setup();
     const api = await import('../hooks/useApi');
 
-    vi.mocked(api.apiGet).mockResolvedValue([] as never);
+    vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/settings') return { runtimes: ['claude-code', 'codex'], projects: [{ name: 'wavepulse', repo: '/home/wave/repos/wavepulse' }], spawn: { max_per_user: 4 } } as never;
+      if (path === '/profiles') return [{ name: 'ana', shared: false, public: false, mine: true, can_login: true, runtimes: { 'claude-code': { logged_in: false, subscription: null, login_seat: null, agents: 0 }, codex: { logged_in: true, subscription: { account: 'ana@countix.ai', plan: 'ChatGPT Pro' }, login_seat: null, agents: 1 } } }] as never;
+      if (path === '/me') return { name: 'ana', role: 'developer', profile: 'ana' } as never;
+      return [] as never;
+    });
     vi.mocked(api.apiPost).mockImplementation(async (path: string, body?: unknown) => {
       if (path === '/agents/spawn') {
         expect(body).toEqual({
           name: 'co-builder',
           runtime: 'codex',
           repo: '/tmp/project-x',
-          branch: 'feat-ui',
         });
         return makeAgent({
           id: 'agent-9',
@@ -132,20 +136,28 @@ describe('Dashboard', () => {
     await screen.findByText('No agents managed');
 
     await user.click(screen.getByRole('button', { name: 'Spawn Agent' }));
-    await user.clear(screen.getByLabelText('Agent Name'));
-    await user.type(screen.getByLabelText('Agent Name'), 'co-builder');
-    await user.clear(screen.getByLabelText('Repo Path'));
-    await user.type(screen.getByLabelText('Repo Path'), '/tmp/project-x');
-    await user.clear(screen.getByLabelText('Branch'));
-    await user.type(screen.getByLabelText('Branch'), 'feat-ui');
-    await user.click(within(screen.getByRole('dialog', { name: 'Spawn Agent' })).getByRole('button', { name: /^Spawn Agent$/ }));
+    const modal = await screen.findByTestId('spawn-modal');
+    // the project select prefilled the repo from the configured base clone
+    await waitFor(() => expect((within(modal).getByLabelText('Repo') as HTMLInputElement).value).toBe('/home/wave/repos/wavepulse'));
+    // Claude Code is not logged in on this profile: the form says so and refuses to spawn
+    await user.selectOptions(within(modal).getByLabelText('Runtime'), 'claude-code');
+    expect(within(modal).getByTestId('spawn-subscription').textContent).toContain('not logged in');
+    expect((within(modal).getByRole('button', { name: /^Spawn Agent$/ }) as HTMLButtonElement).disabled).toBe(true);
+    // Codex is logged in: the account and plan show, the quota too
+    await user.selectOptions(within(modal).getByLabelText('Runtime'), 'codex');
+    expect(within(modal).getByTestId('spawn-subscription').textContent).toContain('ana@countix.ai · ChatGPT Pro');
+    expect(within(modal).getByTestId('spawn-subscription').textContent).toContain('1 of 4 agents');
+    await user.clear(within(modal).getByLabelText('Name'));
+    await user.type(within(modal).getByLabelText('Name'), 'co-builder');
+    await user.clear(within(modal).getByLabelText('Repo'));
+    await user.type(within(modal).getByLabelText('Repo'), '/tmp/project-x');
+    await user.click(within(modal).getByRole('button', { name: /^Spawn Agent$/ }));
 
     await waitFor(() => {
       expect(api.apiPost).toHaveBeenCalledWith('/agents/spawn', {
         name: 'co-builder',
         runtime: 'codex',
         repo: '/tmp/project-x',
-        branch: 'feat-ui',
       });
     });
   });

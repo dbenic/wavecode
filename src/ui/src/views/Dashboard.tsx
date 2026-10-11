@@ -2,10 +2,19 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, TmuxSession } from '../types';
+import type { Agent, ProfileInfo, TmuxSession } from '../types';
 import { shouldReloadAgentList } from '../sse-events';
 import AgentCard from '../components/AgentCard';
 
+interface SpawnSettings { runtimes: string[]; projects: Array<{ name: string; repo: string | null }>; spawn: { max_per_user: number | null } }
+
+const RUNTIME_LABEL: Record<string, string> = { 'claude-code': 'Claude Code', codex: 'Codex', grok: 'Grok', aider: 'Aider' };
+
+/**
+ * Add an agent on your own subscription: pick the CLI, the project (its base clone gives the
+ * agent a worktree and a branch), a name; see whether your profile is logged in for that CLI
+ * and which account it runs on before you press Spawn.
+ */
 function SpawnAgentModal({
   onClose,
   onSpawned,
@@ -13,31 +22,59 @@ function SpawnAgentModal({
   onClose: () => void;
   onSpawned: (agent: Agent) => void;
 }) {
-  const [name, setName] = useState('co-builder');
-  const [runtime, setRuntime] = useState<Agent['runtime']>('codex');
+  const navigate = useNavigate();
+  const [settings, setSettings] = useState<SpawnSettings | null>(null);
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
+  const [me, setMe] = useState<{ name: string; role: string; profile: string | null } | null>(null);
+  const [runtime, setRuntime] = useState('claude-code');
+  const [project, setProject] = useState('');
   const [repo, setRepo] = useState('');
-  const [branch, setBranch] = useState('');
+  const [name, setName] = useState('');
+  const [profile, setProfile] = useState<string>('');
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const submit = async () => {
-    if (!name.trim()) return;
+  useEffect(() => {
+    Promise.all([apiGet<SpawnSettings>('/settings'), apiGet<ProfileInfo[]>('/profiles'), apiGet<{ name: string; role: string; profile: string | null }>('/me')])
+      .then(([st, ps, u]) => {
+        setSettings(st);
+        setProfiles(ps);
+        setMe(u);
+        if (st.runtimes.length && !st.runtimes.includes(runtime)) setRuntime(st.runtimes[0]);
+        const first = st.projects.find((x) => x.repo);
+        if (first) { setProject(first.name); setRepo(first.repo ?? ''); }
+        const mine = ps.find((x) => x.mine);
+        setProfile(mine?.name ?? '');
+        if (!name && u.name) setName(`${u.name}-${(st.runtimes.includes('codex') ? 'codex' : 'claude')}`.replace(/[^a-zA-Z0-9._-]/g, '-'));
+      })
+      .catch(() => { /* the form still works with typed values */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
+  const isAdmin = me?.role === 'admin';
+  const chosen = profiles.find((x) => x.name === profile) ?? null;
+  const rtState = chosen?.runtimes[runtime] ?? null;
+  const loggedIn = !chosen || !rtState ? null : rtState.logged_in;
+  const subscription = rtState?.subscription ?? null;
+  const quota = settings?.spawn.max_per_user ?? null;
+  const used = rtState ? Object.values(chosen!.runtimes).reduce((n, r) => n + r.agents, 0) : 0;
+
+  const handleSubmit = async () => {
+    if (!name.trim() || !runtime) return;
     setSubmitting(true);
     setError(null);
     try {
       const agent = await apiPost<Agent>('/agents/spawn', {
         name: name.trim(),
         runtime,
-        repo: repo.trim() || undefined,
-        branch: branch.trim() || undefined,
-        model: model.trim() || undefined,
-        effort: effort || undefined,
+        ...(repo.trim() ? { repo: repo.trim() } : {}),
+        ...(model.trim() ? { model: model.trim() } : {}),
+        ...(effort ? { effort } : {}),
+        ...(isAdmin && profile && !chosen?.mine ? { profile } : {}),
       });
       onSpawned(agent);
-      onClose();
     } catch (e) {
       setError((e as Error).message || 'Spawn failed');
     } finally {
@@ -45,108 +82,95 @@ function SpawnAgentModal({
     }
   };
 
+  const field = 'w-full px-3 py-2 rounded border border-slate-700/60 bg-slate-950/50 text-sm text-slate-200 font-mono focus:outline-none focus:border-emerald-500/40';
+
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-label="Spawn Agent"
-        className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-lg p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="text-sm font-bold text-slate-100 mb-4 tracking-wide">Spawn Agent</h3>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={onClose}>
+      <div className="w-full max-w-lg rounded-lg border border-slate-700/60 bg-slate-900 p-5 space-y-4" onClick={(e) => e.stopPropagation()} data-testid="spawn-modal">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-bold tracking-[0.15em] text-slate-100 uppercase">Add agent</h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-sm">&times;</button>
+        </div>
 
-        <label className="block mb-3">
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider">Agent Name</span>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            aria-label="Agent Name"
-            className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 font-mono focus:border-emerald-500 focus:outline-none"
-            autoFocus
-          />
-        </label>
-
-        <label className="block mb-3">
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider">Runtime</span>
-          <select
-            value={runtime}
-            onChange={(e) => setRuntime(e.target.value as Agent['runtime'])}
-            aria-label="Runtime"
-            className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
-          >
-            <option value="claude-code">claude-code</option>
-            <option value="codex">codex</option>
-            <option value="aider">aider</option>
-          </select>
-        </label>
-
-        <label className="block mb-3">
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider">Repo Path</span>
-          <input
-            type="text"
-            value={repo}
-            onChange={(e) => setRepo(e.target.value)}
-            aria-label="Repo Path"
-            placeholder="/path/to/repo"
-            className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 font-mono focus:border-emerald-500 focus:outline-none"
-          />
-        </label>
-
-        <label className="block mb-3">
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider">Branch</span>
-          <input
-            type="text"
-            value={branch}
-            onChange={(e) => setBranch(e.target.value)}
-            aria-label="Branch"
-            placeholder="optional"
-            className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 font-mono focus:border-emerald-500 focus:outline-none"
-          />
-        </label>
-
-        <div className="flex gap-2">
-          <label className="block flex-1">
-            <span className="text-[10px] text-slate-500 uppercase tracking-wider">Model Pin</span>
-            <input
-              type="text"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              aria-label="Model Pin"
-              placeholder="e.g. claude-opus-5"
-              className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 font-mono focus:border-emerald-500 focus:outline-none"
-            />
+        <div className="grid grid-cols-2 gap-3">
+          <label className="space-y-1">
+            <span className="text-[9px] uppercase tracking-wider text-slate-500">CLI</span>
+            <select value={runtime} onChange={(e) => setRuntime(e.target.value)} className={field} aria-label="Runtime">
+              {(settings?.runtimes ?? ['claude-code', 'codex']).map((rt) => <option key={rt} value={rt}>{RUNTIME_LABEL[rt] ?? rt}</option>)}
+            </select>
           </label>
-
-          <label className="block w-28">
-            <span className="text-[10px] text-slate-500 uppercase tracking-wider">Effort</span>
+          <label className="space-y-1">
+            <span className="text-[9px] uppercase tracking-wider text-slate-500">Project</span>
             <select
-              value={effort}
-              onChange={(e) => setEffort(e.target.value)}
-              aria-label="Effort"
-              className="w-full mt-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
+              value={project}
+              onChange={(e) => { const p = settings?.projects.find((x) => x.name === e.target.value); setProject(e.target.value); setRepo(p?.repo ?? ''); }}
+              className={field}
+              aria-label="Project"
             >
-              <option value="">default</option>
+              <option value="">custom path…</option>
+              {(settings?.projects ?? []).map((p) => <option key={p.name} value={p.name} disabled={!p.repo}>{p.name}{p.repo ? '' : ' (no repo)'}</option>)}
+            </select>
+          </label>
+        </div>
+
+        <label className="block space-y-1">
+          <span className="text-[9px] uppercase tracking-wider text-slate-500">Repo (base clone — the agent gets its own worktree and branch wc-&lt;name&gt;)</span>
+          <input value={repo} onChange={(e) => { setRepo(e.target.value); setProject(''); }} placeholder="/home/wave/repos/wavepulse" className={field} aria-label="Repo" />
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-[9px] uppercase tracking-wider text-slate-500">Name</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="antonio-codex" className={field} aria-label="Name" />
+        </label>
+
+        {/* Subscription: the profile the agent runs on */}
+        <div className="rounded border border-slate-800/60 bg-slate-950/50 px-3 py-2 text-[11px] space-y-1" data-testid="spawn-subscription">
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] uppercase tracking-wider text-slate-500">Subscription</span>
+            {isAdmin ? (
+              <select value={profile} onChange={(e) => setProfile(e.target.value)} className="px-2 py-0.5 rounded border border-slate-800/60 bg-slate-950/50 text-[10px] text-slate-300 font-mono" aria-label="Profile">
+                {profiles.map((p) => <option key={p.name} value={p.name}>{p.name}{p.mine ? ' (you)' : p.public ? ' (pool)' : p.shared ? ' (shared)' : ''}</option>)}
+              </select>
+            ) : (
+              <span className="font-mono text-slate-200">{profile || 'home login'}</span>
+            )}
+          </div>
+          {chosen && (
+            loggedIn ? (
+              <p className="text-emerald-300">{RUNTIME_LABEL[runtime] ?? runtime} logged in{subscription ? ` · ${[subscription.account, subscription.plan].filter(Boolean).join(' · ')}` : ''}</p>
+            ) : (
+              <p className="text-amber-300">
+                {RUNTIME_LABEL[runtime] ?? runtime} is not logged in on this profile.{' '}
+                <button onClick={() => navigate('/settings')} className="underline underline-offset-2">Log in under Settings → Profiles</button> first.
+              </p>
+            )
+          )}
+          {quota !== null && !isAdmin && <p className="text-[10px] text-slate-500">{used} of {quota} agents on your profile</p>}
+        </div>
+
+        <details className="text-[11px]">
+          <summary className="cursor-pointer text-slate-500">Model and effort (optional pins)</summary>
+          <div className="grid grid-cols-2 gap-3 mt-2">
+            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="model id (default: the CLI's own)" className={field} aria-label="Model" />
+            <select value={effort} onChange={(e) => setEffort(e.target.value)} className={field} aria-label="Effort">
+              <option value="">effort: default</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
               <option value="xhigh">xhigh</option>
             </select>
-          </label>
-        </div>
+          </div>
+        </details>
 
-        <div className="text-[10px] text-slate-600 mt-2 leading-relaxed">
-          Leave repo empty to create or reuse <span className="font-mono text-slate-500">projects_root/&lt;agent-name&gt;</span>.
-        </div>
+        {error && <p className="text-[11px] text-red-400 border border-red-500/30 rounded px-3 py-2">{error}</p>}
 
-        {error && <div className="text-[11px] text-red-400 mt-3">{error}</div>}
-
-        <div className="flex gap-2 mt-5">
-          <button onClick={onClose} className="flex-1 px-3 py-2 text-[11px] text-slate-400 border border-slate-700 rounded">Cancel</button>
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <button onClick={onClose} className="px-3 py-1.5 text-[11px] text-slate-400 hover:text-slate-200">Cancel</button>
           <button
-            onClick={submit}
-            disabled={submitting || !name.trim()}
-            className="flex-1 px-3 py-2 text-[11px] text-emerald-300 bg-emerald-950/50 border border-emerald-500/40 rounded hover:bg-emerald-950 disabled:opacity-50"
+            onClick={handleSubmit}
+            disabled={submitting || !name.trim() || loggedIn === false}
+            title={loggedIn === false ? 'Log the profile in first' : undefined}
+            className="px-4 py-1.5 rounded border border-emerald-500/40 text-[11px] font-semibold tracking-wider text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40"
           >
             {submitting ? 'Spawning...' : 'Spawn Agent'}
           </button>

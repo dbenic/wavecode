@@ -21,7 +21,7 @@ Agents on this box bill the subscription of the person who owns them, so your ag
 
 **Then, in WaveCode:**
 - Settings → My seat → Create. That's your personal PM agent (`pm-NAME`). Ask it anything in the thread: "who is free?", "what is @codex1 doing?", "status". It answers from the live state.
-- Dashboard → Spawn: give an agent a name, pick Claude Code or Codex, repo `/home/wave/repos/wavepulse`. It gets its own git worktree and branch (`wc-<name>`). You can spawn as many as your plan allows.
+- Agents → Spawn: pick the CLI and the project (wavepulse), give the agent a name. The dialog shows whether your profile is logged in for that CLI and which account it runs on, and refuses until it is. The agent gets its own git worktree and branch (`wc-<name>`) on your subscription. You may run up to the number of agents shown in the dialog.
 - Talk to agents with @: `@yourbuilder implement the VAT rounding fix from SPEC.md, run the tests, report`. One task per message works best.
 - When an agent finishes, another agent (a different vendor, picked automatically) reviews the diff. You get a verdict in the thread; Promote merges the lane branch and pushes it.
 - `#reserve @agent 2h` keeps an agent for yourself; `#review #12 @opus` names a reviewer; `#ask deploy/fable …` asks the deploy box a question.

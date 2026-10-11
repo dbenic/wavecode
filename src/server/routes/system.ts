@@ -78,6 +78,8 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
       notifications: cfg.notifications,
       artifacts: cfg.artifacts,
       runtimes: Object.keys(cfg.runtimes),
+      projects: Object.entries(cfg.projects ?? {}).map(([name, p]) => ({ name, repo: p.repo ?? null })),
+      spawn: { max_per_user: cfg.spawn?.max_per_user ?? null },
     });
   });
 

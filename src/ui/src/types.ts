@@ -341,6 +341,21 @@ export interface DeskBoardRow {
   tasks: Array<{ num: number | null; status: string; agent: string | null }>;
 }
 
+/** Settings → Profiles: one credential profile (a subscription) per developer. */
+export interface ProfileInfo {
+  name: string;
+  shared: boolean;
+  public: boolean;
+  mine: boolean;
+  can_login: boolean;
+  runtimes: Record<string, {
+    logged_in: boolean;
+    subscription: { account: string | null; plan: string | null } | null;
+    login_seat: { agent_id: string; session: string } | null;
+    agents: number;
+  }>;
+}
+
 export interface CandidateRow {
   project: string;
   name: string;

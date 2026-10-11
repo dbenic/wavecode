@@ -18,6 +18,8 @@ import * as outputWatcher from '../output-watcher.js';
 import * as validate from '../validate.js';
 import logger from '../logger.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
+import { getConfig } from '../config.js';
+import { isAdmin } from '../users.js';
 import type { User } from '../db.js';
 import * as leases from '../leases.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
@@ -409,6 +411,14 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     }
 
     const profile = resolveSpawnProfile(getActingUser(c), body.profile);
+    // Self-service quota: a developer's own profile carries at most spawn.max_per_user agents
+    if (profile.ok && profile.data && !isAdmin(getActingUser(c))) {
+      const max = getConfig().spawn?.max_per_user ?? null;
+      if (max !== null && max >= 0) {
+        const mine = listAgents().filter((a) => a.profile === profile.data && !a.tmux_session.startsWith('wc-login-')).length;
+        if (mine >= max) return c.json({ error: `Profile '${profile.data}' already runs ${mine} agent${mine === 1 ? '' : 's'} (limit ${max}). Stop one first, or ask an admin.` }, 429);
+      }
+    }
     if (!profile.ok) return c.json({ error: profile.error }, profile.code === 'forbidden' ? 403 : 400);
     // Never start a CLI that would sit at its login menu (spec §5).
     const login = requireProfileLogin(profile.data, body.runtime);

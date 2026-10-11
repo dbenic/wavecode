@@ -393,6 +393,20 @@ product_desk:
 - The Tasks page shows the desk above the kanban (open requests, what WaveCode has for each, hand-to-agent);
   the board carries the open requests for the overlord, which proposes unstarted ones when asked what to pick up.
 
+## Profiles and self-service agents
+
+- `GET /api/profiles` → per profile: `name`, `shared`, `public`, `mine`, `can_login`, and per runtime
+  `{ logged_in, subscription: { account, plan } | null, login_seat: { agent_id, session } | null, agents }`.
+  Credential contents and paths are never returned.
+- `POST /api/profiles/:name/login` `{ runtime }` — opens a login seat (an adopted agent running the
+  CLI's login command on that profile, 15 minutes at most); Settings → Profiles shows its pane so the
+  device code or URL is visible, and `profile.login_finished` reports whether a credential appeared.
+- `POST /api/agents/spawn` — a developer spawns on their own profile (the subscription link); the
+  dialog on the Agents page lists the configured CLIs, the projects (base clone → worktree and
+  branch `wc-<name>`), the login state and account of the profile for that CLI, and refuses while
+  the profile is not logged in. `spawn.max_per_user` (config) caps a non-admin profile's agents
+  (429 beyond it). `GET /api/settings` now also returns `projects: [{ name, repo }]` and `spawn`.
+
 ## Overview and the overlord
 
 The board (`src/server/overview.ts`) is computed from the database alone — nobody asks an

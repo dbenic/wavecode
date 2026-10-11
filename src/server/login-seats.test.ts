@@ -230,8 +230,36 @@ describe('login seats', () => {
       const res = await call(app, 'GET', '/api/profiles', ana.token);
       expect(res.status).toBe(200);
       const mine = res.json.find((p: { name: string }) => p.name === 'ana');
-      expect(mine).toMatchObject({ mine: true, shared: false, runtimes: { codex: { logged_in: true }, 'claude-code': { logged_in: false } } });
+      expect(mine).toMatchObject({ mine: true, shared: false, public: false, can_login: true, runtimes: { codex: { logged_in: true, login_seat: null, agents: 0 }, 'claude-code': { logged_in: false, subscription: null } } });
+      expect(mine.runtimes.codex.subscription).toEqual({ account: null, plan: null }); // logged in, account unreadable from a stub file
+      const other = res.json.find((p: { name: string }) => p.name === 'bob');
+      expect(other).toMatchObject({ mine: false, can_login: false });
       expect(JSON.stringify(res.json)).not.toMatch(/sk-secret|auth\.json/);
+      // an open login seat is reported on its cell
+      await call(app, 'POST', '/api/profiles/ana/login', ana.token, { runtime: 'claude-code' });
+      const again = await call(app, 'GET', '/api/profiles', ana.token);
+      expect(again.json.find((p: { name: string }) => p.name === 'ana').runtimes['claude-code'].login_seat).toMatchObject({ session: 'wc-login-ana-claude-code' });
+    });
+
+    it('spawn.max_per_user caps a developer\'s own profile, never an admin', async () => {
+      const app = await makeApp();
+      const sm = await import('./session-manager.js');
+      vi.spyOn(sm, 'spawnAgent').mockImplementation((opts) => db.insertAgent({
+        name: opts.name, runtime: opts.runtime, tmux_session: `wc-${opts.name}`, workspace: '/w', mode: 'spawned', status: 'idle', profile: opts.profile ?? null,
+      }));
+      fs.mkdirSync(path.join(root, 'ana', 'codex'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'ana', 'codex', 'auth.json'), '{}');
+      const cfg = (await import('./config.js')).getConfig() as { spawn?: { max_per_user?: number | null } };
+      cfg.spawn = { max_per_user: 1 };
+      try {
+        expect((await call(app, 'POST', '/api/agents/spawn', ana.token, { name: 'q1', runtime: 'codex' })).status).toBe(201);
+        const second = await call(app, 'POST', '/api/agents/spawn', ana.token, { name: 'q2', runtime: 'codex' });
+        expect(second.status).toBe(429);
+        expect(second.json.error).toMatch(/already runs 1 agent \(limit 1\)/);
+        expect((await call(app, 'POST', '/api/agents/spawn', FALLBACK, { name: 'q3', runtime: 'codex', profile: 'ana' })).status).toBe(201);
+      } finally {
+        delete cfg.spawn;
+      }
     });
 
     it('POST /api/profiles/:name/login opens a watched seat; others get 403', async () => {
