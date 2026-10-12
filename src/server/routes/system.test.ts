@@ -100,6 +100,7 @@ describe('system routes', () => {
         configured: true,
       }),
       runtimes: ['codex', 'claude-code'],
+      staging_tips: [],
     }));
   });
 

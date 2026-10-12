@@ -32,6 +32,7 @@ import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-sta
 import { alertBehind, alertLanesPastStaging } from './lane-main.js';
 import { productionPrereqGate, stepsPrompt, type GoStep } from './prereqs.js';
 import { evaluateForward, readStagingHealth, type StagingTip } from './staging-forward.js';
+import { setStagingTipStatuses, stagingTipStatuses, type StagingTipStatus } from './staging-tip-status.js';
 import { testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { fireStagingDeployed, fireStagingVerified } from './pipeline-hooks.js';
@@ -263,18 +264,31 @@ function isTarget(t: unknown): t is ReleaseTarget {
 }
 
 const STAGING_TIP_TTL_MS = 15_000;
+const STAGING_TIP_FAILURE_TTL_MS = 5_000;
 const STAGING_TIP_PEER_TIMEOUT_MS = 4_000;
 
 export interface ResolvedStagingTip {
   /** `unknown` means the deploy box could not be asked. Do not trust the local record. */
   state: 'local' | 'peer' | 'unknown';
+  /** Where the sha came from. A forwarding box is always `peer`, even when the ask failed. */
+  source: 'peer' | 'health' | 'local';
   tip: StagingTip | null;
 }
+
+export interface StagingTipPayload {
+  sha: string | null;
+  version: string | null;
+  lane: string | null;
+  source: 'peer' | 'health' | 'local';
+}
+
+export type { StagingTipStatus };
 
 const peerTipCache = new Map<string, { at: number; value: ResolvedStagingTip }>();
 
 export function resetStagingTipCacheForTest(): void {
   peerTipCache.clear();
+  setStagingTipStatuses([]);
 }
 
 function normalizePeerTip(data: unknown): StagingTip | null {
@@ -289,37 +303,112 @@ function normalizePeerTip(data: unknown): StagingTip | null {
 }
 
 /**
- * A dev box with a release peer and no local health command asks the deploy
- * box. The answer is cached for 15 seconds. A local health command, or no
- * peer, keeps the record on this box.
+ * The peer `requestRelease` forwards to for this project (`projects.<p>.release_peer`),
+ * or null when this box serves the release itself.
  */
-export async function resolveStagingTip(project: string): Promise<ResolvedStagingTip> {
-  const peer = getConfig().projects?.[project]?.release_peer;
-  const health = getConfig().releases?.staging_health_command;
-  if (!peer || (health && health.length > 0)) return { state: 'local', tip: currentStagingTip(project) };
-  const hit = peerTipCache.get(project);
-  if (hit && Date.now() - hit.at < STAGING_TIP_TTL_MS) return hit.value;
-  const [peerName] = peer.split('/');
-  const res = await peerGetJson<unknown>(peerName, `/releases/staging-tip?project=${encodeURIComponent(project)}`, STAGING_TIP_PEER_TIMEOUT_MS);
-  const value: ResolvedStagingTip = res.ok
-    ? { state: 'peer', tip: normalizePeerTip(res.data) }
-    : { state: 'unknown', tip: null };
-  peerTipCache.set(project, { at: Date.now(), value });
-  return value;
+export function releaseForwardTarget(project: string): { peer: string; agent: string } | null {
+  const spec = getConfig().projects?.[project]?.release_peer;
+  if (!spec) return null;
+  const [peer, agent] = spec.split('/');
+  if (!peer) return null;
+  return { peer, agent: agent ?? '' };
+}
+
+/**
+ * Whenever this project's releases are forwarded, the staging tip comes from
+ * that same peer. The local release row is not authoritative, and a local
+ * health command does not override the peer. Otherwise the health command
+ * wins, then the newest deployed staging record. A peer answer is cached 15s.
+ * A failed ask stays `unknown`, is cached 5s, and does not fall back to the local row.
+ * The outbound ask sets `local=1` so the peer answers from its own health command
+ * or deployed row and does not proxy again.
+ */
+export async function resolveStagingTip(project: string, opts?: { localOnly?: boolean }): Promise<ResolvedStagingTip> {
+  const forward = opts?.localOnly ? null : releaseForwardTarget(project);
+  if (forward) {
+    const hit = peerTipCache.get(project);
+    const ttl = hit?.value.state === 'unknown' ? STAGING_TIP_FAILURE_TTL_MS : STAGING_TIP_TTL_MS;
+    if (hit && Date.now() - hit.at < ttl) return hit.value;
+    const res = await peerGetJson<unknown>(
+      forward.peer,
+      `/releases/staging-tip?project=${encodeURIComponent(project)}&local=1`,
+      STAGING_TIP_PEER_TIMEOUT_MS,
+    );
+    const value: ResolvedStagingTip = res.ok
+      ? { state: 'peer', source: 'peer', tip: normalizePeerTip(res.data) }
+      : { state: 'unknown', source: 'peer', tip: null };
+    peerTipCache.set(project, { at: Date.now(), value });
+    return value;
+  }
+  const local = localStagingTip(project);
+  return { state: 'local', source: local.source, tip: local.tip };
+}
+
+export async function stagingTipPayload(project: string, opts?: { localOnly?: boolean }): Promise<StagingTipPayload> {
+  const resolved = await resolveStagingTip(project, opts);
+  return {
+    sha: resolved.tip?.sha ?? null,
+    version: resolved.tip?.version ?? null,
+    lane: resolved.tip?.lane ?? null,
+    source: resolved.source,
+  };
 }
 
 /** Health command wins when it prints a SHA. Otherwise the newest deployed staging record. */
 export function currentStagingTip(project: string): StagingTip | null {
+  return localStagingTip(project).tip;
+}
+
+function localStagingTip(project: string): { source: 'health' | 'local'; tip: StagingTip | null } {
   const health = readStagingHealth(project);
   let row: ReleaseRequest | null = listReleases({ project, target: 'staging', status: 'deployed', limit: 1 })[0] ?? null;
   if (health?.sha) {
-    return { sha: health.sha, version: health.version ?? row?.version ?? null, lane: row?.lane ?? null };
+    return { source: 'health', tip: { sha: health.sha, version: health.version ?? row?.version ?? null, lane: row?.lane ?? null } };
   }
   if (!row) {
     row = listReleases({ target: 'staging', status: 'deployed', limit: 20 }).find((item) => item.project == null || item.project === project) ?? null;
   }
-  if (!row) return null;
-  return { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version, lane: row.lane };
+  if (!row) return { source: 'local', tip: null };
+  return { source: 'local', tip: { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version, lane: row.lane } };
+}
+
+let stagingTipLogTimer: ReturnType<typeof setInterval> | null = null;
+const STAGING_TIP_LOG_MS = 60_000;
+
+/** One line per project: which box the staging tip is read from. */
+export async function logStagingTipSources(): Promise<StagingTipStatus[]> {
+  const names = Object.keys(getConfig().projects ?? {});
+  const rows: StagingTipStatus[] = [];
+  for (const project of names) {
+    const forward = releaseForwardTarget(project);
+    try {
+      const resolved = await resolveStagingTip(project);
+      rows.push({ project, source: resolved.source, sha: resolved.tip?.sha ?? null, peer: forward?.peer ?? null });
+    } catch (e) {
+      logger.warn({ project, error: (e as Error).message }, 'Staging tip source unavailable');
+      rows.push({ project, source: forward ? 'peer' : 'local', sha: null, peer: forward?.peer ?? null });
+    }
+  }
+  setStagingTipStatuses(rows);
+  if (rows.length > 0) logger.info({ staging_tips: rows }, 'Staging tip source');
+  return rows;
+}
+
+export { stagingTipStatuses };
+
+export function startStagingTipLog(): void {
+  if (stagingTipLogTimer) return;
+  void logStagingTipSources().catch((e) => logger.warn({ error: (e as Error).message }, 'Staging tip source unavailable'));
+  stagingTipLogTimer = setInterval(() => {
+    void logStagingTipSources().catch((e) => logger.warn({ error: (e as Error).message }, 'Staging tip source unavailable'));
+  }, STAGING_TIP_LOG_MS);
+  stagingTipLogTimer.unref?.();
+}
+
+export function stopStagingTipLog(): void {
+  if (!stagingTipLogTimer) return;
+  clearInterval(stagingTipLogTimer);
+  stagingTipLogTimer = null;
 }
 
 function recordRollback(row: ReleaseRequest, who: string | null, reason: string): void {
@@ -489,8 +578,9 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     steps_json: stepsJson,
   };
 
-  if (project.release_peer) {
-    const [peerName] = project.release_peer.split('/');
+  const forward = releaseForwardTarget(opts.project);
+  if (forward) {
+    const peerName = forward.peer;
     const row = insert({ ...base, origin: 'local', peer: peerName, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
     const remote = await peerPostJson<{ id: string; status: string }>(peerName, '/releases', {
       sha: opts.sha, lane: opts.lane ?? null, target: opts.target, project: opts.project, desk: opts.desk ?? null,
