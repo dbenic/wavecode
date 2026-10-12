@@ -34,17 +34,46 @@ export interface TmuxSession {
   lastActivity: number;
 }
 
-export function scan(): Result<TmuxSession[]> {
-  return tmux.listSessions();
+function bindAgent(agent: Pick<Agent, 'tmux_session' | 'tmux_socket'>): void {
+  try {
+    tmux.bindSessionSocket(agent.tmux_session, agent.tmux_socket ?? null);
+  } catch (e) {
+    // Vitest doubles that replace tmux.js throw on any export they did not list.
+    if (!String((e as Error).message).includes('bindSessionSocket')) throw e;
+  }
+}
+
+/** Fill the session→socket map from the agents table. Called at startup and before capture. */
+export function rebindAgentSockets(): void {
+  for (const agent of listAgents()) bindAgent(agent);
+}
+
+function bindSession(session: string): void {
+  const agent = listAgents().find((a) => a.tmux_session === session);
+  if (agent) bindAgent(agent);
+}
+
+export function scan(socket?: string | null): Result<TmuxSession[]> {
+  if (socket?.trim() && !tmux.isValidSocketName(socket.trim())) {
+    return { ok: false, error: 'Invalid tmux socket name' };
+  }
+  return tmux.listSessions(socket?.trim() || null);
 }
 
 export function adopt(
   sessionName: string,
   runtime: Agent['runtime'],
   name?: string,
+  tmuxSocket?: string | null,
 ): Result<Agent> {
-  // Verify session exists
+  const socket = tmuxSocket?.trim() || null;
+  if (socket && !tmux.isValidSocketName(socket)) {
+    return { ok: false, error: 'Invalid tmux socket name' };
+  }
+  if (socket) tmux.bindSessionSocket(sessionName, socket);
+  // Verify session exists (on that socket when one is set)
   if (!tmux.hasSession(sessionName)) {
+    if (socket) tmux.bindSessionSocket(sessionName, null);
     return { ok: false, error: `tmux session '${sessionName}' not found` };
   }
 
@@ -57,14 +86,17 @@ export function adopt(
     return { ok: false, error: `Agent name '${name ?? sessionName}' collides with another agent's id or alias` };
   }
 
-  return insertAgent({
+  const inserted = insertAgent({
     name: name ?? sessionName,
     runtime,
     tmux_session: sessionName,
     workspace: null,
     mode: 'adopted',
     status: 'idle',
+    tmux_socket: socket,
   });
+  if (inserted.ok) bindAgent(inserted.data);
+  return inserted;
 }
 
 export interface SpawnOptions {
@@ -345,6 +377,7 @@ export function kill(agentId: string): Result<void> {
   stopRunner(agentId);
 
   // Session might already be dead — killSession is safe
+  bindAgent(agent);
   tmux.killSession(agent.tmux_session);
 
   return deleteAgent(agentId);
@@ -391,9 +424,12 @@ export function stopAll(): StopAllSummary {
         const result = kill(agent.id);
         if (result.ok) summary.killed.push(agent.id);
         else summary.errors.push({ agent: agent.name, error: result.error });
-      } else if (tmux.hasSession(agent.tmux_session)) {
-        tmux.sendRawKey(agent.tmux_session, 'C-c');
-        summary.interrupted.push(agent.id);
+      } else {
+        bindAgent(agent);
+        if (tmux.hasSession(agent.tmux_session)) {
+          tmux.sendRawKey(agent.tmux_session, 'C-c');
+          summary.interrupted.push(agent.id);
+        }
       }
     } catch (e) {
       summary.errors.push({ agent: agent.name, error: (e as Error).message });
@@ -411,6 +447,7 @@ export function sendKeys(agentId: string, text: string): Result<void> {
   if (isFileRunnerSeat(agent)) {
     return { ok: false, error: 'File-runner seats do not accept send-keys' };
   }
+  bindAgent(agent);
   if (!tmux.hasSession(agent.tmux_session)) {
     return { ok: false, error: `tmux session '${agent.tmux_session}' is not running` };
   }
@@ -441,6 +478,7 @@ export function sendRawKeys(agentId: string, key: string): Result<void> {
   if (isFileRunnerSeat(agent)) {
     return { ok: false, error: 'File-runner seats do not accept send-keys' };
   }
+  bindAgent(agent);
   if (!tmux.hasSession(agent.tmux_session)) {
     return { ok: false, error: `tmux session '${agent.tmux_session}' is not running` };
   }
@@ -454,17 +492,21 @@ export function sendRawKeys(agentId: string, key: string): Result<void> {
 }
 
 export function capturePane(session: string, lines: number = 50): Result<string> {
+  bindSession(session);
   return tmux.capturePane(session, lines);
 }
 
 export function capturePaneAnsi(session: string, lines: number = 50): Result<string> {
+  bindSession(session);
   return tmux.capturePaneAnsi(session, lines);
 }
 
 export function capturePaneRange(session: string, start: number, end: number): Result<string> {
+  bindSession(session);
   return tmux.capturePaneRange(session, start, end);
 }
 
 export function getScrollbackSize(session: string): Result<number> {
+  bindSession(session);
   return tmux.getScrollbackSize(session);
 }

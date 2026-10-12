@@ -532,7 +532,11 @@ describe('releases.ts', () => {
       expect(rel.reportRelease(staged.id, { status: 'deployed', sha: tip, version: '0.1.0' }).ok).toBe(true);
 
       const allowed = await runWithActor(dev.data.user.id, async () => rq.stage(card.run.id));
-      expect(allowed.ok).toBe(true);
+      expect(allowed.ok).toBe(false);
+      if (!allowed.ok) {
+        expect(allowed.error).toMatch(/would roll staging back:/);
+        expect(allowed.error).not.toMatch(/PASS/);
+      }
       rfz.setFetchDisabledForTest(false);
       rel.stopReleasePollers();
     });

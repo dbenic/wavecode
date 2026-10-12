@@ -9,7 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as child_process from 'node:child_process';
-import { isAllowedRawKey, isValidSessionName, sendLiteralText } from './tmux.js';
+import { bindSessionSocket, isAllowedRawKey, isValidSessionName, isValidSocketName, resetTmuxSocketsForTest, sendLiteralText } from './tmux.js';
 
 // Mock execFileSync to inspect calls without needing real tmux
 vi.mock('node:child_process', () => ({
@@ -18,6 +18,7 @@ vi.mock('node:child_process', () => ({
 
 describe('tmux.ts — shell injection prevention', () => {
   beforeEach(() => {
+    resetTmuxSocketsForTest();
     vi.mocked(child_process.execFileSync).mockReturnValue('');
   });
 
@@ -184,5 +185,19 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('adds -L only for a session bound to a socket, including load-buffer', () => {
+    expect(isValidSocketName('fable')).toBe(true);
+    expect(isValidSocketName('../fable')).toBe(false);
+    sendLiteralText('wc-grok', 'hi');
+    const unbound = vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
+    expect(unbound.every((args) => args[0] !== '-L')).toBe(true);
+    vi.mocked(child_process.execFileSync).mockClear();
+    bindSessionSocket('wc-grok', 'fable');
+    sendLiteralText('wc-grok', 'yo');
+    const bound = vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
+    expect(bound.length).toBeGreaterThan(0);
+    expect(bound.every((args) => args[0] === '-L' && args[1] === 'fable')).toBe(true);
   });
 });

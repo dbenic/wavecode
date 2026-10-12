@@ -104,6 +104,15 @@ describe('hands-free lane pipeline', () => {
     return sha;
   }
 
+  /** Later lane contains the earlier SHA, so staging it does not roll the deploy back. */
+  function contain(parent: string, child: string): string {
+    git(repo, 'checkout', '-q', child);
+    git(repo, 'merge', '--no-ff', '--no-edit', '-m', `merge ${parent}`, parent);
+    const sha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', `refs/remotes/origin/${child}`, sha);
+    return sha;
+  }
+
   function moveMain(file: string, content: string): void {
     git(repo, 'checkout', '-q', 'main');
     fs.writeFileSync(path.join(repo, file), content);
@@ -139,7 +148,7 @@ describe('hands-free lane pipeline', () => {
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(git(repo, 'status', '--porcelain')).toBe('');
     expect(fs.existsSync(path.join(repo, '.git', 'MERGE_HEAD'))).toBe(false);
-    expect(messages(author.id).join('\n')).toMatch(/conflicted in a\.txt/);
+    expect(messages(author.id).join('\n')).toMatch(/Your lane wc-ales is behind main\./);
     const written = fs.existsSync(freezeDir) ? fs.readdirSync(freezeDir).filter((name) => name.includes('auto-freeze')) : [];
     expect(written).toEqual([]);
     expect(listReleases({ target: 'production' })).toEqual([]);
@@ -325,7 +334,8 @@ describe('hands-free lane pipeline', () => {
 
   it('serializes staging until the pin expires, and never requests production', async () => {
     const first = branch('wc-ales', 'ales.txt', 'ales');
-    const second = branch('wc-ben', 'ben.txt', 'ben');
+    branch('wc-ben', 'ben.txt', 'ben');
+    const second = contain('wc-ales', 'wc-ben');
     agent('ales', path.join(tmp, 'ales'));
     agent('ben', path.join(tmp, 'ben'));
     agent('codex3', path.join(tmp, 'codex3'));
@@ -353,7 +363,8 @@ describe('hands-free lane pipeline', () => {
 
   it('releases the next lane when the developer presses Ready for prod', async () => {
     const first = branch('wc-ales', 'ales.txt', 'ales');
-    const second = branch('wc-ben', 'ben.txt', 'ben');
+    branch('wc-ben', 'ben.txt', 'ben');
+    const second = contain('wc-ales', 'wc-ben');
     agent('ales', path.join(tmp, 'ales'));
     agent('ben', path.join(tmp, 'ben'));
     agent('codex3', path.join(tmp, 'codex3'));
@@ -390,7 +401,8 @@ describe('hands-free lane pipeline', () => {
     const text = messages(reviewer.id).join('\n');
     expect(text).toMatch(/delta review: merge only/);
     expect(text).toContain('/reviews/prev.md');
-    expect(messages(author.id).join('\n')).not.toMatch(/conflicted/);
+    expect(messages(author.id).join('\n')).toMatch(/Merged latest main into wc-ales/);
+    expect(messages(author.id).join('\n')).not.toMatch(/behind main/);
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
@@ -405,7 +417,7 @@ describe('hands-free lane pipeline', () => {
     pipe.auto_merge_main = true;
     onMainAdvanced('wave');
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
-    expect(messages(author.id).join('\n')).toMatch(/conflicted in a\.txt/);
+    expect(messages(author.id).join('\n')).toMatch(/Your lane wc-ales is behind main\./);
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 

@@ -18,7 +18,7 @@ import { getConfig, type ProjectConfig } from './config.js';
 import { getAgent, getDb, getRun, listAgents, resolveAgent, type Agent, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
-import { changedFiles, commitsBehind, isMergeOnlyDelta, mainSpec, projectRepo, resolveMainRef } from './lane-main.js';
+import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, mainSpec, mainTip, projectRepo, resolveMainRef } from './lane-main.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
@@ -542,8 +542,8 @@ export function onAuthorDone(agentId: string): Result<{ sha: string }> {
       const merged = mergeMainClean(agent.data.workspace, mainRef);
       if (!merged.ok) {
         const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
-        const text = `merge of ${mainRef} conflicted in ${files}. Resolve them in the lane and freeze again.`;
-        tell(agent.data.id, text);
+        alertBehind({ lane, project, authorAgentId: agent.data.id, authorName: agent.data.name });
+        const text = behindConflict(lane);
         note(project, lane, sha, 'merge', `auto: merge conflict in ${files} — @${agent.data.name}`);
         return { ok: false, error: text };
       }
@@ -557,13 +557,16 @@ export function onAuthorDone(agentId: string): Result<{ sha: string }> {
   }
 }
 
+function behindConflict(lane: string): string {
+  return `Your lane ${lane} is behind main. Run: git fetch origin && git merge origin/main, fix any conflicts, run the quick check, then write your freeze note. Nothing else to do.`;
+}
+
 /** Main moved: clean-merge every open lane that is now behind, then refreeze. */
-export function onMainAdvanced(project: string): void {
+export function onMainAdvanced(project: string, mainSha?: string): void {
   const pipe = pipelineOf(project);
   if (!pipe.auto_merge_main) return;
   const repo = projectRepo(project);
   if (!repo) return;
-  const spec = mainSpec(project);
   const mainRef = resolveMainRef(repo, project);
   if (!mainRef) return;
   const lanes = new Set<string>();
@@ -586,11 +589,14 @@ export function onMainAdvanced(project: string): void {
     const merged = mergeMainClean(author.workspace, mainRef);
     if (!merged.ok) {
       const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
-      tell(author.id, `merge of ${spec.ref} conflicted in ${files}. Resolve them in the lane and freeze again.`);
+      const shaNow = mainSha ?? mainTip(repo, project)?.sha ?? '';
+      if (shaNow) alertBehind({ lane, project, authorAgentId: author.id, authorName: author.name });
       note(project, lane, before, 'merge', `auto: merge conflict in ${files} — @${author.name}`);
       continue;
     }
     const sha = headOf(author.workspace);
+    const mergedTip = mainSha ?? mainTip(repo, project)?.sha ?? '';
+    if (mergedTip) alertMerged({ lane, project, mainSha: mergedTip, authorAgentId: author.id, authorName: author.name });
     if (!sha || sha === before || acted(sha, FROZEN)) continue;
     publishFreeze({ workspace: author.workspace, project, lane, sha, author, pipe });
   }
@@ -621,6 +627,6 @@ export function onStagingDeployed(releaseId: string): void {
 
 pipelineHooks.onFreeze = onFreezeRecorded;
 pipelineHooks.onAuthorDone = (agentId) => { onAuthorDone(agentId); };
-pipelineHooks.onMain = (project) => { onMainAdvanced(project); };
+pipelineHooks.onMain = (project, sha) => { onMainAdvanced(project, sha); };
 pipelineHooks.onDeployed = onStagingDeployed;
 pipelineHooks.onVerified = (project) => { if (project) void drainStagingQueue(project); };

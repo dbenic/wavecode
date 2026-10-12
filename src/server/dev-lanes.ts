@@ -8,13 +8,15 @@ import { getConfig } from './config.js';
 import { getDb, getRun, listAgents, type Agent } from './db.js';
 import { getLatestCompletedReview } from './code-review.js';
 import { listFreezes, refreshProject, type ReleaseFreeze } from './release-freezes.js';
-import { listReleases } from './releases.js';
+import { currentStagingTip, listReleases } from './releases.js';
+import { prereqStatusNote } from './prereqs.js';
+import { isMissingAncestor } from './staging-forward.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { latestPipelineNote } from './lane-pipeline.js';
 import logger from './logger.js';
 import {
-  DEFAULT_BEFORE_FREEZE_TIP, behindMainLine, fullFailFlag, laneStatusLine, needsGreenQuick, promoteBlockReason,
+  BEHIND_STAGING_LINE, DEFAULT_BEFORE_FREEZE_TIP, behindMainLine, fullFailFlag, laneStatusLine, needsGreenQuick, promoteBlockReason,
   QUICK_CHECK_RUNNING, type CheckState, type GateView,
 } from './lane-status.js';
 import {
@@ -184,6 +186,7 @@ export function listDevLanes(): DevLane[] {
 
     let deployed: Array<{ lane: string | null; sha: string }> = [];
     try { deployed = listReleases({ project, target: 'staging', status: 'deployed', limit: 40 }); } catch { deployed = []; }
+    const stagingNow = (() => { try { return currentStagingTip(project); } catch { return null; } })();
 
     for (const lane of [...names].sort()) {
       const sha = tipOf(repo, spec.remote, lane);
@@ -218,11 +221,14 @@ export function listDevLanes(): DevLane[] {
       const onStaging = deployed.some((r) => (r.lane === lane || r.sha === cardSha) && r.sha === cardSha);
       const author = authorFor(lane, agents, freeze ?? current);
       const fullLabel = fullRunPhrase(viewed.fullRun);
+      const behindStaging = !!(repo && stagingNow?.sha && isMissingAncestor(repo, stagingNow.sha, sha));
+      let prereqNote: string | null = null;
+      try { prereqNote = prereqStatusNote(project, cardSha); } catch { prereqNote = null; }
       const status_line = laneStatusLine({
         sha, author: author.name, reviewer: freeze?.reviewer_name ?? null,
         freeze: freeze ? { sha: freeze.sha, verdict: freeze.verdict, issues: issuesFor(freeze), gate: freezeGate } : null,
         gate: viewed.gate, quick: viewed.quick, full: viewed.full, fullRunLabel: fullLabel,
-        behindMain: behind, protectedPath, hasMigration, overlap, onStaging,
+        behindMain: behind, behindStaging, prereqNote, protectedPath, hasMigration, overlap, onStaging,
         autoNote: latestPipelineNote(project, lane),
       });
       const sha8 = cardSha.slice(0, 8);
@@ -231,11 +237,13 @@ export function listDevLanes(): DevLane[] {
       const testsKnown = viewed.quick !== 'unconfigured' || viewed.full !== 'unconfigured';
       const stage_block = behind > 0
         ? behindMainLine(behind)
-        : !testsKnown || stageGreen
-          ? null
-          : viewed.quick === 'pending'
-            ? QUICK_CHECK_RUNNING
-            : needsGreenQuick(sha8);
+        : behindStaging
+          ? BEHIND_STAGING_LINE
+          : !testsKnown || stageGreen
+            ? null
+            : viewed.quick === 'pending'
+              ? QUICK_CHECK_RUNNING
+              : needsGreenQuick(sha8);
       const promote_block = fullGreen || viewed.full === 'unconfigured' ? null : promoteBlockReason(sha8);
       const full_fail_flag = onStaging && viewed.full === 'red' ? fullFailFlag(viewed.fullRun?.failing_step) : null;
       out.push({
@@ -272,7 +280,7 @@ export function requestLaneReview(opts: { project: string; lane: string; reviewe
     return { ok: false, error: (e as Error).message };
   }
   if (!freeze) return { ok: false, error: 'needs an author freeze first' };
-  if (freeze.status === 'behind-main') return { ok: false, error: 'behind main — merge latest main and refreeze first' };
+  if (freeze.status === 'behind-main') return { ok: false, error: 'behind main: merge main' };
   const authorId = freeze.author_agent_id;
   if (!authorId) return { ok: false, error: 'the freeze has no author agent' };
   const run = freeze.run_id ? getRun(freeze.run_id) : null;

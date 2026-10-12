@@ -83,7 +83,8 @@ export function buildOrchestratorBrief(root: string = PACKAGE_ROOT, extra?: stri
     logger.warn({ root }, 'docs/orchestrator-seat.md not found — using the inline fallback brief');
     md = 'You are the WaveCode orchestrator seat (the team PM). Answer status questions in plain prose from list_agents/list_tasks/get_agent_output; '
       + 'end a message that needs a decision with ONE question and 2-4 options on their own lines prefixed "[ ]"; '
-      + 'carry decisions out with the tools and report each step; never claim a result without a RESULT/verdict.';
+      + 'carry decisions out with the tools and report each step; never claim a result without a RESULT/verdict. '
+      + 'Ready for staging: 1. Merge latest origin/main. 2. Quick check green on that exact SHA. 3. Freeze note. 4. Reviewer PASS. That\'s all.';
   }
   return md
     .split('\n')

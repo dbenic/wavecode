@@ -43,7 +43,10 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
         return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})` }, 403);
       }
     }
-    const r = releases.acceptRelease({ ...body, requested_by: fromPeer ? body.requested_by : user.name }, { userName: user.name, fromPeer });
+    const r = releases.acceptRelease(
+      { ...body, requested_by: fromPeer ? body.requested_by : user.name },
+      { userName: user.name, fromPeer, actorIsAdmin: isAdmin(user) && !fromPeer },
+    );
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 201);
   });
@@ -106,7 +109,7 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/releases/:id/report', async (c) => {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
-    const body = await c.req.json<{ status?: unknown; version?: unknown; sha?: unknown; note?: unknown }>().catch(() => ({} as Record<string, unknown>));
+    const body = await c.req.json<{ status?: unknown; version?: unknown; sha?: unknown; note?: unknown; failed_step?: unknown }>().catch(() => ({} as Record<string, unknown>));
     const status = body.status;
     if (status !== 'deployed' && status !== 'failed' && status !== 'rejected') return c.json({ error: "status must be 'deployed', 'failed' or 'rejected'" }, 400);
     const r = releases.reportRelease(c.req.param('id'), {
@@ -114,6 +117,7 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
       version: typeof body.version === 'string' ? body.version : null,
       sha: typeof body.sha === 'string' ? body.sha : null,
       note: typeof body.note === 'string' ? body.note : null,
+      failed_step: typeof body.failed_step === 'string' ? body.failed_step : null,
     });
     if (!r.ok) return c.json({ error: r.error }, r.error.includes('not found') ? 404 : 400);
     return c.json(r.data);

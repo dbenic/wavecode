@@ -212,7 +212,7 @@ function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: 
   if (f.status === 'behind-main') {
     let n: number | null = null;
     try { n = commitsBehind(f.project, f.sha); } catch { n = null; }
-    return { next: n && n > 0 ? behindMainLine(n) : 'behind main — merge latest main', promotable: false };
+    return { next: n && n > 0 ? behindMainLine(n) : 'behind main: merge main', promotable: false };
   }
   if (candidate) return { next: `in candidate ${candidate} — ships with that release`, promotable: false };
   if (f.project && getConfig().projects?.[f.project]?.candidate_refs) {

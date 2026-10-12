@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, ProfileInfo, TmuxSession } from '../types';
+import type { Agent, ProfileInfo, ReleaseRequest, TmuxSession } from '../types';
 import { shouldReloadAgentList } from '../sse-events';
 import AgentCard from '../components/AgentCard';
 
@@ -188,6 +188,7 @@ export default function Dashboard() {
   const [adoptingSession, setAdoptingSession] = useState<string | null>(null);
   const [showSpawn, setShowSpawn] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [stagingLine, setStagingLine] = useState<string | null>(null);
 
   // Fetch agents on mount
   useEffect(() => {
@@ -197,6 +198,15 @@ export default function Dashboard() {
         setLoaded(true);
       })
       .catch(() => setLoaded(true));
+    apiGet<ReleaseRequest[]>('/releases?target=staging&status=deployed&limit=20')
+      .then((rows) => {
+        const row = rows[0];
+        if (!row) return;
+        const sha = (row.deployed_sha || row.sha).slice(0, 8);
+        const version = row.version ? ` v${row.version.replace(/^v/, '')}` : '';
+        setStagingLine(`staging: ${sha}${version}`);
+      })
+      .catch(() => {});
   }, []);
 
   // SSE live updates
@@ -305,6 +315,11 @@ export default function Dashboard() {
               <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">
                 Agent Orchestrator
               </p>
+              {stagingLine && (
+                <p data-testid="staging-tip" className="text-[10px] font-mono text-sky-300/90 tracking-wide">
+                  {stagingLine}
+                </p>
+              )}
             </div>
           </div>
 

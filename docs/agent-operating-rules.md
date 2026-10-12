@@ -5,6 +5,15 @@ UI; WaveCode reads your terminal. These rules keep the shared repository and
 the shared machine safe. They apply on top of the project's own CLAUDE.md /
 AGENTS.md, and win when they conflict.
 
+## Ready for staging
+
+1. Merge latest origin/main.
+2. Quick check green on that exact SHA.
+3. Freeze note.
+4. Reviewer PASS.
+
+That's all.
+
 ## 1. Where you are
 
 - You run in a tmux session that WaveCode owns, on a shared development
