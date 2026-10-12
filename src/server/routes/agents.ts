@@ -5,6 +5,7 @@ import {
   updateAgentPin,
   updateAgentRole,
   updateAgentIdentity,
+  updateAgentSocket,
   addAgentTag,
   removeAgentTag,
   listAllAgentTags,
@@ -31,6 +32,7 @@ import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '.
 import { agentAllowedFor, isRestrictedUser } from '../users.js';
 import { runtimeDefaultsFor, subscriptionFor } from '../subscription-info.js';
 import { usageFor } from '../usage-probe.js';
+import { bindSessionSocket } from '../tmux.js';
 
 export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/agents', (c) => {
@@ -50,8 +52,10 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(enrichAgent(result.data, getActingUser(c)));
   });
 
-  app.post('/api/agents/scan', (c) => {
-    const result = sessionManager.scan();
+  app.post('/api/agents/scan', async (c) => {
+    const body = await c.req.json<{ socket?: unknown }>().catch(() => ({} as { socket?: unknown }));
+    const socket = typeof body.socket === 'string' && body.socket.trim() ? body.socket.trim() : null;
+    const result = sessionManager.scan(socket);
     if (!result.ok) return c.json({ error: result.error }, 500);
 
     const adoptedSessions = new Set(listAgents().map((a) => a.tmux_session));
@@ -68,6 +72,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       name?: string;
       /** 'orchestrator' = the PM seat; it is sent docs/orchestrator-seat.md (spec §5b). */
       role?: string | null;
+      tmux_socket?: string | null;
     }>();
 
     const validationError = validate.validateAdoptBody(body);
@@ -75,7 +80,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const role = parseAgentRole(body.role);
     if (!role.ok) return c.json({ error: role.error }, 400);
 
-    const result = sessionManager.adopt(body.sessionName, body.runtime, body.name);
+    const result = sessionManager.adopt(body.sessionName, body.runtime, body.name, body.tmux_socket ?? null);
     if (!result.ok) return c.json({ error: result.error }, 400);
 
     const agent = result.data;
@@ -318,6 +323,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       alias?: string | null;
       /** One line, e.g. 'frontend lead'; null clears it. */
       persona?: string | null;
+      /** tmux server socket (`-L`). Null or '' clears it. */
+      tmux_socket?: string | null;
     }>();
 
     const role = parseAgentRole(body.role);
@@ -353,9 +360,19 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       agent = updated.data;
     }
     if (role.role !== undefined) agent = assignRole(agent, role.role, user.id);
+    if (body.tmux_socket !== undefined) {
+      const socket = body.tmux_socket == null || body.tmux_socket === '' ? null : body.tmux_socket.trim();
+      if (socket && !/^[a-zA-Z0-9._-]+$/.test(socket)) {
+        return c.json({ error: 'tmux_socket must be a tmux socket name (letters, numbers, hyphens, underscores, dots)' }, 400);
+      }
+      const updated = updateAgentSocket(agent.id, socket);
+      if (!updated.ok) return c.json({ error: updated.error }, 500);
+      bindSessionSocket(updated.data.tmux_session, socket);
+      agent = updated.data;
+    }
     if (body.model === undefined && body.effort === undefined) {
-      if (!hasIdentity && role.role === undefined) {
-        return c.json({ error: 'Provide alias, persona, role, model and/or effort' }, 400);
+      if (!hasIdentity && role.role === undefined && body.tmux_socket === undefined) {
+        return c.json({ error: 'Provide alias, persona, role, model, effort and/or tmux_socket' }, 400);
       }
       return c.json(enrichAgent(agent, user));
     }

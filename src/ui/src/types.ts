@@ -38,6 +38,8 @@ export interface Agent {
   /** Short handle (`@toni`), one-line persona and group tags (spec §5c). */
   alias?: string | null;
   persona?: string | null;
+  /** tmux server socket (`-L`). Absent uses the default server. */
+  tmux_socket?: string | null;
   tags?: string[];
 }
 
@@ -511,7 +513,7 @@ export interface ReleaseRequest {
 export interface AuditEntry {
   at: string;
   who: string;
-  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto';
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq';
   target: 'staging' | 'production' | null;
   sha: string | null;
   project: string | null;

@@ -33,6 +33,7 @@ import {
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { workspaceMatches } from './project-gate.js';
+import { READY_FOR_STAGING_BRIEF } from './lane-status.js';
 import { OWNER_USER_ID } from './users.js';
 
 export const ROOM_NAME_RE = /^[a-z0-9][a-z0-9_.-]{0,47}$/;
@@ -563,7 +564,7 @@ export function roomBriefing(room: Room, kind: TemplateKind, task: string, viewe
     ...(specMd ? ['', '### SPEC.md (top)', specMd] : []),
   ].join('\n');
   const templated = fillTemplate(loadTemplate(room, kind), { task, room: room.root, done_when: DONE_WHEN[kind] });
-  return `${index}\n\n---\n${templated.trim()}`;
+  return `${READY_FOR_STAGING_BRIEF}\n\n${index}\n\n---\n${templated.trim()}`;
 }
 
 /** `<workspace>/.wavecode/room` → the room folder (replaced if it points elsewhere). */

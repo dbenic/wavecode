@@ -29,6 +29,9 @@ import { peerGetJson, peerPostJson } from './peers.js';
 import { getFreeze, releaseBehindMain, staleStageBlock } from './release-freezes.js';
 import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
+import { alertBehind, alertLanesPastStaging } from './lane-main.js';
+import { productionPrereqGate, stepsPrompt, type GoStep } from './prereqs.js';
+import { evaluateForward, readStagingHealth, type StagingTip } from './staging-forward.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { fireStagingDeployed, fireStagingVerified } from './pipeline-hooks.js';
@@ -89,6 +92,10 @@ export interface ReleaseRequest {
   staging_url: string | null;
   rollback_status: string | null;
   rollback_to: string | null;
+  /** Ordered production GO steps (operational checks, then code deploy). Null when the freeze declared none. */
+  steps_json: string | null;
+  /** The step the deploy agent reported as the one that failed. */
+  failed_step: string | null;
   created_at: string;
   updated_at: string;
   reported_at: string | null;
@@ -133,6 +140,7 @@ export function ensureReleaseTables(): void {
     'verified_by TEXT', 'verified_at TEXT', 'verification_note TEXT',
     'deploy_id TEXT', 'progress_phase TEXT', 'progress_status TEXT',
     'pin_until TEXT', 'staging_url TEXT', 'rollback_status TEXT', 'rollback_to TEXT',
+    'steps_json TEXT', 'failed_step TEXT',
   ]) {
     try { getDb().exec(`ALTER TABLE release_requests ADD COLUMN ${col}`); } catch { /* exists */ }
   }
@@ -242,15 +250,99 @@ function patch(id: string, fields: Partial<ReleaseRequest>): void {
     .run(...keys.map((k) => fields[k] ?? null), id);
 }
 
-function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note' | 'deploy_id' | 'progress_phase' | 'progress_status' | 'pin_until' | 'staging_url' | 'rollback_status' | 'rollback_to'>): ReleaseRequest {
-  withTable(() => getDb().prepare(`INSERT INTO release_requests (id, project, sha, lane, target, desk, reviewer, requested_by, origin, peer, peer_request_id, origin_id, run_id, deploy_agent_id, status, version, deployed_sha, report, error)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(row.id, row.project, row.sha, row.lane, row.target, row.desk, row.reviewer, row.requested_by, row.origin, row.peer, row.peer_request_id, row.origin_id, row.run_id, row.deploy_agent_id, row.status, row.version, row.deployed_sha, row.report, row.error));
+function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note' | 'deploy_id' | 'progress_phase' | 'progress_status' | 'pin_until' | 'staging_url' | 'rollback_status' | 'rollback_to' | 'steps_json' | 'failed_step'> & { steps_json?: string | null }): ReleaseRequest {
+  ensureReleaseTables();
+  withTable(() => getDb().prepare(`INSERT INTO release_requests (id, project, sha, lane, target, desk, reviewer, requested_by, origin, peer, peer_request_id, origin_id, run_id, deploy_agent_id, status, version, deployed_sha, report, error, steps_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(row.id, row.project, row.sha, row.lane, row.target, row.desk, row.reviewer, row.requested_by, row.origin, row.peer, row.peer_request_id, row.origin_id, row.run_id, row.deploy_agent_id, row.status, row.version, row.deployed_sha, row.report, row.error, row.steps_json ?? null));
   return getRelease(row.id)!;
 }
 
 function isTarget(t: unknown): t is ReleaseTarget {
   return t === 'staging' || t === 'production';
+}
+
+/** Health command wins when it prints a SHA. Otherwise the newest deployed staging record. */
+export function currentStagingTip(project: string): StagingTip | null {
+  const health = readStagingHealth(project);
+  let row: ReleaseRequest | null = listReleases({ project, target: 'staging', status: 'deployed', limit: 1 })[0] ?? null;
+  if (health?.sha) {
+    return { sha: health.sha, version: health.version ?? row?.version ?? null, lane: row?.lane ?? null };
+  }
+  if (!row) {
+    row = listReleases({ target: 'staging', status: 'deployed', limit: 20 }).find((item) => item.project == null || item.project === project) ?? null;
+  }
+  if (!row) return null;
+  return { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version, lane: row.lane };
+}
+
+function recordRollback(row: ReleaseRequest, who: string | null, reason: string): void {
+  emit('release.rollback', 'release', row.id, {
+    sha: row.sha, project: row.project, lane: row.lane, reason, who: who ?? 'admin',
+  }, null);
+  void notify({
+    title: `Staging rollback ${row.sha.slice(0, 8)}`,
+    body: `${who ?? 'admin'}: ${reason}`,
+    url: '/release',
+    tag: `rollback-${row.id}`,
+  }).catch(() => {});
+}
+
+/**
+ * The body may omit the project. Use the freeze's project, or the only
+ * configured project. Otherwise refuse — the forward and prereq gates
+ * still have to run.
+ */
+export function resolveReleaseProject(explicit: string | null | undefined, sha?: string | null): { ok: true; project: string } | { ok: false; error: string } {
+  const named = explicit?.trim() ?? '';
+  if (named) return { ok: true, project: named };
+  if (sha) {
+    try {
+      const freeze = getFreeze(sha);
+      if (freeze?.project) return { ok: true, project: freeze.project };
+    } catch { /* freeze table unavailable */ }
+  }
+  const names = Object.keys(getConfig().projects ?? {}).map((name) => name.trim()).filter(Boolean);
+  if (names.length === 1) return { ok: true, project: names[0] };
+  return { ok: false, error: 'project is required' };
+}
+
+/** Open staging rows that are behind main, or behind the staging tip, are rejected. The first error wins. */
+export function rejectStaleStaging(project: string | null): number {
+  let n = 0;
+  const rows = listReleases({ ...(project ? { project } : {}), target: 'staging', limit: 100 });
+  for (const row of rows) {
+    if (row.status !== 'requested' && row.status !== 'sent') continue;
+    const resolved = resolveReleaseProject(row.project ?? project, row.sha);
+    if (!resolved.ok) {
+      const tip = listReleases({ target: 'staging', status: 'deployed', limit: 1 })[0];
+      if (!tip) continue;
+      patch(row.id, { status: 'rejected', error: resolved.error, report: resolved.error });
+      emit('release.reported', 'release', row.id, {
+        status: 'rejected', target: 'staging', sha: row.sha, project: row.project, lane: row.lane, error: resolved.error,
+      }, null);
+      n++;
+      continue;
+    }
+    const verdict = evaluateForward({
+      project: resolved.project,
+      requestedSha: row.sha,
+      staging: currentStagingTip(resolved.project),
+    });
+    if (verdict.ok) continue;
+    patch(row.id, { status: 'rejected', error: verdict.error, report: verdict.error });
+    emit('release.reported', 'release', row.id, {
+      status: 'rejected', target: 'staging', sha: row.sha, project: resolved.project, lane: row.lane, error: verdict.error,
+    }, null);
+    n++;
+  }
+  return n;
+}
+
+function productionSteps(project: string, sha: string, who: string | null): { ok: true; steps: GoStep[] | null } | { ok: false; error: string } {
+  const gate = productionPrereqGate(project, sha, who);
+  if (!gate.ok) return gate;
+  return { ok: true, steps: gate.steps };
 }
 
 // --- requester side ---------------------------------------------------------------------
@@ -274,6 +366,9 @@ export interface RequestReleaseOpts {
   runId?: string | null;
   /** free text forwarded to the deployer (e.g. the lanes a candidate contains) */
   note?: string | null;
+  /** Admin-only. Skips the staging-ancestor check, not the main check. Requires forceReason. */
+  forceRollback?: boolean;
+  forceReason?: string | null;
 }
 
 /**
@@ -284,8 +379,34 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   if (!SHA_RE.test(opts.sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(opts.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
   if (opts.target === 'production' && opts.actorIsAdmin !== true) return { ok: false, error: PRODUCTION_RELEASE_ADMIN_ONLY };
+  const resolvedProject = resolveReleaseProject(opts.project, opts.sha);
+  if (!resolvedProject.ok) return resolvedProject;
+  opts = { ...opts, project: resolvedProject.project };
   const behind = releaseBehindMain(opts.project, opts.sha);
   if (behind) return { ok: false, error: behind };
+  let stepsJson: string | null = null;
+  let rollbackReason: string | null = null;
+  if (opts.target === 'production') {
+    const gate = productionSteps(opts.project, opts.sha, opts.actorName);
+    if (!gate.ok) return gate;
+    stepsJson = gate.steps ? JSON.stringify(gate.steps) : null;
+  }
+  if (opts.target === 'staging') {
+    rejectStaleStaging(opts.project);
+    const forward = evaluateForward({
+      project: opts.project,
+      requestedSha: opts.sha,
+      staging: currentStagingTip(opts.project),
+      forceRollback: opts.forceRollback,
+      forceReason: opts.forceReason,
+      actorIsAdmin: opts.actorIsAdmin,
+    });
+    if (!forward.ok) {
+      if (opts.lane) alertBehind({ lane: opts.lane, project: opts.project });
+      return forward;
+    }
+    if (forward.rollback && forward.reason) rollbackReason = forward.reason;
+  }
   try {
     const freeze = getFreeze(opts.sha);
     if (freeze && opts.target === 'staging') {
@@ -317,6 +438,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     version: null,
     deployed_sha: null,
     report: opts.note ?? null,
+    steps_json: stepsJson,
   };
 
   if (project.release_peer) {
@@ -326,7 +448,8 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
       sha: opts.sha, lane: opts.lane ?? null, target: opts.target, project: opts.project, desk: opts.desk ?? null,
       reviewer: opts.reviewer ?? null, requested_by: opts.actorName, requester_is_admin: opts.actorIsAdmin === true,
       // Production forwards the originating user. Staging bodies stay as they were.
-      ...(opts.target === 'production' ? { requester_role: opts.actorRole ?? null } : {}),
+      ...(opts.target === 'production' ? { requester_role: opts.actorRole ?? null, steps: stepsJson } : {}),
+      ...(opts.forceRollback ? { force_rollback: true, force_reason: opts.forceReason ?? null } : {}),
       origin_id: id, origin_box: os.hostname(), note: opts.note ?? null,
     });
     if (!remote.ok || !remote.data?.id) {
@@ -338,6 +461,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     patch(id, { status: 'sent', peer_request_id: remote.data.id });
     const sent = getRelease(id)!;
     emit('release.requested', 'release', id, { target: opts.target, sha: opts.sha, project: opts.project, lane: opts.lane ?? null, desk: opts.desk ?? null, peer: peerName, peer_request_id: remote.data.id, requested_by: opts.actorName, run_id: opts.runId ?? null });
+    if (rollbackReason) recordRollback(sent, opts.actorName, rollbackReason);
     ensureReleasePoller(peerName);
     return { ok: true, data: sent };
   }
@@ -345,7 +469,9 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   if (cfg.releases?.deploy_agent) {
     // this box deploys itself
     const row = insert({ ...base, origin: 'local', peer: null, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
-    return handToDeployAgent(row);
+    const handed = handToDeployAgent(row);
+    if (handed.ok && rollbackReason) recordRollback(handed.data, opts.actorName, rollbackReason);
+    return handed;
   }
   return { ok: false, error: `Project '${opts.project}' has no release_peer and this box has no releases.deploy_agent` };
 }
@@ -355,6 +481,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
 export interface IncomingRelease {
   sha?: unknown; lane?: unknown; target?: unknown; project?: unknown; desk?: unknown; reviewer?: unknown;
   requested_by?: unknown; requester_role?: unknown; requester_is_admin?: unknown; origin_id?: unknown; origin_box?: unknown; note?: unknown;
+  force_rollback?: unknown; force_reason?: unknown; steps?: unknown;
 }
 
 function forwardedUser(body: IncomingRelease): { name: string | null; role: string | null } {
@@ -377,7 +504,7 @@ export function peerProductionAllowed(body: IncomingRelease): Result<true> {
 }
 
 /** A request from a peer box (or a local caller): store it and hand it to the deploy agent. */
-export function acceptRelease(body: IncomingRelease, via: { userName: string; fromPeer: boolean }): Result<ReleaseRequest> {
+export function acceptRelease(body: IncomingRelease, via: { userName: string; fromPeer: boolean; actorIsAdmin?: boolean }): Result<ReleaseRequest> {
   const sha = typeof body.sha === 'string' ? body.sha.trim().toLowerCase() : '';
   if (!SHA_RE.test(sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(body.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
@@ -388,11 +515,47 @@ export function acceptRelease(body: IncomingRelease, via: { userName: string; fr
     if (!allowed.ok) return allowed;
   }
   const str = (v: unknown, max = 200) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+  if (!str(body.project, 64)) {
+    const openRetry = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
+    if (openRetry) {
+      if (body.target === 'staging') rejectStaleStaging(openRetry.project);
+      const fresh = getRelease(openRetry.id);
+      if (fresh && (fresh.status === 'requested' || fresh.status === 'sent')) return { ok: true, data: fresh };
+      if (fresh?.status === 'rejected') return { ok: false, error: fresh.error ?? 'rejected' };
+    }
+  }
+  const resolvedProject = resolveReleaseProject(str(body.project, 64), sha);
+  if (!resolvedProject.ok) return resolvedProject;
+  const projectName = resolvedProject.project;
+  let stepsJson: string | null = typeof body.steps === 'string' ? body.steps : null;
+  let rollbackReason: string | null = null;
+  if (body.target === 'production') {
+    const gate = productionSteps(projectName, sha, str(body.requested_by, 64));
+    if (!gate.ok) return gate;
+    if (gate.steps) stepsJson = JSON.stringify(gate.steps);
+  }
+  if (body.target === 'staging') {
+    rejectStaleStaging(projectName);
+    const forward = evaluateForward({
+      project: projectName,
+      requestedSha: sha,
+      staging: currentStagingTip(projectName),
+      forceRollback: body.force_rollback === true,
+      forceReason: typeof body.force_reason === 'string' ? body.force_reason : null,
+      actorIsAdmin: via.actorIsAdmin === true,
+    });
+    if (!forward.ok) {
+      const lane = str(body.lane, 120);
+      if (lane) alertBehind({ lane, project: projectName });
+      return forward;
+    }
+    if (forward.rollback && forward.reason) rollbackReason = forward.reason;
+  }
   const open = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
   if (open) return { ok: true, data: open }; // idempotent: a retried request is the same request
   const row = insert({
     id: ulid(),
-    project: str(body.project, 64),
+    project: projectName,
     sha,
     lane: str(body.lane, 120),
     target: body.target,
@@ -410,8 +573,11 @@ export function acceptRelease(body: IncomingRelease, via: { userName: string; fr
     deployed_sha: null,
     report: str(body.note, 2000),
     error: null,
+    steps_json: stepsJson,
   });
-  return handToDeployAgent(row);
+  const handed = handToDeployAgent(row);
+  if (handed.ok && rollbackReason) recordRollback(handed.data, str(body.requested_by, 64) ?? via.userName, rollbackReason);
+  return handed;
 }
 
 function deployAgent(): Result<Agent> {
@@ -431,11 +597,23 @@ export function releasePromptText(r: ReleaseRequest): string {
     `Deploy exact SHA ${r.sha}${r.lane ? ` (lane ${r.lane})` : ''}${r.project ? ` of ${r.project}` : ''}${r.desk ? ` for Desk #${r.desk}` : ''} to ${r.target}.`,
     r.reviewer ? `Independent review: @${r.reviewer} VERDICT: PASS on this exact SHA.` : null,
     r.report && r.status === 'requested' ? `Note from the requester: ${r.report}` : null,
+    r.target === 'production' ? stepsText(r.steps_json) : null,
     'Gate the exact SHA per your runbook, assign the version, deploy, verify.',
     `When done, report with the report_release tool (id ${r.id}) or print exactly one line:`,
     `RELEASED ${r.id}: deployed <sha> version <x.y.z> to ${r.target}`,
     `or, if you could not: RELEASE FAILED ${r.id}: <why>`,
   ].filter(Boolean).join('\n');
+}
+
+function stepsText(stepsJson: string | null): string | null {
+  if (!stepsJson) return null;
+  try {
+    const steps = JSON.parse(stepsJson) as GoStep[];
+    if (!Array.isArray(steps) || steps.length === 0) return null;
+    return stepsPrompt(steps);
+  } catch {
+    return null;
+  }
 }
 
 function stagingCommand(): string[] | null {
@@ -645,7 +823,11 @@ export function resumeStagingDeploys(): void {
   let open: ReleaseRequest[] = [];
   try { open = listReleases({ target: 'staging', status: 'sent', limit: 50 }); } catch { return; }
   for (const row of open) {
+    if (row.status === 'rejected') continue;
     if (!row.deploy_id || stagingChildren.has(row.id)) continue;
+    rejectStaleStaging(row.project);
+    const fresh = getRelease(row.id);
+    if (!fresh || fresh.status === 'rejected' || fresh.status !== 'sent') continue;
     const argv = fillArgv(watch, { deploy_id: row.deploy_id, sha: row.sha, lane: row.lane, desk: row.desk });
     if (argv.length === 0) continue;
     spawnStaging(row, argv);
@@ -674,6 +856,8 @@ export interface ReleaseReport {
   sha?: string | null;
   note?: string | null;
   byAgentId?: string | null;
+  /** Which ordered step failed. Recorded on the release and shown in the audit. */
+  failed_step?: string | null;
 }
 
 /** The deploy agent's outcome (MCP tool, API, or a RELEASED / RELEASE FAILED line). */
@@ -692,6 +876,7 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     deployed_sha: report.status === 'deployed' ? r.sha : null,
     report: report.note?.trim().slice(0, 4000) || null,
     error: report.status === 'deployed' ? null : (report.note?.trim().slice(0, 1000) || report.status),
+    failed_step: report.failed_step?.trim().slice(0, 80) || null,
     reported_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
   });
   const done = getRelease(id)!;
@@ -701,7 +886,11 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     deploy_agent_id: report.byAgentId ?? done.deploy_agent_id, requested_by: done.requested_by,
   }, null);
   if (done.origin === 'local') announce(done);
-  if (done.target === 'staging' && done.status === 'deployed') fireStagingDeployed(done.id);
+  if (done.target === 'staging' && done.status === 'deployed') {
+    rejectStaleStaging(done.project);
+    try { alertLanesPastStaging(done.project, done.deployed_sha || done.sha); } catch { /* alert is best-effort */ }
+    fireStagingDeployed(done.id);
+  }
   return { ok: true, data: done };
 }
 
@@ -730,7 +919,7 @@ export function verifyStaging(id: string, by: { name: string }, note: string | n
 export interface AuditEntry {
   at: string;
   who: string;
-  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto';
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq';
   target: ReleaseTarget | null;
   sha: string | null;
   project: string | null;
@@ -747,7 +936,8 @@ export function auditTrail(limit = 200): AuditEntry[] {
     const who = r.requested_by ?? 'unknown';
     out.push({ at: r.created_at, who, action: who === 'overlord' || who === 'auto' ? 'auto-stage' : r.target === 'production' ? 'promote' : 'stage', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.lane ? `lane ${r.lane}` : r.report, release_id: r.id, run_id: r.run_id });
     if (r.reported_at && (r.status === 'deployed' || r.status === 'failed' || r.status === 'rejected')) {
-      out.push({ at: r.reported_at, who: r.deploy_agent_id ? `deployer (${r.deploy_agent_id.slice(-6)})` : (r.peer ? `deployer via ${r.peer}` : 'deployer'), action: r.status === 'deployed' ? 'deployed' : 'failed', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.status === 'deployed' ? (r.version ? `v${r.version}` : r.report) : (r.error ?? r.report), release_id: r.id, run_id: r.run_id });
+      const failedDetail = [r.error ?? r.report, r.failed_step ? `step ${r.failed_step}` : null].filter(Boolean).join(' — ');
+      out.push({ at: r.reported_at, who: r.deploy_agent_id ? `deployer (${r.deploy_agent_id.slice(-6)})` : (r.peer ? `deployer via ${r.peer}` : 'deployer'), action: r.status === 'deployed' ? 'deployed' : 'failed', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.status === 'deployed' ? (r.version ? `v${r.version}` : r.report) : failedDetail, release_id: r.id, run_id: r.run_id });
     }
   }
   const verifications = withTable(() => getDb().prepare('SELECT * FROM release_verifications ORDER BY verified_at DESC LIMIT ?').all(limit) as Verification[]);
@@ -770,6 +960,20 @@ export function auditTrail(limit = 200): AuditEntry[] {
     const fz = p.freeze && typeof p.freeze === 'object' ? p.freeze as Record<string, unknown> : null;
     if (!fz) continue; // only release freezes belong to this trail
     out.push({ at: e.created_at, who: e.user_name ?? 'owner', action: 'reject', target: null, sha: typeof fz.sha === 'string' ? fz.sha : null, project: typeof fz.project === 'string' ? fz.project : null, desk: fz.desk != null ? String(fz.desk) : null, detail: typeof p.reason === 'string' ? p.reason : null, release_id: null, run_id: e.run_id });
+  }
+  const extras = getDb().prepare(
+    `SELECT created_at, type, payload_json FROM events WHERE type IN ('release.rollback', 'release.prereq') ORDER BY id DESC LIMIT ?`,
+  ).all(limit) as Array<{ created_at: string; type: string; payload_json: string | null }>;
+  for (const e of extras) {
+    let payload: { who?: string; sha?: string; project?: string; reason?: string; error?: string; id?: string; output?: string; lane?: string } = {};
+    try { payload = e.payload_json ? JSON.parse(e.payload_json) as typeof payload : {}; } catch { /* ignore */ }
+    const prereq = e.type === 'release.prereq';
+    out.push({
+      at: e.created_at, who: payload.who ?? 'unknown', action: prereq ? 'prereq' : 'rollback',
+      target: prereq ? 'production' : 'staging', sha: payload.sha ?? null, project: payload.project ?? null, desk: null,
+      detail: prereq ? (payload.error ?? payload.id ?? null) : (payload.reason ?? null),
+      release_id: null, run_id: null,
+    });
   }
   const autos = getDb().prepare(
     `SELECT created_at, payload_json FROM events WHERE type = 'pipeline.action' ORDER BY id DESC LIMIT ?`,

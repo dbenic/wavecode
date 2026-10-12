@@ -120,13 +120,78 @@ function pingKey(lane: string, mainSha: string): string {
   return `${lane}:${mainSha}`;
 }
 
-export function alreadyMainPinged(lane: string, mainSha: string): boolean {
+const REPEAT_MS = 30 * 60 * 1000;
+let nowMs = (): number => Date.now();
+
+/** Tests inject the clock so a 30-minute repeat does not wait. */
+export function setLaneAlertNowForTest(fn: (() => number) | null): void {
+  nowMs = fn ?? (() => Date.now());
+}
+
+export function behindMainAlert(lane: string): string {
+  return `Your lane ${lane} is behind main. Run: git fetch origin && git merge origin/main, fix any conflicts, run the quick check, then write your freeze note. Nothing else to do.`;
+}
+
+export function mergedMainAlert(lane: string): string {
+  return `Merged latest main into ${lane} for you; quick check running. You don't need to do anything unless it goes red.`;
+}
+
+function latestPing(lane: string, mainSha: string): { at: number } | null {
   try {
-    const row = getDb().prepare('SELECT id FROM events WHERE type = ? AND entity_id = ? LIMIT 1').get(MAIN_PING, pingKey(lane, mainSha)) as { id: number } | undefined;
-    return !!row;
+    const row = getDb().prepare(
+      'SELECT payload_json, created_at FROM events WHERE type = ? AND entity_id = ? ORDER BY id DESC LIMIT 1',
+    ).get(MAIN_PING, pingKey(lane, mainSha)) as { payload_json: string | null; created_at: string } | undefined;
+    if (!row) return null;
+    if (row.payload_json) {
+      const payload = JSON.parse(row.payload_json) as { at?: unknown };
+      if (typeof payload.at === 'number') return { at: payload.at };
+    }
+    const parsed = Date.parse(row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`);
+    return { at: Number.isNaN(parsed) ? 0 : parsed };
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function alreadyMainPinged(lane: string, mainSha: string): boolean {
+  const latest = latestPing(lane, mainSha);
+  if (!latest) return false;
+  return nowMs() - latest.at < REPEAT_MS;
+}
+
+function laneTipSha(project: string | null, lane: string): string | null {
+  const repo = projectRepo(project);
+  if (!repo) return null;
+  const spec = mainSpec(project);
+  const remote = git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${spec.remote}/${lane}^{commit}`]);
+  if (remote && /^[0-9a-f]{40}$/i.test(remote)) return remote;
+  const local = git(repo, ['rev-parse', '--verify', '--quiet', `${lane}^{commit}`]);
+  return local && /^[0-9a-f]{40}$/i.test(local) ? local : null;
+}
+
+function stillBehind(project: string | null, lane: string): boolean {
+  const tip = laneTipSha(project, lane);
+  if (!tip) return false;
+  const n = commitsBehind(project, tip);
+  return n != null && n > 0;
+}
+
+/** A PASS on a SHA that does not contain this main still counts as unreviewed. */
+function stillUnreviewed(project: string | null, lane: string, mainSha: string): boolean {
+  const repo = projectRepo(project);
+  let rows: { sha: string }[] = [];
+  try {
+    rows = getDb().prepare(
+      "SELECT sha FROM release_freezes WHERE lane = ? AND verdict = 'pass'",
+    ).all(lane) as { sha: string }[];
+  } catch {
+    return true;
+  }
+  if (!repo) return true;
+  for (const row of rows) {
+    if (isAncestor(repo, mainSha, row.sha) === true) return false;
+  }
+  return true;
 }
 
 function authorForLane(lane: string, authorAgentId: string | null, authorName: string | null): Agent | null {
@@ -143,9 +208,12 @@ function authorForLane(lane: string, authorAgentId: string | null, authorName: s
 }
 
 /**
- * One delivery per lane per main SHA. `freeze` is the merge-and-refreeze
- * instruction; `moved` is the short "main moved" notice. Whichever lands
- * first is the one the author sees.
+ * One plain alert per lane per main SHA. The same sentence is used when main
+ * moves, staging moves past the lane, or Stage is refused for being behind.
+ * A second send inside 30 minutes is dropped. After 30 minutes it is sent
+ * again only while the lane is still behind and still has no PASS on a SHA
+ * that contains this main. `merged` is the auto-merge sentence and shares
+ * the same dedupe key.
  */
 export function pingLaneAboutMain(opts: {
   lane: string;
@@ -154,22 +222,49 @@ export function pingLaneAboutMain(opts: {
   subject?: string | null;
   authorAgentId?: string | null;
   authorName?: string | null;
-  kind: 'freeze' | 'moved';
+  kind: 'freeze' | 'moved' | 'merged';
 }): boolean {
   if (!opts.lane || !opts.mainSha) return false;
-  if (alreadyMainPinged(opts.lane, opts.mainSha)) return false;
+  const latest = latestPing(opts.lane, opts.mainSha);
+  if (latest) {
+    if (nowMs() - latest.at < REPEAT_MS) return false;
+    if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) return false;
+  }
   const agent = authorForLane(opts.lane, opts.authorAgentId ?? null, opts.authorName ?? null);
   if (!agent) return false;
-  const spec = mainSpec(opts.project);
-  const sha8 = opts.mainSha.slice(0, 8);
-  const text = opts.kind === 'moved'
-    ? `main moved to ${sha8}${opts.subject ? ` (${opts.subject})` : ''}; merge it now`
-    : `Merge ${spec.remote}/${spec.branch} into this lane (merge, not rebase, so existing review records keep their SHAs), rerun the quick check, then refreeze.`;
+  const text = opts.kind === 'merged' ? mergedMainAlert(opts.lane) : behindMainAlert(opts.lane);
   deliverSystemLine(agent, text, { kind: 'info', source: 'main' });
   emit(MAIN_PING, 'lane', pingKey(opts.lane, opts.mainSha), {
-    lane: opts.lane, project: opts.project, main_sha: opts.mainSha, kind: opts.kind,
+    lane: opts.lane, project: opts.project, main_sha: opts.mainSha, kind: opts.kind, at: nowMs(),
   }, null);
   return true;
+}
+
+/** The behind-main sentence, deduped per lane per current main SHA. */
+export function alertBehind(opts: {
+  lane: string;
+  project: string | null;
+  authorAgentId?: string | null;
+  authorName?: string | null;
+}): boolean {
+  const repo = projectRepo(opts.project);
+  const tip = repo ? mainTip(repo, opts.project) : null;
+  if (!tip) return false;
+  return pingLaneAboutMain({
+    lane: opts.lane, project: opts.project, mainSha: tip.sha, subject: tip.subject,
+    authorAgentId: opts.authorAgentId, authorName: opts.authorName, kind: 'moved',
+  });
+}
+
+/** Clean auto-merge sentence. Same dedupe key as the behind alert. */
+export function alertMerged(opts: {
+  lane: string;
+  project: string | null;
+  mainSha: string;
+  authorAgentId?: string | null;
+  authorName?: string | null;
+}): boolean {
+  return pingLaneAboutMain({ ...opts, kind: 'merged' });
 }
 
 function kvGet(key: string): string | null {
@@ -212,9 +307,9 @@ export function observeRepo(repo: string): void {
     const prev = kvGet(key);
     try { kvSet(key, tip.sha); } catch (e) { logger.debug({ error: (e as Error).message }, 'main tip not stored'); continue; }
     if (!prev || prev === tip.sha) continue;
-    notifyBehindLanes(name, repo, tip.sha, tip.subject, project.lane_glob || 'wc-*');
     const switches = (project as { pipeline?: { auto_merge_main?: boolean } }).pipeline;
     if (switches?.auto_merge_main === true) fireMainAdvanced(name, tip.sha);
+    else notifyBehindLanes(name, repo, tip.sha, tip.subject, project.lane_glob || 'wc-*');
   }
 }
 
@@ -247,6 +342,39 @@ function notifyBehindLanes(project: string, repo: string, mainSha: string, subje
         "UPDATE release_freezes SET status = 'behind-main', updated_at = datetime('now') WHERE project = ? AND lane = ? AND status = 'open'",
       ).run(project, lane);
     } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Staging moved. Tell each developer lane that does not contain the new
+ * staging SHA. The dedupe key is still the lane plus current main, so a
+ * staging-only move does not send a second message inside 30 minutes.
+ */
+export function alertLanesPastStaging(project: string | null, stagingSha: string): void {
+  if (!project || !/^[0-9a-f]{40}$/i.test(stagingSha)) return;
+  const repo = projectRepo(project);
+  const tip = repo ? mainTip(repo, project) : null;
+  if (!repo || !tip) return;
+  const glob = getConfig().projects?.[project]?.lane_glob || 'wc-*';
+  const re = laneGlobRe(glob);
+  const names = new Set<string>();
+  const listed = git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes']);
+  for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const name = short.replace(/^[^/]+\//, '');
+    if (name === 'HEAD' || name === mainSpec(project).branch) continue;
+    if (re.test(name)) names.add(name);
+  }
+  try {
+    const rows = getDb().prepare(
+      "SELECT lane FROM release_freezes WHERE project = ? AND lane IS NOT NULL",
+    ).all(project) as { lane: string }[];
+    for (const row of rows) if (re.test(row.lane) || row.lane.startsWith('wc-')) names.add(row.lane);
+  } catch { /* table missing */ }
+  for (const lane of names) {
+    const ref = laneTipSha(project, lane);
+    if (!ref) continue;
+    if (isAncestor(repo, stagingSha, ref) !== false) continue;
+    pingLaneAboutMain({ lane, project, mainSha: tip.sha, subject: tip.subject, kind: 'moved' });
   }
 }
 

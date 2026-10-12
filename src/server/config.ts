@@ -51,6 +51,16 @@ export interface ProjectGateConfig {
   baseline_glob?: string;
 }
 
+export interface PrereqCheckConfig {
+  /** Argv template. `{sha}` and `{project}` are replaced. Exit 0 passes. */
+  command: string[];
+  /** `exit` (default) or `ndjson` (read a named field from the last JSON line that has it). */
+  type?: 'exit' | 'ndjson';
+  field?: string;
+  compare?: '>=' | '>' | '==' | '<=' | '<' | '!=';
+  value?: number | string;
+}
+
 export interface ProjectConfig {
   // Glob or prefix matched against agents.workspace (e.g. "**/" + "wavepulse*").
   workspace_match: string;
@@ -135,6 +145,12 @@ export interface ProjectConfig {
     /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
     freeze_dir?: string;
   };
+  /**
+   * Operational checks named by a freeze note's `prereqs:` block. Absent
+   * means no extra Promote gate. A declared id with no entry refuses Promote.
+   * Commands run as argv on this box (the deploy box). `code_deploy` is not a check.
+   */
+  prereq_checks?: Record<string, PrereqCheckConfig>;
 }
 
 export interface PeerConfig {
@@ -282,6 +298,12 @@ export interface WaveConfig {
     production_approvers?: string[];
     staging_command?: string[];
     staging_watch_command?: string[];
+    /**
+     * Optional argv that prints the SHA (and version) actually on staging.
+     * When it returns a SHA it wins over the latest deployed record.
+     * Off unless set. `{project}` is optional.
+     */
+    staging_health_command?: string[];
   };
   /**
    * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
@@ -430,6 +452,42 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
   }
 }
 
+const PREREQ_ID = /^[\w.><=!+-]{1,80}$/;
+const COMPARE_OPS = new Set(['>=', '>', '==', '<=', '<', '!=']);
+
+function validatePrereqChecks(name: string, checks: ProjectConfig['prereq_checks']): void {
+  if (checks === undefined) return;
+  if (typeof checks !== 'object' || checks === null || Array.isArray(checks)) {
+    throw new Error(`projects.${name}.prereq_checks must be a map of id to check`);
+  }
+  for (const [id, spec] of Object.entries(checks)) {
+    if (!PREREQ_ID.test(id)) throw new Error(`projects.${name}.prereq_checks key '${id}' is not a prereq id`);
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+      throw new Error(`projects.${name}.prereq_checks.${id} must be a check`);
+    }
+    validateArgvList(`projects.${name}.prereq_checks.${id}.command`, spec.command);
+    if (!spec.command?.length) throw new Error(`projects.${name}.prereq_checks.${id}.command must be a non-empty list of arguments`);
+    if (spec.command.some((part) => part.includes('..'))) {
+      throw new Error(`projects.${name}.prereq_checks.${id}.command must not contain '..'`);
+    }
+    const type = spec.type ?? 'exit';
+    if (type !== 'exit' && type !== 'ndjson') {
+      throw new Error(`projects.${name}.prereq_checks.${id}.type must be exit or ndjson`);
+    }
+    if (type === 'ndjson') {
+      if (typeof spec.field !== 'string' || !spec.field.trim()) {
+        throw new Error(`projects.${name}.prereq_checks.${id}.field is required for ndjson`);
+      }
+      if (typeof spec.compare !== 'string' || !COMPARE_OPS.has(spec.compare)) {
+        throw new Error(`projects.${name}.prereq_checks.${id}.compare must be one of >= > == <= < !=`);
+      }
+      if (typeof spec.value !== 'number' && typeof spec.value !== 'string') {
+        throw new Error(`projects.${name}.prereq_checks.${id}.value is required for ndjson`);
+      }
+    }
+  }
+}
+
 function validateSuiteNames(name: string, suites: string[] | undefined): void {
   if (suites === undefined) return;
   if (!Array.isArray(suites) || suites.length === 0 || suites.some((s) => typeof s !== 'string' || !SUITE_NAME.test(s))) {
@@ -467,6 +525,7 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   validateArgvTemplate('releases.staging_command', cfg.releases?.staging_command, '{sha}');
   validateArgvTemplate('releases.staging_watch_command', cfg.releases?.staging_watch_command, '{deploy_id}');
+  validateArgvList('releases.staging_health_command', cfg.releases?.staging_health_command);
   if (cfg.artifacts.fixture_inbox !== undefined) {
     if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
       throw new Error('artifacts.fixture_inbox must be a list of directory paths');
@@ -512,6 +571,7 @@ export function validateConfig(cfg: WaveConfig): void {
       validateSuiteNames(`projects.${name}.tests.full_suites`, project.tests.full_suites);
     }
     validatePipeline(name, project.pipeline);
+    validatePrereqChecks(name, project.prereq_checks);
     if (project.release_peer !== undefined) {
       const m = /^([a-z][a-z0-9_-]*)\/(@?[\w.-]+)$/.exec(project.release_peer);
       if (!m) throw new Error(`projects.${name}.release_peer must look like peer/agent (e.g. deploy/fable)`);

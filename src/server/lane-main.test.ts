@@ -11,7 +11,8 @@ const projects: Record<string, { repo?: string; workspace_match?: string; lane_g
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { commitsBehind, isMergeOnlyDelta, MAIN_PING, observeRepo, pingLaneAboutMain } from './lane-main.js';
+import { alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest } from './lane-main.js';
+import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 
@@ -44,6 +45,7 @@ describe('lane main ancestry', () => {
   });
 
   afterEach(() => {
+    setLaneAlertNowForTest(null);
     db.resetDbForTest();
     fs.rmSync(tmp, { recursive: true, force: true });
     delete projects.wave;
@@ -76,7 +78,7 @@ describe('lane main ancestry', () => {
     expect(pings()[0].entity_id).toBe(`wc-ales:${first}`);
     expect(JSON.parse(pings()[0].payload_json).kind).toBe('moved');
     const messages = db.listAgentMessages({ limit: 10 });
-    expect(messages.some((m) => m.message.includes(`main moved to ${first.slice(0, 8)}`))).toBe(true);
+    expect(messages.some((m) => m.message.includes('Your lane wc-ales is behind main.'))).toBe(true);
     observeRepo(repo);
     expect(pings()).toHaveLength(1);
     expect(pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: first, kind: 'freeze' })).toBe(false);
@@ -98,5 +100,50 @@ describe('lane main ancestry', () => {
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'more lane work');
     expect(isMergeOnlyDelta(repo, oldSha, git(repo, 'rev-parse', 'HEAD'), 'origin/main')).toBe(false);
+  });
+
+  it('repeats the behind alert after 30 minutes only while the lane is still behind and unreviewed', () => {
+    let now = 1_700_000_000_000;
+    setLaneAlertNowForTest(() => now);
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'm.txt'), 'later');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main moved');
+    const mainSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
+    const oldLane = git(repo, 'rev-parse', 'wc-ales');
+    const ping = () => pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' });
+    expect(ping()).toBe(true);
+    expect(ping()).toBe(false);
+    now += 30 * 60 * 1000;
+    expect(ping()).toBe(true);
+    const rows = () => db.getDb().prepare('SELECT payload_json FROM events WHERE type = ?').all(MAIN_PING) as { payload_json: string }[];
+    expect(rows()).toHaveLength(2);
+    expect(rows().every((row) => JSON.parse(row.payload_json).kind === 'moved')).toBe(true);
+    const messages = db.listAgentMessages({ limit: 10 }).map((m) => m.message);
+    expect(messages.filter((m) => m === behindMainAlert('wc-ales'))).toHaveLength(2);
+
+    ensureReleaseFreezeTable();
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, project, lane, verdict, status) VALUES (?, 'wave', 'wc-ales', 'pass', 'open')`,
+    ).run(oldLane);
+    now += 30 * 60 * 1000;
+    expect(ping()).toBe(true);
+
+    db.getDb().prepare('DELETE FROM release_freezes').run();
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, project, lane, verdict, status) VALUES (?, 'wave', 'wc-ales', 'pass', 'open')`,
+    ).run(mainSha);
+    now += 30 * 60 * 1000;
+    expect(ping()).toBe(false);
+  });
+
+  it('uses the auto-merge sentence and does not also send the behind alert', () => {
+    const mainSha = git(repo, 'rev-parse', 'origin/main');
+    expect(alertMerged({ lane: 'wc-ales', project: 'wave', mainSha })).toBe(true);
+    const messages = db.listAgentMessages({ limit: 5 }).map((m) => m.message);
+    expect(messages).toContain(mergedMainAlert('wc-ales'));
+    expect(messages.some((m) => m.includes('behind main'))).toBe(false);
+    expect(pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' })).toBe(false);
   });
 });

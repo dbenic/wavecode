@@ -200,9 +200,22 @@ projects:
         codex2: claude1
       review_deny: [codex1]
       freeze_dir: /home/wave/inbox/freezes
+    # Off unless a freeze note declares prereqs. Commands are argv, run on the deploy box.
+    prereq_checks:
+      db_roles_applied:
+        command: [check-roles, '{sha}']
+      "prod_owner_count>=2":
+        command: [preflight, '{sha}']
+        type: ndjson
+        field: prod_owner_count
+        compare: '>='
+        value: 2
   max_fix_loops: 2               # bounded fix→re-review rounds
   require_pass_to_promote: true  # promote gate even without auto_review
   gate_dependents_on_approval: true  # DAG advances on approval, not 'done'
+releases:
+  # Optional. Prints the SHA actually on staging; wins over the deployed record. Off unless set.
+  staging_health_command: [staging-health, '{project}']
 autonomy:
   verify_completion: true        # LLM sanity-check on task completion
   hang_timeout_min: 10

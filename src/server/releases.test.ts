@@ -288,7 +288,7 @@ describe('releases.ts', () => {
       const staging = await rel.requestRelease({ project: 'wavepulse', sha: behind, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
       expect(staging.ok).toBe(false);
       if (staging.ok) return;
-      expect(staging.error).toMatch(/^behind main by \d+ — merge latest main$/);
+      expect(staging.error).toBe('behind main: merge main');
       const production = await rel.requestRelease({ project: 'wavepulse', sha: behind, target: 'production', actorName: 'denis', actorIsAdmin: true });
       expect(production.ok).toBe(false);
       if (!production.ok) expect(production.error).toBe(staging.error);
@@ -532,7 +532,11 @@ describe('releases.ts', () => {
       expect(rel.reportRelease(staged.id, { status: 'deployed', sha: tip, version: '0.1.0' }).ok).toBe(true);
 
       const allowed = await runWithActor(dev.data.user.id, async () => rq.stage(card.run.id));
-      expect(allowed.ok).toBe(true);
+      expect(allowed.ok).toBe(false);
+      if (!allowed.ok) {
+        expect(allowed.error).toMatch(/would roll staging back:/);
+        expect(allowed.error).not.toMatch(/PASS/);
+      }
       rfz.setFetchDisabledForTest(false);
       rel.stopReleasePollers();
     });
@@ -698,7 +702,7 @@ describe('releases.ts', () => {
 
     it('without a deploy agent the request fails loudly instead of vanishing', () => {
       cfg.releases = {};
-      const r = rel.acceptRelease({ sha: SHA, target: 'staging' }, { userName: 'peer', fromPeer: true });
+      const r = rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
       expect(r.ok).toBe(false);
       expect(rel.listReleases({ sha: SHA })[0]).toMatchObject({ status: 'failed', error: expect.stringMatching(/deploy_agent/) });
     });
@@ -750,7 +754,7 @@ describe('releases.ts', () => {
       expect(vi.mocked(emit)).toHaveBeenCalledWith('release.reported', 'release', staged.data.id, expect.objectContaining({ status: 'deployed', version: '1.2.3' }), null);
 
       cfg.releases = { ...cfg.releases, staging_command: ['node', replay, failed, '1', '{sha}'] };
-      const broke = rel.acceptRelease({ sha: SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      const broke = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
       expect(broke.ok).toBe(true);
       if (!broke.ok) return;
       for (let i = 0; i < 50 && rel.getRelease(broke.data.id)!.status !== 'failed'; i++) await flush(20);
@@ -762,7 +766,7 @@ describe('releases.ts', () => {
       cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'], staging_command: ['node', replay, success, '0', '{sha}'] };
       fs.writeFileSync(path.join(tmp, 'touch.cjs'), "require('fs').writeFileSync(process.argv[2], 'ran');\n");
       cfg.releases.staging_command = ['node', path.join(tmp, 'touch.cjs'), marker, '{sha}'];
-      const prod = rel.acceptRelease({ sha: SHA_B, target: 'production', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
+      const prod = rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
       expect(prod.ok).toBe(true);
       expect(typedInto(fable.id)[0]).toMatch(/authorization for PRODUCTION/);
       await flush(40);
@@ -803,7 +807,7 @@ describe('releases.ts', () => {
         staging_command: ['node', hold, '{sha}'],
         staging_watch_command: ['node', watch, '{deploy_id}', success],
       };
-      const staged = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      const staged = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
       expect(staged.ok).toBe(true);
       if (!staged.ok) return;
       for (let i = 0; i < 50 && rel.getRelease(staged.data.id)?.deploy_id !== '20261012T120000Z-abc123abc'; i++) await flush(20);

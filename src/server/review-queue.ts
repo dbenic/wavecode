@@ -26,6 +26,7 @@ import { currentActorId, currentActorIsAdmin } from './request-context.js';
 import { OWNER_USER_ID } from './users.js';
 import * as freezes from './release-freezes.js';
 import * as releases from './releases.js';
+import { productionPrereqGate } from './prereqs.js';
 
 export interface ReviewItem {
   run: Run;
@@ -85,6 +86,10 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
     // A green full gate is required even when an admin overrides a non-PASS verdict.
     const full = releases.promoteFullBlock(freeze);
     if (full) return { ok: false, error: `Promotion blocked: ${full}` };
+    if (freeze.project && currentActorIsAdmin()) {
+      const gate = productionPrereqGate(freeze.project, freeze.sha, null);
+      if (!gate.ok) return { ok: false, error: gate.error };
+    }
   } else {
     const referee = evaluateRefereeForPromote(
       runId,

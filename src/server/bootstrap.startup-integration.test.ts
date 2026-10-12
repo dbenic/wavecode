@@ -62,6 +62,7 @@ vi.mock('./event-bus.js', () => ({
 vi.mock('./session-manager.js', () => ({
   sendRawKeys: vi.fn(),
   ensureSpawnedAgentSession: vi.fn(),
+  rebindAgentSockets: vi.fn(),
 }));
 
 vi.mock('./output-watcher.js', () => ({

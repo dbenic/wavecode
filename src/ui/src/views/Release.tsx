@@ -45,6 +45,8 @@ const ACTION_CLS: Record<AuditEntry['action'], string> = {
   verify: 'text-violet-300',
   reject: 'text-red-300',
   failed: 'text-red-300',
+  rollback: 'text-amber-300',
+  prereq: 'text-amber-300',
 };
 
 const ACTION_LABEL: Record<AuditEntry['action'], string> = {
@@ -56,6 +58,8 @@ const ACTION_LABEL: Record<AuditEntry['action'], string> = {
   verify: 'ready for prod',
   reject: 'reject',
   failed: 'failed',
+  rollback: 'rollback',
+  prereq: 'prereq',
 };
 
 export default function Release() {

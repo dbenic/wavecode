@@ -32,7 +32,7 @@ describe('laneStatusLine', () => {
   });
 
   it('is only the behind-main line when the lane does not contain main', () => {
-    expect(line({ behindMain: 6, protectedPath: 'src/version.ts' })).toBe('behind main by 6 — merge latest main');
+    expect(line({ behindMain: 6, protectedPath: 'src/version.ts' })).toBe('behind main: merge main');
   });
 
   it('says the reviewer is holding when GREEN landed on an evidence-only NEEDS FIXES', () => {
@@ -52,19 +52,20 @@ describe('laneStatusLine', () => {
       gate: { state: 'not_run' },
       quick: 'missing',
       full: 'missing',
-    })).toBe(`needs review PASS on ${SHA.slice(0, 8)} — @reviewer`);
+    })).toBe('waiting for PASS');
   });
 
   it('tells Stage the quick check is running, or still needed', () => {
     const freeze = { sha: SHA, verdict: 'pass' as const, issues: 0, gate: null };
     expect(line({ freeze, quick: 'pending', full: 'missing', gate: { state: 'running' } })).toBe('quick check running');
     expect(line({ freeze, quick: 'missing', full: 'missing', gate: { state: 'not_run' } })).toBe(needsGreenQuick(SHA.slice(0, 8)));
-    expect(line({ freeze, quick: 'red', full: 'red', gate: { state: 'red', failingStep: 'lint' } })).toBe(needsGreenQuick(SHA.slice(0, 8)));
+    expect(line({ freeze, quick: 'red', full: 'red', gate: { state: 'red', failingStep: 'lint' } })).toBe('tests red');
   });
 
   it('is ready to stage on a green quick check, and names the full run once that SHA is on staging', () => {
     const freeze = { sha: SHA, verdict: 'pass' as const, issues: 0, gate: null };
-    expect(line({ freeze, quick: 'green', full: 'missing', gate: { state: 'not_run' } })).toBe('ready — press STAGE');
+    expect(line({ freeze, quick: 'green', full: 'missing', gate: { state: 'not_run' } })).toBe('ready for staging');
+    expect(line({ behindStaging: true, protectedPath: 'src/version.ts' })).toBe('behind staging — merge main');
     expect(line({
       freeze, quick: 'green', full: 'pending', fullRunLabel: 'queued #2', onStaging: true, gate: { state: 'queued' },
     })).toBe(onStagingQuickLine('queued #2'));

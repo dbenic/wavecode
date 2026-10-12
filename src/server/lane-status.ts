@@ -35,6 +35,10 @@ export interface LaneStatusInput {
   fullRunLabel?: string | null;
   /** Commits on main that this SHA does not contain. */
   behindMain: number;
+  /** SHA does not contain what is on staging now. Ignored while behind main. */
+  behindStaging?: boolean;
+  /** First failing operational prereq, shown but not a Stage lock. */
+  prereqNote?: string | null;
   /** First configured protected path the diff touches. */
   protectedPath?: string | null;
   hasMigration?: boolean;
@@ -44,9 +48,20 @@ export interface LaneStatusInput {
   autoNote?: string | null;
 }
 
-export function behindMainLine(n: number): string {
-  return `behind main by ${n} — merge latest main`;
+export function behindMainLine(_n: number): string {
+  return 'behind main: merge main';
 }
+
+export const BEHIND_STAGING_LINE = 'behind staging — merge main';
+
+export const READY_FOR_STAGING_BRIEF = [
+  'Ready for staging:',
+  '1. Merge latest origin/main.',
+  '2. Quick check green on that exact SHA.',
+  '3. Freeze note.',
+  '4. Reviewer PASS.',
+  "That's all.",
+].join(' ');
 
 export function needsGreenQuick(sha8: string): string {
   return `needs green quick check on ${sha8}`;
@@ -99,9 +114,10 @@ function processStep(input: LaneStatusInput): string | null {
   const stageGreen = quick === 'green' || fullGreen;
   const evidenceHold = freeze.verdict === 'needs-fixes' && freeze.issues === 0 && fullGreen;
   if (evidenceHold) return `reviewer holding for gate — GREEN landed, pinged ${reviewer}`;
-  if (freeze.verdict !== 'pass') return `needs review PASS on ${sha8} — ${reviewer}`;
+  if (freeze.verdict !== 'pass') return 'waiting for PASS';
   const testsKnown = quick !== 'unconfigured' || full !== 'unconfigured';
   if (!stageGreen && testsKnown) {
+    if (quick === 'red' || full === 'red') return 'tests red';
     if (quick === 'pending') return QUICK_CHECK_RUNNING;
     return needsGreenQuick(sha8);
   }
@@ -114,6 +130,7 @@ function processStep(input: LaneStatusInput): string | null {
 /** The single visible line. Behind-main wins on its own: the lane cannot move until it is merged up. */
 export function laneStatusLine(input: LaneStatusInput): string {
   if (input.behindMain > 0) return behindMainLine(input.behindMain);
+  if (input.behindStaging) return BEHIND_STAGING_LINE;
   const notes: string[] = [];
   if (input.protectedPath) notes.push(`touches ${input.protectedPath} — dev lanes must not`);
   if (input.hasMigration) notes.push('has migration — deploy agent stages it');
@@ -125,7 +142,8 @@ export function laneStatusLine(input: LaneStatusInput): string {
   if (step) notes.push(step);
   else if (input.autoNote) notes.push(input.autoNote);
   if (input.autoNote && step) notes.push(input.autoNote);
-  if (notes.length === 0) return input.onStaging ? 'on staging — mark Ready for prod' : 'ready — press STAGE';
+  if (input.prereqNote) notes.push(input.prereqNote);
+  if (notes.length === 0) return input.onStaging ? 'on staging — mark Ready for prod' : 'ready for staging';
   return notes.join(' · ');
 }
 

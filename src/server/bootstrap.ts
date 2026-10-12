@@ -18,6 +18,7 @@ import * as taskDispatcher from './task-dispatcher.js';
 import { startHealthMonitor, stopHealthMonitor } from './health-monitor.js';
 import { pruneOldArtifacts } from './artifact-manager.js';
 import { reconcileStartupState, type StartupReconcileResult } from './startup-reconcile.js';
+import { rebindAgentSockets } from './session-manager.js';
 import logger from './logger.js';
 
 /** Pick up out-of-band pending inserts (CLI fallback, scripts) that skipped HTTP. */
@@ -46,6 +47,8 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   fileSharing.ensureFileSharingTable();
   teamManager.startAllCommsWatchers();
   notifications.getVapidPublicKey();
+
+  rebindAgentSockets();
 
   const startupReconciliation = await reconcileStartupState();
 

@@ -44,6 +44,7 @@ export function validateAdoptBody(body: {
   sessionName?: string;
   runtime?: string;
   name?: string;
+  tmux_socket?: string | null;
 }): string | null {
   if (!body.sessionName || typeof body.sessionName !== 'string') {
     return 'sessionName is required';
@@ -53,6 +54,11 @@ export function validateAdoptBody(body: {
   }
   if (!body.runtime || typeof body.runtime !== 'string') {
     return 'runtime is required';
+  }
+  if (body.tmux_socket != null && body.tmux_socket !== '') {
+    if (typeof body.tmux_socket !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(body.tmux_socket) || body.tmux_socket.length > 64) {
+      return 'tmux_socket must be a tmux socket name (letters, numbers, hyphens, underscores, dots)';
+    }
   }
   if (body.name !== undefined) {
     if (typeof body.name !== 'string' || body.name.length === 0 || body.name.length > MAX_NAME_LENGTH) {

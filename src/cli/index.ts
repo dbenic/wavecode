@@ -32,10 +32,11 @@ function loadInstalledConfig(): void {
 program
   .command('scan')
   .description('List all tmux sessions on this server')
-  .action(() => {
+  .option('--socket <name>', 'tmux server socket (-L); default server when omitted')
+  .action((opts: { socket?: string }) => {
     initDb();
     loadInstalledConfig();
-    const result = sessionManager.scan();
+    const result = sessionManager.scan(opts.socket);
     if (!result.ok) {
       console.error('Error:', result.error);
       process.exit(1);
@@ -63,10 +64,11 @@ program
   .description('Monitor an existing tmux session')
   .requiredOption('--runtime <type>', 'Agent runtime: claude-code, codex, aider')
   .option('--name <name>', 'Custom agent name')
+  .option('--socket <name>', 'tmux server socket (-L) this session runs on')
   .action((session, opts) => {
     initDb();
     loadInstalledConfig();
-    const result = sessionManager.adopt(session, opts.runtime, opts.name);
+    const result = sessionManager.adopt(session, opts.runtime, opts.name, opts.socket);
     if (!result.ok) {
       console.error('Error:', result.error);
       process.exit(1);

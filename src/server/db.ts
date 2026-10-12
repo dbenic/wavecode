@@ -37,6 +37,8 @@ export interface Agent {
   alias?: string | null;
   /** One line ("frontend lead"), shown in the UI and prepended to prompts. */
   persona?: string | null;
+  /** tmux server socket (`-L`). Null uses the default server. */
+  tmux_socket?: string | null;
   created_at: string;
 }
 
@@ -278,7 +280,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 23;
+export const SCHEMA_VERSION = 24;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -301,6 +303,7 @@ const SCHEMA_SQL = `
     role TEXT,
     alias TEXT,
     persona TEXT,
+    tmux_socket TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_alias ON agents(alias) WHERE alias IS NOT NULL;
@@ -902,6 +905,10 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE artifacts ADD COLUMN provenance TEXT;
     ALTER TABLE artifacts ADD COLUMN uploaded_by TEXT;
   `,
+  // v23 → v24: optional per-agent tmux server socket (`tmux -L`). Null = the default server.
+  23: `
+    ALTER TABLE agents ADD COLUMN tmux_socket TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -962,11 +969,12 @@ export function insertAgent(
   const id = generateId();
   try {
     getDb().prepare(`
-      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status, model, effort, profile, role)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, name, runtime, tmux_session, workspace, mode, status, model, effort, profile, role, tmux_socket)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, agent.name, agent.runtime, agent.tmux_session, agent.workspace,
       agent.mode, agent.status, agent.model ?? null, agent.effort ?? null, agent.profile ?? null, agent.role ?? null,
+      agent.tmux_socket ?? null,
     );
     const row = getDb().prepare('SELECT * FROM agents WHERE id = ?').get(id) as Agent;
     return { ok: true, data: row };
@@ -1021,6 +1029,12 @@ export function resolveAgent(ref: string): Result<Agent> {
 /** True when `name` would collide with an existing agent's id or alias (spawn/adopt guard). */
 export function agentNameShadowsIdentity(name: string): boolean {
   return listAgents().some((a) => a.id === name || (a.alias !== null && a.alias === name));
+}
+
+export function updateAgentSocket(id: string, socket: string | null): Result<Agent> {
+  const info = getDb().prepare('UPDATE agents SET tmux_socket = ? WHERE id = ?').run(socket, id);
+  if (info.changes === 0) return { ok: false, error: `Agent ${id} not found` };
+  return getAgent(id);
 }
 
 export function updateAgentIdentity(id: string, fields: { alias?: string | null; persona?: string | null }): Result<Agent> {

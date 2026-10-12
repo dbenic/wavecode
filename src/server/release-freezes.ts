@@ -776,7 +776,7 @@ export function behindMainBlock(freeze: ReleaseFreeze): string | null {
     }
     return behindMainLine(n);
   }
-  if (freeze.status === 'behind-main') return 'behind main — merge latest main';
+  if (freeze.status === 'behind-main') return 'behind main: merge main';
   return null;
 }
 

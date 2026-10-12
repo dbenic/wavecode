@@ -52,13 +52,19 @@ List managed agents with watch status and the last captured output line.
 Get one agent by ID or name.
 
 ### `POST /api/agents/scan`
-Discover tmux sessions on the server.
+Discover tmux sessions on the server. Optional body `{ socket?: string }` lists
+that tmux server (`-L`). Omitted uses the default server.
 
 ### `POST /api/agents/adopt`
 Adopt an existing tmux session.
 
 Body:
-`{ sessionName: string, runtime: "claude-code" | "codex" | "aider", name?: string }`
+`{ sessionName: string, runtime: "claude-code" | "codex" | "aider", name?: string, tmux_socket?: string }`
+
+`tmux_socket` is the tmux server (`-L`) that session runs on. `PATCH /api/agents/:id`
+accepts `tmux_socket` (null clears it). Every later tmux call for that agent uses
+`-L`. Unset stays the default server. CLI: `wavecode scan --socket <name>`,
+`wavecode adopt <session> --socket <name>`.
 
 ### `POST /api/agents/spawn`
 Spawn a managed agent and optional git worktree. `model`/`effort` pin the
@@ -476,6 +482,66 @@ production request. Staging is one lane at a time until Ready for prod or the pi
 The requester mirrors `release.*`, so `/release`
 shows what is on staging and in production per lane. The STAGE control becomes a live phase
 chip (queued → lock → fetch → build → verify → pin) and, on success, "On staging".
+The dashboard shows `staging: <sha> v<version>` from the newest deployed staging record.
+
+Staging never moves backwards. Every staging path (Stage, auto-stage, a candidate, and a
+peer `POST /api/releases`) refuses unless the requested SHA contains the SHA now on staging
+(`git merge-base --is-ancestor`) and contains current `origin/main`. The refusal is
+`would roll staging back: <sha> is missing <N> commits now on staging (<version, lane>)`.
+`force_rollback: true` plus a `force_reason` is admin-only, skips only the staging-ancestor
+check, and is audited as `rollback` (ops are notified). The normal Stage button never sends
+it. A requested or sent staging row that no longer contains the new staging SHA is marked
+`rejected` with that reason. Optional `releases.staging_health_command` (argv, `{project}`)
+prints the live SHA; when it does, that SHA wins over the deployed record. Off unless set.
+
+A freeze note may declare operational prerequisites in a fenced YAML block (not CURRENT.md
+prose). A candidate's list is the union of the freeze notes whose SHAs it contains;
+duplicate ids keep the earliest order. Promote refuses while a check fails, or when a
+declared id has no command (`prereq <id> has no check`). Stage is not blocked; the card
+shows the failing id and output. The production prompt lists the steps in order, operational
+steps first and `code_deploy` last unless a `kind: code` step says otherwise, and tells the
+deploy agent to stop on the first failure and leave the previous state live. `failed_step`
+on the report is stored and shown in the audit (`prereq` when a check refuses the GO).
+
+```yaml
+prereqs:
+  - id: db_roles_applied
+    order: 10
+  - id: prod_owner_count>=2
+    order: 20
+  - id: code_deploy
+    order: 100
+    kind: code
+```
+
+```yaml
+projects:
+  demo:
+    prereq_checks:
+      db_roles_applied:
+        command: [check-roles, '{sha}']
+      "prod_owner_count>=2":
+        command: [preflight, '{sha}']
+        type: ndjson
+        field: prod_owner_count
+        compare: '>='
+        value: 2
+releases:
+  staging_health_command: [staging-health, '{project}']  # optional
+```
+
+`type: ndjson` reads the last JSON line that has `field` and compares it. A non-zero exit
+fails even when the field is present. No `prereqs:` block means today's Promote.
+
+When main moves, staging moves past a lane, or Stage is refused for being behind, the
+lane's author gets one plain message (the seat inbox, on that agent's tmux socket when
+`tmux_socket` is set): merge `origin/main`, fix conflicts, run the quick check, write the
+freeze note. If `auto_merge_main` already merged it cleanly, the message says so and that
+a quick check is running. One alert per lane per main SHA; it repeats after 30 minutes
+only while the lane is still behind and has no PASS on a SHA that contains that main.
+
+An agent may set `tmux_socket` (adopt, `PATCH /api/agents/:id`, scan, CLI `--socket`).
+Every tmux call for that agent then uses `-L <socket>`. Unset stays the default server.
 
 Record fields: `id, project, sha, lane, target ('staging'|'production'), desk, reviewer,
 requested_by, origin ('local'|'peer'), peer, peer_request_id, origin_id, run_id,
@@ -515,7 +581,7 @@ staging_url, rollback_status, rollback_to, created_at, updated_at, reported_at`.
   fields go out through the existing notifiers (ntfy / Telegram / web push). There is no GitHub PR comment client.
 - `POST /api/releases/:id/verify` `{ note? }` — the same Ready for prod action for a deployed staging record
   (delegates to the SHA). The release card shows Ready for prod once it is recorded.
-- `GET /api/releases/audit?limit=` — who did what, newest first: `stage` / `auto-stage` / `promote`
+- `GET /api/releases/audit?limit=` — who did what, newest first: `stage` / `auto-stage` / `promote` / `rollback` / `prereq`
   (the person, or `overlord` for auto-stage), `verify` (shown as Ready for prod, with lane, version and desk),
   `reject` (with reason), and the deployer's `deployed` / `failed` outcomes with version. Shown on the Release page.
 - `POST /api/releases/:id/report` `{ status: 'deployed'|'failed'|'rejected', sha?, version?, note? }` —

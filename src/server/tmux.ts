@@ -38,6 +38,39 @@ export function isValidSessionName(name: string): boolean {
   return /^[a-zA-Z0-9._-]+$/.test(name) && name.length > 0 && name.length <= 256;
 }
 
+/** tmux socket names (`-L`) use the same safe character set as session names. */
+export function isValidSocketName(name: string): boolean {
+  return /^[a-zA-Z0-9._-]+$/.test(name) && name.length > 0 && name.length <= 64;
+}
+
+/** Session name → tmux server socket. Unset means the default server (no `-L`). */
+const sessionSockets = new Map<string, string>();
+
+export function bindSessionSocket(sessionName: string, socket: string | null | undefined): void {
+  const name = socket?.trim() || '';
+  if (!name) sessionSockets.delete(sessionName);
+  else sessionSockets.set(sessionName, name);
+}
+
+export function resetTmuxSocketsForTest(): void {
+  sessionSockets.clear();
+}
+
+function socketPrefix(sessionName: string | null): string[] {
+  if (!sessionName) return [];
+  const socket = sessionSockets.get(sessionName);
+  return socket ? ['-L', socket] : [];
+}
+
+function sessionFromArgs(args: string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-t' || args[i] === '-s') && args[i + 1] && !args[i + 1].startsWith('-')) {
+      return args[i + 1].split(':')[0];
+    }
+  }
+  return null;
+}
+
 // --- Core tmux operations ---
 
 /**
@@ -45,7 +78,8 @@ export function isValidSessionName(name: string): boolean {
  * Returns stdout on success.
  */
 export function tmuxExec(args: string[], timeout = TMUX_TIMEOUT): string {
-  return execFileSync('tmux', args, {
+  const full = [...socketPrefix(sessionFromArgs(args)), ...args];
+  return execFileSync('tmux', full, {
     encoding: 'utf-8',
     timeout,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -69,11 +103,17 @@ export function hasSession(sessionName: string): boolean {
   return tmuxExecSafe(['has-session', '-t', sessionName]) !== null;
 }
 
-export function listSessions(): Result<Array<{ name: string; created: number; lastActivity: number }>> {
+export function listSessions(socket?: string | null): Result<Array<{ name: string; created: number; lastActivity: number }>> {
   try {
-    const output = tmuxExec(
-      ['list-sessions', '-F', '#{session_name}:#{session_created}:#{session_activity}'],
-    ).trim();
+    const prefix = socket?.trim() ? ['-L', socket.trim()] : [];
+    const output = execFileSync('tmux', [
+      ...prefix,
+      'list-sessions', '-F', '#{session_name}:#{session_created}:#{session_activity}',
+    ], {
+      encoding: 'utf-8',
+      timeout: TMUX_TIMEOUT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
 
     if (!output) return { ok: true, data: [] };
 
@@ -208,7 +248,7 @@ function pasteAndSubmit(sessionName: string, text: string): Promise<void> {
   // Clear whatever is in the input box, then one atomic bracketed paste
   tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
   const buf = `wc-${process.pid}-${Date.now()}`;
-  execFileSync('tmux', ['load-buffer', '-b', buf, '-'], { input: text, timeout: TMUX_TIMEOUT, stdio: ['pipe', 'pipe', 'pipe'] });
+  execFileSync('tmux', [...socketPrefix(sessionName), 'load-buffer', '-b', buf, '-'], { input: text, timeout: TMUX_TIMEOUT, stdio: ['pipe', 'pipe', 'pipe'] });
   tmuxExec(['paste-buffer', '-p', '-d', '-b', buf, '-t', sessionName]);
   return new Promise<void>((resolve) => {
     setTimeout(() => {
