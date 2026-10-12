@@ -11,7 +11,7 @@ const projects: Record<string, { repo?: string; workspace_match?: string; lane_g
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest } from './lane-main.js';
+import { alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest, withRefMemo } from './lane-main.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -60,6 +60,21 @@ describe('lane main ancestry', () => {
     git(repo, 'commit', '-q', '-m', 'main moved');
     const mainSha = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
+    expect(commitsBehind('wave', lane)).toBe(1);
+  });
+
+  it('inside one board pass the main tip is resolved once, so every card sees the same main; outside a pass a move is seen at once', () => {
+    const lane = git(repo, 'rev-parse', 'wc-ales');
+    const seen = withRefMemo(() => {
+      const before = commitsBehind('wave', lane);
+      git(repo, 'checkout', '-q', 'main');
+      fs.writeFileSync(path.join(repo, 'm.txt'), 'm');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-q', '-m', 'main moved');
+      git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+      return { before, during: commitsBehind('wave', lane) };
+    });
+    expect(seen).toEqual({ before: 0, during: 0 });
     expect(commitsBehind('wave', lane)).toBe(1);
   });
 

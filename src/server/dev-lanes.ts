@@ -19,7 +19,7 @@ import {
   QUICK_CHECK_RUNNING, type CheckState, type GateView,
 } from './lane-status.js';
 import {
-  changedFilesAsync, commitsBehindAsync, isMergeOnlyDeltaAsync, mainSpec, projectRepo, reconcileBehindFreezes, resolveMainRef,
+  withRefMemoAsync, changedFilesAsync, commitsBehindAsync, isMergeOnlyDeltaAsync, mainSpec, projectRepo, reconcileBehindFreezes, resolveMainRef,
 } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import { stagingForwardBlock } from './staging-forward.js';
@@ -161,6 +161,10 @@ function yieldTurn(): Promise<void> {
  * per refresh. Git facts are cached by (lane tip, main tip).
  */
 export async function loadDevLanes(): Promise<DevLane[]> {
+  return withRefMemoAsync(loadDevLanesPass);
+}
+
+async function loadDevLanesPass(): Promise<DevLane[]> {
   const freezes = (() => { try { return listFreezes(); } catch { return [] as ReleaseFreeze[]; } })();
   for (const freeze of freezes) {
     if (!freeze.sha) continue;

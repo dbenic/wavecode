@@ -28,12 +28,45 @@ export function mainSpec(project: string | null): MainSpec {
   return { remote, branch, ref: `${remote}/${branch}` };
 }
 
+/**
+ * Inside one board build, a ref's SHA is asked once: `withRefMemo` scopes the
+ * memo to that pass, so fifty freezes share one origin/main lookup and every
+ * card sees the same main. Outside a pass (ingest, pings, tests) git is asked
+ * every time, so a tip that just moved is seen at once.
+ */
+const refMemo = new Map<string, string | null>();
+let refMemoDepth = 0;
+
+export function resetRefMemoForTest(): void {
+  refMemo.clear();
+  refMemoDepth = 0;
+}
+
+export function withRefMemo<T>(fn: () => T): T {
+  refMemoDepth++;
+  try { return fn(); } finally { if (--refMemoDepth === 0) refMemo.clear(); }
+}
+
+export async function withRefMemoAsync<T>(fn: () => Promise<T>): Promise<T> {
+  refMemoDepth++;
+  try { return await fn(); } finally { if (--refMemoDepth === 0) refMemo.clear(); }
+}
+
+function isRefLookup(args: string[]): boolean {
+  return args.length === 4 && args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === '--quiet';
+}
+
 function git(repo: string, args: string[]): string | null {
+  const key = refMemoDepth > 0 && isRefLookup(args) ? `${repo}\0${args[3]}` : null;
+  if (key && refMemo.has(key)) return refMemo.get(key) ?? null;
+  let value: string | null;
   try {
-    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024 }).trim();
+    value = execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024 }).trim();
   } catch {
-    return null;
+    value = null;
   }
+  if (key) refMemo.set(key, value);
+  return value;
 }
 
 /** Keyed by the main tip SHA and the lane tip SHA. A repeat review refresh does not re-diff. */
