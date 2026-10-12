@@ -70,5 +70,8 @@ describe('pickProbeTargets', () => {
       agent({ name: 'grok1', runtime: 'grok', profile: 'denis' }),
     ];
     expect(pickProbeTargets(agents).map((a) => a.name)).toEqual(['codex1', 'claude1', 'claude2']);
+    // a login seat on a profile must never be probed: it is a device-code prompt, and /status would land in it
+    const seat = { ...agents[0], id: 'seat', name: 'login-ales-codex', tmux_session: 'wc-login-ales-codex', profile: 'ales', mode: 'adopted' as const };
+    expect(pickProbeTargets([seat]).map((a) => a.name)).toEqual([]);
   });
 });

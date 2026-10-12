@@ -119,6 +119,7 @@ export function pickProbeTargets(agents: Agent[], now = Date.now(), intervalMs =
   for (const a of agents) {
     if (!PROBE_COMMAND[a.runtime]) continue;
     if (a.status !== 'idle' || a.mode === 'file') continue;
+    if (a.tmux_session.startsWith('wc-login-')) continue; // a login seat is a sign-in prompt, not a CLI to type /status into
     const k = key(a.runtime, a.profile);
     if (chosen.has(k)) continue;
     const last = lastProbe.get(k) ?? 0;
