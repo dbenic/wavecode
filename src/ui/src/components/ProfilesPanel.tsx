@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { ProfileInfo } from '../types';
+import type { LoginHint, ProfileInfo } from '../types';
 
 const RUNTIME_LABEL: Record<string, string> = { 'claude-code': 'Claude Code', codex: 'Codex', grok: 'Grok', aider: 'Aider' };
 
@@ -20,7 +20,10 @@ export default function ProfilesPanel() {
   const [error, setError] = useState<string | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
   const [seat, setSeat] = useState<{ profile: string; runtime: string; agentId: string; expires_at: string | null } | null>(null);
-  const [pane, setPane] = useState<string>('');
+  const [hint, setHint] = useState<LoginHint | null>(null);
+  const [code, setCode] = useState('');
+  const [sending, setSending] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
   const [done, setDone] = useState<{ logged_in: boolean; reason: string } | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -31,11 +34,11 @@ export default function ProfilesPanel() {
 
   const stopPolling = () => { if (timer.current) { clearInterval(timer.current); timer.current = null; } };
 
-  const pollPane = useCallback((agentId: string) => {
+  const pollPane = useCallback((profile: string, runtime: string) => {
     stopPolling();
     const tick = () => {
-      apiGet<{ output: string }>(`/agents/${agentId}/output?lines=30`)
-        .then((r) => setPane(r.output))
+      apiGet<LoginHint>(`/profiles/${encodeURIComponent(profile)}/login/${encodeURIComponent(runtime)}`)
+        .then(setHint)
         .catch(() => { /* the seat may have exited */ });
     };
     tick();
@@ -60,12 +63,13 @@ export default function ProfilesPanel() {
   const login = async (profile: string, runtime: string) => {
     setError(null);
     setDone(null);
-    setPane('');
+    setHint(null);
+    setCode('');
     setOpening(`${profile}:${runtime}`);
     try {
       const r = await apiPost<{ agent: { id: string }; session: string; expires_at: string }>(`/profiles/${encodeURIComponent(profile)}/login`, { runtime });
       setSeat({ profile, runtime, agentId: r.agent.id, expires_at: r.expires_at });
-      pollPane(r.agent.id);
+      pollPane(profile, runtime);
       load();
     } catch (e) {
       setError((e as Error).message || 'could not open the login');
@@ -76,8 +80,23 @@ export default function ProfilesPanel() {
 
   const attach = (profile: string, runtime: string, agentId: string) => {
     setDone(null);
+    setHint(null);
     setSeat({ profile, runtime, agentId, expires_at: null });
-    pollPane(agentId);
+    pollPane(profile, runtime);
+  };
+
+  const sendCode = async () => {
+    if (!seat || !code.trim()) return;
+    setSending(true);
+    setError(null);
+    try {
+      await apiPost(`/profiles/${encodeURIComponent(seat.profile)}/login/${encodeURIComponent(seat.runtime)}/code`, { code: code.trim() });
+      setCode('');
+    } catch (e) {
+      setError((e as Error).message || 'code not accepted');
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -155,8 +174,37 @@ export default function ProfilesPanel() {
               </p>
             ) : (
               <>
-                <p className="text-[11px] text-slate-400">Follow the link or type the device code below in your browser, signed in to the subscription this profile should use. The pane updates every few seconds; the window closes itself when the CLI is logged in (15 minutes at most).</p>
-                <pre className="max-h-64 overflow-auto rounded bg-black/60 p-2 text-[10px] leading-snug text-slate-200 whitespace-pre-wrap">{pane || 'waiting for the CLI…'}</pre>
+                {!hint?.open ? (
+                  <p className="text-[11px] text-slate-500 animate-pulse">waiting for the CLI…</p>
+                ) : (
+                  <div className="space-y-2">
+                    <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-slate-300">
+                      <li>
+                        {hint.url ? (
+                          <>
+                            <a href={hint.url} target="_blank" rel="noopener" className="inline-block px-2.5 py-1 rounded border border-cyan-400/60 bg-cyan-500/10 text-cyan-100 font-semibold tracking-wider text-[10px]">OPEN SIGN-IN LINK</a>
+                            <button onClick={() => { void navigator.clipboard?.writeText(hint.url!); }} className="ml-2 text-[10px] text-slate-400 underline underline-offset-2">copy link</button>
+                            <span className="ml-2 text-slate-500">sign in with the account this profile should use</span>
+                          </>
+                        ) : <span className="text-slate-500">the CLI has not printed a link yet</span>}
+                      </li>
+                      {hint.code && (
+                        <li>Enter this code on that page: <span className="font-mono text-base text-emerald-300 tracking-widest select-all">{hint.code}</span></li>
+                      )}
+                      {hint.awaiting_code && (
+                        <li>
+                          Paste the code the browser shows here:
+                          <span className="ml-2 inline-flex items-center gap-1.5">
+                            <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="code from the browser" className="px-2 py-1 rounded border border-slate-700 bg-slate-950/60 text-[11px] text-slate-200 font-mono w-56" aria-label="Login code" />
+                            <button onClick={() => void sendCode()} disabled={sending || !code.trim()} className="px-2 py-1 rounded border border-emerald-500/40 text-[10px] font-semibold tracking-wider text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40">{sending ? '...' : 'SEND'}</button>
+                          </span>
+                        </li>
+                      )}
+                    </ol>
+                    <p className="text-[10px] text-slate-500">The window closes itself once the CLI is logged in (15 minutes at most). <button onClick={() => setShowRaw((v) => !v)} className="underline underline-offset-2">{showRaw ? 'hide' : 'show'} the CLI output</button></p>
+                    {showRaw && <pre className="max-h-48 overflow-auto rounded bg-black/60 p-2 text-[10px] leading-snug text-slate-300 whitespace-pre-wrap">{hint.tail.join('\n')}</pre>}
+                  </div>
+                )}
               </>
             )}
           </div>

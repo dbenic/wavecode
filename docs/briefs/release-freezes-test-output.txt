@@ -1,0 +1,166 @@
+
+ RUN  v4.1.4 /Users/denis/Dev/Projects/Wave/WaveCode
+
+fatal: cannot change to '/var/folders/zp/ydsmhyhx0fl0lts_zgrcl5mw0000gn/T/wavecode-freezes-ED16C2/ws/claude2': No such file or directory
+fatal: cannot change to '/var/folders/zp/ydsmhyhx0fl0lts_zgrcl5mw0000gn/T/wavecode-freezes-ED16C2/ws/claude2': No such file or directory
+fatal: Not a valid object name origin/main
+fatal: Not a valid object name origin/master
+fatal: Not a valid object name master
+fatal: Not a valid object name origin/main
+(node:18754) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+fatal: Not a valid object name origin/master
+fatal: Not a valid object name master
+(node:18749) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+fatal: Not a valid object name origin/main
+fatal: Not a valid object name origin/master
+fatal: Not a valid object name master
+fatal: Not a valid object name origin/main
+(node:18752) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 exit listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+[16:37:10.854] INFO (18752): Code review completed
+    reviewId: "01M4GHHEA6062K728V59G3XQ4H"
+    runId: "01M4GHHEA5ZMCD7NN6RR0G9MP1"
+    verdict: "needs-fixes"
+    issuesFound: 0
+    fixRound: 0
+[16:37:10.806] INFO (18752): Code review completed
+    reviewId: "01M4GHHE8PB7ETR5WHTE2YSYSA"
+    runId: "01M4GHHE8P5K4V4VJN0RBVZF7G"
+    verdict: "pass"
+    issuesFound: 0
+    fixRound: 0
+[16:37:11.019] INFO (18752): Cross-model review started
+    reviewId: "01M4GHHEFBZ627BKNXJ5CEKJ9X"
+    runId: "01M4GHHEFA501PYQ392W34AHGQ"
+    runtime: "aider"
+    reviewer: "llm"
+[16:37:10.945] INFO (18752): Run needs a reviewer
+    runId: "01M4GHHECY2TT6TQ1B0FFZ2EQH"
+    reason: "no free agent to review (all busy, reserved or on another subscription)"
+[16:37:10.787] INFO (18752): Code review completed
+    reviewId: "01M4GHHE82GFAPENGNKZCTQVJ2"
+    runId: "01M4GHHE800DT5YHW68Z8SPT7W"
+    verdict: "needs-fixes"
+    issuesFound: 1
+    fixRound: 0
+[16:37:11.006] INFO (18752): Code review completed
+    reviewId: "01M4GHHEEYT493PBE2GD2ESRQY"
+    runId: "01M4GHHEEXD70FYD2R1280QCZ8"
+    verdict: "needs-fixes"
+    issuesFound: 1
+    fixRound: 0
+[16:37:10.992] INFO (18752): Code review completed
+    reviewId: "01M4GHHEEFMQ7V608FZBY50PFB"
+    runId: "01M4GHHEEFZ8YF51KSCPJWQPE0"
+    verdict: "needs-fixes"
+    issuesFound: 1
+    fixRound: 1
+[16:37:10.836] INFO (18752): Code review completed
+    reviewId: "01M4GHHE9MBBRC4H3F8FC0M6S6"
+    runId: "01M4GHHE9KCKQPAE177PPXCRYK"
+    verdict: "needs-fixes"
+    issuesFound: 0
+    fixRound: 2
+[16:37:10.945] INFO (18752): Auto-review is waiting for a reviewer
+    runId: "01M4GHHECY2TT6TQ1B0FFZ2EQH"
+    reason: "no free agent to review (all busy, reserved or on another subscription)"
+[16:37:10.946] INFO (18752): Auto-review is waiting for a reviewer
+    runId: "01M4GHHECY2TT6TQ1B0FFZ2EQH"
+    reason: "no free agent to review (all busy, reserved or on another subscription)"
+[16:37:10.948] INFO (18752): Code review completed
+    reviewId: "01M4GHHED3G5S97N2RDPN34VSA"
+    runId: "01M4GHHECY2TT6TQ1B0FFZ2EQH"
+    verdict: "needs-fixes"
+    issuesFound: 1
+    fixRound: 0
+[16:37:10.964] INFO (18752): Code review completed
+    reviewId: "01M4GHHEDMVB00TD7BXHRT45E1"
+    runId: "01M4GHHEDKC9ZZY2B3HG49NVWA"
+    verdict: "needs-fixes"
+    issuesFound: 1
+    fixRound: 1
+[16:37:10.836] WARN (18752): Fix loop budget exhausted — leaving run for human review
+    reviewId: "01M4GHHE9MBBRC4H3F8FC0M6S6"
+    runId: "01M4GHHE9KCKQPAE177PPXCRYK"
+    fixRound: 2
+[16:37:11.019] INFO (18752): Code review completed
+    reviewId: "01M4GHHEFBZ627BKNXJ5CEKJ9X"
+    runId: "01M4GHHEFA501PYQ392W34AHGQ"
+    verdict: "needs-fixes"
+    issuesFound: 1
+    fixRound: 0
+(node:19734) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20010) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20182) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20183) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20184) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20221) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20222) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20253) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20419) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 exit listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+[16:37:15.996] INFO (20421): Agent reserved
+    agentId: "01M4GHHKAP7JTQGGJ2AXM3GJPT"
+    ownerId: "01M4GHHKAMEM2XEAVNWMQRQ0X4"
+    until: "2026-10-09T18:37:15.990Z"
+(node:20327) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20358) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20418) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20424) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20423) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[16:37:18.017] INFO (20476): Agent reserved
+    agentId: "01M4GHHN9YNZH42ECDGCZG0JZS"
+    ownerId: "01M4GHHN9Z5N13593Q3N2130YM"
+    until: "2026-10-09T15:37:18.015Z"
+[16:37:18.059] INFO (20475): Goal persisted without decomposition
+    goalId: "01M4GHHNBAJBQ3F3GA3GRZ5D2R"
+    externalId: "W0"
+(node:20429) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20430) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20427) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[16:37:18.413] WARN (20478): Artifact copied into workspace but agent notify failed
+    artifactId: "01M4GHHNN1513NMFTKVXFJ9A74"
+    targetAgentId: "01M4GHHNMZSEVCK79HV1V2P83Q"
+    attachedPath: "/var/folders/zp/ydsmhyhx0fl0lts_zgrcl5mw0000gn/T/wavecode-artifact-share-ZOsy3g/agent-workspace/.wavecode/artifacts/screen-2.png"
+    error: "tmux session 'wc-countixdev' is not running"
+(node:20470) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20483) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 exit listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+[16:37:18.883] INFO (20533): VAPID keys generated and persisted
+[16:37:19.051] WARN (20537): Decision mirror failed
+    error: "Config not loaded. Call loadConfig() first."
+(node:20477) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20480) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20576) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+[16:37:20.538] INFO (20664): Dismissed Claude Bypass Permissions dialog
+    agentId: "agent-1"
+(node:20660) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  113 passed (113)
+      Tests  949 passed | 1 skipped (950)
+   Start at  16:37:10
+   Duration  11.01s (transform 7.40s, setup 1.78s, import 12.92s, tests 44.99s, environment 19.83s)
+

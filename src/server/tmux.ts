@@ -243,6 +243,15 @@ export function paneInputHolds(pane: string, text: string): boolean {
 /**
  * Capture pane output (plain text, no ANSI).
  */
+/** Like capturePane, but wrapped lines are joined back (`-J`) — for URLs and codes the pane wrapped. */
+export function capturePaneJoined(sessionName: string, lines = 50): Result<string> {
+  try {
+    return { ok: true, data: tmuxExec(['capture-pane', '-t', sessionName, '-p', '-J', '-S', `-${lines}`]) };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
 export function capturePane(sessionName: string, lines = 50): Result<string> {
   try {
     const output = tmuxExec(['capture-pane', '-t', sessionName, '-p', '-S', `-${lines}`]);

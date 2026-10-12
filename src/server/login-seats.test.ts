@@ -24,6 +24,7 @@ vi.mock('./tmux.js', () => ({
   killSession: vi.fn((s: string) => tmuxHarness.sessions.delete(s)),
   sendTextAndEnter: vi.fn(),
   capturePane: vi.fn(() => ({ ok: true, data: '╭─╮\n│ > │\n  ? for shortcuts' })),
+  capturePaneJoined: vi.fn(() => ({ ok: true, data: '' })),
   isValidSessionName: vi.fn((s: string) => /^[a-zA-Z0-9._-]+$/.test(s)),
 }));
 
@@ -260,6 +261,34 @@ describe('login seats', () => {
       } finally {
         delete cfg.spawn;
       }
+    });
+
+    it('parseLoginPane: link joined across wrapped lines with OSC codes removed, the device code, and whether a code is awaited', async () => {
+      const { parseLoginPane } = await import('./login-seats.js');
+      const codex = 'Welcome to Codex\n1. Open this link in your browser and sign in to your account\n   https://auth.openai.com/codex/device\n2. Enter this one-time code (expires in 15 minutes)\n   SBJG-R5FXV\n/status\n';
+      expect(parseLoginPane(codex)).toMatchObject({ url: 'https://auth.openai.com/codex/device', code: 'SBJG-R5FXV', awaiting_code: false });
+      const claude = ' Browser didn\'t open? Use the url below to sign in (c to copy)\n\x1b]8;id=rphif8;https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&state=abc\x1b\\https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&state=abc\x1b]8;;\x1b\\\n Paste code here if prompted >';
+      const h = parseLoginPane(claude);
+      expect(h.url).toBe('https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&state=abc');
+      expect(h.code).toBeNull();
+      expect(h.awaiting_code).toBe(true);
+      expect(h.tail.join('\n')).not.toContain('\x1b');
+    });
+
+    it('GET …/login/:runtime reports the seat hint; POST …/login/:runtime/code types the code into it; strangers get 403', async () => {
+      const app = await makeApp();
+      const tmuxMod = await import('./tmux.js');
+      expect((await call(app, 'GET', '/api/profiles/ana/login/codex', ana.token)).json).toEqual({ open: false });
+      await call(app, 'POST', '/api/profiles/ana/login', ana.token, { runtime: 'codex' });
+      vi.mocked(tmuxMod.capturePaneJoined).mockReturnValue({ ok: true, data: 'Open https://auth.openai.com/codex/device\nEnter this one-time code\nABCD-EFGHI\n' });
+      const hint = await call(app, 'GET', '/api/profiles/ana/login/codex', ana.token);
+      expect(hint.json).toMatchObject({ open: true, url: 'https://auth.openai.com/codex/device', code: 'ABCD-EFGHI' });
+      expect((await call(app, 'GET', '/api/profiles/ana/login/codex', bob.token)).status).toBe(403);
+      const send = vi.mocked(tmuxMod.sendTextAndEnter);
+      expect((await call(app, 'POST', '/api/profiles/ana/login/codex/code', ana.token, { code: 'XYZ-123' })).status).toBe(200);
+      expect(send).toHaveBeenCalledWith('wc-login-ana-codex', 'XYZ-123', { mode: 'type' });
+      expect((await call(app, 'POST', '/api/profiles/ana/login/codex/code', ana.token, { code: 'rm -rf /' })).status).toBe(400);
+      expect((await call(app, 'POST', '/api/profiles/ana/login/codex/code', bob.token, { code: 'XYZ-123' })).status).toBe(403);
     });
 
     it('POST /api/profiles/:name/login opens a watched seat; others get 403', async () => {

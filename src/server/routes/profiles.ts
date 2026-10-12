@@ -1,6 +1,6 @@
 import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
-import { canLoginProfile, loginSeatErrorStatus, loginSessionName, openLoginSeat } from '../login-seats.js';
+import { canLoginProfile, loginHint, loginSeatErrorStatus, loginSessionName, openLoginSeat, submitLoginCode } from '../login-seats.js';
 import * as outputWatcher from '../output-watcher.js';
 import { profileStatuses } from '../profiles.js';
 import { getConfig } from '../config.js';
@@ -41,6 +41,31 @@ export function registerProfileRoutes(app: Hono<NodeAppEnv>): void {
         runtimes,
       };
     }));
+  });
+
+  /** What the open login seat is showing: the sign-in link, the device code, whether it waits for a code. */
+  app.get('/api/profiles/:name/login/:runtime', (c) => {
+    const user = getActingUser(c);
+    const name = c.req.param('name');
+    if (!canLoginProfile(user, name)) return c.json({ error: 'Forbidden' }, 403);
+    const seat = getAgentByName(`login-${name}-${c.req.param('runtime')}`);
+    if (!seat.ok) return c.json({ open: false });
+    const hint = loginHint(seat.data.id);
+    return c.json({ open: !!hint, agent_id: seat.data.id, ...(hint ?? { url: null, code: null, awaiting_code: false, tail: [] }) });
+  });
+
+  /** Paste the code the browser showed into the seat (Claude Code asks for it). */
+  app.post('/api/profiles/:name/login/:runtime/code', async (c) => {
+    const user = getActingUser(c);
+    const name = c.req.param('name');
+    if (!canLoginProfile(user, name)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ code?: unknown }>().catch(() => ({} as { code?: unknown }));
+    if (typeof body.code !== 'string') return c.json({ error: 'code is required' }, 400);
+    const seat = getAgentByName(`login-${name}-${c.req.param('runtime')}`);
+    if (!seat.ok) return c.json({ error: 'No open login for that profile and runtime' }, 404);
+    const r = submitLoginCode(seat.data.id, body.code);
+    if (!r.ok) return c.json({ error: r.error }, loginSeatErrorStatus(r.code));
+    return c.json({ ok: true });
   });
 
   /** Open a login seat: an adopted agent running the runtime's login command on this profile. */

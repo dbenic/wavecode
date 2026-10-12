@@ -140,6 +140,53 @@ export function openLoginSeat(opts: {
   return { ok: true, data: { agent: fresh.ok ? fresh.data : inserted.data, session, expires_at: expiresAt } };
 }
 
+export interface LoginHint {
+  /** the sign-in link the CLI printed (joined across wrapped lines, OSC codes removed) */
+  url: string | null;
+  /** a one-time device code the CLI printed (Codex style ABCD-EFGHI) */
+  code: string | null;
+  /** the CLI waits for a code the browser shows ("Paste code here if prompted") */
+  awaiting_code: boolean;
+  /** last meaningful lines of the pane, for the person */
+  tail: string[];
+}
+
+/** Pull link, code and state out of a login pane text (exported for tests). */
+export function parseLoginPane(text: string): LoginHint {
+  // eslint-disable-next-line no-control-regex
+  const clean = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  const urls = [...clean.matchAll(/https?:\/\/[^\s"'<>\\\]]+/g)].map((m) => m[0].replace(/[.,;)]+$/, ''));
+  // prefer the sign-in link over anything else the CLI printed
+  const url = urls.find((u) => /auth|oauth|device|login|sign/i.test(u)) ?? urls[urls.length - 1] ?? null;
+  const code = clean.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b/)?.[1] ?? null;
+  const awaiting = /paste code here|enter the code|authorization code/i.test(clean);
+  const tail = clean.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() && !/^[\s*░▓█▄.]+$/.test(l)).slice(-8);
+  return { url, code, awaiting_code: awaiting, tail };
+}
+
+/** The hint for an open login seat, or null when the seat is gone. */
+export function loginHint(agentId: string): LoginHint | null {
+  const agent = getAgent(agentId);
+  if (!agent.ok || !isLoginSeat(agent.data)) return null;
+  const cap = tmux.capturePaneJoined(agent.data.tmux_session, 60);
+  if (!cap.ok) return null;
+  return parseLoginPane(cap.data);
+}
+
+/** Type the code the browser showed into the seat (Claude's "Paste code here"). */
+export function submitLoginCode(agentId: string, code: string): LoginSeatResult<void> {
+  const agent = getAgent(agentId);
+  if (!agent.ok || !isLoginSeat(agent.data)) return { ok: false, error: 'No open login for that profile and runtime', code: 'invalid' };
+  const clean = code.trim();
+  if (!/^[A-Za-z0-9_#.-]{4,200}$/.test(clean)) return { ok: false, error: 'That does not look like a login code', code: 'invalid' };
+  try {
+    tmux.sendTextAndEnter(agent.data.tmux_session, clean, { mode: 'type' });
+  } catch (e) {
+    return { ok: false, error: (e as Error).message, code: 'failed' };
+  }
+  return { ok: true, data: undefined };
+}
+
 /** Watcher tick: reap on exit, kill after the TTL. Exported for tests. */
 export function checkLoginSeat(agentId: string, now = Date.now()): 'open' | 'exited' | 'timeout' | 'unknown' {
   const watch = watches.get(agentId);

@@ -27,7 +27,7 @@ describe('ProfilesPanel', () => {
     vi.clearAllMocks();
     sseHandler = null;
     const api = await import('../hooks/useApi');
-    vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p === '/profiles' ? PROFILES : { output: 'Open https://auth.openai.com/device\nEnter code: ABCD-1234' }) as never);
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p === '/profiles' ? PROFILES : { open: true, agent_id: 'seat-1', url: 'https://claude.com/cai/oauth/authorize?x=1', code: null, awaiting_code: true, tail: ['Paste code here if prompted >'] }) as never);
     vi.mocked(api.apiPost).mockResolvedValue({ agent: { id: 'seat-1' }, session: 'wc-login-antonio-claude-code', expires_at: '2026-10-11T10:15:00Z' } as never);
   });
 
@@ -51,8 +51,11 @@ describe('ProfilesPanel', () => {
     await waitFor(() => expect(screen.getByTestId('profiles-table')).toBeTruthy());
     fireEvent.click(within(screen.getByTestId('profile-antonio')).getByText('LOG IN'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/profiles/antonio/login', { runtime: 'claude-code' }));
-    await waitFor(() => expect(screen.getByTestId('login-wizard').textContent).toContain('ABCD-1234'));
-    expect(vi.mocked(api.apiGet)).toHaveBeenCalledWith('/agents/seat-1/output?lines=30');
+    await waitFor(() => expect(within(screen.getByTestId('login-wizard')).getByText('OPEN SIGN-IN LINK').getAttribute('href')).toBe('https://claude.com/cai/oauth/authorize?x=1'));
+    expect(vi.mocked(api.apiGet)).toHaveBeenCalledWith('/profiles/antonio/login/claude-code');
+    fireEvent.change(screen.getByLabelText('Login code'), { target: { value: 'abc#123' } });
+    fireEvent.click(screen.getByText('SEND'));
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/profiles/antonio/login/claude-code/code', { code: 'abc#123' }));
     sseHandler?.({ id: 1, type: 'profile.login_finished', entityType: 'agent', entityId: 'seat-1', payload: { profile: 'antonio', runtime: 'claude-code', logged_in: true, reason: 'exited' }, createdAt: '' } as SSEEvent);
     await waitFor(() => expect(screen.getByTestId('login-wizard').textContent).toContain('Logged in. Agents on this profile can start now.'));
   });

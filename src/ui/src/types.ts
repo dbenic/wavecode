@@ -341,6 +341,16 @@ export interface DeskBoardRow {
   tasks: Array<{ num: number | null; status: string; agent: string | null }>;
 }
 
+/** What an open login seat shows (GET /api/profiles/:name/login/:runtime). */
+export interface LoginHint {
+  open: boolean;
+  agent_id?: string;
+  url: string | null;
+  code: string | null;
+  awaiting_code: boolean;
+  tail: string[];
+}
+
 /** Settings → Profiles: one credential profile (a subscription) per developer. */
 export interface ProfileInfo {
   name: string;

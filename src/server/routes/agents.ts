@@ -516,6 +516,9 @@ function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null,
 
 function cleanCapturedOutput(output: string): string {
   return output
+    // OSC sequences (terminal hyperlinks \e]8;;url\e\\, titles): the HTML renderer cannot show them and they garble links
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .split('\n')
     .map((line) => {
       const stripped = line.replace(/\x1b\[[0-9;]*m/g, '').trim();
