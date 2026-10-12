@@ -1,16 +1,17 @@
 /**
  * Watch hand-off folders (default `~/inbox/from-fable/`): a new file there is
- * announced to its addressed agent by typing one line into its pane when it is
- * idle — agents only act on pane input. Recipient = a `To: @agent` line in the
- * first lines of the file, else the file name's first token (`claude1-…`).
- * Unaddressed files are posted to the thread only.
+ * announced into each addressed agent's pane when that agent is idle.
+ * An address line (`To:` / `For:` / `Recipient:` or a heading that names `@agent`)
+ * goes to every agent that resolves. Otherwise the longest hyphen-prefix of the
+ * file name that resolves (`ales-codex1-foo.md` → `ales-codex1`) is the recipient.
+ * When nothing resolves, the file is still posted to the thread as an unrouted hand-off.
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfig } from './config.js';
-import { insertAgentMessage, resolveAgent } from './db.js';
+import { insertAgentMessage, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
@@ -31,21 +32,46 @@ export function watchedInboxDirs(): string[] {
   return dirs.map(expand);
 }
 
-function recipientFor(file: string, content: string): ReturnType<typeof resolveAgent> | null {
+function addressedNames(content: string): string[] | null {
+  const names: string[] = [];
+  let saw = false;
   for (const line of content.split('\n').slice(0, MAX_HEAD_LINES)) {
-    const m = /^\s*(?:to|for|recipient)\s*:\s*@?([\w.-]+)/i.exec(line);
-    if (m) {
-      const r = resolveAgent(m[1]);
-      if (r.ok) return r;
-    }
+    const isTo = /^\s*(?:to|for|recipient)\s*:/i.test(line);
+    const isHeading = /^\s*#{1,6}\s+/.test(line) && /@[\w.-]+/.test(line);
+    if (!isTo && !isHeading) continue;
+    saw = true;
+    for (const m of line.matchAll(/@([\w.-]+)/g)) names.push(m[1]);
   }
+  return saw ? names : null;
+}
+
+/** Longest hyphen-prefix of the file name that resolves to an agent (`ales-codex1-foo` → `ales-codex1`). */
+function recipientFromName(file: string): ReturnType<typeof resolveAgent> | null {
   const stem = path.basename(file).replace(/\.[^.]+$/, '');
-  const first = /^([a-z0-9][\w]*?)(?:-|$)/i.exec(stem)?.[1];
-  if (first) {
-    const r = resolveAgent(first);
+  const parts = stem.split('-').filter(Boolean);
+  for (let i = parts.length; i >= 1; i--) {
+    const r = resolveAgent(parts.slice(0, i).join('-'));
     if (r.ok) return r;
   }
   return null;
+}
+
+function recipientsFor(file: string, content: string): Agent[] | 'addressed-none' | null {
+  const named = addressedNames(content);
+  if (named) {
+    const found: Agent[] = [];
+    const seenIds = new Set<string>();
+    for (const name of named) {
+      const r = resolveAgent(name);
+      if (r.ok && !seenIds.has(r.data.id)) {
+        seenIds.add(r.data.id);
+        found.push(r.data);
+      }
+    }
+    return found.length ? found : 'addressed-none';
+  }
+  const one = recipientFromName(file);
+  return one?.ok ? [one.data] : null;
 }
 
 export function announceFile(file: string, label: string): void {
@@ -62,7 +88,7 @@ export function announceFile(file: string, label: string): void {
   try {
     head = fs.readFileSync(file, 'utf8').slice(0, 4000);
   } catch { /* unreadable: still announce by path */ }
-  const recipient = recipientFor(file, head);
+  const recipients = recipientsFor(file, head);
   // The hand-off stays reviewable after the inbox moves on: archive it as a library document.
   let archive = '';
   try {
@@ -72,14 +98,17 @@ export function announceFile(file: string, label: string): void {
     logger.debug({ file, error: (e as Error).message }, 'Hand-off not archived');
   }
   const text = `[File from ${label}] ${file}${archive} — read it and act on it as part of your current task; answer with a TO @fable: line if it asks a question.`;
-  if (recipient?.ok) {
-    deliverSystemLine(recipient.data, text, { kind: 'handoff', source: label });
-    logger.info({ file, agent: recipient.data.name }, 'Inbox file announced to its agent');
+  if (Array.isArray(recipients) && recipients.length) {
+    for (const agent of recipients) {
+      deliverSystemLine(agent, text, { kind: 'handoff', source: label });
+      logger.info({ file, agent: agent.name }, 'Inbox file announced to its agent');
+    }
     return;
   }
-  const stored = insertAgentMessage({ from_agent_id: null, to_agent_id: null, message: text, message_type: 'info' });
-  if (stored.ok) emit('message.created', 'agent_message', stored.data.id, { from_agent_id: null, to_agent_id: null, message_type: 'info', via: 'inbox_watch', file }, null);
-  logger.info({ file }, 'Inbox file posted to the thread (no addressed agent)');
+  const notice = `unrouted hand-off: [File from ${label}] ${file}${archive} — no agent resolved from the header or the file name.`;
+  const stored = insertAgentMessage({ from_agent_id: null, to_agent_id: null, message: notice, message_type: 'info' });
+  if (stored.ok) emit('message.created', 'agent_message', stored.data.id, { from_agent_id: null, to_agent_id: null, message_type: 'info', via: 'inbox_watch', file, unrouted: true, notice: 'unrouted hand-off' }, null);
+  logger.warn({ file, label }, 'unrouted hand-off');
 }
 
 function labelFor(dir: string): string {

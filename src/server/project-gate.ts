@@ -18,6 +18,7 @@ import { getConfig, type ProjectConfig } from './config.js';
 import { getDb, type Agent, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
+import { pingReviewersForGreenSha } from './gate-ping.js';
 
 export const GATE_FULL_TIMEOUT_MS = 70 * 60 * 1000;
 const GATE_KV_PREFIX = 'gate_result:';
@@ -342,6 +343,12 @@ export async function maybeInvokeProjectGate(runId: string, agent: Agent): Promi
     branch: record.branch,
     log_path: record.log_path,
   });
+
+  if (parsed?.verdict === 'GREEN' && parsed.sha) {
+    try { pingReviewersForGreenSha(parsed.sha); } catch (e) {
+      logger.debug({ sha: parsed.sha, error: (e as Error).message }, 'Gate GREEN ping skipped');
+    }
+  }
 
   logger.info(
     { runId, project: matched.name, exitCode, sha: record.sha, result: record.result_line },

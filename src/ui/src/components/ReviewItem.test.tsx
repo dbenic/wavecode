@@ -107,6 +107,34 @@ describe('ReviewItem freeze card', () => {
     expect(screen.getByText('STALE → e65a2ab5')).toBeTruthy();
   });
 
+  it('locks STAGE on a stale freeze for an admin too', () => {
+    render(
+      <MemoryRouter>
+        <ReviewItem item={item({ status: 'stale', verdict: 'pass' })} agents={[]} onAction={() => {}} index={0} isAdmin />
+      </MemoryRouter>,
+    );
+    const stage = screen.getByRole('button', { name: 'STAGE' });
+    expect((stage as HTMLButtonElement).disabled).toBe(true);
+    expect(stage.getAttribute('title')).toMatch(/stale/);
+  });
+
+  it('keeps PROMOTE disabled until the full run is green, and shows a failure after staging', () => {
+    const withBlock = item({});
+    withBlock.promote_block = 'full run not green on 2431f684';
+    withBlock.full_fail_flag = 'Full run FAILED after staging: lint. Fix before asking for prod';
+    withBlock.status_line = 'On staging (quick check) · Full run: FAIL: lint';
+    render(
+      <MemoryRouter>
+        <ReviewItem item={withBlock} agents={[]} onAction={() => {}} index={0} />
+      </MemoryRouter>,
+    );
+    const promote = screen.getByText('PROMOTE');
+    expect((promote as HTMLButtonElement).disabled).toBe(true);
+    expect(promote.getAttribute('title')).toMatch(/full run not green on 2431f684/);
+    expect(screen.getByTestId('full-fail-flag').textContent).toMatch(/Full run FAILED after staging: lint/);
+    expect(screen.getByTestId('status-line').textContent).toMatch(/On staging \(quick check\)/);
+  });
+
   it('Reject on a freeze asks for a reason and sends it', async () => {
     const api = await import('../hooks/useApi');
     vi.spyOn(window, 'prompt').mockReturnValue('wrong base');

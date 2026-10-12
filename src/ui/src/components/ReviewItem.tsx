@@ -4,6 +4,7 @@ import { apiGet, apiPost } from '../hooks/useApi';
 import type { ReviewItem as ReviewItemType, Agent, CodeReview } from '../types';
 import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 import StageChip, { type StageProgress } from './StageChip';
+import TestChip from './TestChip';
 
 function formatDuration(seconds: number | null): string {
   if (seconds === null) return '--:--';
@@ -108,10 +109,27 @@ export default function ReviewItem({
   const verdict = item.latestReview?.verdict ?? aiReviews.find((r) => r.status === 'done')?.verdict ?? null;
   const freeze = item.freeze;
   const freezeStale = freeze?.status === 'stale';
-  // A freeze card promotes only on an independent PASS on the exact SHA; a stale SHA never.
-  const canPromote = !freeze || (freeze.verdict === 'pass' && !freezeStale);
-  // Stage needs that same PASS. Admins may stage without it. The label follows the verdict, never the issue count.
-  const stageLocked = !!freeze && !freezeStale && freeze.verdict !== 'pass' && !isAdmin;
+  const staleTitle = freeze
+    ? `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on; freeze the new SHA`
+    : '';
+  // A freeze card promotes only on an independent PASS on the exact SHA, and only once the full gate is green. A stale SHA never.
+  const passOk = !freeze || (freeze.verdict === 'pass' && !freezeStale);
+  const promoteReason = freezeStale
+    ? staleTitle
+    : !passOk
+      ? 'Promote needs an independent PASS on the exact SHA; a stale SHA must be frozen and reviewed again'
+      : item.promote_block ?? null;
+  const canPromote = passOk && !item.promote_block;
+  // Stage needs that same PASS. Admins may stage without it. Staleness blocks everyone, admins included.
+  const stageNeedsPass = !!freeze && freeze.verdict !== 'pass' && !isAdmin;
+  const stageLocked = !!freeze && (freezeStale || stageNeedsPass || !!item.stage_block);
+  const stageTitle = freezeStale
+    ? staleTitle
+    : item.stage_block
+      ? item.stage_block
+      : stageNeedsPass
+        ? "Stage needs the reviewer's PASS on this exact SHA"
+        : 'Automated deploy to staging through the release pipeline, no GO';
   const latestAi = aiReviews.find((r) => r.status === 'done') ?? aiReviews[0] ?? null;
   const chipVerdict = latestAi?.verdict ?? item.latestReview?.verdict ?? freeze?.verdict ?? null;
   const chipIssues = latestAi?.issues_found ?? item.latestReview?.issues_found ?? 0;
@@ -188,6 +206,23 @@ export default function ReviewItem({
                 <a href={fileViewHref(freeze.verdict_path)} onClick={openFile} className="text-sky-300 hover:text-sky-200 underline underline-offset-2">verdict</a>
               )}
             </div>
+            {item.status_line && (
+              <p className="text-[11px] text-slate-200" data-testid="status-line">{item.status_line}</p>
+            )}
+            {item.full_fail_flag && (
+              <p className="text-[11px] font-semibold text-red-300" data-testid="full-fail-flag">{item.full_fail_flag}</p>
+            )}
+            {item.delta_review && (
+              <p className="text-[10px] text-violet-300" data-testid="delta-review">
+                {item.delta_review.label}{item.delta_review.verdict_path ? ` · ${item.delta_review.verdict_path}` : ''}
+              </p>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              {item.test_run && <TestChip run={item.test_run} project={freeze?.project} canLog={item.test_log} />}
+              {item.test_errors && item.test_errors.length > 0 && (
+                <span className="text-[10px] text-amber-300" data-testid="host-unreachable">test host unreachable</span>
+              )}
+            </div>
           </div>
         )}
 
@@ -208,11 +243,11 @@ export default function ReviewItem({
 
         {/* Action buttons */}
         <div className="flex items-center gap-2 pt-1">
-          {canPromote && (
+          {passOk && (
             <button
               onClick={promote}
-              disabled={acting !== null}
-              title={verdict !== 'pass' ? 'Requires a passing AI review (or an explicit override reason)' : freeze ? `Send the GO for ${freeze.sha.slice(0, 8)} to the deployer` : undefined}
+              disabled={acting !== null || !canPromote}
+              title={promoteReason ?? (verdict !== 'pass' ? 'Requires a passing AI review (or an explicit override reason)' : freeze ? `Send the GO for ${freeze.sha.slice(0, 8)} to the deployer` : undefined)}
               className="px-2.5 py-1 rounded border border-emerald-500/30 text-[10px] font-semibold tracking-wider text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-500/50 transition-all active:scale-95 disabled:opacity-40"
             >
               {acting === 'promote' ? '...' : 'PROMOTE'}
@@ -221,18 +256,18 @@ export default function ReviewItem({
           {staging && (staging.status === 'sent' || staging.status === 'requested' || staging.status === 'deployed' || staging.status === 'failed') && (
             <StageChip releaseId={staging.id} progress={staging} />
           )}
-          {freeze && !freezeStale && staging?.status !== 'sent' && staging?.status !== 'requested' && staging?.status !== 'deployed' && (
+          {freeze && staging?.status !== 'sent' && staging?.status !== 'requested' && staging?.status !== 'deployed' && (
             <button
-              onClick={() => act('stage')}
+              onClick={() => { if (!stageLocked) void act('stage'); }}
               disabled={acting !== null || stageLocked}
-              title={stageLocked ? "Stage needs the reviewer's PASS on this exact SHA" : 'Automated deploy to staging through the release pipeline, no GO'}
+              title={stageTitle}
               className="px-2.5 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 hover:border-sky-500/50 transition-all active:scale-95 disabled:opacity-40"
             >
               {acting === 'stage' ? '...' : 'STAGE'}
             </button>
           )}
-          {freeze && !canPromote && (
-            <span className="text-[10px] text-slate-500" title="Promote needs an independent PASS on the exact SHA; a stale SHA must be frozen and reviewed again">
+          {freeze && !passOk && (
+            <span className="text-[10px] text-slate-500" title={promoteReason ?? undefined}>
               {freezeStale ? 'stale — not promotable' : 'no PASS — not promotable'}
             </span>
           )}

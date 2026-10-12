@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "generated_at": "2026-10-12T14:00:00.000+02:00",
+  "errors": [{ "host": "runner.example", "msg": "connection reset\r" }],
+  "extra": "ignored",
+  "runs": [
+    {
+      "id": "q-queued",
+      "sha": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+      "who": "wave.runner.wc-lane-a",
+      "kind": "dev",
+      "suite": "tier1",
+      "state": "queued",
+      "queue_pos": 2,
+      "summary": null,
+      "ended_at": null,
+      "log": null
+    }
+  ]
+}

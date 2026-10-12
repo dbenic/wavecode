@@ -10,6 +10,8 @@ import { getActingUser, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
 import { canMutate, isAdmin } from '../users.js';
 import * as freezes from '../release-freezes.js';
+import * as devLanes from '../dev-lanes.js';
+import logger from '../logger.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/reviews/:runId/ai-review', async (c) => {
@@ -75,8 +77,58 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json({ ok: true });
   });
 
+  app.get('/api/reviews/lanes', (c) => {
+    try { return c.json(devLanes.listDevLanes()); } catch (e) {
+      logger.warn({ error: (e as Error).message }, 'Lane list failed');
+      return c.json([]);
+    }
+  });
+
+  app.post('/api/reviews/lanes/request-review', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ project?: string; lane?: string; reviewer?: string }>().catch(() => ({} as { project?: string; lane?: string; reviewer?: string }));
+    const result = devLanes.requestLaneReview({
+      project: body.project ?? '', lane: body.lane ?? '', reviewer: body.reviewer ?? '',
+    });
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json(result.data);
+  });
+
+  app.get('/api/reviews/test-log', (c) => {
+    const project = c.req.query('project') ?? '';
+    const id = c.req.query('id') ?? '';
+    if (!project || !id) return c.json({ error: 'project and id are required' }, 400);
+    const result = devLanes.laneTestLog(project, id);
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    return c.json(result.data);
+  });
+
   app.get('/api/reviews', (c) => {
-    return c.json(reviewQueue.listPendingReviews());
+    const items = reviewQueue.listPendingReviews();
+    let lanes: devLanes.DevLane[] = [];
+    try { lanes = devLanes.listDevLanes(); } catch (e) {
+      logger.warn({ error: (e as Error).message }, 'Lane list failed');
+    }
+    const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
+    const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
+    return c.json(items.map((item) => {
+      const lane = (item.freeze && bySha.get(item.freeze.sha))
+        || (item.freeze?.lane ? byLane.get(`${item.freeze.project}:${item.freeze.lane}`) : undefined);
+      if (!lane) return item;
+      return {
+        ...item,
+        status_line: lane.status_line,
+        stage_block: lane.stage_block,
+        promote_block: lane.promote_block,
+        full_fail_flag: lane.full_fail_flag,
+        test_run: lane.test_run,
+        test_errors: lane.test_errors,
+        test_log: lane.test_log,
+        delta_review: lane.delta_review,
+        reviewers: lane.reviewers,
+      };
+    }));
   });
 
   app.get('/api/reviews/:runId', (c) => {

@@ -187,20 +187,32 @@ export default function Release() {
         </td>
         <td className="px-3 py-2 align-top text-[10px] text-slate-400">{l.next}</td>
         <td className="px-3 py-2 align-top text-right whitespace-nowrap space-x-1.5">
-          {l.status === 'open' && !l.candidate && (
+          {(l.status === 'open' || l.status === 'stale') && !l.candidate && (
             <>
               <button
                 onClick={() => laneStage(l)}
-                disabled={acting !== null || openReq || !l.run_id || (l.verdict !== 'pass' && !isAdmin)}
-                title={l.verdict !== 'pass' && !isAdmin ? "Stage needs the reviewer's PASS on this exact SHA" : 'Automated staging of this lane alone, no GO'}
+                disabled={acting !== null || openReq || !l.run_id || l.status === 'stale' || (l.verdict !== 'pass' && !isAdmin)}
+                title={l.status === 'stale'
+                  ? `Freeze ${l.sha.slice(0, 8)} is stale — lane ${l.lane ?? '?'} moved on; freeze the new SHA`
+                  : l.verdict !== 'pass' && !isAdmin
+                    ? "Stage needs the reviewer's PASS on this exact SHA"
+                    : 'Automated staging of this lane alone, no GO'}
                 className="px-2 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 disabled:opacity-40"
               >
                 {busy(`stage:${l.sha}`) ? '...' : 'STAGE'}
               </button>
-              {l.staging?.status === 'deployed' && !verified && (
-                <button onClick={() => verify(l.sha, l.project, `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`)} disabled={acting !== null} title="Mark this lane Ready for prod after checking it on staging. Developers and admins can do this." className="px-2 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 disabled:opacity-40">
+              {l.status === 'open' && l.staging?.status === 'deployed' && !verified && (
+                <button
+                  onClick={() => verify(l.sha, l.project, `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`)}
+                  disabled={acting !== null}
+                  title={l.full_fail_flag ? `${l.full_fail_flag} Production stays blocked until the full run is green.` : 'Mark this lane Ready for prod after checking it on staging. Developers and admins can do this.'}
+                  className="px-2 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 disabled:opacity-40"
+                >
                   {busy(`verify:${l.sha}`) ? '...' : 'READY FOR PROD'}
                 </button>
+              )}
+              {l.full_fail_flag && (
+                <div className="mt-1 text-[10px] font-semibold text-red-300" data-testid="full-fail-flag">{l.full_fail_flag}</div>
               )}
             </>
           )}

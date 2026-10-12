@@ -170,6 +170,18 @@ projects:
     workspace_match: '**/wavepulse*'
     repo: /home/wave/repos/wavepulse          # told to PM seats; base clone for worktrees
     setup_command: npm ci --no-audit --no-fund # runs detached in every new worktree (.wavecode-setup.log)
+    main_remote: origin
+    main_branch: main
+    lane_glob: 'wc-*'
+    protected_paths: [src/version.ts]        # dev lanes must not edit these
+    migrations_dir: db/migrations
+    before_freeze_tip: "Run the quick check during development, and run the full suite only after the lane is on staging."
+    tests:
+      status_command: [test-status, '{lane}', '{sha}']
+      history_command: [test-history, '{sha}']
+      log_command: [test-log, '{id}']
+      quick_suites: [quick, tier1]           # a green one of these can stage
+      full_suites: [full-tuned, full]        # production Promote needs one of these green
   max_fix_loops: 2               # bounded fix→re-review rounds
   require_pass_to_promote: true  # promote gate even without auto_review
   gate_dependents_on_approval: true  # DAG advances on approval, not 'done'

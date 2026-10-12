@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -256,6 +257,67 @@ describe('releases.ts', () => {
       rel.stopReleasePollers();
     });
 
+    it('refuses staging and production when the SHA does not contain main, including a candidate and an overlord auto-stage', async () => {
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-q', '-m', 'base');
+      git('checkout', '-q', '-b', 'rc');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'c');
+      git('add', '.');
+      git('commit', '-q', '-m', 'candidate');
+      const behind = git('rev-parse', 'HEAD');
+      git('checkout', '-q', 'main');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-q', '-m', 'main moved');
+      const mainSha = git('rev-parse', 'HEAD');
+      git('update-ref', 'refs/remotes/origin/main', mainSha);
+      git('update-ref', 'refs/remotes/origin/fable/rc-0443-2', behind);
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable', repo, candidate_refs: 'fable/rc-*' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const rfz = await import('./release-freezes.js');
+      rfz.setFetchDisabledForTest(true);
+
+      const staging = await rel.requestRelease({ project: 'wavepulse', sha: behind, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+      expect(staging.ok).toBe(false);
+      if (staging.ok) return;
+      expect(staging.error).toMatch(/^behind main by \d+ — merge latest main$/);
+      const production = await rel.requestRelease({ project: 'wavepulse', sha: behind, target: 'production', actorName: 'denis', actorIsAdmin: true });
+      expect(production.ok).toBe(false);
+      if (!production.ok) expect(production.error).toBe(staging.error);
+      expect(rel.listReleases({ sha: behind })).toEqual([]);
+
+      const current = await rel.requestRelease({ project: 'wavepulse', sha: mainSha, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+      expect(current.ok).toBe(true);
+
+      const stage = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/stage', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(stage.status).toBe(400);
+      expect(await stage.json()).toMatchObject({ error: staging.error });
+      const promote = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/promote', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(promote.status).toBe(400);
+      expect(box.state.posts.every((p) => p.sha !== behind)).toBe(true);
+
+      const ol = await import('./overlord.js');
+      const staged = await ol.autoStage({
+        lanes: [{ status: 'open', verdict: 'pass', candidate: null, staging: null, project: 'wavepulse', sha: behind, lane: 'wc-ales', desk: null, reviewer: 'codex3', gate: null, run_id: null }],
+      } as never);
+      expect(staged).toBe(0);
+      expect(rel.listReleases({ sha: behind })).toEqual([]);
+      rfz.setFetchDisabledForTest(false);
+      rel.stopReleasePollers();
+    });
+
     it('a peer that refuses the request leaves a failed record, visible as an event', async () => {
       cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
       cfg.peers.deploy = { url: 'http://deploy.test', token: 'wrong-token-000000000', agents: ['fable'] };
@@ -303,6 +365,83 @@ describe('releases.ts', () => {
       const stale = await rq.stage(cardC.run.id);
       expect(stale.ok).toBe(false);
       expect(!stale.ok && stale.error).toMatch(/stale/);
+
+      // An admin override covers a missing PASS only. It does not cover staleness.
+      const asAdmin = await runWithActor('owner', async () => rq.stage(cardC.run.id), { admin: true });
+      expect(asAdmin.ok).toBe(false);
+      if (!asAdmin.ok) expect(asAdmin.error).toMatch(/stale/);
+      expect(box.state.posts.filter((p) => p.sha === SHA_C)).toEqual([]);
+    });
+
+    it('refuses Stage when the lane tip moved past the freeze, even for an admin', async () => {
+      const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+      const repo = path.join(tmp, 'moved');
+      fs.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a'); git('add', '.'); git('commit', '-q', '-m', 'base');
+      const base = git('rev-parse', 'HEAD');
+      git('update-ref', 'refs/remotes/origin/main', base);
+      git('checkout', '-q', '-b', 'lane');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b'); git('add', '.'); git('commit', '-q', '-m', 'frozen');
+      const frozen = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'c'); git('add', '.'); git('commit', '-q', '-m', 'moved on');
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable', repo };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      peers.setPeerFetchForTest(fakeDeployBox().fetchImpl);
+      const rfz = await import('./release-freezes.js');
+      rfz.setFetchDisabledForTest(true);
+      const author = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'adopted', status: 'idle' });
+      if (!author.ok) throw new Error(author.error);
+      db.insertAgent({ name: 'codex3', runtime: 'claude-code', tmux_session: 'wc-codex3', workspace: repo, mode: 'adopted', status: 'idle' });
+      const note = path.join(tmp, `lane-freeze-${frozen.slice(0, 8)}.md`);
+      fs.writeFileSync(note, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${frozen}\`\n- Review: @codex3 **VERDICT: PASS (gate pending)** on this exact SHA: /r/v.md\n`);
+      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      const card = rq.listPendingReviews().find((i) => i.freeze?.sha === frozen);
+      expect(card?.freeze?.verdict).toBe('pass');
+      const { runWithActor } = await import('./request-context.js');
+      const refused = await runWithActor('owner', async () => rq.stage(card!.run.id), { admin: true });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toMatch(/stale/);
+      expect(rf.getFreeze(frozen)?.status).toBe('stale');
+      rfz.setFetchDisabledForTest(false);
+    });
+
+    it('stages on a green quick check and refuses Promote until the full gate is green', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      (cfg.projects.wavepulse as { tests?: { status_command: string[] } }).tests = { status_command: ['test-status', '{sha}'] };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      agent('claude2'); agent('codex3');
+      const runs = await import('./test-runs.js');
+      const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
+      const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
+      fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
+      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      const [card] = rq.listPendingReviews();
+      const report = (rows: unknown[]) => JSON.stringify({ v: 1, runs: rows });
+      runs.setTestRunExecForTest(() => report([{ id: 'q', sha: SHA, who: 'wave.runner.example.wc-claude2', kind: 'dev', suite: 'tier1', state: 'running', host: 'runner.example' }]));
+      const running = await rq.stage(card.run.id);
+      expect(running.ok).toBe(false);
+      if (!running.ok) expect(running.error).toBe('quick check running');
+
+      runs.setTestRunExecForTest(() => report([{ id: 'q', sha: SHA, who: 'wave.runner.example.wc-claude2', kind: 'dev', suite: 'quick', state: 'pass', ended_at: '2026-10-12T12:00:00.000+02:00' }]));
+      const staged = await rq.stage(card.run.id);
+      expect(staged.ok).toBe(true);
+      const { runWithActor } = await import('./request-context.js');
+      const blocked = await runWithActor('owner', async () => rq.promote(card.run.id), { admin: true });
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.error).toMatch(/needs green full gate on/);
+
+      runs.setTestRunExecForTest(() => report([
+        { id: 'q', sha: SHA, who: 'wave.runner.example.wc-claude2', kind: 'dev', suite: 'quick', state: 'pass', ended_at: '2026-10-12T12:00:00.000+02:00' },
+        { id: 'g', sha: SHA, who: 'unknown', kind: 'gate', suite: 'full-tuned', state: 'pass', ended_at: '2026-10-12T13:00:00.000+02:00' },
+      ]));
+      const promoted = await runWithActor('owner', async () => rq.promote(card.run.id), { admin: true });
+      expect(promoted.ok).toBe(true);
+      runs.setTestRunExecForTest(null);
     });
 
     it('a developer can stage and approve a freeze, and that does not send a production request or a Release GO', async () => {
