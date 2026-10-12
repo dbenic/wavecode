@@ -258,7 +258,8 @@ type CommandGate = 'GREEN' | 'RED' | 'QUEUED' | 'RUNNING';
 function recordedCommandGate(sha: string): CommandGate | null {
   try {
     const row = getDb().prepare(
-      `SELECT payload_json FROM events WHERE type = 'pipeline.gate' AND entity_id = ? ORDER BY id DESC LIMIT 1`,
+      // entity_type first: the (entity_type, entity_id, created_at) index serves this; without it every call scans the events table
+      `SELECT payload_json FROM events WHERE entity_type = 'run' AND entity_id = ? AND type = 'pipeline.gate' ORDER BY id DESC LIMIT 1`,
     ).get(`${sha.toLowerCase()}:full`) as { payload_json: string | null } | undefined;
     if (!row?.payload_json) return null;
     const payload = JSON.parse(row.payload_json) as { gate?: string; sha?: string };
