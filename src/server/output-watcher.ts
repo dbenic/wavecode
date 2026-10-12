@@ -691,4 +691,9 @@ function finishOneStuckRun(agentId: string, run: { id: string; task_id: string }
   );
 }
 
-registerPaneClassifier(detectStatus);
+try {
+  registerPaneClassifier(detectStatus);
+} catch (e) {
+  // Vitest doubles that replace session-manager.js throw on any export they did not list.
+  if (!String((e as Error).message).includes('registerPaneClassifier')) throw e;
+}

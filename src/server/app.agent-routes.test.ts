@@ -51,6 +51,7 @@ vi.mock('./session-manager.js', () => ({
   get: vi.fn(),
   scan: vi.fn(),
   adopt: vi.fn(),
+  reprobeAgent: vi.fn((agent) => agent),
   sendKeys: vi.fn(),
   sendRawKeys: vi.fn(),
   capturePaneAnsi: vi.fn(),
