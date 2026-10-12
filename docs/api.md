@@ -214,7 +214,33 @@ List persisted team messages.
 List tasks.
 
 Query:
-`status`, `agent_id`
+`status`, `agent_id`, and optionally `limit` (≤ 500) with `offset`. With
+`limit` the list is newest first (a page of the Done or Failed column);
+without it the order is priority, then oldest first (the queue).
+
+Each task carries `dependencies`, `dependents`, `run_phase`, `result`,
+`result_reason` and a slim `latest_run` (`id`, `status`, `attempt`,
+`agent_id`, `started_at`, `finished_at`, `exit_code`, `review_status`,
+`result`, `result_reason`, `phase`, `last_line`). The run's `summary`, log
+and paths are on `GET /api/runs/:id` and `GET /api/tasks/:id`, not in the list.
+
+### `GET /api/tasks/board`
+The Tasks page in one round trip:
+
+```json
+{
+  "counts": { "pending": 2, "running": 1, "done": 181, "failed": 3, "blocked": 0 },
+  "active": [ "…every pending, blocked and running task…" ],
+  "done":   [ "…newest 25 (query done=N for more)…" ],
+  "failed": [ "…newest 25 (query failed=N for more)…" ],
+  "page_size": 25,
+  "has_more": { "done": true, "failed": false }
+}
+```
+
+The page shows the real totals from `counts` and asks for a bigger page
+with `?done=50` as the person presses "show more"; the whole history is
+never shipped to the browser.
 
 **Local status CLI (no LLM poll):** on the daemon host, `wavecode status`
 GETs this list plus `GET /api/agents` and `GET /api/runs/:id` (same

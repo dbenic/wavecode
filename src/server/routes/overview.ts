@@ -1,7 +1,7 @@
 import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { isAdmin } from '../users.js';
-import { buildBoard, fixMarker } from '../overview.js';
+import { buildBoard, cachedBoard, fixMarker } from '../overview.js';
 import * as overlord from '../overlord.js';
 import { canMutate } from '../users.js';
 import { getDb, getRun, insertTask, resolveAgent } from '../db.js';
@@ -15,7 +15,7 @@ export function registerOverviewRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/overview', (c) => {
     const cfg = overlord.overlordConfig();
     return c.json({
-      board: buildBoard(),
+      board: cachedBoard(),
       report: overlord.getLatestReport(),
       overlord: { enabled: cfg.enabled, model: cfg.model, heartbeat_min: cfg.heartbeatMin, max_wakes_per_hour: cfg.maxWakesPerHour },
     });

@@ -9,7 +9,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
-import { gitAncestor, gitText } from './git-memo.js';
+import { gitAncestor, gitAncestorSync, gitText } from './git-memo.js';
 import { behindMainLine } from './lane-status.js';
 import { commitsBehind, projectRepo } from './lane-main.js';
 
@@ -38,15 +38,9 @@ function git(repo: string, args: string[]): string | null {
   }
 }
 
+/** Memoised for full-SHA pairs (see git-memo). */
 function isAncestor(repo: string, ancestor: string, descendant: string): boolean | null {
-  try {
-    execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', ancestor, descendant], { stdio: 'ignore', timeout: 5000 });
-    return true;
-  } catch (e) {
-    const status = (e as { status?: number }).status;
-    if (status === 1) return false;
-    return null;
-  }
+  return gitAncestorSync(repo, ancestor, descendant);
 }
 
 /** Best-effort refresh. A missing remote or a failed fetch leaves the refs we already have. */

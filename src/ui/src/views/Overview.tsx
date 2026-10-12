@@ -42,6 +42,14 @@ const field = 'px-2 py-1 rounded border border-slate-800/60 bg-slate-950/50 text
  * open fixes (assign an agent, see who is on it), the attention list, the agent board with
  * budget, and the lanes.
  */
+const BOARD_RELOAD_DEBOUNCE_MS = 1500;
+
+/** Which events change the board. Pane output and usage probes do not. */
+export function boardEventReloads(type: string): boolean {
+  if (type === 'agent.output_updated' || type === 'usage.probed') return false;
+  return /^(overlord|release|review|run|agent|task)\./.test(type);
+}
+
 export default function Overview() {
   const navigate = useNavigate();
   const [board, setBoard] = useState<Board | null>(null);
@@ -71,10 +79,19 @@ export default function Overview() {
   useEffect(() => { fetchData(); fetchChat(); }, [fetchData, fetchChat]);
   useEffect(() => { chatEnd.current?.scrollIntoView?.({ block: 'nearest' }); }, [chat.length]);
 
+  // The board is rebuilt server-side on every fetch (git per freeze), so a burst of events
+  // costs one reload, and the pane-output tick (several a second on a busy box) costs none.
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleFetch = useCallback(() => {
+    if (reloadTimer.current) return;
+    reloadTimer.current = setTimeout(() => { reloadTimer.current = null; fetchData(); }, BOARD_RELOAD_DEBOUNCE_MS);
+  }, [fetchData]);
+  useEffect(() => () => { if (reloadTimer.current) clearTimeout(reloadTimer.current); }, []);
+
   const handleSSE = useCallback((event: SSEEvent) => {
     if (event.type === 'overlord.chat') fetchChat();
-    else if (/^(overlord|release|review|run|agent|task)\./.test(event.type)) fetchData();
-  }, [fetchData, fetchChat]);
+    else if (boardEventReloads(event.type)) scheduleFetch();
+  }, [scheduleFetch, fetchChat]);
   useSSE(handleSSE);
 
   const act = async (key: string, fn: () => Promise<unknown>) => {

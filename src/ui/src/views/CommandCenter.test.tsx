@@ -52,7 +52,7 @@ async function setup(me: User = ana) {
       agent({ name: 'grok-fe-2', alias: 'mia', tags: ['frontend'] }),
       agent({ name: 'pm', orchestrator: true, role: 'orchestrator' }),
     ] as never;
-    if (path === '/tasks') return [{ id: 'task-1', agent_id: null, prompt: 'T5 UI', status: 'pending', priority: 0, created_at: new Date().toISOString(), created_by: 'u-ana' }] as never;
+    if (path === '/tasks/board') return board([{ id: 'task-1', agent_id: null, prompt: 'T5 UI', status: 'pending', priority: 0, created_at: new Date().toISOString(), created_by: 'u-ana' }]) as never;
     if (path === '/reviews') return [{}, {}] as never;
     if (path.startsWith('/thread')) return (threadPages.shift() ?? { items: [], cursor: 99 }) as never;
     if (path.startsWith('/agents/grok-fe/output')) return { output: '$ npm test\n✓ ok' } as never;
@@ -62,6 +62,11 @@ async function setup(me: User = ana) {
   render(<MemoryRouter><CommandCenter /></MemoryRouter>);
   await screen.findByText('Report one');
   return api;
+}
+
+/** GET /api/tasks/board shape around a few open tasks. */
+function board(active: unknown[]) {
+  return { counts: { pending: active.length, running: 0, done: 0, failed: 0, blocked: 0 }, active, done: [], failed: [], page_size: 25, has_more: { done: false, failed: false } };
 }
 
 describe('CommandCenter', () => {
@@ -213,7 +218,7 @@ describe('CommandCenter', () => {
       const original = vi.mocked(api.apiGet).getMockImplementation();
       await setup();
       vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
-        if (path === '/tasks') return [{ id: 'task-9', agent_id: 'grok-fe', prompt: 'mine, running', status: 'running', priority: 0, created_at: new Date().toISOString(), created_by: 'u-ana' }] as never;
+        if (path === '/tasks/board') return board([{ id: 'task-9', agent_id: 'grok-fe', prompt: 'mine, running', status: 'running', priority: 0, created_at: new Date().toISOString(), created_by: 'u-ana' }]) as never;
         return original ? original(path) : (null as never);
       });
       await act(async () => {
@@ -231,7 +236,7 @@ describe('CommandCenter', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Collapse board' }));
       // a running task of mine appears — the default would now expand, but the viewer chose collapsed
       vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
-        if (path === '/tasks') return [{ id: 'task-9', agent_id: 'grok-fe', prompt: 'mine', status: 'running', priority: 0, created_at: '', created_by: 'u-ana' }] as never;
+        if (path === '/tasks/board') return board([{ id: 'task-9', agent_id: 'grok-fe', prompt: 'mine', status: 'running', priority: 0, created_at: '', created_by: 'u-ana' }]) as never;
         return original ? original(path) : (null as never);
       });
       await act(async () => {

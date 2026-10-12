@@ -9,6 +9,10 @@ import {
   getTask,
   getRun,
   listTasks,
+  countTasksByStatus,
+  latestRunsByTask,
+  dependencyEdgesForTasks,
+  type Task,
   updateTaskStatus,
   updateTaskReviewer,
   listRuns,
@@ -20,7 +24,8 @@ import { getConfig } from '../config.js';
 import { emit } from '../event-bus.js';
 import * as taskDispatcher from '../task-dispatcher.js';
 import * as validate from '../validate.js';
-import { presentFileRun, readCliLog } from '../file-runner.js';
+import { presentFileRun, readCliLog, readFileRunStatus } from '../file-runner.js';
+import { presentRunResult } from '../run-result.js';
 import logger from '../logger.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
@@ -43,25 +48,77 @@ function canCancelTask(status: string): boolean {
   return ['pending', 'blocked', 'running'].includes(status);
 }
 
+/** Default page size for the board's done/failed columns. */
+export const TASK_BOARD_PAGE = 25;
+
+/**
+ * The list shape of a task: dependencies and the newest run slimmed to what a
+ * card or `wavecode status` needs (phase, verdict, last line — no summary, no
+ * log paths). Bulk lookups: two queries for the whole page and one small
+ * status read per task instead of five file probes.
+ */
+export function presentTaskList(tasks: Task[]) {
+  const ids = tasks.map((t) => t.id);
+  const latest = latestRunsByTask(ids);
+  const edges = dependencyEdgesForTasks(ids);
+  return tasks.map((task) => {
+    const run = latest.get(task.id) ?? null;
+    const result = run ? presentRunResult(run.result_path) : null;
+    const status = run ? readFileRunStatus(run.id) : null;
+    return {
+      ...task,
+      dependencies: edges.dependsOn.get(task.id) ?? [],
+      dependents: edges.dependents.get(task.id) ?? [],
+      run_phase: status?.phase ?? null,
+      result: result?.result ?? null,
+      result_reason: result?.result_reason ?? null,
+      latest_run: run ? {
+        id: run.id, status: run.status, attempt: run.attempt, agent_id: run.agent_id,
+        started_at: run.started_at, finished_at: run.finished_at, exit_code: run.exit_code,
+        review_status: run.review_status, result: result?.result ?? null, result_reason: result?.result_reason ?? null,
+        phase: status?.phase ?? null, last_line: status?.last_line ?? null,
+      } : null,
+    };
+  });
+}
+
+function pageParam(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 500) : fallback;
+}
+
 export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/tasks', (c) => {
     const status = c.req.query('status');
     const agentId = c.req.query('agent_id');
-    const tasks = listTasks({ status: status || undefined, agent_id: agentId || undefined });
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw ? pageParam(limitRaw, TASK_BOARD_PAGE) : undefined;
+    const offset = limit ? pageParam(c.req.query('offset'), 0) : undefined;
+    const tasks = listTasks({ status: status || undefined, agent_id: agentId || undefined, limit, offset: offset || 0 });
+    return c.json(presentTaskList(tasks));
+  });
 
-    return c.json(tasks.map((task) => {
-      const latest = listRuns({ task_id: task.id })[0];
-      const presented = latest ? presentTaskRun(latest) : null;
-      return {
-        ...task,
-        dependencies: taskDispatcher.getDependencies(task.id),
-        dependents: taskDispatcher.getDependents(task.id),
-        run_phase: presented?.phase ?? null,
-        result: presented?.result ?? null,
-        result_reason: presented?.result_reason ?? null,
-        latest_run: presented,
-      };
-    }));
+  /**
+   * The Tasks page in one round trip: every open task (pending, blocked,
+   * running) plus the newest page of done and failed, with the counts per
+   * status so the columns show the real totals. `done` / `failed` set how
+   * many of those columns to return (the page grows as the person asks).
+   */
+  app.get('/api/tasks/board', (c) => {
+    const doneLimit = pageParam(c.req.query('done'), TASK_BOARD_PAGE);
+    const failedLimit = pageParam(c.req.query('failed'), TASK_BOARD_PAGE);
+    const counts = countTasksByStatus();
+    const active = listTasks({ status: ['pending', 'blocked', 'running'] });
+    const done = listTasks({ status: 'done', limit: doneLimit });
+    const failed = listTasks({ status: 'failed', limit: failedLimit });
+    return c.json({
+      counts,
+      active: presentTaskList(active),
+      done: presentTaskList(done),
+      failed: presentTaskList(failed),
+      page_size: TASK_BOARD_PAGE,
+      has_more: { done: counts.done > done.length, failed: counts.failed > failed.length },
+    });
   });
 
   app.get('/api/tasks/:id', (c) => {

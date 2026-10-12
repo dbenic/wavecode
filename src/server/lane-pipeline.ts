@@ -19,16 +19,14 @@ import { getConfig, type ProjectConfig } from './config.js';
 import { getAgent, getDb, getRun, listAgents, listAllAgentTags, type Agent, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
-import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, mainSpec, mainTip, projectRepo, resolveMainRef } from './lane-main.js';
+import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, laneAutomationDenied, mainSpec, mainTip, projectRepo, resolveMainRef } from './lane-main.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
-import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, type ReleaseFreeze } from './release-freezes.js';
+import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
-import { countixDenied } from './pipeline-deny.js';
 import { assignmentFacts, loadFor, projectReassignMs, selectReviewer, shouldReassign } from './reviewer-assign.js';
-import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 export const PIPELINE_ACTION = 'pipeline.action';
@@ -134,7 +132,7 @@ export function laneRefError(project: string, lane: string): string | null {
   if (lane === mainBranch || PROTECTED_BRANCHES.has(lane)) return `refusing ${lane}: protected branch`;
   const glob = projectCfg?.lane_glob?.trim() || 'wc-*';
   if (!laneGlobRe(glob).test(lane)) return `refusing ${lane}: not a developer lane`;
-  if (countixDenied(project, lane)) return `refusing ${lane}: denied`;
+  if (laneAutomationDenied(project, null, lane)) return `refusing ${lane}: denied`;
   return null;
 }
 
@@ -230,8 +228,19 @@ function branchOf(workspace: string): string | null {
   }
 }
 
-/** Merge origin/main. A conflict aborts and names the files. Never pushes. */
-export function mergeMainClean(workspace: string, mainRef: string): { ok: true } | { ok: false; files: string[] } {
+/** A checkout owned by a `review_deny` or `agent_deny` seat (name or alias) is not auto-merged. */
+function workspaceOwnedByDenied(workspace: string): boolean {
+  const resolved = path.resolve(workspace);
+  const owners = listAgents().filter((agent) => agent.workspace && path.resolve(agent.workspace) === resolved);
+  if (owners.length === 0) return false;
+  const project = projectForWorkspace(workspace);
+  const names = project ? [project] : Object.keys(getConfig().projects ?? {});
+  return owners.some((owner) => names.some((name) => laneAutomationDenied(name, owner)));
+}
+
+/** Merge origin/main. A conflict aborts and names the files. A denied owner's workspace is left untouched. Never pushes. */
+export function mergeMainClean(workspace: string, mainRef: string): { ok: true } | { ok: false; files: string[]; skipped?: boolean } {
+  if (workspaceOwnedByDenied(workspace)) return { ok: false, files: [], skipped: true };
   try {
     git(workspace, ['merge', '--no-ff', '--no-edit', '-m', 'merge origin/main', mainRef]);
     return { ok: true };
@@ -355,7 +364,7 @@ function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 'assig
   if (!freeze.project || !freeze.author_agent_id) return;
   const pipe = pipelineOf(freeze.project);
   if (!pipe.auto_review) return;
-  if (countixDenied(freeze.project, freeze.lane, { name: freeze.author_name })) return;
+  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
   if (kind === 'green' && freeze.verdict === 'pass') return;
   if (acted(`${freeze.sha}:${kind}`, 'pipeline.review')) return;
   const author = getAgent(freeze.author_agent_id);
@@ -398,7 +407,7 @@ export function reassignWaitingReviews(now = Date.now()): number {
     if (freeze.status !== 'open' && freeze.status !== 'behind-main') continue;
     const pipe = pipelineOf(freeze.project);
     if (!pipe.auto_review) continue;
-    if (countixDenied(freeze.project, freeze.lane, { name: freeze.author_name })) continue;
+    if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) continue;
     const facts = assignmentFacts(freeze.sha);
     if (!facts) continue;
     const current = getAgent(freeze.reviewer_agent_id);
@@ -443,7 +452,7 @@ function gateWord(stdout: string): 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED' | null
 
 function queueFullGate(freeze: ReleaseFreeze): void {
   if (!freeze.project) return;
-  if (countixDenied(freeze.project, freeze.lane, { name: freeze.author_name })) return;
+  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
   const pipe = pipelineOf(freeze.project);
   if (!pipe.auto_gate || !pipe.gate_command?.length) return;
   if (acted(`${freeze.sha}:full`, GATED)) return;
@@ -464,10 +473,7 @@ function queueFullGate(freeze: ReleaseFreeze): void {
 }
 
 function isGreen(freeze: ReleaseFreeze): boolean {
-  if ((freeze.gate ?? '').toUpperCase() === 'GREEN') return true;
-  if (!freeze.project || !testsConfigured(freeze.project)) return false;
-  const checks = shaChecks(readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project));
-  return checks.full === 'green';
+  return viewShaChecks(freeze).full === 'green';
 }
 
 function touches(files: string[], paths: string[]): string | null {
@@ -539,6 +545,10 @@ export async function drainStagingQueue(project: string): Promise<void> {
     getDb().prepare('DELETE FROM pipeline_queue WHERE sha = ?').run(row.sha);
     return drainStagingQueue(project);
   }
+  if (!isGreen(freeze)) {
+    note(row.project, row.lane, row.sha, 'hold', `auto: waiting for GREEN on ${row.sha.slice(0, 8)}`);
+    return;
+  }
   const dump = row.kind === 'dump';
   // Staging only. This function has no production target.
   const sent = await requestRelease({
@@ -574,7 +584,7 @@ export async function drainStagingQueue(project: string): Promise<void> {
 export async function considerAutoStage(sha: string): Promise<void> {
   const freeze = getFreeze(sha);
   if (!freeze?.project || !freeze.lane || freeze.verdict !== 'pass') return;
-  if (countixDenied(freeze.project, freeze.lane, { name: freeze.author_name })) return;
+  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
   const pipe = pipelineOf(freeze.project);
   if (!pipe.auto_stage) return;
   if (freeze.status === 'behind-main') {
@@ -637,15 +647,17 @@ export function onAuthorDone(agentId: string): Result<{ sha: string }> {
     const spec = mainSpec(project);
     const refused = lane ? laneRefError(project, lane) : 'not a developer lane';
     if (!lane || refused) return { ok: false, error: refused ?? 'not a developer lane' };
-    if (countixDenied(project, lane, agent.data)) return { ok: false, error: `refusing ${lane}: denied` };
+    if (laneAutomationDenied(project, agent.data, lane)) return { ok: false, error: `refusing ${lane}: denied` };
     const repo = projectRepo(project) ?? agent.data.workspace;
     const mainRef = resolveMainRef(repo, project) ?? `${spec.remote}/${spec.branch}`;
     let sha = headOf(agent.data.workspace);
     if (!sha) return { ok: false, error: 'no HEAD' };
     const behind = commitsBehind(project, sha);
     if (behind != null && behind > 0) {
+      if (laneAutomationDenied(project, agent.data)) return { ok: false, error: 'excluded from lane automation' };
       const merged = mergeMainClean(agent.data.workspace, mainRef);
       if (!merged.ok) {
+        if (merged.skipped) return { ok: false, error: 'excluded from lane automation' };
         const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
         alertBehind({ lane, project, authorAgentId: agent.data.id, authorName: agent.data.name });
         const text = behindConflict(lane);
@@ -666,7 +678,7 @@ function behindConflict(lane: string): string {
   return `Your lane ${lane} is behind main. Run: git fetch origin && git merge origin/main, fix any conflicts, run the quick check, then write your freeze note. Nothing else to do.`;
 }
 
-/** Main moved: clean-merge every open lane that is now behind, then refreeze. */
+/** Main moved: clean-merge every open lane that is now behind, then refreeze. `review_deny` seats are left alone. */
 export function onMainAdvanced(project: string, mainSha?: string): void {
   const pipe = pipelineOf(project);
   if (!pipe.auto_merge_main) return;
@@ -686,14 +698,14 @@ export function onMainAdvanced(project: string, mainSha?: string): void {
   for (const lane of lanes) {
     if (laneRefError(project, lane)) continue;
     const author = listAgents().find((agent) => agent.workspace && branchOf(agent.workspace) === lane);
-    if (!author?.workspace) continue;
-    if (countixDenied(project, lane, author)) continue;
+    if (!author?.workspace || laneAutomationDenied(project, author, lane)) continue;
     const before = headOf(author.workspace);
     if (!before) continue;
     const behind = commitsBehind(project, before);
     if (behind == null || behind <= 0) continue;
     const merged = mergeMainClean(author.workspace, mainRef);
     if (!merged.ok) {
+      if (merged.skipped) continue;
       const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
       const shaNow = mainSha ?? mainTip(repo, project)?.sha ?? '';
       if (shaNow) alertBehind({ lane, project, authorAgentId: author.id, authorName: author.name });
@@ -711,7 +723,7 @@ export function onMainAdvanced(project: string, mainSha?: string): void {
 export function onFreezeRecorded(sha: string): void {
   const freeze = getFreeze(sha);
   if (!freeze || (freeze.status !== 'open' && freeze.status !== 'behind-main')) return;
-  if (countixDenied(freeze.project, freeze.lane, { name: freeze.author_name })) return;
+  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
   try { queueFullGate(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'); }
   try { assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
   void considerAutoStage(sha).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'));

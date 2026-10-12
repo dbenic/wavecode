@@ -38,9 +38,9 @@ describe('TaskBoard', () => {
 
     let taskFetchCount = 0;
     vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
-      if (path === '/tasks') {
+      if (path.startsWith('/tasks/board')) {
         taskFetchCount += 1;
-        return (taskFetchCount === 1
+        return makeBoard(taskFetchCount === 1
           ? [makeTask('Initial queued work')]
           : [makeTask('Updated queued work')]) as never;
       }
@@ -82,8 +82,8 @@ describe('TaskBoard', () => {
     const useApi = await import('../hooks/useApi');
 
     vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
-      if (path === '/tasks') {
-        return [makeTask('Manual queue still works')] as never;
+      if (path.startsWith('/tasks/board')) {
+        return makeBoard([makeTask('Manual queue still works')]) as never;
       }
 
       if (path === '/agents') {
@@ -114,7 +114,8 @@ describe('TaskBoard', () => {
     const useApi = await import('../hooks/useApi');
 
     vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
-      if (path === '/tasks' || path === '/agents' || path === '/messages?limit=30' || path === '/goals') {
+      if (path.startsWith('/tasks/board')) return makeBoard([]) as never;
+      if (path === '/agents' || path === '/messages?limit=30' || path === '/goals') {
         return [] as never;
       }
 
@@ -147,12 +148,43 @@ describe('TaskBoard', () => {
     expect(await screen.findByText('Dependency task not found: task-123')).toBeInTheDocument();
   });
 
+  it('done tasks come paged with the real column count; SHOW MORE asks the board for a bigger page', async () => {
+    const useApi = await import('../hooks/useApi');
+    const paths: string[] = [];
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      paths.push(path);
+      if (path.startsWith('/tasks/board')) {
+        const want = Number(new URL(path, 'http://x').searchParams.get('done') ?? 2);
+        const done = Array.from({ length: Math.min(want, 5) }, (_, i) => ({ ...makeTask(`Done work ${i + 1}`), status: 'done' as const }));
+        return { counts: { pending: 0, running: 0, done: 5, failed: 0, blocked: 0 }, active: [], done, failed: [], page_size: 2, has_more: { done: done.length < 5, failed: false } } as never;
+      }
+      if (path === '/agents' || path === '/messages?limit=30' || path === '/goals') return [] as never;
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    render(<MemoryRouter><TaskBoard /></MemoryRouter>);
+    expect(await screen.findByText('Done work 2')).toBeInTheDocument();
+    expect(screen.queryByText('Done work 3')).toBeNull();
+    expect(screen.getByTestId('count-done').textContent).toBe('5');
+    fireEvent.click(screen.getByText(/SHOW 2 MORE/));
+    expect(await screen.findByText('Done work 4')).toBeInTheDocument();
+    expect(paths.some((p) => p === '/tasks/board?done=4')).toBe(true);
+    // a burst of task events costs one reload, not one per event
+    const before = paths.filter((p) => p.startsWith('/tasks/board')).length;
+    await act(async () => {
+      sseHandler?.(makeTaskEvent('task.completed'));
+      sseHandler?.(makeTaskEvent('task.completed'));
+      sseHandler?.(makeTaskEvent('run.phase'));
+    });
+    await waitFor(() => expect(paths.filter((p) => p.startsWith('/tasks/board')).length).toBe(before + 1));
+  });
+
   it('shows a goal rollup of done vs total child tasks', async () => {
     const useApi = await import('../hooks/useApi');
 
     vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
-      if (path === '/tasks') {
-        return [makeTask('Add /incoming route')] as never;
+      if (path.startsWith('/tasks/board')) {
+        return makeBoard([makeTask('Add /incoming route')]) as never;
       }
       if (path === '/agents' || path === '/messages?limit=30') {
         return [] as never;
@@ -182,6 +214,13 @@ describe('TaskBoard', () => {
     expect(screen.getByText('2/3 done')).toBeInTheDocument();
   });
 });
+
+function makeBoard(active: ReturnType<typeof makeTask>[]) {
+  return {
+    counts: { pending: active.length, running: 0, done: 0, failed: 0, blocked: 0 },
+    active, done: [], failed: [], page_size: 25, has_more: { done: false, failed: false },
+  };
+}
 
 function makeTask(prompt: string) {
   return {

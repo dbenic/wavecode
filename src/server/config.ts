@@ -141,6 +141,7 @@ export interface ProjectConfig {
     gate_command?: string[];
     /** Author name → reviewer name. The author, `review_deny`, and `agent_deny` are never chosen. */
     review_routes?: Record<string, string>;
+    /** Agent name or alias. Never a reviewer, and excluded from lane pings and auto-merge. */
     review_deny?: string[];
     /**
      * Globs over lane branch names that get no Countix automation

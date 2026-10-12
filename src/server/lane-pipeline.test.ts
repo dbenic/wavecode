@@ -24,7 +24,7 @@ import { commitsBehind } from './lane-main.js';
 import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
-  considerAutoStage, drainStagingQueue, latestPipelineNote, onAuthorDone, onMainAdvanced, reassignWaitingReviews, setPipelineExecForTest,
+  considerAutoStage, drainStagingQueue, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, reassignWaitingReviews, setPipelineExecForTest,
 } from './lane-pipeline.js';
 import { listPendingReviews } from './review-queue.js';
 import { ensureReleaseFreezeTable, getFreeze, ingestFreezeFile, listReviewFreezes, setFetchDisabledForTest } from './release-freezes.js';
@@ -318,6 +318,42 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
+  it('does not auto-stage a retracted note GREEN unless the latest command word is GREEN', async () => {
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    agent('ales', path.join(tmp, 'ales'));
+    agent('codex3', path.join(tmp, 'codex3'));
+    const file = passNote('ales', 'wc-ales', sha);
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('GREEN');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('gate GREEN\n', ''));
+    const event = (gate: string) => {
+      const saved = db.insertEvent({
+        type: 'pipeline.gate', entity_type: 'run', entity_id: `${sha}:full`, payload: { sha, gate },
+      });
+      expect(saved.ok).toBe(true);
+    };
+    event('QUEUED');
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('QUEUED');
+    pipe.auto_stage = true;
+    await considerAutoStage(sha);
+    expect(listReleases({ sha })).toEqual([]);
+    expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/waiting for GREEN/);
+
+    event('RED');
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('RED');
+    await considerAutoStage(sha);
+    expect(listReleases({ sha })).toEqual([]);
+
+    event('GREEN');
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('GREEN');
+    await considerAutoStage(sha);
+    expect(listReleases({ project: 'wave', target: 'staging' })).toHaveLength(1);
+    expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
   it('hands a migration lane to deploy flagged for a pre-deploy dump', async () => {
     const sha = branch('wc-ales', 'db/migrations/001.sql', 'create table t(id int);');
     agent('ales', path.join(tmp, 'ales'));
@@ -406,6 +442,28 @@ describe('hands-free lane pipeline', () => {
     expect(text).toContain('/reviews/prev.md');
     expect(messages(author.id).join('\n')).toMatch(/Merged latest main into wc-ales/);
     expect(messages(author.id).join('\n')).not.toMatch(/behind main/);
+    expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  it('does not auto-merge or ping a review_deny agent', () => {
+    const sha = branch('wc-codex1', 'codex.txt', 'lane');
+    const seat = agent('chatgpt-countix', repo);
+    db.updateAgentIdentity(seat.id, { alias: 'codex1' });
+    moveMain('main.txt', 'later');
+    git(repo, 'checkout', '-q', 'wc-codex1');
+    pipe.auto_merge_main = true;
+    pipe.auto_freeze = true;
+    onMainAdvanced('wave');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
+    expect(git(repo, 'status', '--porcelain')).toBe('');
+    expect(fs.existsSync(path.join(repo, '.git', 'MERGE_HEAD'))).toBe(false);
+    expect(mergeMainClean(repo, 'origin/main')).toMatchObject({ ok: false, skipped: true });
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
+    expect(messages(seat.id).join('\n')).not.toMatch(/behind main|Merged latest main/);
+    expect(latestPipelineNote('wave', 'wc-codex1')).toBeNull();
+    const written = fs.existsSync(freezeDir) ? fs.readdirSync(freezeDir).filter((name) => name.includes('auto-freeze')) : [];
+    expect(written).toEqual([]);
+    expect(calls.filter((argv) => argv[0] === 'push-lane')).toEqual([]);
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 

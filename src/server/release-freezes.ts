@@ -42,8 +42,7 @@ import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
 import { behindMainLine } from './lane-status.js';
 import { gitText } from './git-memo.js';
-import { commitsBehind, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
-import { countixDenied } from './pipeline-deny.js';
+import { commitsBehind, laneAutomationDenied, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured, type TestRun } from './test-runs.js';
 
@@ -171,7 +170,7 @@ export function listFreezes(): ReleaseFreeze[] {
 
 /** A denied lane or author is not a Reviews card and is not a developer lane on that page. */
 export function freezeOnReviews(freeze: { project: string | null; lane: string | null; author_name?: string | null }): boolean {
-  return !countixDenied(freeze.project, freeze.lane, freeze.author_name ? { name: freeze.author_name } : null);
+  return !laneAutomationDenied(freeze.project, freeze.author_name ? { name: freeze.author_name } : null, freeze.lane);
 }
 
 /** Freezes the Reviews page may show. Denied lanes and agents are left out. */
@@ -330,11 +329,16 @@ export interface NoteChecks {
   full: 'green' | 'red' | null;
 }
 
+function prefixMatches(mention: string, sha: string): boolean {
+  return sha.startsWith(mention) || mention.startsWith(sha);
+}
+
+/** 'other' when any 7+ hex token is not a prefix of this SHA. One matching prefix does not rescue the line. */
 function shaMention(line: string, sha: string): 'this' | 'other' | 'none' {
   const mentions = [...line.toLowerCase().matchAll(/\b[0-9a-f]{7,40}\b/g)].map((m) => m[0]);
   if (mentions.length === 0) return 'none';
-  const hit = mentions.some((m) => sha.startsWith(m) || m.startsWith(sha));
-  return hit ? 'this' : 'other';
+  if (mentions.some((m) => !prefixMatches(m, sha))) return 'other';
+  return 'this';
 }
 
 function noteCheckOnLine(line: string): { kind: 'quick' | 'full'; word: 'green' | 'red' } | null {
@@ -355,9 +359,10 @@ function noteCheckOnLine(line: string): { kind: 'quick' | 'full'; word: 'green' 
 }
 
 /**
- * Quick and full results written in a freeze note. A line counts when it names
- * this SHA, or when it names none and the note's frozen SHA is this SHA.
- * A line that names a different SHA does not count.
+ * Quick and full results written in a freeze note. A line counts when every
+ * 7+ hex token on it is a prefix of this SHA, or when it names no SHA and the
+ * note's frozen SHA is this SHA. Any token that is not a prefix of this SHA
+ * rejects the whole line.
  */
 export function parseNoteChecks(text: string, sha: string): NoteChecks {
   const wanted = sha.toLowerCase();
@@ -376,6 +381,38 @@ export function parseNoteChecks(text: string, sha: string): NoteChecks {
   return out;
 }
 
+type CommandGate = 'GREEN' | 'RED' | 'QUEUED' | 'RUNNING';
+
+/** Latest full-gate command word for this exact SHA, if one was recorded. */
+function recordedCommandGate(sha: string): CommandGate | null {
+  try {
+    const row = getDb().prepare(
+      // entity_type first: the (entity_type, entity_id, created_at) index serves this; without it every call scans the events table
+      `SELECT payload_json FROM events WHERE entity_type = 'run' AND entity_id = ? AND type = 'pipeline.gate' ORDER BY id DESC LIMIT 1`,
+    ).get(`${sha.toLowerCase()}:full`) as { payload_json: string | null } | undefined;
+    if (!row?.payload_json) return null;
+    const payload = JSON.parse(row.payload_json) as { gate?: string; sha?: string };
+    if (payload.sha && payload.sha.toLowerCase() !== sha.toLowerCase()) return null;
+    const gate = String(payload.gate ?? '').toUpperCase();
+    if (gate === 'GREEN' || gate === 'RED' || gate === 'QUEUED' || gate === 'RUNNING') return gate;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Column GREEN only when the note confirms GREEN for this SHA or the latest
+ * command event for this SHA is GREEN. Any other command word replaces a
+ * stale note GREEN; with no command word the column is null.
+ */
+function storedFreezeGate(sha: string, noteGate: string | null): string | null {
+  const command = recordedCommandGate(sha);
+  if ((noteGate ?? '').toUpperCase() === 'GREEN' || command === 'GREEN') return 'GREEN';
+  if (command) return command;
+  return null;
+}
+
 export interface ShaView {
   quick: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
   full: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
@@ -389,8 +426,9 @@ function readFreezeNote(filePath: string | null | undefined): string | null {
 }
 
 /**
- * Status command wins when it reports this SHA. Otherwise the freeze note.
- * A stored gate word is the last fallback for the full result.
+ * Status command wins when it reports this SHA. Otherwise the freeze note, then
+ * a latest command event of GREEN for this SHA. A stored column GREEN is not
+ * enough once the note was read and does not confirm this SHA.
  */
 export function viewShaChecks(freeze: {
   project: string | null;
@@ -400,7 +438,7 @@ export function viewShaChecks(freeze: {
   freeze_path?: string | null;
 }, runs?: TestRun[]): ShaView {
   const note = readFreezeNote(freeze.freeze_path);
-  const parsed = note ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
+  const parsed = note != null ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
   const configured = !!(freeze.project && testsConfigured(freeze.project));
   const live = configured
     ? shaChecks(runs ?? readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project))
@@ -414,8 +452,15 @@ export function viewShaChecks(freeze: {
   };
   let full = pick(live?.full, parsed.full);
   let gate: 'GREEN' | 'RED' | null = full === 'green' ? 'GREEN' : full === 'red' ? 'RED' : null;
+  // A command GREEN for this SHA counts. A stored column GREEN does not, once
+  // the note was read and does not itself confirm this SHA.
+  if (full !== 'green' && full !== 'red' && recordedCommandGate(freeze.sha) === 'GREEN') {
+    full = 'green';
+    gate = 'GREEN';
+  }
   const stored = (freeze.gate ?? '').toUpperCase();
-  if ((full === 'missing' || full === 'unconfigured') && !parsed.full && (stored === 'GREEN' || stored === 'RED') && (!live || live.full === 'missing')) {
+  const staleGreen = stored === 'GREEN' && note != null && !parsed.full;
+  if (!staleGreen && (full === 'missing' || full === 'unconfigured') && !parsed.full && (stored === 'GREEN' || stored === 'RED') && (!live || live.full === 'missing')) {
     full = stored === 'GREEN' ? 'green' : 'red';
     gate = stored === 'GREEN' ? 'GREEN' : 'RED';
   }
@@ -571,7 +616,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   const reviewerName = reviewer?.name ?? parsed.reviewerCandidates[0] ?? null;
   const project = projectFor(parsed, text);
   const authorLabel = author ?? (parsed.authorCandidates[0] ? { name: parsed.authorCandidates[0] } : null);
-  if (countixDenied(project, parsed.lane, authorLabel)) {
+  if (laneAutomationDenied(project, authorLabel, parsed.lane)) {
     return { ok: false, error: `${path.basename(filePath)}: denied lane or agent` };
   }
 
@@ -609,7 +654,9 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   if (project && !existing?.project) enrich.project = project;
   if (parsed.desk && !existing?.desk) enrich.desk = parsed.desk;
   if (parsed.lane && !existing?.lane) enrich.lane = parsed.lane;
-  if (parsed.gate && (!existing?.gate || parsed.kind === 'freeze')) enrich.gate = parsed.gate;
+  const gateToStore = parsed.kind === 'freeze' ? storedFreezeGate(sha, parsed.gate) : parsed.gate;
+  if (parsed.kind === 'freeze') enrich.gate = gateToStore;
+  else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
   if (author && !existing?.author_agent_id) { enrich.author_agent_id = author.id; enrich.author_name = author.name; }
 
   const verdict = parsed.verdict;
@@ -627,7 +674,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
       getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, freeze_path, verdict_path, gate, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
         .run(sha, project, parsed.desk, parsed.lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
-          parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+          parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       supersedeOlder(sha, project, parsed.lane, parsed.desk);
       settleBehind(sha, project);
       return { ok: true, data: { sha, effect: 'stored', run_id: null } };
@@ -659,7 +706,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, freeze_path, verdict_path, gate, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
       .run(sha, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName,
-        parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+        parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
     settleBehind(sha, project);
     return { ok: true, data: { sha, effect: 'stored', run_id: null } };
   }
@@ -696,7 +743,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         getDb().prepare(`INSERT INTO release_freezes (sha, run_id, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, verdict, freeze_path, verdict_path, gate, status)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
           .run(sha, runId, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName, verdict,
-            parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+            parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       } else {
         patch(sha, { ...enrich, run_id: runId, author_agent_id: authorId, author_name: authorName, reviewer_agent_id: reviewer?.id ?? null, reviewer_name: reviewerName, verdict });
       }

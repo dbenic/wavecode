@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data: undefined })) }));
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
-const projects: Record<string, { repo?: string; workspace_match?: string; lane_glob?: string; pipeline?: { lane_deny?: string[]; agent_deny?: string[] } }> = {};
+const projects: Record<string, { repo?: string; workspace_match?: string; lane_glob?: string; pipeline?: { review_deny?: string[]; lane_deny?: string[]; agent_deny?: string[] } }> = {};
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest, withRefMemo } from './lane-main.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -60,6 +60,21 @@ describe('lane main ancestry', () => {
     git(repo, 'commit', '-q', '-m', 'main moved');
     const mainSha = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
+    expect(commitsBehind('wave', lane)).toBe(1);
+  });
+
+  it('inside one board pass the main tip is resolved once, so every card sees the same main; outside a pass a move is seen at once', () => {
+    const lane = git(repo, 'rev-parse', 'wc-ales');
+    const seen = withRefMemo(() => {
+      const before = commitsBehind('wave', lane);
+      git(repo, 'checkout', '-q', 'main');
+      fs.writeFileSync(path.join(repo, 'm.txt'), 'm');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-q', '-m', 'main moved');
+      git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+      return { before, during: commitsBehind('wave', lane) };
+    });
+    expect(seen).toEqual({ before: 0, during: 0 });
     expect(commitsBehind('wave', lane)).toBe(1);
   });
 
@@ -178,5 +193,46 @@ describe('lane main ancestry', () => {
     expect(messages).toContain(mergedMainAlert('wc-ales'));
     expect(messages.some((m) => m.includes('behind main'))).toBe(false);
     expect(pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' })).toBe(false);
+  });
+
+  it('does not ping a review_deny agent by name or alias', () => {
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'checkout', '-q', '-b', 'wc-codex1');
+    fs.writeFileSync(path.join(repo, 'codex.txt'), 'lane');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'codex lane');
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-codex1', git(repo, 'rev-parse', 'HEAD'));
+    const seat = db.insertAgent({
+      name: 'chatgpt-countix', runtime: 'codex', tmux_session: 'wc-codex1', workspace: repo, mode: 'spawned', status: 'idle',
+    });
+    if (!seat.ok) throw new Error(seat.error);
+    db.updateAgentIdentity(seat.data.id, { alias: 'codex1' });
+    projects.wave.pipeline = { review_deny: ['codex1'] };
+
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'm.txt'), 'advance');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main moved');
+    const mainSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
+    db.getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?)').run('main_tip:wave', git(repo, 'rev-parse', 'wc-ales'));
+    observeRepo(repo);
+
+    const pings = db.getDb().prepare('SELECT entity_id FROM events WHERE type = ?').all(MAIN_PING) as { entity_id: string }[];
+    expect(pings.map((row) => row.entity_id)).toEqual([`wc-ales:${mainSha}`]);
+    const seatText = db.listAgentMessages({ to_agent_id: seat.data.id }).map((row) => row.message).join('\n');
+    expect(seatText).not.toMatch(/behind main|Merged latest main/);
+    expect(pingLaneAboutMain({
+      lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved', authorAgentId: seat.data.id, authorName: 'codex1',
+    })).toBe(false);
+    expect(pingLaneAboutMain({
+      lane: 'wc-codex1', project: 'wave', mainSha, kind: 'merged', authorName: 'chatgpt-countix',
+    })).toBe(false);
+
+    projects.wave.pipeline = { review_deny: ['chatgpt-countix'] };
+    expect(pingLaneAboutMain({
+      lane: 'wc-codex1', project: 'wave', mainSha, kind: 'freeze', authorAgentId: seat.data.id,
+    })).toBe(false);
+    expect(db.listAgentMessages({ to_agent_id: seat.data.id }).map((row) => row.message).join('\n')).not.toMatch(/behind main|Merged latest main/);
   });
 });

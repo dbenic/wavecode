@@ -5,7 +5,7 @@
  * tip is noticed on the next refresh.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 
 export interface GitResult {
   stdout: string | null;
@@ -87,6 +87,33 @@ export async function gitText(repo: string, args: string[], timeout = 8000): Pro
   const result = await gitRun(repo, args, timeout);
   if (result.status !== 0) return null;
   return result.stdout;
+}
+
+/**
+ * Synchronous `merge-base --is-ancestor` sharing the same memo as the async
+ * one: a pair of full SHAs is an immutable fact, so the second question about
+ * the same pair never forks git. Callers that still run on the request path
+ * (prereqs, forward checks, behind-main) use this; refs stay uncached.
+ */
+export function gitAncestorSync(repo: string, ancestor: string, descendant: string): boolean | null {
+  if (ancestor === descendant && isFullSha(ancestor)) return true;
+  const args = ['merge-base', '--is-ancestor', ancestor, descendant];
+  const key = memoKey(repo, args);
+  const cacheable = gitArgsCacheable(args);
+  if (cacheable) {
+    const hit = memo.get(key);
+    if (hit) return hit.status === 0 ? true : hit.status === 1 ? false : null;
+  }
+  let status: number | null;
+  try {
+    execFileSync('git', ['-C', repo, ...args], { stdio: 'ignore', timeout: 5000 });
+    status = 0;
+  } catch (e) {
+    const code = (e as { status?: unknown }).status;
+    status = typeof code === 'number' ? code : null;
+  }
+  if (cacheable && (status === 0 || status === 1)) memo.set(key, { stdout: '', status });
+  return status === 0 ? true : status === 1 ? false : null;
 }
 
 /** `merge-base --is-ancestor`. Null when git cannot say (timeout, missing object). */

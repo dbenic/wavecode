@@ -6,12 +6,11 @@
 
 import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
-import { gitAncestor, gitText } from './git-memo.js';
+import { gitAncestor, gitText, gitAncestorSync } from './git-memo.js';
 import { getAgent, getDb, listAgents, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
-import { countixDenied } from './pipeline-deny.js';
 import { fireMainAdvanced } from './pipeline-hooks.js';
 
 export const MAIN_PING = 'lane.main_ping';
@@ -29,12 +28,45 @@ export function mainSpec(project: string | null): MainSpec {
   return { remote, branch, ref: `${remote}/${branch}` };
 }
 
+/**
+ * Inside one board build, a ref's SHA is asked once: `withRefMemo` scopes the
+ * memo to that pass, so fifty freezes share one origin/main lookup and every
+ * card sees the same main. Outside a pass (ingest, pings, tests) git is asked
+ * every time, so a tip that just moved is seen at once.
+ */
+const refMemo = new Map<string, string | null>();
+let refMemoDepth = 0;
+
+export function resetRefMemoForTest(): void {
+  refMemo.clear();
+  refMemoDepth = 0;
+}
+
+export function withRefMemo<T>(fn: () => T): T {
+  refMemoDepth++;
+  try { return fn(); } finally { if (--refMemoDepth === 0) refMemo.clear(); }
+}
+
+export async function withRefMemoAsync<T>(fn: () => Promise<T>): Promise<T> {
+  refMemoDepth++;
+  try { return await fn(); } finally { if (--refMemoDepth === 0) refMemo.clear(); }
+}
+
+function isRefLookup(args: string[]): boolean {
+  return args.length === 4 && args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === '--quiet';
+}
+
 function git(repo: string, args: string[]): string | null {
+  const key = refMemoDepth > 0 && isRefLookup(args) ? `${repo}\0${args[3]}` : null;
+  if (key && refMemo.has(key)) return refMemo.get(key) ?? null;
+  let value: string | null;
   try {
-    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024 }).trim();
+    value = execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024 }).trim();
   } catch {
-    return null;
+    value = null;
   }
+  if (key) refMemo.set(key, value);
+  return value;
 }
 
 /** Keyed by the main tip SHA and the lane tip SHA. A repeat review refresh does not re-diff. */
@@ -94,15 +126,9 @@ export function resolveMainRef(repo: string, project: string | null): string | n
   return null;
 }
 
+/** Memoised for full-SHA pairs (see git-memo); a ref name is asked every time. */
 function isAncestor(repo: string, ancestor: string, descendant: string): boolean | null {
-  try {
-    execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', ancestor, descendant], { stdio: 'ignore', timeout: 5000 });
-    return true;
-  } catch (e) {
-    const status = (e as { status?: number }).status;
-    if (status === 1) return false;
-    return null;
-  }
+  return gitAncestorSync(repo, ancestor, descendant);
 }
 
 function mainTipSha(repo: string, ref: string): string | null {
@@ -279,8 +305,9 @@ export function mergedMainAlert(lane: string): string {
 function latestPing(lane: string, mainSha: string): { at: number } | null {
   try {
     const row = getDb().prepare(
-      'SELECT payload_json, created_at FROM events WHERE type = ? AND entity_id = ? ORDER BY id DESC LIMIT 1',
-    ).get(MAIN_PING, pingKey(lane, mainSha)) as { payload_json: string | null; created_at: string } | undefined;
+      // entity_type first so idx_events_entity serves it; (type, entity_id) alone scans the whole table
+      "SELECT payload_json, created_at FROM events WHERE entity_type = 'lane' AND entity_id = ? AND type = ? ORDER BY id DESC LIMIT 1",
+    ).get(pingKey(lane, mainSha), MAIN_PING) as { payload_json: string | null; created_at: string } | undefined;
     if (!row) return null;
     if (row.payload_json) {
       const payload = JSON.parse(row.payload_json) as { at?: unknown };
@@ -334,21 +361,81 @@ function stillUnreviewed(project: string | null, lane: string, mainSha: string):
   return true;
 }
 
+type DenyHandle = { name?: string | null; alias?: string | null };
+
+function pipelineHandles(project: string, key: 'review_deny' | 'agent_deny' | 'lane_deny'): string[] {
+  const raw = getConfig().projects?.[project]?.pipeline?.[key];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+}
+
+function automationDenySet(project: string): Set<string> {
+  const deny = new Set<string>();
+  for (const handle of [...pipelineHandles(project, 'review_deny'), ...pipelineHandles(project, 'agent_deny')]) {
+    deny.add(handle.trim().toLowerCase());
+  }
+  return deny;
+}
+
+function handleDenied(deny: Set<string>, agent: DenyHandle | null | undefined): boolean {
+  if (!agent || deny.size === 0) return false;
+  if (agent.name && deny.has(agent.name.toLowerCase())) return true;
+  return !!agent.alias && deny.has(agent.alias.toLowerCase());
+}
+
+function laneGlobDenied(project: string, lane: string): boolean {
+  return pipelineHandles(project, 'lane_deny').some((glob) => {
+    try { return laneGlobRe(glob.trim()).test(lane); } catch { return false; }
+  });
+}
+
+/** The agent a `wc-<name>` lane belongs to, when one is registered. */
+function registeredLaneAgent(lane: string): DenyHandle | null {
+  const bare = lane.replace(/^wc-/i, '');
+  try {
+    return listAgents().find((a) =>
+      a.tmux_session === lane
+      || a.name.toLowerCase() === bare.toLowerCase()
+      || a.name.toLowerCase() === lane.toLowerCase()
+      || a.alias?.toLowerCase() === bare.toLowerCase()
+      || a.alias?.toLowerCase() === lane.toLowerCase(),
+    ) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `review_deny` and `agent_deny` (name or alias) get no lane automation.
+ * A lane is denied when it matches `lane_deny`, or when `wc-<name>` names a denied seat.
+ */
+export function laneAutomationDenied(project: string | null, agent: DenyHandle | null, lane?: string | null): boolean {
+  if (!project) return false;
+  if (lane && laneGlobDenied(project, lane)) return true;
+  const deny = automationDenySet(project);
+  if (handleDenied(deny, agent)) return true;
+  if (!lane) return false;
+  const bare = lane.replace(/^wc-/i, '');
+  if (handleDenied(deny, { name: bare, alias: lane })) return true;
+  const implied = registeredLaneAgent(lane);
+  return implied ? handleDenied(deny, implied) : false;
+}
+
 function authorForLane(lane: string, authorAgentId: string | null, authorName: string | null, project: string | null): Agent | null {
   let agent: Agent | null = null;
   if (authorAgentId) {
-    const a = getAgent(authorAgentId);
-    if (a.ok) agent = a.data;
+    const found = getAgent(authorAgentId);
+    if (found.ok) agent = found.data;
   }
   if (!agent && authorName) {
-    const a = resolveAgent(authorName);
-    if (a.ok) agent = a.data;
+    const found = resolveAgent(authorName);
+    if (found.ok) agent = found.data;
   }
   if (!agent) {
     const bare = lane.replace(/^wc-/, '');
     agent = listAgents().find((a) => a.tmux_session === lane || a.name === bare || a.name === lane || a.alias === bare) ?? null;
   }
-  if (!agent || countixDenied(project, lane, agent)) return null;
+  if (!agent || laneAutomationDenied(project, agent, lane)) return null;
   return agent;
 }
 
@@ -358,8 +445,15 @@ function authorForLane(lane: string, authorAgentId: string | null, authorName: s
  * A second send inside 30 minutes is dropped. After 30 minutes it is sent
  * again only while the lane is still behind and still has no PASS on a SHA
  * that contains this main. `merged` is the auto-merge sentence and shares
- * the same dedupe key.
+ * the same dedupe key. `review_deny`, `agent_deny`, and `lane_deny` are not delivered to.
  */
+/** (lane, main SHA) pairs found no longer behind or already reviewed: not re-asked for REPEAT_MS. */
+const caughtUp = new Map<string, number>();
+
+export function resetMainPingMemoForTest(): void {
+  caughtUp.clear();
+}
+
 export function pingLaneAboutMain(opts: {
   lane: string;
   project: string | null;
@@ -370,14 +464,22 @@ export function pingLaneAboutMain(opts: {
   kind: 'freeze' | 'moved' | 'merged';
 }): boolean {
   if (!opts.lane || !opts.mainSha) return false;
-  if (countixDenied(opts.project, opts.lane, opts.authorName ? { name: opts.authorName } : null)) return false;
+  if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
+  const key = pingKey(opts.lane, opts.mainSha);
   const latest = latestPing(opts.lane, opts.mainSha);
   if (latest) {
     if (nowMs() - latest.at < REPEAT_MS) return false;
-    if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) return false;
+    // A lane that has caught up with this main cannot fall behind the same main again, so
+    // the git questions are asked once per lane and main, not on every board refresh.
+    const settled = caughtUp.get(key);
+    if (settled !== undefined && nowMs() - settled < REPEAT_MS) return false;
+    if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) {
+      caughtUp.set(key, nowMs());
+      return false;
+    }
   }
   const agent = authorForLane(opts.lane, opts.authorAgentId ?? null, opts.authorName ?? null, opts.project);
-  if (!agent) return false;
+  if (!agent || laneAutomationDenied(opts.project, agent, opts.lane)) return false;
   const text = opts.kind === 'merged' ? mergedMainAlert(opts.lane) : behindMainAlert(opts.lane);
   deliverSystemLine(agent, text, { kind: 'info', source: 'main' });
   emit(MAIN_PING, 'lane', pingKey(opts.lane, opts.mainSha), {
@@ -393,7 +495,7 @@ export function alertBehind(opts: {
   authorAgentId?: string | null;
   authorName?: string | null;
 }): boolean {
-  if (countixDenied(opts.project, opts.lane, opts.authorName ? { name: opts.authorName } : null)) return false;
+  if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
   const repo = projectRepo(opts.project);
   const tip = repo ? mainTip(repo, opts.project) : null;
   if (!tip) return false;
@@ -411,7 +513,7 @@ export function alertMerged(opts: {
   authorAgentId?: string | null;
   authorName?: string | null;
 }): boolean {
-  if (countixDenied(opts.project, opts.lane, opts.authorName ? { name: opts.authorName } : null)) return false;
+  if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
   return pingLaneAboutMain({ ...opts, kind: 'merged' });
 }
 
@@ -471,16 +573,16 @@ function notifyBehindLanes(project: string, repo: string, mainSha: string, subje
   for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
     const name = short.replace(/^[^/]+\//, '');
     if (name === 'HEAD' || name === mainSpec(project).branch) continue;
-    if (re.test(name) && !countixDenied(project, name)) names.add(name);
+    if (re.test(name) && !laneAutomationDenied(project, null, name)) names.add(name);
   }
   try {
     const rows = getDb().prepare(
       "SELECT lane FROM release_freezes WHERE project = ? AND status IN ('open', 'behind-main') AND lane IS NOT NULL",
     ).all(project) as { lane: string }[];
-    for (const row of rows) if (!countixDenied(project, row.lane)) names.add(row.lane);
+    for (const row of rows) if (!laneAutomationDenied(project, null, row.lane)) names.add(row.lane);
   } catch { /* table missing */ }
   for (const lane of names) {
-    if (countixDenied(project, lane)) continue;
+    if (laneAutomationDenied(project, null, lane)) continue;
     const ref = git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${mainSpec(project).remote}/${lane}^{commit}`])
       ?? git(repo, ['rev-parse', '--verify', '--quiet', `${lane}^{commit}`]);
     if (!ref || !/^[0-9a-f]{40}$/i.test(ref)) continue;
@@ -512,19 +614,19 @@ export function alertLanesPastStaging(project: string | null, stagingSha: string
   for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
     const name = short.replace(/^[^/]+\//, '');
     if (name === 'HEAD' || name === mainSpec(project).branch) continue;
-    if (re.test(name) && !countixDenied(project, name)) names.add(name);
+    if (re.test(name) && !laneAutomationDenied(project, null, name)) names.add(name);
   }
   try {
     const rows = getDb().prepare(
       "SELECT lane FROM release_freezes WHERE project = ? AND lane IS NOT NULL",
     ).all(project) as { lane: string }[];
     for (const row of rows) {
-      if (countixDenied(project, row.lane)) continue;
+      if (laneAutomationDenied(project, null, row.lane)) continue;
       if (re.test(row.lane) || row.lane.startsWith('wc-')) names.add(row.lane);
     }
   } catch { /* table missing */ }
   for (const lane of names) {
-    if (countixDenied(project, lane)) continue;
+    if (laneAutomationDenied(project, null, lane)) continue;
     const ref = laneTipSha(project, lane);
     if (!ref) continue;
     if (isAncestor(repo, stagingSha, ref) !== false) continue;
@@ -541,7 +643,7 @@ export function reconcileBehindFreezes(): void {
     return;
   }
   for (const f of rows) {
-    if (countixDenied(f.project, f.lane, { name: f.author_name })) continue;
+    if (laneAutomationDenied(f.project, { name: f.author_name }, f.lane)) continue;
     const n = commitsBehind(f.project, f.sha);
     if (n == null || n <= 0) continue;
     if (f.status === 'open') {

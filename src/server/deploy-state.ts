@@ -13,7 +13,7 @@ import { getDb } from './db.js';
 import { emit } from './event-bus.js';
 import { gitAncestor, gitText } from './git-memo.js';
 import logger from './logger.js';
-import { commitsBehind, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef } from './lane-main.js';
+import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef } from './lane-main.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { getConfig } from './config.js';
@@ -36,7 +36,6 @@ import {
   resolveStagingTip,
 } from './releases.js';
 import { readProdHealth } from './staging-forward.js';
-import { countixDenied } from './pipeline-deny.js';
 import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
 import {
@@ -473,7 +472,7 @@ function pingBehindMain(freeze: ReleaseFreeze, facts: DeriveFacts): void {
   if (facts.behindMain !== true || facts.superseded) return;
   if (facts.containedInStaging === true || facts.containedInProd === true) return;
   if (!freeze.project || !freeze.lane) return;
-  if (countixDenied(freeze.project, freeze.lane, freeze.author_name ? { name: freeze.author_name } : null)) return;
+  if (laneAutomationDenied(freeze.project, freeze.author_name ? { name: freeze.author_name } : null, freeze.lane)) return;
   const repo = projectRepo(freeze.project);
   const tip = repo ? mainTip(repo, freeze.project) : null;
   if (!tip) return;
@@ -1021,7 +1020,7 @@ export function reviewBoard(user: { name: string; role: string }, lanes: DevLane
     const working: WorkingLaneFact[] = [];
     for (const lane of lanes) {
       if (lane.freeze_sha) continue;
-      if (countixDenied(lane.project, lane.lane, lane.author_name ? { name: lane.author_name } : null)) continue;
+      if (laneAutomationDenied(lane.project, lane.author_name ? { name: lane.author_name } : null, lane.lane)) continue;
       working.push({
         project: lane.project,
         lane: lane.lane,

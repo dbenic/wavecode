@@ -263,3 +263,44 @@ describe('db.ts — schema migrations', () => {
     expect(alreadyDone.ok && alreadyDone.data.status === 'done').toBe(true);
   });
 });
+
+describe('db.ts — task board helpers', () => {
+  let tmpDir: string;
+  beforeEach(() => { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-db-board-')); });
+  afterEach(async () => {
+    const { resetDbForTest } = await import('./db.js');
+    if (typeof resetDbForTest === 'function') resetDbForTest();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('pages newest first, counts per status, and finds the latest run and dependency edges in bulk', async () => {
+    const mod = await import('./db.js');
+    const db = mod.initDb(path.join(tmpDir, 'board.db'));
+    const agent = mod.insertAgent({ name: 'a', runtime: 'codex', tmux_session: 'wc-a', workspace: null, mode: 'spawned', status: 'idle' });
+    if (!agent.ok) throw new Error(agent.error);
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const t = mod.insertTask({ agent_id: agent.data.id, prompt: `t${i}` });
+      if (!t.ok) throw new Error(t.error);
+      ids.push(t.data.id);
+      db.prepare('UPDATE tasks SET created_at = ?, status = ? WHERE id = ?').run(`2026-10-0${i + 1} 00:00:00`, i < 4 ? 'done' : 'pending', t.data.id);
+    }
+    db.prepare('INSERT INTO task_dependencies (task_id, depends_on_id) VALUES (?, ?)').run(ids[5], ids[4]);
+    const r1 = mod.insertRun({ task_id: ids[0], agent_id: agent.data.id, attempt: 1 });
+    const r2 = mod.insertRun({ task_id: ids[0], agent_id: agent.data.id, attempt: 2 });
+    if (!r1.ok || !r2.ok) throw new Error('run');
+    db.prepare('UPDATE runs SET started_at = ? WHERE id = ?').run('2026-10-01 00:00:00', r1.data.id);
+    db.prepare('UPDATE runs SET started_at = ? WHERE id = ?').run('2026-10-02 00:00:00', r2.data.id);
+
+    expect(mod.countTasksByStatus()).toEqual({ pending: 2, running: 0, done: 4, failed: 0, blocked: 0 });
+    expect(mod.listTasks({ status: 'done', limit: 2 }).map((t) => t.prompt)).toEqual(['t3', 't2']);
+    expect(mod.listTasks({ status: 'done', limit: 2, offset: 2 }).map((t) => t.prompt)).toEqual(['t1', 't0']);
+    expect(mod.listTasks({ status: ['pending', 'running'] }).map((t) => t.prompt)).toEqual(['t4', 't5']);
+    expect(mod.latestRunsByTask(ids).get(ids[0])?.id).toBe(r2.data.id);
+    expect(mod.latestRunsByTask(ids).has(ids[1])).toBe(false);
+    const edges = mod.dependencyEdgesForTasks([ids[5]]);
+    expect(edges.dependsOn.get(ids[5])).toEqual([ids[4]]);
+    expect(edges.dependents.get(ids[4])).toEqual([ids[5]]);
+    expect(mod.dependencyEdgesForTasks([]).dependsOn.size).toBe(0);
+  });
+});

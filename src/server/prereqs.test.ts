@@ -127,6 +127,26 @@ describe('prereqs', () => {
     expect(productionPrereqGate('demo', 'c'.repeat(40), 'denis')).toEqual({ ok: true, steps: null });
   });
 
+  it('gitAncestorSync answers a full-SHA pair from memory after the first call, and never caches a ref', async () => {
+    const { gitAncestorSync, resetGitMemoForTest } = await import('./git-memo.js');
+    resetGitMemoForTest();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-memo-'));
+    git(dir, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(dir, 'a'), '1');
+    git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'one');
+    const first = git(dir, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(dir, 'a'), '2');
+    git(dir, 'commit', '-q', '-am', 'two');
+    const second = git(dir, 'rev-parse', 'HEAD');
+    expect(gitAncestorSync(dir, first, second)).toBe(true);
+    expect(gitAncestorSync(dir, second, first)).toBe(false);
+    expect(gitAncestorSync(dir, first, 'main')).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true }); // git can no longer answer anything here
+    expect(gitAncestorSync(dir, first, second)).toBe(true); // remembered
+    expect(gitAncestorSync(dir, second, first)).toBe(false); // remembered
+    expect(gitAncestorSync(dir, first, 'main')).toBeNull(); // a ref is asked again
+  });
+
   it('unions freeze notes whose SHAs are contained in a candidate', () => {
     const repo = path.join(tmp, 'repo');
     fs.mkdirSync(repo);

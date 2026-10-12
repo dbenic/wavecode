@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import yaml from 'js-yaml';
 import { getConfig, type PrereqCheckConfig } from './config.js';
 import { emit } from './event-bus.js';
+import { gitAncestorSync } from './git-memo.js';
 import { listFreezes } from './release-freezes.js';
 
 export interface PrereqDecl {
@@ -84,12 +85,7 @@ export function stepsPrompt(steps: GoStep[]): string {
 
 function contained(repo: string, ancestor: string, descendant: string): boolean {
   if (ancestor === descendant) return true;
-  try {
-    execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', ancestor, descendant], { stdio: 'ignore', timeout: 5000 });
-    return true;
-  } catch {
-    return false;
-  }
+  return gitAncestorSync(repo, ancestor, descendant) === true;
 }
 
 function readFreezePrereqs(filePath: string | null): PrereqDecl[] {
@@ -105,10 +101,11 @@ export function declaredPrereqs(project: string, sha: string): PrereqDecl[] {
   const groups: PrereqDecl[][] = [];
   for (const row of rows) {
     if (row.project && row.project !== project) continue;
-    const inside = row.sha === sha || (!!repo && contained(repo, row.sha, sha));
-    if (!inside) continue;
+    // read the note first: most freezes declare nothing, and git is only asked about the ones that do
     const decls = readFreezePrereqs(row.freeze_path);
-    if (decls.length) groups.push(decls);
+    if (!decls.length) continue;
+    const inside = row.sha === sha || (!!repo && contained(repo, row.sha, sha));
+    if (inside) groups.push(decls);
   }
   return unionPrereqs(groups);
 }

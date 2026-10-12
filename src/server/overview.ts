@@ -9,7 +9,7 @@ import { getDb, getTask, listAgents, listAgentMessages, listRuns, type Agent, ty
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
 import { candidateFor, listCandidates, listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
-import { commitsBehind } from './lane-main.js';
+import { commitsBehind, withRefMemo } from './lane-main.js';
 import { behindMainLine, fullFailFlag, needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { listReleases, verificationFor, type ReleaseRequest } from './releases.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured, type ShaChecks } from './test-runs.js';
@@ -245,7 +245,30 @@ function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: 
   return { next: 'reviewed — stage it, then mark Ready for prod', promotable: true };
 }
 
+const BOARD_CACHE_MS = 3_000;
+let boardCache: { at: number; board: Board } | null = null;
+
+export function resetBoardCacheForTest(): void {
+  boardCache = null;
+}
+
+/**
+ * The board for request handlers: rebuilt at most every 3 seconds. Several
+ * open pages reacting to the same event burst share one build (each build
+ * asks git about every freeze).
+ */
+export function cachedBoard(now = Date.now()): Board {
+  if (boardCache && now - boardCache.at < BOARD_CACHE_MS) return boardCache.board;
+  const board = buildBoard(now);
+  boardCache = { at: now, board };
+  return board;
+}
+
 export function buildBoard(now = Date.now()): Board {
+  return withRefMemo(() => buildBoardPass(now));
+}
+
+function buildBoardPass(now: number): Board {
   const cfg = getConfig();
   // A SHA already on main closes its lane and its fix, whatever the last verdict said
   try { reconcileMerged(now); } catch (e) { /* git unavailable: the board still builds */ void e; }
