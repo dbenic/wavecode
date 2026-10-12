@@ -233,6 +233,35 @@ describe('release-freezes.ts', () => {
       expect(rf.viewShaChecks(cleared!).full).not.toBe('green');
     });
 
+    it('a retracted note GREEN follows the latest command word, and only a GREEN command stays green', () => {
+      const green = `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA_A}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\nRESULT GREEN\n`;
+      const file = write(`desk7-events-${SHA_A.slice(0, 8)}.md`, green);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
+      const retracted = green.replace('RESULT GREEN\n', '');
+      const event = (gate: string) => {
+        const saved = db.insertEvent({
+          type: 'pipeline.gate', entity_type: 'run', entity_id: `${SHA_A}:full`, payload: { sha: SHA_A, gate },
+        });
+        expect(saved.ok).toBe(true);
+      };
+      fs.writeFileSync(file, retracted);
+      event('QUEUED');
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBe('QUEUED');
+      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).not.toBe('green');
+
+      event('RED');
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBe('RED');
+      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).not.toBe('green');
+
+      event('GREEN');
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
+      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).toBe('green');
+    });
+
     it('a freeze note carrying the reviewer PASS inline (Desk #91) creates the card and links both files', () => {
       const file = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
       const r = rf.ingestFreezeFile(file);

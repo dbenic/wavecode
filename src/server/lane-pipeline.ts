@@ -23,10 +23,9 @@ import logger from './logger.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
-import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, type ReleaseFreeze } from './release-freezes.js';
+import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
 import { pickReviewer } from './reviewer-ladder.js';
-import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 export const PIPELINE_ACTION = 'pipeline.action';
@@ -361,10 +360,7 @@ function queueFullGate(freeze: ReleaseFreeze): void {
 }
 
 function isGreen(freeze: ReleaseFreeze): boolean {
-  if ((freeze.gate ?? '').toUpperCase() === 'GREEN') return true;
-  if (!freeze.project || !testsConfigured(freeze.project)) return false;
-  const checks = shaChecks(readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project));
-  return checks.full === 'green';
+  return viewShaChecks(freeze).full === 'green';
 }
 
 function touches(files: string[], paths: string[]): string | null {
@@ -435,6 +431,10 @@ export async function drainStagingQueue(project: string): Promise<void> {
   if (!freeze) {
     getDb().prepare('DELETE FROM pipeline_queue WHERE sha = ?').run(row.sha);
     return drainStagingQueue(project);
+  }
+  if (!isGreen(freeze)) {
+    note(row.project, row.lane, row.sha, 'hold', `auto: waiting for GREEN on ${row.sha.slice(0, 8)}`);
+    return;
   }
   const dump = row.kind === 'dump';
   // Staging only. This function has no production target.

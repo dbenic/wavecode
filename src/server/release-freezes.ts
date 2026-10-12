@@ -252,24 +252,35 @@ export function parseNoteChecks(text: string, sha: string): NoteChecks {
   return out;
 }
 
-/** A full-result line is present, but none of them count for this SHA. */
-function noteFullConflicts(text: string, sha: string): boolean {
-  if (parseNoteChecks(text, sha).full) return false;
-  return text.replace(/\r/g, '').split('\n').some((line) => noteCheckOnLine(line)?.kind === 'full');
-}
+type CommandGate = 'GREEN' | 'RED' | 'QUEUED' | 'RUNNING';
 
-/** Gate word recorded by the full-gate command, if it has already run for this SHA. */
-function recordedCommandGate(sha: string): string | null {
+/** Latest full-gate command word for this exact SHA, if one was recorded. */
+function recordedCommandGate(sha: string): CommandGate | null {
   try {
     const row = getDb().prepare(
       `SELECT payload_json FROM events WHERE type = 'pipeline.gate' AND entity_id = ? ORDER BY id DESC LIMIT 1`,
-    ).get(`${sha}:full`) as { payload_json: string | null } | undefined;
+    ).get(`${sha.toLowerCase()}:full`) as { payload_json: string | null } | undefined;
     if (!row?.payload_json) return null;
-    const gate = String((JSON.parse(row.payload_json) as { gate?: string }).gate ?? '').toUpperCase();
-    return gate === 'GREEN' || gate === 'RED' || gate === 'QUEUED' || gate === 'RUNNING' ? gate : null;
+    const payload = JSON.parse(row.payload_json) as { gate?: string; sha?: string };
+    if (payload.sha && payload.sha.toLowerCase() !== sha.toLowerCase()) return null;
+    const gate = String(payload.gate ?? '').toUpperCase();
+    if (gate === 'GREEN' || gate === 'RED' || gate === 'QUEUED' || gate === 'RUNNING') return gate;
   } catch {
     return null;
   }
+  return null;
+}
+
+/**
+ * Column GREEN only when the note confirms GREEN for this SHA or the latest
+ * command event for this SHA is GREEN. Any other command word replaces a
+ * stale note GREEN; with no command word the column is null.
+ */
+function storedFreezeGate(sha: string, noteGate: string | null): string | null {
+  const command = recordedCommandGate(sha);
+  if ((noteGate ?? '').toUpperCase() === 'GREEN' || command === 'GREEN') return 'GREEN';
+  if (command) return command;
+  return null;
 }
 
 export interface ShaView {
@@ -285,10 +296,9 @@ function readFreezeNote(filePath: string | null | undefined): string | null {
 }
 
 /**
- * Status command wins when it reports this SHA. Otherwise the freeze note.
- * A stored gate word is the last fallback only when the note cannot be read.
- * A note that was read and does not name a full result for this SHA (missing,
- * or a line that also names another SHA) must not keep a stale GREEN.
+ * Status command wins when it reports this SHA. Otherwise the freeze note, then
+ * a latest command event of GREEN for this SHA. A stored column GREEN is not
+ * enough once the note was read and does not confirm this SHA.
  */
 export function viewShaChecks(freeze: {
   project: string | null;
@@ -312,6 +322,12 @@ export function viewShaChecks(freeze: {
   };
   let full = pick(live?.full, parsed.full);
   let gate: 'GREEN' | 'RED' | null = full === 'green' ? 'GREEN' : full === 'red' ? 'RED' : null;
+  // A command GREEN for this SHA counts. A stored column GREEN does not, once
+  // the note was read and does not itself confirm this SHA.
+  if (full !== 'green' && full !== 'red' && recordedCommandGate(freeze.sha) === 'GREEN') {
+    full = 'green';
+    gate = 'GREEN';
+  }
   const stored = (freeze.gate ?? '').toUpperCase();
   const staleGreen = stored === 'GREEN' && note != null && !parsed.full;
   if (!staleGreen && (full === 'missing' || full === 'unconfigured') && !parsed.full && (stored === 'GREEN' || stored === 'RED') && (!live || live.full === 'missing')) {
@@ -506,12 +522,9 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   if (project && !existing?.project) enrich.project = project;
   if (parsed.desk && !existing?.desk) enrich.desk = parsed.desk;
   if (parsed.lane && !existing?.lane) enrich.lane = parsed.lane;
-  if (parsed.kind === 'freeze') {
-    // Recompute from this note. Missing or conflicting evidence for this SHA
-    // clears a stale GREEN. A word already recorded by the gate command stays.
-    if (parsed.gate) enrich.gate = parsed.gate;
-    else if (noteFullConflicts(text, sha) || !recordedCommandGate(sha)) enrich.gate = null;
-  } else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
+  const gateToStore = parsed.kind === 'freeze' ? storedFreezeGate(sha, parsed.gate) : parsed.gate;
+  if (parsed.kind === 'freeze') enrich.gate = gateToStore;
+  else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
   if (author && !existing?.author_agent_id) { enrich.author_agent_id = author.id; enrich.author_name = author.name; }
 
   const verdict = parsed.verdict;
@@ -529,7 +542,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
       getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, freeze_path, verdict_path, gate, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
         .run(sha, project, parsed.desk, parsed.lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
-          parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+          parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       supersedeOlder(sha, project, parsed.lane, parsed.desk);
       settleBehind(sha, project);
       return { ok: true, data: { sha, effect: 'stored', run_id: null } };
@@ -561,7 +574,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, freeze_path, verdict_path, gate, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
       .run(sha, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName,
-        parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+        parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
     settleBehind(sha, project);
     return { ok: true, data: { sha, effect: 'stored', run_id: null } };
   }
@@ -598,7 +611,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         getDb().prepare(`INSERT INTO release_freezes (sha, run_id, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, verdict, freeze_path, verdict_path, gate, status)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
           .run(sha, runId, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName, verdict,
-            parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+            parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       } else {
         patch(sha, { ...enrich, run_id: runId, author_agent_id: authorId, author_name: authorName, reviewer_agent_id: reviewer?.id ?? null, reviewer_name: reviewerName, verdict });
       }
