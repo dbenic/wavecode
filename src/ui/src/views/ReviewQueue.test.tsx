@@ -69,6 +69,35 @@ describe('ReviewQueue', () => {
       expect(screen.getByText('Updated review item')).toBeInTheDocument();
     });
   });
+
+  it('shows each reviewer queue and whether the pane is busy', async () => {
+    const useApi = await import('../hooks/useApi');
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/reviews/board') {
+        return {
+          last_reconciled_at: '2026-10-12T18:00:00.000Z',
+          stale: false,
+          reviewers: [
+            { id: 'c2', name: 'codex2', alias: null, busy: true, queue: 2 },
+            { id: 'c3', name: 'codex3', alias: 'c3', busy: false, queue: 0 },
+          ],
+          items: [],
+        } as never;
+      }
+      if (path === '/agents') return [] as never;
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    render(
+      <MemoryRouter>
+        <ReviewQueue />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('reviewer-load')).toBeInTheDocument();
+    expect(screen.getByTestId('reviewer-load-codex2')).toHaveTextContent('@codex2 busy · queue 2');
+    expect(screen.getByTestId('reviewer-load-codex3')).toHaveTextContent('@c3 idle · queue 0');
+  });
 });
 
 function makeReviewItem(prompt: string) {

@@ -24,7 +24,7 @@ import { commitsBehind } from './lane-main.js';
 import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
-  considerAutoStage, drainStagingQueue, latestPipelineNote, onAuthorDone, onMainAdvanced, setPipelineExecForTest,
+  considerAutoStage, drainStagingQueue, latestPipelineNote, onAuthorDone, onMainAdvanced, reassignWaitingReviews, setPipelineExecForTest,
 } from './lane-pipeline.js';
 import { listPendingReviews } from './review-queue.js';
 import { ensureReleaseFreezeTable, getFreeze, ingestFreezeFile, listReviewFreezes, setFetchDisabledForTest } from './release-freezes.js';
@@ -510,5 +510,80 @@ describe('hands-free lane pipeline', () => {
     expect(getFreeze(sha)?.gate).toBe('GREEN');
     expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/full gate GREEN/);
     expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  function openNote(authorName: string, lane: string, sha: string): string {
+    const file = path.join(freezeDir, `${authorName}-freeze-${sha.slice(0, 8)}.md`);
+    fs.mkdirSync(freezeDir, { recursive: true });
+    fs.writeFileSync(file, [
+      `# ${lane} freeze note`,
+      '',
+      `Project: wave · Author: ${authorName}`,
+      `- Lane: \`${lane}\``,
+      `- Freeze SHA: \`${sha}\``,
+      '',
+    ].join('\n'));
+    return file;
+  }
+
+  it('assigns the least-loaded preferred reviewer and reassigns a busy seat', () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    const author = agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex1 = agent('codex1', path.join(tmp, 'codex1'));
+    const codex2 = agent('codex2', path.join(tmp, 'codex2'));
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    const ownSeat = agent('claude1-codex', path.join(tmp, 'claude1-codex'));
+    const claude2 = agent('claude2', path.join(tmp, 'claude2'), 'claude-code');
+    db.updateAgentStatus(codex2.id, 'working');
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex2', 'codex3', 'codex1', 'claude1-codex'] };
+    const ingested = ingestFreezeFile(openNote('claude1', 'wc-claude1', sha));
+    expect(ingested.ok).toBe(true);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    expect(getFreeze(sha)?.verdict).toBeNull();
+    expect(messages(codex3.id).join('\n')).toMatch(/Please review freeze/);
+    for (const skipped of [author, codex1, codex2, ownSeat, claude2]) {
+      expect(messages(skipped.id).join('\n')).not.toMatch(/Please review/);
+    }
+
+    db.updateAgentStatus(codex3.id, 'working');
+    db.updateAgentStatus(codex2.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 14 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+
+    expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(1);
+    expect(getFreeze(sha)?.reviewer_name).toBe('codex2');
+    expect(messages(codex2.id).join('\n')).toMatch(/Please review freeze/);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex3 → @codex2 \(busy, no verdict\)/);
+
+    db.updateAgentStatus(codex2.id, 'working');
+    db.updateAgentStatus(codex3.id, 'working');
+    expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex2.id);
+
+    db.updateAgentStatus(codex3.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(1);
+    expect(getFreeze(sha)?.reviewer_name).toBe('codex3');
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex2 → @codex3 \(busy, no verdict\)/);
+    expect(messages(ownSeat.id).join('\n')).not.toMatch(/Please review/);
+    expect(messages(claude2.id).join('\n')).not.toMatch(/Please review/);
+    expect(messages(codex1.id).join('\n')).not.toMatch(/Please review/);
+  });
+
+  it('does not reassign when review_reassign_minutes is 0', () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex2 = agent('codex2', path.join(tmp, 'codex2'));
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    db.updateAgentStatus(codex2.id, 'working');
+    pipe.auto_review = true;
+    pipe.review_reassign_minutes = 0;
+    pipe.reviewer_prefer = { claude: ['codex2', 'codex3'] };
+    ingestFreezeFile(openNote('claude1', 'wc-claude1', sha));
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    db.updateAgentStatus(codex3.id, 'working');
+    db.updateAgentStatus(codex2.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 60 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
   });
 });

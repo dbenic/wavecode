@@ -155,6 +155,16 @@ export function setFreezeGate(sha: string, gate: string): void {
   patch(sha, { gate: g });
 }
 
+/** Point an open, undecided freeze at a reviewer. A written verdict stays put. */
+export function setFreezeReviewer(sha: string, reviewer: { id: string; name: string } | null): void {
+  const freeze = getFreeze(sha);
+  if (!freeze || freeze.verdict) return;
+  patch(sha, {
+    reviewer_agent_id: reviewer?.id ?? null,
+    reviewer_name: reviewer?.name ?? null,
+  });
+}
+
 export function listFreezes(): ReleaseFreeze[] {
   return withTable(() => getDb().prepare('SELECT * FROM release_freezes ORDER BY created_at DESC').all() as ReleaseFreeze[]);
 }

@@ -201,6 +201,13 @@ projects:
       review_deny: [codex1]
       lane_deny: ['wc-codex1']             # globs: no merge, ping, freeze, or Reviews card
       agent_deny: [codex1]                 # names or aliases; also never chosen as a reviewer
+      # Least-loaded seat in the first non-empty tier. Prefer replaces the map as the first choice.
+      reviewer_prefer:
+        claude: [codex2, codex3]           # Claude-authored work
+        codex: [claude1, claude2]          # Codex-authored work
+      reviewer_pool_by_author_glob:
+        'ales-*': [ales-codex1]            # Aleš's own seats may use this one
+      review_reassign_minutes: 15          # busy seat, no verdict; 0 disables. Once, unless the next seat is idle
       freeze_dir: /home/wave/inbox/freezes
     # Off unless a freeze note declares prereqs. Commands are argv, run on the deploy box.
     prereq_checks:

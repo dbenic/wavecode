@@ -264,10 +264,19 @@ export interface DeployCardView {
   last_reconciled_at: string | null;
 }
 
+export interface ReviewerLoadView {
+  id: string;
+  name: string;
+  alias: string | null;
+  busy: boolean;
+  queue: number;
+}
+
 export interface ReviewBoard {
   last_reconciled_at: string | null;
   stale: boolean;
   items: ReviewItem[];
+  reviewers?: ReviewerLoadView[];
 }
 
 /** A row from the test-status JSON, already parsed by the server. */

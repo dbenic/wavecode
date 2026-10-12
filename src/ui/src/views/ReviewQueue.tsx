@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, DeployCardState, DevLane, ReleaseRequest, ReviewBoard, ReviewItem as ReviewItemType, User } from '../types';
+import type { Agent, DeployCardState, DevLane, ReleaseRequest, ReviewBoard, ReviewerLoadView, ReviewItem as ReviewItemType, User } from '../types';
 import type { StageProgress } from '../components/StageChip';
 import { isReviewEventType } from '../sse-events';
 import ReviewItemCard from '../components/ReviewItem';
@@ -126,6 +126,7 @@ export default function ReviewQueue() {
   const [lanes, setLanes] = useState<DevLane[]>([]);
   const [reconciledAt, setReconciledAt] = useState<string | null>(null);
   const [reconcileStale, setReconcileStale] = useState(false);
+  const [reviewerLoads, setReviewerLoads] = useState<ReviewerLoadView[]>([]);
   const [showHistory, setShowHistory] = useState(false);
 
   const fetchData = useCallback(() => {
@@ -139,6 +140,7 @@ export default function ReviewQueue() {
       setReviews(Array.isArray(board?.items) ? board.items : []);
       setReconciledAt(board?.last_reconciled_at ?? null);
       setReconcileStale(board?.stale === true);
+      setReviewerLoads(board?.reviewers ?? []);
       setAgents(a);
       setIsAdmin(me?.role === 'admin');
       setStagingBySha(indexStaging(releases));
@@ -210,6 +212,19 @@ export default function ReviewQueue() {
             {showHistory ? 'Hide history' : `History${historyCount ? ` (${historyCount})` : ''}`}
           </button>
         </div>
+        {reviewerLoads.length > 0 && (
+          <div className="max-w-6xl mx-auto px-4 pb-2 flex flex-wrap gap-x-3 gap-y-1" data-testid="reviewer-load">
+            {reviewerLoads.map((seat) => (
+              <span
+                key={seat.id}
+                data-testid={`reviewer-load-${seat.name}`}
+                className={`text-[10px] font-mono ${seat.busy ? 'text-amber-300' : 'text-slate-400'}`}
+              >
+                @{seat.alias ?? seat.name} {seat.busy ? 'busy' : 'idle'} · queue {seat.queue}
+              </span>
+            ))}
+          </div>
+        )}
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-6">

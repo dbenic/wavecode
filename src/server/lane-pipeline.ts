@@ -6,8 +6,9 @@
  * Auto-freeze merges a clean origin/main, pushes the lane branch through the
  * configured command, runs the quick check, and writes a freeze note the
  * existing parser already reads. Auto-gate queues one full run per SHA.
- * Auto-review uses the routing map, then the reviewer ladder, and never the
- * author or a denied name. Auto-stage waits for PASS plus GREEN, then a FIFO
+ * Auto-review picks the least-loaded eligible seat. Preference tiers come
+ * first, then the author-glob pool, the routing map, and the ladder. Never
+ * the author, a denied name, or the author's other seats. Auto-stage waits for PASS plus GREEN, then a FIFO
  * slot (one lane until Ready for prod or the pin expires).
  */
 
@@ -15,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig, type ProjectConfig } from './config.js';
-import { getAgent, getDb, getRun, listAgents, resolveAgent, type Agent, type Result } from './db.js';
+import { getAgent, getDb, getRun, listAgents, listAllAgentTags, type Agent, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, mainSpec, mainTip, projectRepo, resolveMainRef } from './lane-main.js';
@@ -23,10 +24,10 @@ import logger from './logger.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
-import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, type ReleaseFreeze } from './release-freezes.js';
+import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, type ReleaseFreeze } from './release-freezes.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
 import { countixDenied } from './pipeline-deny.js';
-import { pickReviewer } from './reviewer-ladder.js';
+import { assignmentFacts, loadFor, projectReassignMs, selectReviewer, shouldReassign } from './reviewer-assign.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
@@ -49,6 +50,12 @@ export interface PipelineSwitches {
   review_deny: string[];
   lane_deny: string[];
   agent_deny: string[];
+  /** Vendor (`claude`, `codex`) → preferred reviewer names. First non-empty tier. */
+  reviewer_prefer: Record<string, string[]>;
+  /** Author-name glob → seats allowed to review that person, including an own seat. */
+  reviewer_pool_by_author_glob: Record<string, string[]>;
+  /** Minutes a busy seat may hold a review with no verdict. 0 disables. Default 15. */
+  review_reassign_minutes: number;
   freeze_dir: string | null;
 }
 
@@ -64,7 +71,8 @@ export function pipelineOf(project: string | null): PipelineSwitches {
   const off: PipelineSwitches = {
     auto_freeze: false, auto_gate: false, auto_review: false, auto_stage: false, auto_merge_main: false,
     quick_check_command: null, push_command: null, gate_command: null, review_routes: {}, review_deny: [],
-    lane_deny: [], agent_deny: [], freeze_dir: null,
+    lane_deny: [], agent_deny: [], reviewer_prefer: {}, reviewer_pool_by_author_glob: {},
+    review_reassign_minutes: 15, freeze_dir: null,
   };
   if (!raw) return off;
   const reviewDeny = (raw.review_deny ?? []).map((s) => s.toLowerCase());
@@ -82,8 +90,25 @@ export function pipelineOf(project: string | null): PipelineSwitches {
     review_deny: [...new Set([...reviewDeny, ...agentDeny])],
     lane_deny: raw.lane_deny ?? [],
     agent_deny: agentDeny,
+    reviewer_prefer: lowerMap(raw.reviewer_prefer),
+    reviewer_pool_by_author_glob: lowerMap(raw.reviewer_pool_by_author_glob),
+    review_reassign_minutes: reassignMinutes(raw.review_reassign_minutes),
     freeze_dir: raw.freeze_dir ?? null,
   };
+}
+
+function lowerMap(raw: Record<string, string[]> | undefined): Record<string, string[]> {
+  if (!raw) return {};
+  const out: Record<string, string[]> = {};
+  for (const [key, names] of Object.entries(raw)) {
+    out[key.toLowerCase()] = (names ?? []).map((name) => name.toLowerCase());
+  }
+  return out;
+}
+
+function reassignMinutes(raw: number | undefined): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 15;
+  return Math.min(1440, Math.max(0, raw));
 }
 
 function fill(template: string[], vars: Record<string, string>): string[] {
@@ -276,30 +301,45 @@ function writeFreeze(dir: string, author: string, project: string, lane: string,
   return file;
 }
 
-function denied(name: string, pipe: PipelineSwitches): boolean {
-  return pipe.review_deny.includes(name.toLowerCase());
+function routeTargetOf(author: Agent, pipe: PipelineSwitches): string | null {
+  return pipe.review_routes[author.name]
+    ?? (author.alias ? pipe.review_routes[author.alias] : undefined)
+    ?? Object.entries(pipe.review_routes).find(([key]) => key.toLowerCase() === author.name.toLowerCase())?.[1]
+    ?? null;
 }
 
-function badReviewer(agent: Agent, authorId: string, pipe: PipelineSwitches): boolean {
-  if (agent.id === authorId) return true;
-  if (denied(agent.name, pipe)) return true;
-  if (agent.alias && denied(agent.alias, pipe)) return true;
-  return false;
-}
-
-/** Routing map first, then the reviewer ladder. Never the author, never a denied name. */
-export function chooseReviewer(author: Agent, pipe: PipelineSwitches, taskId: string | null): Agent | null {
-  const routed = pipe.review_routes[author.name]
-    ?? pipe.review_routes[author.alias ?? '']
-    ?? Object.entries(pipe.review_routes).find(([key]) => key.toLowerCase() === author.name.toLowerCase())?.[1];
-  if (routed && routed.toLowerCase() !== author.name.toLowerCase() && !denied(routed, pipe)) {
-    const resolved = resolveAgent(routed);
-    if (resolved.ok && !badReviewer(resolved.data, author.id, pipe)) return resolved.data;
+function reviewTagIds(): Set<string> {
+  try {
+    const ids = new Set<string>();
+    for (const [id, tags] of listAllAgentTags()) {
+      if (tags.includes('review')) ids.add(id);
+    }
+    return ids;
+  } catch {
+    return new Set();
   }
-  if (!taskId) return null;
-  const picked = pickReviewer({ agent_id: author.id, task_id: taskId });
-  if (!picked.ok || badReviewer(picked.agent, author.id, pipe)) return null;
-  return picked.agent;
+}
+
+/**
+ * Least-loaded eligible reviewer. A non-empty prefer tier replaces the
+ * fixed route map. Never the author, a denied name, or the author's own seats
+ * unless a glob pool names that seat.
+ */
+export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: string | null): Agent | null {
+  const review = getConfig().review;
+  return selectReviewer({
+    author,
+    agents: listAgents(),
+    deny: pipe.review_deny,
+    prefer: pipe.reviewer_prefer,
+    pools: pipe.reviewer_pool_by_author_glob,
+    routeReviewers: Object.values(pipe.review_routes),
+    routeTarget: routeTargetOf(author, pipe),
+    defaultReviewer: review?.default_reviewer ?? null,
+    autoPick: review?.auto_pick !== false,
+    reviewTagIds: reviewTagIds(),
+    load: loadFor,
+  });
 }
 
 function deltaSentence(project: string, lane: string, sha: string): string | null {
@@ -334,11 +374,62 @@ function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 'assig
     ? `[from WaveCode] ${delta}. New SHA ${sha8} on ${freeze.lane}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).`
     : `[from WaveCode] Please review freeze ${sha8} on ${freeze.lane ?? 'the lane'} by @${author.data.name}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).`;
   deliverSystemLine(reviewer, text, { kind: 'info', source: 'review' });
-  emit('pipeline.review', 'run', `${freeze.sha}:${kind}`, { sha: freeze.sha, reviewer_id: reviewer.id, kind }, null);
+  emit('pipeline.review', 'run', `${freeze.sha}:${kind}`, {
+    sha: freeze.sha, reviewer_id: reviewer.id, kind, assigned_at_ms: Date.now(), reassigned: false,
+  }, null);
+  if (!freeze.verdict) setFreezeReviewer(freeze.sha, { id: reviewer.id, name: reviewer.name });
   const shown = kind === 'green'
     ? `auto: GREEN landed — re-pinged @${reviewer.alias ?? reviewer.name}`
     : `auto: review requested — pinged @${reviewer.alias ?? reviewer.name}`;
   note(freeze.project, freeze.lane, freeze.sha, 'review', shown);
+}
+
+/**
+ * A review with no verdict that has sat on a busy seat longer than
+ * `review_reassign_minutes` moves to the least-loaded eligible seat.
+ * Once per freeze, unless the new seat is idle. Returns how many moved.
+ */
+export function reassignWaitingReviews(now = Date.now()): number {
+  let freezes: ReleaseFreeze[] = [];
+  try { freezes = listFreezes(); } catch { return 0; }
+  let moved = 0;
+  for (const freeze of freezes) {
+    if (!freeze.project || !freeze.reviewer_agent_id || freeze.verdict) continue;
+    if (freeze.status !== 'open' && freeze.status !== 'behind-main') continue;
+    const pipe = pipelineOf(freeze.project);
+    if (!pipe.auto_review) continue;
+    if (countixDenied(freeze.project, freeze.lane, { name: freeze.author_name })) continue;
+    const facts = assignmentFacts(freeze.sha);
+    if (!facts) continue;
+    const current = getAgent(freeze.reviewer_agent_id);
+    const author = freeze.author_agent_id ? getAgent(freeze.author_agent_id) : null;
+    if (!current.ok || !author?.ok) continue;
+    const next = chooseReviewer(author.data, pipe, null);
+    const nextLoad = next ? loadFor(next) : null;
+    if (!shouldReassign({
+      hasVerdict: false,
+      waitedMs: now - facts.at,
+      limitMs: projectReassignMs(freeze.project),
+      currentBusy: loadFor(current.data).busy,
+      reassignCount: facts.reassigns,
+      nextId: next?.id ?? null,
+      currentId: current.data.id,
+      nextIdle: nextLoad ? !nextLoad.busy : false,
+    }) || !next) continue;
+    setFreezeReviewer(freeze.sha, { id: next.id, name: next.name });
+    const sha8 = freeze.sha.slice(0, 8);
+    const ask = `[from WaveCode] Please review freeze ${sha8} on ${freeze.lane ?? 'the lane'} by @${author.data.name}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).`;
+    deliverSystemLine(next, ask, { kind: 'info', source: 'review' });
+    const from = current.data.alias ?? current.data.name;
+    const to = next.alias ?? next.name;
+    const text = `reassigned @${from} → @${to} (busy, no verdict)`;
+    note(freeze.project, freeze.lane, freeze.sha, 'review', text);
+    emit('pipeline.review', 'run', `${freeze.sha}:reassign`, {
+      sha: freeze.sha, reviewer_id: next.id, kind: 'reassign', assigned_at_ms: Date.now(), reassigned: true,
+    }, null);
+    moved += 1;
+  }
+  return moved;
 }
 
 function gateWord(stdout: string): 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED' | null {

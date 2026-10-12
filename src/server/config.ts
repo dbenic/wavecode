@@ -152,6 +152,23 @@ export interface ProjectConfig {
      * Also excluded from reviewer choice, the same as `review_deny`.
      */
     agent_deny?: string[];
+    /**
+     * First choice inside the eligible set, by the author's vendor
+     * (`claude-code` → `claude`). The least-loaded name in the first
+     * non-empty tier wins. Empty means the route map is next.
+     */
+    reviewer_prefer?: Record<string, string[]>;
+    /**
+     * Author-name glob → seats that may review that person, including their
+     * own other seats (`ales-*` → `ales-codex1`). Never the author, and never
+     * a denied name.
+     */
+    reviewer_pool_by_author_glob?: Record<string, string[]>;
+    /**
+     * Reassign a review that has waited this many minutes on a busy seat
+     * with no verdict. 0 disables. Default 15.
+     */
+    review_reassign_minutes?: number;
     /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
     freeze_dir?: string;
   };
@@ -471,6 +488,35 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
       if (!AGENT_HANDLE.test(author) || typeof reviewer !== 'string' || !AGENT_HANDLE.test(reviewer)) {
         throw new Error(`projects.${name}.pipeline.review_routes entries must be agent names`);
       }
+    }
+  }
+  validateNamedListMap(`projects.${name}.pipeline.reviewer_prefer`, pipeline.reviewer_prefer, /^[A-Za-z][A-Za-z0-9]{0,20}$/, 'vendor names');
+  validateNamedListMap(`projects.${name}.pipeline.reviewer_pool_by_author_glob`, pipeline.reviewer_pool_by_author_glob, null, 'author globs');
+  if (pipeline.review_reassign_minutes !== undefined) {
+    const minutes = pipeline.review_reassign_minutes;
+    if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+      throw new Error(`projects.${name}.pipeline.review_reassign_minutes must be a number of minutes from 0 to 1440`);
+    }
+  }
+}
+
+function validateNamedListMap(
+  label: string,
+  value: Record<string, string[]> | undefined,
+  keyRe: RegExp | null,
+  keyWhat: string,
+): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be a map of ${keyWhat} to agent names`);
+  }
+  for (const [key, names] of Object.entries(value)) {
+    const globOk = key.trim().length > 0 && key.length <= 80 && !key.includes('..');
+    if (keyRe ? !keyRe.test(key) : !globOk) {
+      throw new Error(`${label} keys must be ${keyWhat}`);
+    }
+    if (!Array.isArray(names) || names.some((n) => typeof n !== 'string' || !AGENT_HANDLE.test(n))) {
+      throw new Error(`${label} values must be lists of agent names`);
     }
   }
 }

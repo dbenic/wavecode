@@ -35,6 +35,7 @@ import {
   resolveStagingTip,
 } from './releases.js';
 import { readProdHealth } from './staging-forward.js';
+import { reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
 import { readLaneTests, shaChecks, suiteNames, type TestRun } from './test-runs.js';
 
 export const RECONCILE_INTERVAL_MS = 90_000;
@@ -180,6 +181,7 @@ export interface ReviewBoard {
   last_reconciled_at: string | null;
   stale: boolean;
   items: BoardItem[];
+  reviewers: ReviewerLoadView[];
 }
 
 const KV_AT = 'deploy_reconcile_at';
@@ -533,10 +535,18 @@ async function runOnce(reason: string): Promise<void> {
   running = true;
   try {
     maybeAlertStale();
-    await reconcileDeployStates();
-  } catch (e) {
-    logger.warn({ reason, error: (e as Error).message }, 'Deploy reconcile failed');
-    maybeAlertStale();
+    try {
+      await reconcileDeployStates();
+    } catch (e) {
+      logger.warn({ reason, error: (e as Error).message }, 'Deploy reconcile failed');
+      maybeAlertStale();
+    }
+    try {
+      const pipeline = await import('./lane-pipeline.js');
+      pipeline.reassignWaitingReviews();
+    } catch (e) {
+      logger.warn({ reason, error: (e as Error).message }, 'Review reassignment skipped');
+    }
   } finally {
     running = false;
     if (again) {
@@ -802,9 +812,12 @@ export function reviewBoard(user: { name: string; role: string }, lanes: DevLane
     if (pending.freeze || seen.has(pending.run.id)) continue;
     items.push({ ...pending, deploy: null });
   }
+  let reviewers: ReviewerLoadView[] = [];
+  try { reviewers = reviewerLoads(); } catch { reviewers = []; }
   return {
     last_reconciled_at: lastReconciledAt(),
     stale: reconcileIsStale(),
     items,
+    reviewers,
   };
 }
