@@ -82,6 +82,27 @@ releases:
     expect(() => missing.loadConfig(configPath)).toThrow(/staging_command must include \{sha\}/);
   });
 
+  it('keeps pipeline switches off unless set, and requires the push placeholder', async () => {
+    fs.writeFileSync(configPath, `
+projects:
+  demo:
+    pipeline:
+      auto_freeze: false
+      push_command: [git, '-C', '{workspace}', 'push', 'origin', 'HEAD:{lane}']
+      review_deny: [codex1]
+`, 'utf8');
+    const { loadConfig } = await import('./config.js');
+    const loaded = loadConfig(configPath);
+    expect(loaded.projects?.demo.pipeline?.auto_freeze).toBe(false);
+    expect(loaded.projects?.demo.pipeline?.auto_stage).toBeUndefined();
+    expect(loaded.projects?.demo.pipeline?.review_deny).toEqual(['codex1']);
+
+    fs.writeFileSync(configPath, 'projects:\n  demo:\n    pipeline:\n      push_command: [git, push]\n', 'utf8');
+    vi.resetModules();
+    const missing = await import('./config.js');
+    expect(() => missing.loadConfig(configPath)).toThrow(/push_command must include \{lane\}/);
+  });
+
   it('loads a per-project referee profile from yaml', async () => {
     fs.writeFileSync(configPath, `
 projects:

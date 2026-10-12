@@ -250,6 +250,9 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
     import('./code-review.js')
       .then((cr) => cr.maybeAutoReview(runId))
       .catch((err) => logger.warn({ error: (err as Error).message }, 'Auto-review trigger failed'));
+    if (run.exit_code === 0) {
+      void import('./pipeline-hooks.js').then((hooks) => hooks.fireAuthorDone(agentId)).catch(() => {});
+    }
     }
   } else if (run.status === 'failed') {
     if (task.status === 'failed') {

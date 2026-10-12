@@ -220,6 +220,9 @@ function tickInner(agentId: string, state: WatcherState): void {
 
   const output = captureResult.data;
   maybeDismissFirstRunDialog(agentId, output);
+  if (output !== state.previousOutput && /^\s*(?:DONE|FROZEN)\b/im.test(output)) {
+    void import('./pipeline-hooks.js').then((hooks) => hooks.fireAuthorDone(agentId)).catch(() => {});
+  }
   const outputChanged = output !== state.previousOutput;
   state.previousOutput = output;
 

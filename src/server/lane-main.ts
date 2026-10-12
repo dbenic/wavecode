@@ -10,6 +10,7 @@ import { getAgent, getDb, listAgents, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
+import { fireMainAdvanced } from './pipeline-hooks.js';
 
 export const MAIN_PING = 'lane.main_ping';
 
@@ -212,6 +213,8 @@ export function observeRepo(repo: string): void {
     try { kvSet(key, tip.sha); } catch (e) { logger.debug({ error: (e as Error).message }, 'main tip not stored'); continue; }
     if (!prev || prev === tip.sha) continue;
     notifyBehindLanes(name, repo, tip.sha, tip.subject, project.lane_glob || 'wc-*');
+    const switches = (project as { pipeline?: { auto_merge_main?: boolean } }).pipeline;
+    if (switches?.auto_merge_main === true) fireMainAdvanced(name, tip.sha);
   }
 }
 

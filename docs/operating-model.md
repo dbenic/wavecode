@@ -182,6 +182,24 @@ projects:
       log_command: [test-log, '{id}']
       quick_suites: [quick, tier1]           # a green one of these can stage
       full_suites: [full-tuned, full]        # production Promote needs one of these green
+    # Hands-free pipeline. Every switch defaults off. Commands are argv, not a shell.
+    # Placeholders only: this file is public. The push command must name {lane}, never main.
+    pipeline:
+      auto_freeze: false
+      auto_gate: false
+      auto_review: false
+      auto_stage: false
+      auto_merge_main: false
+      quick_check_command: [quick-check, '{sha}', '{lane}']
+      push_command: [git, '-C', '{workspace}', 'push', 'origin', 'HEAD:{lane}']
+      gate_command: [gate-run, '--full', '{sha}']
+      review_routes:
+        ales-claude1: ales-codex1
+        ales-codex2: codex3
+        claude1: codex2
+        codex2: claude1
+      review_deny: [codex1]
+      freeze_dir: /home/wave/inbox/freezes
   max_fix_loops: 2               # bounded fix→re-review rounds
   require_pass_to_promote: true  # promote gate even without auto_review
   gate_dependents_on_approval: true  # DAG advances on approval, not 'done'

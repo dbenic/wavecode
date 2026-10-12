@@ -36,6 +36,7 @@ import {
   type Result,
 } from './db.js';
 import { countVerdictIssues, type ReviewVerdict } from './code-review.js';
+import { fireFreeze } from './pipeline-hooks.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
@@ -142,6 +143,13 @@ export function getFreeze(sha: string): ReleaseFreeze | null {
 
 export function getFreezeByRun(runId: string): ReleaseFreeze | null {
   return withTable(() => (getDb().prepare('SELECT * FROM release_freezes WHERE run_id = ?').get(runId) as ReleaseFreeze | undefined) ?? null);
+}
+
+/** Record the gate command's result word on the freeze. */
+export function setFreezeGate(sha: string, gate: string): void {
+  const g = gate.toUpperCase();
+  if (g !== 'GREEN' && g !== 'RED' && g !== 'QUEUED' && g !== 'RUNNING') return;
+  patch(sha, { gate: g });
 }
 
 export function listFreezes(): ReleaseFreeze[] {
@@ -319,7 +327,9 @@ export function ingestFreezeFile(filePath: string, opts: IngestOptions = {}): Re
   } catch (e) {
     return { ok: false, error: `cannot read ${filePath}: ${(e as Error).message}` };
   }
-  return ingestFreezeText(text, filePath, opts);
+  const result = ingestFreezeText(text, filePath, opts);
+  if (result.ok) fireFreeze(result.data.sha);
+  return result;
 }
 
 export function ingestFreezeText(text: string, filePath: string, opts: IngestOptions = {}): Result<IngestOutcome> {

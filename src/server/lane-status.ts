@@ -40,6 +40,8 @@ export interface LaneStatusInput {
   hasMigration?: boolean;
   overlap?: { lane: string; files: number } | null;
   onStaging?: boolean;
+  /** What the hands-free pipeline last did for this lane. */
+  autoNote?: string | null;
 }
 
 export function behindMainLine(n: number): string {
@@ -121,6 +123,8 @@ export function laneStatusLine(input: LaneStatusInput): string {
   }
   const step = processStep(input);
   if (step) notes.push(step);
+  else if (input.autoNote) notes.push(input.autoNote);
+  if (input.autoNote && step) notes.push(input.autoNote);
   if (notes.length === 0) return input.onStaging ? 'on staging — mark Ready for prod' : 'ready — press STAGE';
   return notes.join(' · ');
 }

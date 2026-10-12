@@ -114,6 +114,27 @@ export interface ProjectConfig {
      */
     full_suites?: string[];
   };
+  /**
+   * Hands-free lane pipeline. Every switch defaults off. Push and the quick
+   * check are argv templates, not a shell. `{lane}` in the push command is the
+   * lane branch; the daemon never pushes main.
+   */
+  pipeline?: {
+    auto_freeze?: boolean;
+    auto_gate?: boolean;
+    auto_review?: boolean;
+    auto_stage?: boolean;
+    /** When main advances, clean-merge it into open lanes and refreeze. */
+    auto_merge_main?: boolean;
+    quick_check_command?: string[];
+    push_command?: string[];
+    gate_command?: string[];
+    /** Author name → reviewer name. The author and `review_deny` are never chosen. */
+    review_routes?: Record<string, string>;
+    review_deny?: string[];
+    /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
+    freeze_dir?: string;
+  };
 }
 
 export interface PeerConfig {
@@ -357,6 +378,37 @@ function validateArgvList(name: string, argv: string[] | undefined): void {
 
 const SUITE_NAME = /^[a-z0-9][a-z0-9._+-]{0,40}$/;
 
+const AGENT_HANDLE = /^[A-Za-z][\w.-]{0,63}$/;
+
+function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): void {
+  if (pipeline === undefined) return;
+  const flags = ['auto_freeze', 'auto_gate', 'auto_review', 'auto_stage', 'auto_merge_main'] as const;
+  for (const flag of flags) {
+    if (pipeline[flag] !== undefined && typeof pipeline[flag] !== 'boolean') {
+      throw new Error(`projects.${name}.pipeline.${flag} must be a boolean`);
+    }
+  }
+  validateArgvTemplate(`projects.${name}.pipeline.quick_check_command`, pipeline.quick_check_command, '{sha}');
+  validateArgvTemplate(`projects.${name}.pipeline.gate_command`, pipeline.gate_command, '{sha}');
+  validateArgvTemplate(`projects.${name}.pipeline.push_command`, pipeline.push_command, '{lane}');
+  if (pipeline.freeze_dir !== undefined && (typeof pipeline.freeze_dir !== 'string' || !pipeline.freeze_dir.trim() || pipeline.freeze_dir.includes('..'))) {
+    throw new Error(`projects.${name}.pipeline.freeze_dir must be a directory path`);
+  }
+  if (pipeline.review_deny !== undefined && (!Array.isArray(pipeline.review_deny) || pipeline.review_deny.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
+    throw new Error(`projects.${name}.pipeline.review_deny must be a list of agent names`);
+  }
+  if (pipeline.review_routes !== undefined) {
+    if (typeof pipeline.review_routes !== 'object' || pipeline.review_routes === null || Array.isArray(pipeline.review_routes)) {
+      throw new Error(`projects.${name}.pipeline.review_routes must be an author-to-reviewer map`);
+    }
+    for (const [author, reviewer] of Object.entries(pipeline.review_routes)) {
+      if (!AGENT_HANDLE.test(author) || typeof reviewer !== 'string' || !AGENT_HANDLE.test(reviewer)) {
+        throw new Error(`projects.${name}.pipeline.review_routes entries must be agent names`);
+      }
+    }
+  }
+}
+
 function validateSuiteNames(name: string, suites: string[] | undefined): void {
   if (suites === undefined) return;
   if (!Array.isArray(suites) || suites.length === 0 || suites.some((s) => typeof s !== 'string' || !SUITE_NAME.test(s))) {
@@ -438,6 +490,7 @@ export function validateConfig(cfg: WaveConfig): void {
       validateSuiteNames(`projects.${name}.tests.quick_suites`, project.tests.quick_suites);
       validateSuiteNames(`projects.${name}.tests.full_suites`, project.tests.full_suites);
     }
+    validatePipeline(name, project.pipeline);
     if (project.release_peer !== undefined) {
       const m = /^([a-z][a-z0-9_-]*)\/(@?[\w.-]+)$/.exec(project.release_peer);
       if (!m) throw new Error(`projects.${name}.release_peer must look like peer/agent (e.g. deploy/fable)`);
