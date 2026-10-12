@@ -210,6 +210,27 @@ describe('release-freezes.ts', () => {
       expect(db.listArtifacts({ kind: 'document' })).toHaveLength(1);
     });
 
+    it('re-ingesting a freeze note recomputes the gate and clears a stale GREEN', () => {
+      const green = `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA_A}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\nRESULT GREEN\n`;
+      const file = write(`desk7-freeze-${SHA_A.slice(0, 8)}.md`, green);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
+
+      fs.writeFileSync(file, green.replace('RESULT GREEN', `RESULT GREEN sha=${SHA_B} ${SHA_A.slice(0, 8)}`));
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBeNull();
+      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).gate).toBeNull();
+
+      fs.writeFileSync(file, green);
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
+
+      fs.writeFileSync(file, green.replace('RESULT GREEN\n', ''));
+      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect(rf.getFreeze(SHA_A)?.gate).toBeNull();
+      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).not.toBe('green');
+    });
+
     it('a freeze note carrying the reviewer PASS inline (Desk #91) creates the card and links both files', () => {
       const file = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
       const r = rf.ingestFreezeFile(file);

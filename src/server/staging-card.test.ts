@@ -61,6 +61,33 @@ describe('freeze note checks', () => {
     expect(parseNoteChecks(note('- RESULT GREEN or RED'), SHA).full).toBeNull();
   });
 
+  it('rejects a result line that also names another SHA', () => {
+    const prefix = SHA.slice(0, 8);
+    expect(parseNoteChecks(note(`- RESULT GREEN sha=${OTHER} ${prefix}`), SHA).full).toBeNull();
+    expect(parseNoteChecks(note(`- RESULT GREEN sha=${OTHER} (rebased onto ${prefix})`), SHA).full).toBeNull();
+    expect(parseNoteChecks(note(`- GATE GREEN ${OTHER.slice(0, 7)} ${SHA.slice(0, 7)}`), SHA).full).toBeNull();
+    expect(parseNoteChecks(note(`- quick check GREEN ${prefix} ${OTHER.slice(0, 7)}`), SHA).quick).toBeNull();
+    expect(parseNoteChecks(note(`- RESULT GREEN ${SHA.slice(0, 7)}`), SHA).full).toBe('green');
+  });
+
+  it('does not keep a stored GREEN when the note for this SHA is missing or conflicting', () => {
+    const file = path.join(os.tmpdir(), `wc-stale-${SHA.slice(0, 8)}.md`);
+    projects.demo = { workspace_match: '**/*', tests: { status_command: ['status', '{sha}'] } };
+    setTestRunExecForTest(() => JSON.stringify({ v: 1, runs: [] }));
+    fs.writeFileSync(file, note(`- RESULT GREEN sha=${OTHER} ${SHA.slice(0, 8)}`));
+    const conflicting = { ...lane, gate: 'GREEN', freeze_path: file };
+    expect(viewShaChecks(conflicting)).toMatchObject({ full: 'missing', gate: null });
+    expect(promoteFullBlock(conflicting)).toMatch(/needs green full gate/);
+
+    fs.writeFileSync(file, note('- reviewed, no result on this SHA'));
+    const missing = { ...lane, gate: 'GREEN', freeze_path: file };
+    expect(viewShaChecks(missing)).toMatchObject({ full: 'missing', gate: null });
+    expect(promoteFullBlock(missing)).toMatch(/needs green full gate/);
+
+    expect(viewShaChecks({ ...lane, gate: 'GREEN', freeze_path: null }).gate).toBe('GREEN');
+    fs.rmSync(file, { force: true });
+  });
+
   it('prefers a status command that names the SHA, and keeps quick and full apart', () => {
     const file = path.join(os.tmpdir(), `wc-note-${SHA.slice(0, 8)}.md`);
     fs.writeFileSync(file, note('- RESULT RED\n- quick check RED'));

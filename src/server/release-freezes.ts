@@ -200,11 +200,16 @@ export interface NoteChecks {
   full: 'green' | 'red' | null;
 }
 
+function prefixMatches(mention: string, sha: string): boolean {
+  return sha.startsWith(mention) || mention.startsWith(sha);
+}
+
+/** 'other' when any 7+ hex token is not a prefix of this SHA. One matching prefix does not rescue the line. */
 function shaMention(line: string, sha: string): 'this' | 'other' | 'none' {
   const mentions = [...line.toLowerCase().matchAll(/\b[0-9a-f]{7,40}\b/g)].map((m) => m[0]);
   if (mentions.length === 0) return 'none';
-  const hit = mentions.some((m) => sha.startsWith(m) || m.startsWith(sha));
-  return hit ? 'this' : 'other';
+  if (mentions.some((m) => !prefixMatches(m, sha))) return 'other';
+  return 'this';
 }
 
 function noteCheckOnLine(line: string): { kind: 'quick' | 'full'; word: 'green' | 'red' } | null {
@@ -225,9 +230,10 @@ function noteCheckOnLine(line: string): { kind: 'quick' | 'full'; word: 'green' 
 }
 
 /**
- * Quick and full results written in a freeze note. A line counts when it names
- * this SHA, or when it names none and the note's frozen SHA is this SHA.
- * A line that names a different SHA does not count.
+ * Quick and full results written in a freeze note. A line counts when every
+ * 7+ hex token on it is a prefix of this SHA, or when it names no SHA and the
+ * note's frozen SHA is this SHA. Any token that is not a prefix of this SHA
+ * rejects the whole line.
  */
 export function parseNoteChecks(text: string, sha: string): NoteChecks {
   const wanted = sha.toLowerCase();
@@ -260,7 +266,9 @@ function readFreezeNote(filePath: string | null | undefined): string | null {
 
 /**
  * Status command wins when it reports this SHA. Otherwise the freeze note.
- * A stored gate word is the last fallback for the full result.
+ * A stored gate word is the last fallback only when the note cannot be read.
+ * A note that was read and does not name a full result for this SHA (missing,
+ * or a line that also names another SHA) must not keep a stale GREEN.
  */
 export function viewShaChecks(freeze: {
   project: string | null;
@@ -270,7 +278,7 @@ export function viewShaChecks(freeze: {
   freeze_path?: string | null;
 }, runs?: TestRun[]): ShaView {
   const note = readFreezeNote(freeze.freeze_path);
-  const parsed = note ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
+  const parsed = note != null ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
   const configured = !!(freeze.project && testsConfigured(freeze.project));
   const live = configured
     ? shaChecks(runs ?? readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project))
@@ -285,7 +293,8 @@ export function viewShaChecks(freeze: {
   let full = pick(live?.full, parsed.full);
   let gate: 'GREEN' | 'RED' | null = full === 'green' ? 'GREEN' : full === 'red' ? 'RED' : null;
   const stored = (freeze.gate ?? '').toUpperCase();
-  if ((full === 'missing' || full === 'unconfigured') && !parsed.full && (stored === 'GREEN' || stored === 'RED') && (!live || live.full === 'missing')) {
+  const staleGreen = stored === 'GREEN' && note != null && !parsed.full;
+  if (!staleGreen && (full === 'missing' || full === 'unconfigured') && !parsed.full && (stored === 'GREEN' || stored === 'RED') && (!live || live.full === 'missing')) {
     full = stored === 'GREEN' ? 'green' : 'red';
     gate = stored === 'GREEN' ? 'GREEN' : 'RED';
   }
@@ -477,7 +486,10 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   if (project && !existing?.project) enrich.project = project;
   if (parsed.desk && !existing?.desk) enrich.desk = parsed.desk;
   if (parsed.lane && !existing?.lane) enrich.lane = parsed.lane;
-  if (parsed.gate && (!existing?.gate || parsed.kind === 'freeze')) enrich.gate = parsed.gate;
+  // A freeze note is re-read in full. Missing or conflicting evidence for this
+  // SHA clears a stale GREEN instead of leaving the old column in place.
+  if (parsed.kind === 'freeze') enrich.gate = parsed.gate;
+  else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
   if (author && !existing?.author_agent_id) { enrich.author_agent_id = author.id; enrich.author_name = author.name; }
 
   const verdict = parsed.verdict;
