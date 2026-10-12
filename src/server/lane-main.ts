@@ -6,7 +6,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
-import { gitAncestor, gitText } from './git-memo.js';
+import { gitAncestor, gitText, gitAncestorSync } from './git-memo.js';
 import { getAgent, getDb, listAgents, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
@@ -93,15 +93,9 @@ export function resolveMainRef(repo: string, project: string | null): string | n
   return null;
 }
 
+/** Memoised for full-SHA pairs (see git-memo); a ref name is asked every time. */
 function isAncestor(repo: string, ancestor: string, descendant: string): boolean | null {
-  try {
-    execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', ancestor, descendant], { stdio: 'ignore', timeout: 5000 });
-    return true;
-  } catch (e) {
-    const status = (e as { status?: number }).status;
-    if (status === 1) return false;
-    return null;
-  }
+  return gitAncestorSync(repo, ancestor, descendant);
 }
 
 function mainTipSha(repo: string, ref: string): string | null {
