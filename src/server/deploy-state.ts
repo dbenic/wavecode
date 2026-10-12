@@ -5,6 +5,11 @@
  * (`pipelineHooks.onMain`) and deploy (`pipelineHooks.onDeployed`).
  * Anything git or a health probe cannot prove stays unknown — the board
  * never treats a missing tip as "not deployed".
+ *
+ * The staging tip is `resolveStagingTip`: the release peer when this project
+ * forwards releases, otherwise the health command, then the local deployed row.
+ * A failed peer ask stays unknown and is not replaced by the local row.
+ * `stage_block` is the same behind / forward / gate sentence the lane card uses.
  */
 
 import fs from 'node:fs';
@@ -14,6 +19,7 @@ import { emit } from './event-bus.js';
 import { gitAncestor, gitText } from './git-memo.js';
 import logger from './logger.js';
 import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef } from './lane-main.js';
+import { behindMainLine } from './lane-status.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { getConfig } from './config.js';
@@ -30,12 +36,12 @@ import {
   PRODUCTION_RELEASE_ADMIN_ONLY,
   PRODUCTION_RELEASE_NOT_APPROVER,
   clearSettledReleaseErrors,
-  currentStagingTip,
   listReleases,
+  stageGateBlock,
   verificationFor,
   resolveStagingTip,
 } from './releases.js';
-import { readProdHealth } from './staging-forward.js';
+import { readProdHealth, stagingForwardBlock, type StagingTip } from './staging-forward.js';
 import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
 import {
@@ -144,6 +150,7 @@ interface DeployRow {
   desk: number | null;
   lane: string | null;
   unknown_reason: string | null;
+  stage_block: string | null;
   last_reconciled_at: string;
 }
 
@@ -229,9 +236,14 @@ export function ensureDeployStateTable(): void {
       desk INTEGER,
       lane TEXT,
       unknown_reason TEXT,
+      stage_block TEXT,
       last_reconciled_at TEXT NOT NULL
     );
   `);
+  const cols = getDb().prepare('PRAGMA table_info(deploy_card_states)').all() as { name: string }[];
+  if (!cols.some((col) => col.name === 'stage_block')) {
+    getDb().exec('ALTER TABLE deploy_card_states ADD COLUMN stage_block TEXT');
+  }
 }
 
 function withTable<T>(fn: () => T): T {
@@ -286,10 +298,10 @@ function upsert(row: DeployRow): void {
     getDb().prepare(`
       INSERT INTO deploy_card_states (
         sha, state, merged_main, in_staging, in_prod, behind_main, superseded, verdict, quick, full_result,
-        test_kind, test_at, test_word, version, badge, title, summary, desk, lane, unknown_reason, last_reconciled_at
+        test_kind, test_at, test_word, version, badge, title, summary, desk, lane, unknown_reason, stage_block, last_reconciled_at
       ) VALUES (
         @sha, @state, @merged_main, @in_staging, @in_prod, @behind_main, @superseded, @verdict, @quick, @full_result,
-        @test_kind, @test_at, @test_word, @version, @badge, @title, @summary, @desk, @lane, @unknown_reason, @last_reconciled_at
+        @test_kind, @test_at, @test_word, @version, @badge, @title, @summary, @desk, @lane, @unknown_reason, @stage_block, @last_reconciled_at
       )
       ON CONFLICT(sha) DO UPDATE SET
         state = excluded.state, merged_main = excluded.merged_main, in_staging = excluded.in_staging,
@@ -298,12 +310,44 @@ function upsert(row: DeployRow): void {
         test_kind = excluded.test_kind, test_at = excluded.test_at, test_word = excluded.test_word,
         version = excluded.version, badge = excluded.badge, title = excluded.title, summary = excluded.summary,
         desk = excluded.desk, lane = excluded.lane, unknown_reason = excluded.unknown_reason,
+        stage_block = excluded.stage_block,
         last_reconciled_at = excluded.last_reconciled_at
     `).run(row);
   });
 }
 
-interface Tip { sha: string | null; version: string | null }
+interface Tip { sha: string | null; version: string | null; lane: string | null }
+
+interface ProjectTips {
+  staging: Tip;
+  prod: Tip;
+  /** False when `resolveStagingTip` could not ask the peer. The local row is not a substitute. */
+  stagingKnown: boolean;
+  source: 'peer' | 'health' | 'local';
+}
+
+const KV_TIPS = 'deploy_reconcile_tips';
+let reconciledTips = new Map<string, ProjectTips>();
+
+function emptyTip(): Tip {
+  return { sha: null, version: null, lane: null };
+}
+
+function rememberTips(tips: Map<string, ProjectTips>): void {
+  reconciledTips = tips;
+  try { kvSet(KV_TIPS, JSON.stringify(Object.fromEntries(tips))); } catch { /* kv unavailable */ }
+}
+
+function storedTips(): Map<string, ProjectTips> {
+  if (reconciledTips.size > 0) return reconciledTips;
+  try {
+    const raw = kvGet(KV_TIPS);
+    if (!raw) return reconciledTips;
+    const parsed = JSON.parse(raw) as Record<string, ProjectTips>;
+    reconciledTips = new Map(Object.entries(parsed));
+  } catch { /* the board stays unknown until the next reconcile */ }
+  return reconciledTips;
+}
 
 async function containedIn(repo: string | null, sha: string, tip: string | null): Promise<Tri> {
   if (!tip || !/^[0-9a-f]{40}$/i.test(tip)) return null;
@@ -356,29 +400,55 @@ function versionFor(sha: string, project: string | null, staging: Tip, prod: Tip
   return null;
 }
 
-async function tipsFor(project: string): Promise<{ staging: Tip; prod: Tip }> {
-  const empty: Tip = { sha: null, version: null };
-  let staging = empty;
+function blankTips(): ProjectTips {
+  return { staging: emptyTip(), prod: emptyTip(), stagingKnown: false, source: 'local' };
+}
+
+async function tipsFor(project: string): Promise<ProjectTips> {
+  const out = blankTips();
   try {
     const resolved = await resolveStagingTip(project);
-    const sha = resolved.tip?.sha;
-    if (sha && /^[0-9a-f]{40}$/i.test(sha)) staging = { sha: sha.toLowerCase(), version: resolved.tip?.version ?? null };
-  } catch { staging = empty; }
-  let prod = empty;
+    out.source = resolved.source;
+    if (resolved.state === 'unknown') {
+      out.stagingKnown = false;
+      out.staging = emptyTip();
+    } else {
+      out.stagingKnown = true;
+      const sha = resolved.tip?.sha;
+      if (sha && /^[0-9a-f]{40}$/i.test(sha)) {
+        out.staging = { sha: sha.toLowerCase(), version: resolved.tip?.version ?? null, lane: resolved.tip?.lane ?? null };
+      }
+    }
+  } catch { /* unknown: do not fall back to a local staging row */ }
   try {
     const health = readProdHealth(project);
     const row = listReleases({ project, target: 'production', status: 'deployed', limit: 1 })[0]
       ?? listReleases({ target: 'production', status: 'deployed', limit: 20 }).find((r) => r.project == null || r.project === project)
       ?? null;
-    if (health?.sha) prod = { sha: health.sha, version: health.version ?? row?.version ?? null };
-    else if (row?.sha) prod = { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version };
-  } catch { prod = empty; }
-  return { staging, prod };
+    if (health?.sha) out.prod = { sha: health.sha, version: health.version ?? row?.version ?? null, lane: row?.lane ?? null };
+    else if (row?.sha) out.prod = { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version, lane: row.lane };
+  } catch { out.prod = emptyTip(); }
+  return out;
 }
 
-async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<string, { staging: Tip; prod: Tip }>): Promise<DeriveFacts> {
+/** The lane card's stage reason: behind main, then the forward check against the resolved tip, then the gate. */
+async function stageBlockFor(freeze: ReleaseFreeze, facts: DeriveFacts, pair: ProjectTips): Promise<string | null> {
+  if (facts.behindMain === true) return behindMainLine(1);
+  try {
+    if (pair.stagingKnown && freeze.project && pair.staging.sha) {
+      const tip: StagingTip = { sha: pair.staging.sha, version: pair.staging.version, lane: pair.staging.lane };
+      const forward = await stagingForwardBlock(freeze.project, freeze.sha, tip);
+      if (forward) return forward;
+    }
+    return stageGateBlock(freeze);
+  } catch {
+    return null;
+  }
+}
+
+async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<string, ProjectTips>): Promise<DeriveFacts> {
   const project = freeze.project;
-  let pair = { staging: { sha: null, version: null } as Tip, prod: { sha: null, version: null } as Tip };
+  let pair = blankTips();
   if (project) {
     const hit = tips.get(project);
     if (hit) pair = hit;
@@ -505,14 +575,14 @@ export async function reconcileDeployStates(now = new Date()): Promise<number> {
     }
   }
   try { freezes = listFreezes(); } catch { /* keep the first list */ }
-  const tips = new Map<string, { staging: Tip; prod: Tip }>();
+  const tips = new Map<string, ProjectTips>();
   const at = now.toISOString();
   const seen = new Set<string>();
   for (const freeze of freezes) {
     seen.add(freeze.sha);
     const project = freeze.project;
     if (project && !tips.has(project)) tips.set(project, await tipsFor(project));
-    const pair = project ? tips.get(project)! : { staging: { sha: null, version: null }, prod: { sha: null, version: null } };
+    const pair = project ? tips.get(project)! : blankTips();
     const facts = await factsFor(freeze, freezes, tips);
     const state = deriveDeployState(facts);
     backfillRunReviewStatus(freeze);
@@ -557,6 +627,7 @@ export async function reconcileDeployStates(now = new Date()): Promise<number> {
       desk: labels ? labels.desk : fresh.desk,
       lane: labels ? labels.lane : fresh.lane,
       unknown_reason: unknownReason(facts),
+      stage_block: await stageBlockFor(fresh, facts, pair),
       last_reconciled_at: at,
     });
   }
@@ -564,6 +635,12 @@ export async function reconcileDeployStates(now = new Date()): Promise<number> {
   for (const row of staleRows) {
     if (!seen.has(row.sha)) getDb().prepare('DELETE FROM deploy_card_states WHERE sha = ?').run(row.sha);
   }
+  try {
+    for (const project of Object.keys(getConfig().projects ?? {})) {
+      if (!tips.has(project)) tips.set(project, await tipsFor(project));
+    }
+  } catch { /* config unavailable: keep the tips already resolved for these freezes */ }
+  rememberTips(tips);
   kvSet(KV_AT, at);
   kvDel(KV_ALERTED);
   emit('deploy.reconciled', 'release', 'board', { at, count: seen.size }, null);
@@ -686,6 +763,7 @@ export function resetDeployReconcilerForTest(): void {
   running = false;
   again = false;
   alertedThisGap = false;
+  reconciledTips = new Map();
 }
 
 function promoteLock(user: { name: string; role: string }, project: string | null): string | null {
@@ -898,8 +976,9 @@ function quickCheck(lane: DevLane | undefined, sha: string): { running: boolean;
 
 function factFor(freeze: ReleaseFreeze, lane: DevLane | undefined, user: { name: string; role: string }): LaneFreezeFact {
   const row = readRow(freeze.sha);
+  const stageBlock = row ? row.stage_block : (lane?.stage_block ?? null);
   const view = row
-    ? toView(row, user, freeze.project, lane?.stage_block ?? null, lane?.promote_block ?? null, !!freeze.run_id)
+    ? toView(row, user, freeze.project, stageBlock, lane?.promote_block ?? null, !!freeze.run_id)
     : { ...NOT_RECONCILED, run_backed: !!freeze.run_id };
   const behind = !!row && row.behind_main === 1 && row.superseded !== 1 && row.in_staging !== 1 && row.in_prod !== 1
     && row.state !== 'superseded' && row.state !== 'live_on_prod';
@@ -945,33 +1024,16 @@ function emptyRelease(): ReleaseView {
 function deployTips(): { prod: { version: string | null; sha: string | null }; staging: { version: string | null; sha: string | null } } {
   const empty = { version: null as string | null, sha: null as string | null };
   const out = { prod: { ...empty }, staging: { ...empty } };
-  let projects: string[] = [];
-  try { projects = Object.keys(getConfig().projects ?? {}); } catch { projects = []; }
-  for (const project of projects) {
-    if (!out.prod.sha) {
-      try {
-        const health = readProdHealth(project);
-        if (health?.sha) out.prod = { sha: health.sha, version: health.version };
-      } catch { /* unknown until a probe works */ }
-      if (!out.prod.sha) {
-        try {
-          const row = listReleases({ project, target: 'production', status: 'deployed', limit: 1 })[0];
-          if (row) out.prod = { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version };
-        } catch { /* no release table */ }
-      }
-    }
-    if (!out.staging.sha) {
-      try {
-        const tip = currentStagingTip(project);
-        if (tip?.sha) out.staging = { sha: tip.sha, version: tip.version };
-      } catch { /* unknown */ }
-    }
+  for (const pair of storedTips().values()) {
+    if (!out.prod.sha && pair.prod.sha) out.prod = { sha: pair.prod.sha, version: pair.prod.version };
+    if (!out.staging.sha && pair.stagingKnown && pair.staging.sha) out.staging = { sha: pair.staging.sha, version: pair.staging.version };
   }
   return out;
 }
 
 /** The Reviews page. Reads the last reconcile; it does not run git. */
 export function reviewBoard(user: { name: string; role: string }, lanes: DevLane[], token: string | null = null): ReviewBoard {
+  try { ensureDeployStateTable(); } catch { /* the board still renders from the lane list */ }
   const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
   const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
   let freezes: ReleaseFreeze[] = [];
@@ -985,9 +1047,11 @@ export function reviewBoard(user: { name: string; role: string }, lanes: DevLane
     seen.add(item.run.id);
     const lane = bySha.get(freeze.sha) ?? (freeze.lane ? byLane.get(`${freeze.project}:${freeze.lane}`) : undefined);
     const merged = overlay(item, lane);
+    const stageBlock = row ? row.stage_block : (merged.stage_block ?? null);
     const deploy = row
-      ? toView(row, user, freeze.project, merged.stage_block ?? null, merged.promote_block ?? null, runBacked)
+      ? toView(row, user, freeze.project, stageBlock, merged.promote_block ?? null, runBacked)
       : { ...NOT_RECONCILED, title: null, run_backed: runBacked, show_reject: runBacked };
+    merged.stage_block = stageBlock;
     if (deploy.hide_errors) {
       merged.test_errors = [];
       if (deploy.state === 'superseded' || deploy.state === 'live_on_prod') merged.full_fail_flag = null;

@@ -8,20 +8,23 @@ vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('./notifications.js', () => ({ notify: vi.fn(async () => undefined) }));
 
-const projects: Record<string, { repo?: string; lane_glob?: string; pipeline?: { lane_deny?: string[]; agent_deny?: string[] } }> = {};
+const projects: Record<string, { repo?: string; lane_glob?: string; release_peer?: string; pipeline?: { lane_deny?: string[]; agent_deny?: string[] } }> = {};
 const releases: { staging_health_command?: string[]; prod_health_command?: string[] } = {};
+const peers: Record<string, { url: string; token: string }> = {};
 vi.mock('./config.js', () => ({
   getConfig: vi.fn(() => ({
     projects, releases, paths: {}, artifacts: { storage: '' },
     review: { auto_pick: false, default_reviewer: 'codex3' },
-    peers: {}, notifications: {},
+    peers, notifications: {},
   })),
 }));
 
 import * as db from './db.js';
-import { reconcileDeployStates } from './deploy-state.js';
+import { reconcileDeployStates, reviewBoard } from './deploy-state.js';
 import { behindMainAlert, MAIN_PING } from './lane-main.js';
+import { setPeerFetchForTest } from './peers.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
+import { resetStagingTipCacheForTest } from './releases.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 
@@ -80,6 +83,9 @@ describe('deploy reconciler review status and behind-main pings', () => {
   });
 
   afterEach(() => {
+    setPeerFetchForTest(null);
+    resetStagingTipCacheForTest();
+    for (const name of Object.keys(peers)) delete peers[name];
     db.resetDbForTest();
     fs.rmSync(tmp, { recursive: true, force: true });
     delete projects.wave;
@@ -212,5 +218,54 @@ describe('deploy reconciler review status and behind-main pings', () => {
     await reconcileDeployStates();
     expect(pings().some((row) => row.entity_id.startsWith('wc-codex1:'))).toBe(false);
     expect(db.listAgentMessages({ to_agent_id: codex.data.id })).toEqual([]);
+  });
+
+  it('reads the staging tip and stage_block from the release peer, not the local health command', async () => {
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'checkout', '-q', '-b', 'wc-forward');
+    fs.writeFileSync(path.join(repo, 'forward.txt'), 'forward');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'forward');
+    const forwardSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'checkout', '-q', '-b', 'staging-tip');
+    fs.writeFileSync(path.join(repo, 'staging.txt'), 'staging');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'staging only');
+    const stagingSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'main');
+
+    releases.staging_health_command = ['printf', '%s', forwardSha];
+    releases.prod_health_command = ['printf', '%s', mainSha];
+    projects.wave.release_peer = 'deploy/fable';
+    peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+    setPeerFetchForTest(async () => new Response(JSON.stringify({ sha: stagingSha, version: '0.443.2', lane: 'staging' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    insertFreeze(forwardSha, { verdict: 'pass', lane: 'wc-forward' });
+
+    await reconcileDeployStates();
+    const row = db.getDb().prepare('SELECT in_staging, stage_block, state FROM deploy_card_states WHERE sha = ?').get(forwardSha) as {
+      in_staging: number | null; stage_block: string | null; state: string;
+    };
+    expect(row.in_staging).toBe(0);
+    expect(row.state).toBe('ready_to_stage');
+    expect(row.stage_block).toMatch(/would roll staging back/);
+    const board = reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    expect(board.release.staging.sha).toBe(stagingSha);
+    const card = board.cards.find((item) => item.lane === 'wc-forward');
+    expect(card?.button).toBeNull();
+    expect(card?.action).toMatch(/would roll staging back/);
+
+    resetStagingTipCacheForTest();
+    setPeerFetchForTest(async () => new Response(JSON.stringify({ error: 'down' }), { status: 500 }));
+    await reconcileDeployStates();
+    const failed = db.getDb().prepare('SELECT in_staging, state FROM deploy_card_states WHERE sha = ?').get(forwardSha) as {
+      in_staging: number | null; state: string;
+    };
+    expect(failed.in_staging).toBeNull();
+    expect(failed.state).toBe('unknown');
+    expect(reviewBoard({ name: 'antonio', role: 'developer' }, []).release.staging.sha).toBeNull();
   });
 });
