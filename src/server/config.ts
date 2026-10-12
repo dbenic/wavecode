@@ -211,8 +211,12 @@ export interface WaveConfig {
    * Releases (src/server/releases.ts). On the deploy box: the agent that receives staging
    * and production requests (alias, name or id). A box without it forwards requests to
    * `projects.<p>.release_peer`.
+   *
+   * `production_approvers` is the deploy box's allow-list of user names that may originate
+   * a production release forwarded by a peer. Empty or unset refuses every such request.
+   * Staging requests from peers are not checked against it.
    */
-  releases?: { deploy_agent?: string | null };
+  releases?: { deploy_agent?: string | null; production_approvers?: string[] };
   /**
    * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
    * calls `model` on the configured LLM key (llm.anthropic_api_key), posts reports with
@@ -309,6 +313,12 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   if (cfg.releases?.deploy_agent != null && (typeof cfg.releases.deploy_agent !== 'string' || !/^@?[\w.-]{1,64}$/.test(cfg.releases.deploy_agent))) {
     throw new Error('releases.deploy_agent must be an agent alias, name or id');
+  }
+  if (cfg.releases?.production_approvers !== undefined) {
+    const list = cfg.releases.production_approvers;
+    if (!Array.isArray(list) || list.some((n) => typeof n !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(n))) {
+      throw new Error('releases.production_approvers must be a list of user names (an empty list refuses every peer production request)');
+    }
   }
   if (cfg.artifacts.fixture_inbox !== undefined) {
     if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {

@@ -13,7 +13,7 @@ vi.mock('./task-dispatcher.js', () => ({ dispatchNext: vi.fn(), unblockDependent
 const cfg = {
   projects: {} as Record<string, { workspace_match: string; release_peer?: string; repo?: string; candidate_refs?: string }>,
   peers: {} as Record<string, { url: string; token: string; agents?: string[] }>,
-  releases: {} as { deploy_agent?: string | null },
+  releases: {} as { deploy_agent?: string | null; production_approvers?: string[] },
   review: { auto_review: false, default_reviewer: 'x', self_review: true, max_fix_loops: 2, require_pass_to_promote: false, gate_dependents_on_approval: false, auto_pick: true, freeze_inbox: [] as string[] },
   artifacts: { storage: '', retention_days: 30 },
   paths: {},
@@ -132,6 +132,7 @@ describe('releases.ts', () => {
       expect(r.data).toMatchObject({ status: 'sent', origin: 'local', peer: 'deploy', target: 'staging', requested_by: 'denis' });
       expect(r.data.peer_request_id).toMatch(/^R/);
       expect(box.state.posts[0]).toMatchObject({ sha: SHA, target: 'staging', project: 'wavepulse', desk: '91', reviewer: 'codex3', requested_by: 'denis', origin_id: r.data.id });
+      expect(box.state.posts[0]).not.toHaveProperty('requester_role');
       expect(vi.mocked(emit)).toHaveBeenCalledWith('release.requested', 'release', r.data.id, expect.objectContaining({ target: 'staging', sha: SHA, peer: 'deploy' }));
 
       // a second request for the same SHA + target while one is open is refused
@@ -164,9 +165,16 @@ describe('releases.ts', () => {
       const ok = await app.fetch(new Request(`http://x/api/releases/${r.data.id}/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ note: 'credit note PDF and e-SLOG checked' }) }));
       expect(ok.status).toBe(200);
       expect(rel.getRelease(r.data.id)).toMatchObject({ verified_by: 'antonio', verification_note: 'credit note PDF and e-SLOG checked' });
-      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.verified', 'release', SHA, expect.objectContaining({ sha: SHA, verified_by: 'antonio' }));
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.verified', 'release', SHA, expect.objectContaining({
+        sha: SHA, verified_by: 'antonio', version: '0.442.10', lane: 'wc-claude2', desk: '91', wording: 'Ready for prod',
+      }));
+      expect(vi.mocked(notify)).toHaveBeenCalledWith(expect.objectContaining({
+        title: expect.stringMatching(/Ready for prod: wavepulse 2431f684 v0\.442\.10/),
+        body: expect.stringMatching(/lane wc-claude2 · Desk #91 · SHA 2431f684b9e960b84e73a4e98b5068869664ffb4 · v0\.442\.10 · by antonio/),
+      }));
       const trail = rel.auditTrail();
       expect(trail.map((e) => [e.action, e.who]).sort()).toEqual([['deployed', expect.stringMatching(/^deployer/)], ['stage', 'denis'], ['verify', 'antonio']]);
+      expect(trail.find((e) => e.action === 'verify')?.detail).toMatch(/Ready for prod/);
       const viaRoute = await (await app.fetch(new Request('http://x/api/releases/audit'))).json() as Array<{ action: string }>;
       expect(viaRoute).toHaveLength(3);
     });
@@ -214,7 +222,7 @@ describe('releases.ts', () => {
       // the GO for the candidate: production request for the tip, lanes named in the note
       const go = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/promote', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }) }));
       expect(go.status).toBe(202);
-      expect(box.state.posts[0]).toMatchObject({ target: 'production', sha: tip, lane: 'fable/rc-0443-2', requested_by: 'owner', note: `contains: Desk #91 ${laneSha.slice(0, 8)}` });
+      expect(box.state.posts[0]).toMatchObject({ target: 'production', sha: tip, lane: 'fable/rc-0443-2', requested_by: 'owner', requester_role: 'admin', note: `contains: Desk #91 ${laneSha.slice(0, 8)}` });
       expect(rel.auditTrail().map((e) => e.action).sort()).toEqual(['promote', 'verify']);
       expect((await app.fetch(new Request('http://x/api/releases/candidates/nope/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }) }))).status).toBe(404);
       rfz.setFetchDisabledForTest(false);
@@ -225,7 +233,7 @@ describe('releases.ts', () => {
       cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
       cfg.peers.deploy = { url: 'http://deploy.test', token: 'wrong-token-000000000', agents: ['fable'] };
       peers.setPeerFetchForTest(fakeDeployBox().fetchImpl);
-      const r = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'production', actorName: 'denis' });
+      const r = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'production', actorName: 'denis', actorIsAdmin: true });
       expect(r.ok).toBe(false);
       expect(rel.listReleases({ sha: SHA })[0]).toMatchObject({ status: 'failed', target: 'production' });
       expect(vi.mocked(emit)).toHaveBeenCalledWith('release.reported', 'release', expect.any(String), expect.objectContaining({ status: 'failed' }));
@@ -248,11 +256,12 @@ describe('releases.ts', () => {
       // outside an HTTP request there is no acting user, so requested_by is null here; the route fills it in
       expect(box.state.posts[0]).toMatchObject({ target: 'staging', sha: SHA, lane: 'wc-claude2', desk: '91', reviewer: 'codex3', requested_by: null });
 
-      const promoted = rq.promote(card.run.id);
+      const { runWithActor } = await import('./request-context.js');
+      const promoted = await runWithActor('owner', async () => rq.promote(card.run.id), { admin: true });
       expect(promoted.ok).toBe(true);
       const prod = () => rel.listReleases({ sha: SHA, target: 'production' })[0];
       for (let i = 0; i < 40 && prod()?.status !== 'sent'; i++) await flush(10);
-      expect(box.state.posts[1]).toMatchObject({ target: 'production', sha: SHA, requested_by: null, reviewer: 'codex3' });
+      expect(box.state.posts[1]).toMatchObject({ target: 'production', sha: SHA, requested_by: 'owner', requester_role: 'admin', requester_is_admin: true, reviewer: 'codex3' });
       expect(prod()).toMatchObject({ status: 'sent', run_id: card.run.id });
 
       // on another lane: a newer freeze makes the older one stale, and a stale SHA cannot be staged
@@ -268,16 +277,176 @@ describe('releases.ts', () => {
       expect(stale.ok).toBe(false);
       expect(!stale.ok && stale.error).toMatch(/stale/);
     });
+
+    it('a developer can stage and approve a freeze, and that does not send a production request or a Release GO', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      agent('claude2'); agent('codex3');
+      const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
+      const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
+      fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
+      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      const [card] = rq.listPendingReviews();
+      const { createUser } = await import('./users.js');
+      const { runWithActor } = await import('./request-context.js');
+      const dev = createUser({ name: 'antonio', role: 'developer' });
+      if (!dev.ok) throw new Error(dev.error);
+
+      const staged = await runWithActor(dev.data.user.id, async () => rq.stage(card.run.id));
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      expect(staged.data.target).toBe('staging');
+      expect(box.state.posts).toHaveLength(1);
+      expect(box.state.posts[0]).toMatchObject({ target: 'staging', requested_by: 'antonio' });
+
+      const promoted = await runWithActor(dev.data.user.id, async () => rq.promote(card.run.id));
+      expect(promoted.ok).toBe(true);
+      if (promoted.ok) expect(promoted.data.review_status).toBe('approved');
+      await flush(40);
+      expect(rel.listReleases({ sha: SHA, target: 'production' })).toEqual([]);
+      expect(box.state.posts.filter((p) => p.target === 'production')).toEqual([]);
+      expect(db.getDb().prepare(`SELECT COUNT(*) AS n FROM peer_questions`).get()).toEqual({ n: 0 });
+    });
+
+    it('a developer cannot stage a freeze or candidate without the reviewer PASS; an admin can, and a deployed candidate is exempt', async () => {
+      const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a'); git('add', '.'); git('commit', '-q', '-m', 'base');
+      const base = git('rev-parse', 'HEAD');
+      git('checkout', '-q', '-b', 'lane'); fs.writeFileSync(path.join(repo, 'b.txt'), 'b'); git('add', '.'); git('commit', '-q', '-m', 'desk 91');
+      const laneSha = git('rev-parse', 'HEAD');
+      git('checkout', '-q', '-b', 'rc'); fs.writeFileSync(path.join(repo, 'c.txt'), 'c'); git('add', '.'); git('commit', '-q', '-m', 'compose');
+      const tip = git('rev-parse', 'HEAD');
+      git('checkout', '-q', 'main');
+      git('update-ref', 'refs/remotes/origin/main', base);
+      git('update-ref', 'refs/remotes/origin/fable/rc-0443-2', tip);
+      (cfg.projects as Record<string, Record<string, unknown>>).wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable', repo, candidate_refs: 'fable/rc-*' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const rfz = await import('./release-freezes.js');
+      rfz.resetMergedCacheForTest();
+      rfz.setFetchDisabledForTest(true);
+      agent('claude2'); agent('codex3');
+      const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
+      const note = path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`);
+      fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${laneSha}\`\n- Review: @codex3 **VERDICT: NEEDS FIXES** on this exact SHA: /r/v.md\n\nR1 — P1 balance\nR2 (P2) rounding\n`);
+      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      const [card] = rq.listPendingReviews();
+      expect(card.latestReview).toMatchObject({ verdict: 'needs-fixes', issues_found: 2 });
+      const { createUser } = await import('./users.js');
+      const { runWithActor } = await import('./request-context.js');
+      const dev = createUser({ name: 'antonio', role: 'developer' });
+      if (!dev.ok) throw new Error(dev.error);
+
+      const refused = await runWithActor(dev.data.user.id, async () => rq.stage(card.run.id));
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toMatch(/reviewer's PASS on this exact SHA/);
+      expect(box.state.posts).toEqual([]);
+
+      acting.user = { id: dev.data.user.id, name: 'antonio', role: 'developer', allowed_agents: null };
+      const candRefused = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/stage', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(candRefused.status).toBe(403);
+      expect(((await candRefused.json()) as { error: string }).error).toMatch(/reviewer's PASS on this exact SHA/);
+
+      acting.user = { id: 'owner', name: 'owner', role: 'admin', allowed_agents: null };
+      const candAdmin = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/stage', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(candAdmin.status).toBe(202);
+      const staged = rel.listReleases({ sha: tip, target: 'staging' })[0];
+      expect(rel.reportRelease(staged.id, { status: 'deployed', sha: tip, version: '0.1.0' }).ok).toBe(true);
+
+      const allowed = await runWithActor(dev.data.user.id, async () => rq.stage(card.run.id));
+      expect(allowed.ok).toBe(true);
+      rfz.setFetchDisabledForTest(false);
+      rel.stopReleasePollers();
+    });
+
+    it('a developer Promote of a plain run does not relay a Release GO; production requestRelease without an admin does not post', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const urls: string[] = [];
+      peers.setPeerFetchForTest(async (input, init) => {
+        const url = new URL(String(input));
+        urls.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+        if (url.pathname === '/api/releases' && init?.method === 'POST') return Response.json({ id: 'R000000000000000000000099', status: 'sent' }, { status: 201 });
+        if (url.pathname === '/api/agents') return Response.json([{ id: 'r-fable', name: 'fable', alias: 'fable', runtime: 'claude-code', status: 'idle' }]);
+        if (/^\/api\/agents\/[^/]+\/send$/.test(url.pathname)) return Response.json({ ok: true, prompt_event_id: 1 });
+        return Response.json({ events: [], last_id: 0 });
+      });
+      const author = agent('claude2');
+      const task = db.insertTask({ prompt: 'ship the lane', agent_id: author.id });
+      if (!task.ok) throw new Error(task.error);
+      const run = db.insertRun({ task_id: task.data.id, agent_id: author.id });
+      if (!run.ok) throw new Error(run.error);
+      db.finishRun(run.data.id, 0);
+      const { createUser } = await import('./users.js');
+      const { runWithActor } = await import('./request-context.js');
+      const dev = createUser({ name: 'antonio', role: 'developer' });
+      if (!dev.ok) throw new Error(dev.error);
+      const promoted = await runWithActor(dev.data.user.id, async () => rq.promote(run.data.id));
+      expect(promoted.ok).toBe(true);
+      await flush(30);
+      expect(urls).toEqual([]);
+      expect(rel.listReleases({ target: 'production' })).toEqual([]);
+
+      // The same kind of run, promoted by an admin, does reach the deploy peer.
+      const task2 = db.insertTask({ prompt: 'ship the other lane', agent_id: author.id });
+      if (!task2.ok) throw new Error(task2.error);
+      const run2 = db.insertRun({ task_id: task2.data.id, agent_id: author.id });
+      if (!run2.ok) throw new Error(run2.error);
+      db.finishRun(run2.data.id, 0);
+      const asAdmin = await runWithActor('owner', async () => rq.promote(run2.data.id), { admin: true });
+      expect(asAdmin.ok).toBe(true);
+      await flush(40);
+      expect(urls.some((u) => u.includes('/api/agents'))).toBe(true);
+
+      const before = urls.filter((u) => u.startsWith('POST') && u.includes('/api/releases')).length;
+      const refused = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'production', actorName: 'antonio' });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toMatch(/only an admin/);
+      expect(urls.filter((u) => u.startsWith('POST') && u.includes('/api/releases'))).toHaveLength(before);
+      const sent = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'production', actorName: 'denis', actorRole: 'admin', actorIsAdmin: true });
+      expect(sent.ok).toBe(true);
+      expect(urls.filter((u) => u.startsWith('POST') && u.includes('/api/releases')).length).toBe(before + 1);
+    });
+
+    it('candidate promote is 403 for a developer and stage is not; Ready for prod stays open to a developer', async () => {
+      acting.user = { id: 'u-dev', name: 'antonio', role: 'developer', allowed_agents: null };
+      const promote = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc/promote', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(promote.status).toBe(403);
+      expect(((await promote.json()) as { error: string }).error).toMatch(/only an admin can send a production release \(you are antonio, developer\)/);
+      const stage = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc/stage', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(stage.status).not.toBe(403);
+      const ready = await app.fetch(new Request('http://x/api/releases/verify', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: SHA, project: 'wavepulse', note: 'checked on staging' }),
+      }));
+      expect(ready.status).toBe(200);
+      expect(rel.auditTrail().find((e) => e.action === 'verify')).toMatchObject({ who: 'antonio', detail: expect.stringMatching(/Ready for prod/) });
+    });
   });
 
   describe('deploy side (the box with the deploy agent)', () => {
     it('a request from a peer is handed to the deploy agent with the right header; its report closes the record', async () => {
       const fable = agent('fable');
-      cfg.releases = { deploy_agent: 'fable' };
+      cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'] };
       acting.user = { id: 'u-peer', name: 'peer-countix-dev', role: 'developer', allowed_agents: '["fable"]' };
       const res = await app.fetch(new Request('http://x/api/releases', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sha: SHA, lane: 'wc-claude2', target: 'production', project: 'wavepulse', desk: '91', reviewer: 'codex3', requested_by: 'denis', origin_id: 'L1', origin_box: 'countix-dev' }),
+        body: JSON.stringify({ sha: SHA, lane: 'wc-claude2', target: 'production', project: 'wavepulse', desk: '91', reviewer: 'codex3', requested_by: 'denis', requester_role: 'admin', requester_is_admin: true, origin_id: 'L1', origin_box: 'countix-dev' }),
       }));
       expect(res.status).toBe(201);
       const r = await res.json() as import('./releases.js').ReleaseRequest;
@@ -289,8 +458,12 @@ describe('releases.ts', () => {
       expect(prompt).toContain(`RELEASED ${r.id}: deployed <sha> version <x.y.z> to production`);
 
       // the same request again (a retry) is the same record
-      const dup = await app.fetch(new Request('http://x/api/releases', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: SHA, target: 'production' }) }));
+      const dup = await app.fetch(new Request('http://x/api/releases', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: SHA, target: 'production', requested_by: 'denis', requester_role: 'admin' }) }));
       expect((await dup.json() as { id: string }).id).toBe(r.id);
+      // a retry that drops the originating user must not reuse the open production GO
+      const stripped = await app.fetch(new Request('http://x/api/releases', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: SHA, target: 'production' }) }));
+      expect(stripped.status).toBe(403);
+      expect(typedInto(fable.id)).toHaveLength(1);
 
       // the report: a different SHA is refused, the right one closes it
       const bad = rel.reportRelease(r.id, { status: 'deployed', sha: SHA_B, version: '1.0.0' });
@@ -311,8 +484,50 @@ describe('releases.ts', () => {
       expect(r.ok).toBe(true);
       expect(typedInto(fable.id)[0]).toMatch(/^\[Staging request \w+ from antonio via WaveCode\. Automated: deploy to STAGING only; no production step is authorized/);
       acting.user = { id: 'u-dev', name: 'antonio', role: 'developer', allowed_agents: null };
-      const res = await app.fetch(new Request('http://x/api/releases', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: SHA_B, target: 'production' }) }));
+      const res = await app.fetch(new Request('http://x/api/releases', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: SHA_B, target: 'production', requester_is_admin: true }) }));
       expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toMatch(/only an admin can send a production release \(you are antonio, developer\)/);
+      expect(typedInto(fable.id)).toHaveLength(1); // the staging prompt only
+    });
+
+    it('a peer production request is refused unless the originating user is on production_approvers; staging is not', async () => {
+      const fable = agent('fable');
+      cfg.releases = { deploy_agent: 'fable' };
+      acting.user = { id: 'u-peer', name: 'peer-countix-dev', role: 'developer', allowed_agents: '["fable"]' };
+      const post = (body: Record<string, unknown>) => app.fetch(new Request('http://x/api/releases', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      }));
+      const named = { sha: SHA, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin', origin_box: 'countix-dev' };
+
+      // empty allow-list (the default) refuses a complete originating user, including a direct accept
+      const empty = await post(named);
+      expect(empty.status).toBe(403);
+      expect(((await empty.json()) as { error: string }).error).toMatch(/not in releases\.production_approvers/);
+      const direct = rel.acceptRelease(named, { userName: 'peer-countix-dev', fromPeer: true });
+      expect(direct.ok).toBe(false);
+      expect(typedInto(fable.id)).toEqual([]);
+      expect(rel.listReleases({ sha: SHA, target: 'production' })).toEqual([]);
+
+      cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'] };
+      const noName = await post({ sha: SHA, target: 'production', requester_role: 'admin' });
+      expect(noName.status).toBe(403);
+      expect(((await noName.json()) as { error: string }).error).toMatch(/originating user \(name and role\)/);
+      const noRole = await post({ sha: SHA, target: 'production', requested_by: 'denis' });
+      expect(noRole.status).toBe(403);
+      expect(((await noRole.json()) as { error: string }).error).toMatch(/originating user \(name and role\)/);
+      const other = await post({ ...named, requested_by: 'antonio', requester_role: 'developer' });
+      expect(other.status).toBe(403);
+      expect(((await other.json()) as { error: string }).error).toMatch(/not in releases\.production_approvers/);
+
+      const allowed = await post(named);
+      expect(allowed.status).toBe(201);
+      expect(typedInto(fable.id)).toHaveLength(1);
+      expect(typedInto(fable.id)[0]).toMatch(/Release GO/);
+
+      cfg.releases = { deploy_agent: 'fable' };
+      const staging = await post({ sha: SHA_B, target: 'staging', project: 'wavepulse', requested_by: 'antonio' });
+      expect(staging.status).toBe(201);
+      expect(typedInto(fable.id)[1]).toMatch(/Automated: deploy to STAGING only/);
     });
 
     it('without a deploy agent the request fails loudly instead of vanishing', () => {
@@ -325,9 +540,9 @@ describe('releases.ts', () => {
     it('RELEASED / RELEASE FAILED lines in the deploy agent pane report the outcome; another agent cannot', () => {
       const fable = agent('fable');
       const other = agent('claude1');
-      cfg.releases = { deploy_agent: 'fable' };
+      cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'] };
       const a = rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
-      const b = rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
+      const b = rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'peer', fromPeer: true });
       if (!a.ok || !b.ok) throw new Error('accept failed');
       expect(rel.detectReleaseLines(other.id, `• RELEASED ${a.data.id}: deployed ${SHA.slice(0, 8)} version 0.442.10 to staging\n`)).toBe(0);
       expect(rel.getRelease(a.data.id)!.status).toBe('sent');

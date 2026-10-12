@@ -23,6 +23,7 @@ import { getConfig, type PeerConfig } from './config.js';
 import { generateId, getAgent, getDb, getUser, type Agent, type Result, type Run } from './db.js';
 import { checkAgentAccess } from './leases.js';
 import { OWNER_USER_ID } from './users.js';
+import { currentActorIsAdmin } from './request-context.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import * as sessionManager from './session-manager.js';
@@ -259,8 +260,9 @@ async function sendNextQueued(peerName: string, remoteAgentId: string): Promise<
 }
 
 /**
- * A person promoted a run: tell the project's release peer (deploy/fable),
- * attributed to that person. Agents cannot trigger this — only Promote does.
+ * An admin promoted a run: tell the project's release peer (deploy/fable),
+ * attributed to that person. A developer approve, an agent token, and anything
+ * outside an admin request do not send this Release GO.
  */
 export interface PromotedFreeze {
   sha: string;
@@ -279,6 +281,7 @@ export async function onRunPromoted(
   actorName: string | null,
   freeze?: PromotedFreeze,
 ): Promise<void> {
+  if (!currentActorIsAdmin()) return;
   const cfg = getConfig();
   const agent = getAgent(run.agent_id);
   if (!agent.ok) return;

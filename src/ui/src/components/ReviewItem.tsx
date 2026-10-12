@@ -11,16 +11,27 @@ function formatDuration(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+function verdictChip(verdict: string | null | undefined, issues: number): { text: string; className: string } {
+  const count = issues > 0 ? ` · ${issues} issue${issues === 1 ? '' : 's'}` : '';
+  if (verdict === 'pass') return { text: `✓ PASS${count}`, className: 'text-emerald-400' };
+  if (verdict === 'reject') return { text: `✗ REJECT${count}`, className: 'text-red-400' };
+  if (verdict === 'needs-fixes') return { text: `⚠ NEEDS FIXES${count}`, className: 'text-amber-400' };
+  return { text: 'NO VERDICT', className: 'text-slate-500' };
+}
+
 export default function ReviewItem({
   item,
   agents,
   onAction,
   index,
+  isAdmin = false,
 }: {
   item: ReviewItemType;
   agents: Agent[];
   onAction: () => void;
   index: number;
+  /** Admins may stage a freeze that does not have the reviewer's PASS. */
+  isAdmin?: boolean;
 }) {
   const navigate = useNavigate();
   const [acting, setActing] = useState<string | null>(null);
@@ -95,6 +106,13 @@ export default function ReviewItem({
   const freezeStale = freeze?.status === 'stale';
   // A freeze card promotes only on an independent PASS on the exact SHA; a stale SHA never.
   const canPromote = !freeze || (freeze.verdict === 'pass' && !freezeStale);
+  // Stage needs that same PASS. Admins may stage without it. The label follows the verdict, never the issue count.
+  const stageLocked = !!freeze && !freezeStale && freeze.verdict !== 'pass' && !isAdmin;
+  const latestAi = aiReviews.find((r) => r.status === 'done') ?? aiReviews[0] ?? null;
+  const chipVerdict = latestAi?.verdict ?? item.latestReview?.verdict ?? freeze?.verdict ?? null;
+  const chipIssues = latestAi?.issues_found ?? item.latestReview?.issues_found ?? 0;
+  const chip = verdictChip(chipVerdict, chipIssues);
+  const showChip = Boolean(chipVerdict) || aiReviews.length > 0;
   const openFile = internalLinkClickHandler(navigate);
 
   const reject = async () => {
@@ -199,8 +217,8 @@ export default function ReviewItem({
           {freeze && !freezeStale && (
             <button
               onClick={() => act('stage')}
-              disabled={acting !== null}
-              title="Automated deploy to staging through the release pipeline, no GO"
+              disabled={acting !== null || stageLocked}
+              title={stageLocked ? "Stage needs the reviewer's PASS on this exact SHA" : 'Automated deploy to staging through the release pipeline, no GO'}
               className="px-2.5 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 hover:border-sky-500/50 transition-all active:scale-95 disabled:opacity-40"
             >
               {acting === 'stage' ? '...' : 'STAGE'}
@@ -266,8 +284,18 @@ export default function ReviewItem({
         {/* AI Review section */}
         <div className="pt-2 border-t border-slate-800/30 space-y-2">
           <div className="flex items-center gap-2">
-            <span className="text-[9px] text-slate-500 font-bold tracking-wider">AI REVIEW</span>
-            {aiReviews.length === 0 ? (
+            <span className="text-[9px] text-slate-500 font-bold tracking-wider">
+              {freeze ? `@${freeze.reviewer_name ?? 'reviewer'} VERDICT` : 'AI REVIEW'}
+            </span>
+            {showChip ? (
+              <button
+                onClick={() => aiReviews.length > 0 && setShowAiReview(!showAiReview)}
+                className={`text-[9px] font-bold tracking-wider ${chip.className}`}
+                data-testid="review-chip"
+              >
+                {chip.text}{aiReviews.length > 0 ? (showAiReview ? ' ▼' : ' ▶') : ''}
+              </button>
+            ) : (
               <div className="flex gap-1.5">
                 <button
                   onClick={() => requestReview('self')}
@@ -284,16 +312,6 @@ export default function ReviewItem({
                   {requesting ? '...' : '✦ CROSS-MODEL'}
                 </button>
               </div>
-            ) : (
-              <button
-                onClick={() => setShowAiReview(!showAiReview)}
-                className="text-[9px] text-emerald-400 font-bold tracking-wider"
-              >
-                {aiReviews[0].issues_found > 0
-                  ? `⚠ ${aiReviews[0].issues_found} ISSUES`
-                  : '✓ PASS'
-                } {showAiReview ? '▼' : '▶'}
-              </button>
             )}
           </div>
 
@@ -303,18 +321,16 @@ export default function ReviewItem({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold ${
-                    review.reviewer_type === 'self'
+                    freeze
                       ? 'bg-slate-800 text-slate-300'
-                      : 'bg-violet-950 border border-violet-500/30 text-violet-300'
+                      : review.reviewer_type === 'self'
+                        ? 'bg-slate-800 text-slate-300'
+                        : 'bg-violet-950 border border-violet-500/30 text-violet-300'
                   }`}>
-                    {review.reviewer_type === 'self' ? 'SELF' : review.reviewer_runtime ?? 'LLM'}
+                    {freeze ? `@${freeze.reviewer_name ?? 'reviewer'}` : review.reviewer_type === 'self' ? 'SELF' : review.reviewer_runtime ?? 'LLM'}
                   </span>
-                  <span className={`text-[9px] font-bold ${
-                    review.status === 'done' ? 'text-emerald-400' :
-                    review.status === 'reviewing' ? 'text-amber-400 animate-pulse' :
-                    review.status === 'failed' ? 'text-red-400' : 'text-slate-500'
-                  }`}>
-                    {review.status === 'reviewing' ? 'REVIEWING...' : review.status.toUpperCase()}
+                  <span className={`text-[9px] font-bold ${verdictChip(review.verdict, 0).className}`}>
+                    {review.verdict ? verdictChip(review.verdict, review.issues_found).text : review.status.toUpperCase()}
                   </span>
                 </div>
                 {review.status === 'done' && review.issues_found > 0 && (

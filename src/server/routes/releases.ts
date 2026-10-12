@@ -35,15 +35,20 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<releases.IncomingRelease>().catch(() => ({} as releases.IncomingRelease));
     const fromPeer = isRestrictedUser(user);
-    if (!fromPeer && body.target === 'production' && !isAdmin(user)) {
-      return c.json({ error: 'Forbidden: a production release on this box is admin only' }, 403);
+    if (body.target === 'production') {
+      if (fromPeer) {
+        const allowed = releases.peerProductionAllowed(body);
+        if (!allowed.ok) return c.json({ error: allowed.error }, 403);
+      } else if (!isAdmin(user)) {
+        return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})` }, 403);
+      }
     }
     const r = releases.acceptRelease({ ...body, requested_by: fromPeer ? body.requested_by : user.name }, { userName: user.name, fromPeer });
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 201);
   });
 
-  // A person confirms a SHA (a lane or a whole candidate) works on staging
+  // A developer or admin marks a SHA Ready for prod (checked on staging)
   app.post('/api/releases/verify', async (c) => {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
@@ -60,22 +65,34 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
     const action = c.req.param('action');
     if (action !== 'stage' && action !== 'promote') return c.json({ error: "action must be 'stage' or 'promote'" }, 400);
+    // Promote sends the production GO and is admin only. Stage needs each contained
+    // lane's reviewer PASS, unless this composed candidate is already on staging
+    // (the deploy agent deployed it) or the caller is an admin.
+    if (action === 'promote' && !isAdmin(user)) {
+      return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})` }, 403);
+    }
     const body = await c.req.json<{ project?: unknown }>().catch(() => ({} as { project?: unknown }));
     const project = typeof body.project === 'string' ? body.project : '';
     const name = decodeURIComponent(c.req.param('name'));
     const cand = listCandidates(project).find((x) => x.name === name);
     if (!cand) return c.json({ error: `No unreleased candidate '${name}' in project '${project}'` }, 404);
     const lanes = buildBoard().lanes.filter((l) => l.candidate === name);
+    if (action === 'stage' && !isAdmin(user)) {
+      const deployed = releases.listReleases({ sha: cand.tip, target: 'staging', limit: 10 }).some((r) => r.status === 'deployed');
+      if (!deployed && lanes.some((l) => l.verdict !== 'pass')) {
+        return c.json({ error: releases.STAGE_NEEDS_PASS }, 403);
+      }
+    }
     const r = await releases.requestRelease({
       project, sha: cand.tip, lane: cand.name, target: action === 'promote' ? 'production' : 'staging',
-      desk: null, reviewer: null, actorName: user.name, runId: null,
+      desk: null, reviewer: null, actorName: user.name, actorRole: user.role, actorIsAdmin: isAdmin(user), runId: null,
       note: lanes.length ? `contains: ${lanes.map((l) => `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`).join(', ')}` : null,
     });
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 202);
   });
 
-  // A person confirms the feature works on staging (recorded with their name)
+  // Ready for prod: a developer or admin confirms the feature works on staging (recorded with their name)
   app.post('/api/releases/:id/verify', async (c) => {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
@@ -106,8 +123,8 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/reviews/:runId/stage', async (c) => {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
-    const r = await reviewQueue.stage(c.req.param('runId'));
-    if (!r.ok) return c.json({ error: r.error }, 400);
+    const r = await reviewQueue.stage(c.req.param('runId'), { actorIsAdmin: isAdmin(user) });
+    if (!r.ok) return c.json({ error: r.error }, r.error === releases.STAGE_NEEDS_PASS ? 403 : 400);
     return c.json(r.data, 202);
   });
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { AuditEntry, Board, CandidateRow, LaneBoardRow, OverviewResponse, ReviewItem } from '../types';
+import type { AuditEntry, Board, CandidateRow, LaneBoardRow, OverviewResponse, ReviewItem, User } from '../types';
 import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 
 /**
@@ -37,6 +37,16 @@ const ACTION_CLS: Record<AuditEntry['action'], string> = {
   failed: 'text-red-300',
 };
 
+const ACTION_LABEL: Record<AuditEntry['action'], string> = {
+  promote: 'promote',
+  deployed: 'deployed',
+  stage: 'stage',
+  'auto-stage': 'auto-stage',
+  verify: 'ready for prod',
+  reject: 'reject',
+  failed: 'failed',
+};
+
 export default function Release() {
   const navigate = useNavigate();
   const [board, setBoard] = useState<Board | null>(null);
@@ -46,13 +56,21 @@ export default function Release() {
   const [loaded, setLoaded] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [me, setMe] = useState<Pick<User, 'role'> | null>(null);
+  const isAdmin = me?.role === 'admin';
 
   const fetchData = useCallback(() => {
-    Promise.all([apiGet<OverviewResponse>('/overview'), apiGet<ReviewItem[]>('/reviews'), apiGet<AuditEntry[]>('/releases/audit?limit=100')])
-      .then(([ov, items, au]) => {
+    Promise.all([
+      apiGet<OverviewResponse>('/overview'),
+      apiGet<ReviewItem[]>('/reviews'),
+      apiGet<AuditEntry[]>('/releases/audit?limit=100'),
+      apiGet<User>('/me').catch(() => null),
+    ])
+      .then(([ov, items, au, user]) => {
         setBoard(ov.board);
         setCards(new Map(items.filter((i) => i.freeze).map((i) => [i.freeze!.sha, i])));
         setAudit(au);
+        setMe(user);
         setLoaded(true);
       })
       .catch(() => setLoaded(true));
@@ -79,19 +97,20 @@ export default function Release() {
   };
 
   const verify = (sha: string, project: string | null, label: string) => {
-    const note = window.prompt(`Verified on staging — what did you check for ${label}? (optional note)`);
+    const note = window.prompt(`Ready for prod — what did you check for ${label}? (optional note)`);
     if (note === null) return;
     return run(`verify:${sha}`, () => apiPost('/releases/verify', { sha, project, note: note.trim() }));
   };
 
   const candidateGo = (c: CandidateRow) => {
+    if (!isAdmin) return;
     const summary = [
       'DEPLOY TO PRODUCTION',
       '',
       `${c.project} · candidate ${c.name}`,
       `tip SHA ${c.tip}`,
       c.lanes.length ? `contains: ${c.lanes.map((l) => `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`).join(', ')}` : 'contains: no lanes WaveCode knows',
-      `staging: ${cellLabel(c.staging).text}${c.verified ? `, verified by ${c.verified.by}` : ', NOT verified'}`,
+      `staging: ${cellLabel(c.staging).text}${c.verified ? `, Ready for prod · ${c.verified.by}` : ', not ready for prod'}`,
       '',
       'This sends the production GO for the whole candidate to the deployer with your name on it. Continue?',
     ].join('\n');
@@ -155,7 +174,7 @@ export default function Release() {
         <td className={`px-3 py-2 align-top ${st.cls}`}>
           {st.text}
           {l.staging && <div className="text-[9px] text-slate-600">{when(l.staging.at)}{l.staging.by ? ` · ${l.staging.by}` : ''}</div>}
-          {verified && <div className="text-[9px] text-violet-300">verified by {verified}</div>}
+          {verified && <div className="text-[9px] font-semibold text-violet-300" data-testid="ready-for-prod">Ready for prod · {verified}</div>}
         </td>
         <td className="px-3 py-2 align-top text-[10px] text-slate-400">{l.next}</td>
         <td className="px-3 py-2 align-top text-right whitespace-nowrap space-x-1.5">
@@ -163,15 +182,15 @@ export default function Release() {
             <>
               <button
                 onClick={() => laneStage(l)}
-                disabled={acting !== null || openReq || !l.run_id}
-                title="Automated staging of this lane alone, no GO"
+                disabled={acting !== null || openReq || !l.run_id || (l.verdict !== 'pass' && !isAdmin)}
+                title={l.verdict !== 'pass' && !isAdmin ? "Stage needs the reviewer's PASS on this exact SHA" : 'Automated staging of this lane alone, no GO'}
                 className="px-2 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 disabled:opacity-40"
               >
                 {busy(`stage:${l.sha}`) ? '...' : 'STAGE'}
               </button>
               {l.staging?.status === 'deployed' && !verified && (
-                <button onClick={() => verify(l.sha, l.project, `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`)} disabled={acting !== null} className="px-2 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 disabled:opacity-40">
-                  {busy(`verify:${l.sha}`) ? '...' : 'VERIFIED ON STAGING'}
+                <button onClick={() => verify(l.sha, l.project, `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`)} disabled={acting !== null} title="Mark this lane Ready for prod after checking it on staging. Developers and admins can do this." className="px-2 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 disabled:opacity-40">
+                  {busy(`verify:${l.sha}`) ? '...' : 'READY FOR PROD'}
                 </button>
               )}
             </>
@@ -217,6 +236,8 @@ export default function Release() {
                     const pr = cellLabel(c.production);
                     const goOpen = !!c.production && (c.production.status === 'sent' || c.production.status === 'requested');
                     const done = c.production?.status === 'deployed';
+                    const candidateDeployed = c.staging?.status === 'deployed';
+                    const stageLocked = !isAdmin && !candidateDeployed && c.lanes.some((l) => l.verdict !== 'pass');
                     return (
                       <li key={`${c.project}:${c.name}`} className="rounded-lg border border-violet-500/30 bg-violet-950/10 p-3 space-y-2" data-testid={`candidate-${c.name}`}>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
@@ -235,25 +256,27 @@ export default function Release() {
                           ))}
                         </div>
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
-                          <span>staging: <span className={st.cls}>{st.text}</span>{c.verified ? <span className="text-violet-300"> · verified by {c.verified.by}{c.verified.note ? ` — ${c.verified.note}` : ''}</span> : <span className="text-amber-300"> · not verified</span>}</span>
+                          <span>staging: <span className={st.cls}>{st.text}</span>{c.verified ? <span className="text-violet-300" data-testid="ready-for-prod"> · Ready for prod · {c.verified.by}{c.verified.note ? ` — ${c.verified.note}` : ''}</span> : <span className="text-amber-300"> · not ready for prod</span>}</span>
                           <span>production: <span className={pr.cls}>{pr.text}</span>{c.production?.by ? <span className="text-slate-500"> · GO by {c.production.by}</span> : null}</span>
                           <span className="ml-auto flex items-center gap-1.5">
-                            <button onClick={() => candidateStage(c)} disabled={acting !== null || (!!c.staging && (c.staging.status === 'sent' || c.staging.status === 'requested'))} title="Ask the deployer to put this candidate on staging" className="px-2 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 disabled:opacity-40">
+                            <button onClick={() => candidateStage(c)} disabled={acting !== null || stageLocked || (!!c.staging && (c.staging.status === 'sent' || c.staging.status === 'requested'))} title={stageLocked ? "Stage needs the reviewer's PASS on this exact SHA" : 'Ask the deployer to put this candidate on staging'} className="px-2 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 disabled:opacity-40">
                               {busy(`stage:${c.name}`) ? '...' : 'STAGE'}
                             </button>
                             {!c.verified && (
-                              <button onClick={() => verify(c.tip, c.project, c.name)} disabled={acting !== null} className="px-2 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 disabled:opacity-40">
-                                {busy(`verify:${c.tip}`) ? '...' : 'VERIFIED ON STAGING'}
+                              <button onClick={() => verify(c.tip, c.project, c.name)} disabled={acting !== null} title="Mark this candidate Ready for prod after checking it on staging. Developers and admins can do this." className="px-2 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 disabled:opacity-40">
+                                {busy(`verify:${c.tip}`) ? '...' : 'READY FOR PROD'}
                               </button>
                             )}
-                            <button
-                              onClick={() => candidateGo(c)}
-                              disabled={acting !== null || goOpen || done}
-                              title={c.verified ? 'Production GO for the whole candidate, with your name' : 'Not verified on staging yet — the confirmation says so'}
-                              className={`px-2.5 py-1 rounded border text-[10px] font-bold tracking-wider disabled:opacity-40 ${c.verified ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25' : 'border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10'}`}
-                            >
-                              {busy(`go:${c.name}`) ? '...' : 'DEPLOY TO PRODUCTION'}
-                            </button>
+                            {isAdmin && (
+                              <button
+                                onClick={() => candidateGo(c)}
+                                disabled={acting !== null || goOpen || done}
+                                title={c.verified ? 'Production GO for the whole candidate, with your name. Admin only.' : 'Not Ready for prod yet — the confirmation says so. Admin only.'}
+                                className={`px-2.5 py-1 rounded border text-[10px] font-bold tracking-wider disabled:opacity-40 ${c.verified ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25' : 'border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10'}`}
+                              >
+                                {busy(`go:${c.name}`) ? '...' : 'DEPLOY TO PRODUCTION'}
+                              </button>
+                            )}
                           </span>
                         </div>
                       </li>
@@ -318,7 +341,7 @@ export default function Release() {
                         <tr key={i}>
                           <td className="px-3 py-1 text-slate-500 tabular-nums whitespace-nowrap">{when(e.at)}</td>
                           <td className="px-3 py-1 text-slate-200">{e.who}</td>
-                          <td className={`px-3 py-1 font-semibold tracking-wider uppercase ${ACTION_CLS[e.action]}`}>{e.action}</td>
+                          <td className={`px-3 py-1 font-semibold tracking-wider uppercase ${ACTION_CLS[e.action]}`}>{ACTION_LABEL[e.action]}</td>
                           <td className="px-3 py-1 text-slate-400">{e.target ?? '—'}</td>
                           <td className="px-3 py-1 text-slate-300">{e.project ?? ''}{e.desk ? ` Desk #${e.desk}` : ''}</td>
                           <td className="px-3 py-1 font-mono text-slate-400" title={e.sha ?? ''}>{e.sha?.slice(0, 8) ?? '—'}</td>

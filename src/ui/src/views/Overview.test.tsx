@@ -30,6 +30,7 @@ const RESPONSE: OverviewResponse = {
     id: 'rep1', created_at: '2026-10-10 15:01:00', trigger: 'review.ai_completed', model: 'claude-sonnet-5-5',
     agents: [{ id: 'a1', note: 'freezing Desk #91, nothing blocks it' }],
     recommendations: [
+      { kind: 'promote', run_id: 'r1', sha: SHA, text: 'Production GO for Desk #91.' },
       { kind: 'stage', run_id: 'r1', sha: SHA, text: 'Stage Desk #91 2431f684.' },
       { kind: 'nudge', agent_id: 'a2', text: 'Ask @codex3 whether Fable answered.' },
       { kind: 'info', text: 'All other lanes quiet.' },
@@ -87,7 +88,7 @@ describe('Overview', () => {
     await waitFor(() => expect(screen.getByTestId('overlord-report')).toBeTruthy());
     const rep = screen.getByTestId('overlord-report');
     expect(rep.textContent).toContain('One lane ready: Desk #91.');
-    expect(within(rep).getAllByText('DO IT')).toHaveLength(2); // stage + nudge; info has no button
+    expect(within(rep).getAllByText('DO IT')).toHaveLength(2); // stage + nudge; promote is admin-only, info has no button
     expect(screen.getByTestId('attention').textContent).toContain('Desk #91');
     const row = screen.getByTestId('agent-claude2');
     expect(row.textContent).toContain('WORKING');
@@ -110,5 +111,22 @@ describe('Overview', () => {
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/agents/a2/send', { text: '[Overlord] Ask @codex3 whether Fable answered.' }));
     fireEvent.click(screen.getByText('NEW REPORT'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/overview/wake', {}));
+  });
+
+  it('an admin sees the production GO on a promote recommendation; a developer does not', async () => {
+    const api = await import('../hooks/useApi');
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/me') return { id: 'owner', name: 'denis', role: 'admin', color: '#64748b' };
+      if (p.startsWith('/overview/chat')) return [];
+      return RESPONSE;
+    });
+    render(<MemoryRouter><Overview /></MemoryRouter>);
+    await waitFor(() => expect(within(screen.getByTestId('overlord-report')).getAllByText('DO IT')).toHaveLength(3));
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
+    fireEvent.click(within(screen.getByTestId('overlord-report')).getAllByText('DO IT')[0]);
+    expect(vi.mocked(api.apiPost)).not.toHaveBeenCalled();
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(true);
+    fireEvent.click(within(screen.getByTestId('overlord-report')).getAllByText('DO IT')[0]);
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/reviews/r1/promote'));
   });
 });

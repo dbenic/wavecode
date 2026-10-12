@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, ReviewItem as ReviewItemType } from '../types';
+import type { Agent, ReviewItem as ReviewItemType, User } from '../types';
 import { isReviewEventType } from '../sse-events';
 import ReviewItemCard from '../components/ReviewItem';
 import RoomProposals from '../components/RoomProposals';
@@ -12,15 +12,18 @@ export default function ReviewQueue() {
   const [reviews, setReviews] = useState<ReviewItemType[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [proposalsVersion, setProposalsVersion] = useState(0);
 
   const fetchData = useCallback(() => {
     Promise.all([
       apiGet<ReviewItemType[]>('/reviews'),
       apiGet<Agent[]>('/agents'),
-    ]).then(([r, a]) => {
+      apiGet<User>('/me').catch(() => null),
+    ]).then(([r, a, me]) => {
       setReviews(r);
       setAgents(a);
+      setIsAdmin(me?.role === 'admin');
       setLoaded(true);
     }).catch(() => setLoaded(true));
   }, []);
@@ -95,6 +98,7 @@ export default function ReviewQueue() {
                 agents={agents}
                 onAction={fetchData}
                 index={i}
+                isAdmin={isAdmin}
               />
             ))}
           </div>

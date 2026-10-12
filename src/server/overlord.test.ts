@@ -104,7 +104,7 @@ describe('overview board + overlord', () => {
     const c3 = board.agents.find((a) => a.name === 'codex3')!;
     expect(c3.last_reply?.text).toContain('VERDICT: PASS');
     expect(board.lanes).toHaveLength(1);
-    expect(board.lanes[0]).toMatchObject({ sha: SHA, project: 'wavepulse', desk: 91, verdict: 'pass', gate: 'GREEN', promotable: true, next: 'reviewed — stage it, then promote', staging: null, production: null });
+    expect(board.lanes[0]).toMatchObject({ sha: SHA, project: 'wavepulse', desk: 91, verdict: 'pass', gate: 'GREEN', promotable: true, next: 'reviewed — stage it, then mark Ready for prod', staging: null, production: null });
     expect(board.attention.map((a) => a.kind)).toContain('promotable');
     expect(board.counts).toMatchObject({ working: 1, idle: 1, open_lanes: 1, promotable: 1 });
   });
@@ -254,7 +254,7 @@ describe('overview board + overlord', () => {
     expect(turn.actions.map((a) => a.kind)).toEqual(['send', 'assign_fix', 'verify']);
     expect(turn.actions[0]).toMatchObject({ label: 'Send to @codex1', agent_id: codex1.id, text: expect.stringMatching(/^Discovery only/) });
     expect(turn.actions[1]).toMatchObject({ label: 'Assign fix → @claude1', agent_id: claude1.id, run_id: 'run-43' });
-    expect(turn.actions[2]).toMatchObject({ label: 'Verified on staging 2431f684' });
+    expect(turn.actions[2]).toMatchObject({ label: 'Ready for prod 2431f684' });
     const history = await (await app.fetch(new Request('http://x/api/overview/chat'))).json() as Array<{ role: string; actions: unknown[] }>;
     expect(history[1].actions).toHaveLength(3);
     // a truncated JSON (the model ran out of output) keeps the readable answer and drops the actions

@@ -47,7 +47,8 @@ describe('Release view (candidates are the unit of production)', () => {
     vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
       if (p === '/overview') return RESPONSE;
       if (p === '/reviews') return [];
-      if (p.startsWith('/releases/audit')) return [{ at: '2026-10-10T14:00:00', who: 'denis', action: 'stage', target: 'staging', sha: SHA_A, project: 'wavepulse', desk: '78', detail: 'lane claude1/desk78-collector', release_id: 'R1', run_id: 'run-2431' }];
+      if (p === '/me') return { id: 'owner', name: 'denis', role: 'admin', color: '#64748b' };
+      if (p.startsWith('/releases/audit')) return [{ at: '2026-10-10T14:00:00', who: 'denis', action: 'verify', target: 'staging', sha: SHA_A, project: 'wavepulse', desk: '78', detail: 'Ready for prod — lane claude1/desk78-collector', release_id: null, run_id: null }];
       return [];
     });
   });
@@ -57,9 +58,9 @@ describe('Release view (candidates are the unit of production)', () => {
     await waitFor(() => expect(screen.getByTestId('candidates')).toBeTruthy());
     const cand = screen.getByTestId('candidate-fable/rc-0443-2');
     expect(cand.textContent).toContain('Desk #88');
-    expect(cand.textContent).toContain('not verified');
+    expect(cand.textContent).toContain('not ready for prod');
     expect(within(cand).getByText('DEPLOY TO PRODUCTION')).toBeTruthy();
-    expect(within(cand).getByText('VERIFIED ON STAGING')).toBeTruthy();
+    expect(within(cand).getByText('READY FOR PROD')).toBeTruthy();
     const lanes = screen.getByTestId('lanes');
     expect(within(lanes).getByTestId(`lane-${SHA_A.slice(0, 8)}`)).toBeTruthy();
     expect(within(lanes).queryByTestId(`lane-${SHA_B.slice(0, 8)}`)).toBeNull(); // in candidate: hidden
@@ -68,6 +69,7 @@ describe('Release view (candidates are the unit of production)', () => {
     fireEvent.click(screen.getByText(/show 1 in candidates · 1 stale\/merged/));
     expect(within(screen.getByTestId('lanes')).getByTestId(`lane-${SHA_C.slice(0, 8)}`).textContent).toContain('stale');
     expect(screen.getByTestId('audit').textContent).toContain('denis');
+    expect(screen.getByTestId('audit').textContent).toMatch(/ready for prod/i);
   });
 
   it('DEPLOY TO PRODUCTION on a candidate confirms with its lanes and staging state, then posts the GO for the candidate', async () => {
@@ -77,23 +79,121 @@ describe('Release view (candidates are the unit of production)', () => {
     const cand = screen.getByTestId('candidate-fable/rc-0443-2');
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
     fireEvent.click(within(cand).getByText('DEPLOY TO PRODUCTION'));
-    expect(confirm.mock.calls[0][0]).toMatch(/DEPLOY TO PRODUCTION[\s\S]*candidate fable\/rc-0443-2[\s\S]*tip SHA f91a5fc7[\s\S]*Desk #88 3562f040[\s\S]*NOT verified/);
+    expect(confirm.mock.calls[0][0]).toMatch(/DEPLOY TO PRODUCTION[\s\S]*candidate fable\/rc-0443-2[\s\S]*tip SHA f91a5fc7[\s\S]*Desk #88 3562f040[\s\S]*not ready for prod/i);
     expect(vi.mocked(api.apiPost)).not.toHaveBeenCalled();
     vi.spyOn(window, 'confirm').mockReturnValueOnce(true);
     fireEvent.click(within(cand).getByText('DEPLOY TO PRODUCTION'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/releases/candidates/fable%2Frc-0443-2/promote', { project: 'wavepulse' }));
   });
 
-  it('VERIFIED ON STAGING records a SHA with a note; STAGE on a lane posts the lane staging', async () => {
+  it('READY FOR PROD records a SHA with a note; STAGE on a lane posts the lane staging', async () => {
     const api = await import('../hooks/useApi');
     vi.spyOn(window, 'prompt').mockReturnValueOnce('invoices checked');
     render(<MemoryRouter><Release /></MemoryRouter>);
     await waitFor(() => expect(screen.getByTestId('candidates')).toBeTruthy());
-    fireEvent.click(within(screen.getByTestId('candidate-fable/rc-0443-2')).getByText('VERIFIED ON STAGING'));
+    const ready = within(screen.getByTestId('candidate-fable/rc-0443-2')).getByText('READY FOR PROD');
+    expect(ready.getAttribute('title')).toMatch(/Ready for prod/i);
+    fireEvent.click(ready);
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/releases/verify', { sha: TIP, project: 'wavepulse', note: 'invoices checked' }));
     const row = within(screen.getByTestId('lanes')).getByTestId(`lane-${SHA_A.slice(0, 8)}`);
-    expect(within(row).getByText('VERIFIED ON STAGING')).toBeTruthy(); // staged, not yet verified
+    expect(within(row).getByText('READY FOR PROD')).toBeTruthy(); // staged, not yet marked
     fireEvent.click(within(row).getByText('STAGE'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/reviews/run-2431/stage'));
+  });
+
+  it('a developer can Stage and mark Ready for prod, and does not see Deploy to production', async () => {
+    const api = await import('../hooks/useApi');
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/overview') return RESPONSE;
+      if (p === '/me') return { id: 'u-antonio', name: 'antonio', role: 'developer', color: '#2563eb' };
+      if (p === '/reviews') return [];
+      return [];
+    });
+    render(<MemoryRouter><Release /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId('candidates')).toBeTruthy());
+    const cand = screen.getByTestId('candidate-fable/rc-0443-2');
+    expect(within(cand).queryByText('DEPLOY TO PRODUCTION')).toBeNull();
+    expect(within(cand).getByText('READY FOR PROD')).toBeTruthy();
+    expect(within(cand).getByText('STAGE')).toBeTruthy();
+    fireEvent.click(within(cand).getByText('STAGE'));
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/releases/candidates/fable%2Frc-0443-2/stage', { project: 'wavepulse' }));
+  });
+
+  it('STAGE stays off for a developer until the reviewer PASS, and an admin can still press it', async () => {
+    const api = await import('../hooks/useApi');
+    const board: Board = {
+      ...BOARD,
+      lanes: BOARD.lanes.map((l) => l.sha === SHA_A ? { ...l, verdict: 'needs-fixes' } : l),
+      candidates: BOARD.candidates.map((c) => ({ ...c, lanes: c.lanes.map((l) => ({ ...l, verdict: 'needs-fixes' })) })),
+    };
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/overview') return { ...RESPONSE, board };
+      if (p === '/me') return { id: 'u-antonio', name: 'antonio', role: 'developer', color: '#2563eb' };
+      return [];
+    });
+    const view = render(<MemoryRouter><Release /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId('candidates')).toBeTruthy());
+    const row = within(screen.getByTestId('lanes')).getByTestId(`lane-${SHA_A.slice(0, 8)}`);
+    expect((within(row).getByText('STAGE') as HTMLButtonElement).disabled).toBe(true);
+    expect(within(row).getByText('STAGE').getAttribute('title')).toMatch(/reviewer's PASS/);
+    const cand = screen.getByTestId('candidate-fable/rc-0443-2');
+    expect((within(cand).getByText('STAGE') as HTMLButtonElement).disabled).toBe(true);
+    view.unmount();
+
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/overview') return { ...RESPONSE, board };
+      if (p === '/me') return { id: 'owner', name: 'denis', role: 'admin', color: '#64748b' };
+      return [];
+    });
+    render(<MemoryRouter><Release /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId('candidates')).toBeTruthy());
+    expect((within(within(screen.getByTestId('lanes')).getByTestId(`lane-${SHA_A.slice(0, 8)}`)).getByText('STAGE') as HTMLButtonElement).disabled).toBe(false);
+    expect((within(screen.getByTestId('candidate-fable/rc-0443-2')).getByText('STAGE') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a developer can stage a composed candidate the deploy agent already deployed, even if a lane is not a PASS', async () => {
+    const api = await import('../hooks/useApi');
+    const board: Board = {
+      ...BOARD,
+      candidates: BOARD.candidates.map((c) => ({
+        ...c,
+        lanes: c.lanes.map((l) => ({ ...l, verdict: 'needs-fixes' })),
+        staging: { status: 'deployed', version: '0.443.3-rc', at: '2026-10-10T15:00:00Z', by: 'fable', verified_by: null, verified_at: null },
+      })),
+    };
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/overview') return { ...RESPONSE, board };
+      if (p === '/me') return { id: 'u-antonio', name: 'antonio', role: 'developer', color: '#2563eb' };
+      return [];
+    });
+    render(<MemoryRouter><Release /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId('candidates')).toBeTruthy());
+    const stage = within(screen.getByTestId('candidate-fable/rc-0443-2')).getByText('STAGE');
+    expect((stage as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(stage);
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/releases/candidates/fable%2Frc-0443-2/stage', { project: 'wavepulse' }));
+  });
+
+  it('a marked candidate and lane show Ready for prod', async () => {
+    const api = await import('../hooks/useApi');
+    const board: Board = {
+      ...BOARD,
+      lanes: BOARD.lanes.map((l) => l.sha === SHA_A ? { ...l, staging: { status: 'deployed', version: '0.443.3-rc', at: '2026-10-10T15:00:00Z', by: 'denis', verified_by: 'antonio', verified_at: '2026-10-10T16:00:00Z' }, next: 'Ready for prod — antonio' } : l),
+      candidates: BOARD.candidates.map((c) => ({ ...c, verified: { by: 'antonio', at: '2026-10-10T16:00:00Z', note: 'invoices' }, next: 'Ready for prod — antonio' })),
+    };
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/overview') return { ...RESPONSE, board };
+      if (p === '/me') return { id: 'owner', name: 'denis', role: 'admin', color: '#64748b' };
+      if (p === '/reviews') return [];
+      return [];
+    });
+    render(<MemoryRouter><Release /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByTestId('candidates')).toBeTruthy());
+    const cand = screen.getByTestId('candidate-fable/rc-0443-2');
+    expect(cand.textContent).toContain('Ready for prod');
+    expect(cand.textContent).toContain('antonio');
+    expect(within(cand).queryByText('READY FOR PROD')).toBeNull();
+    const row = screen.getByTestId(`lane-${SHA_A.slice(0, 8)}`);
+    expect(row.textContent).toContain('Ready for prod · antonio');
   });
 });

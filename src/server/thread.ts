@@ -416,7 +416,7 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         const runId = str(r.run_id);
         const agentId = str(r.agent_id);
         if ((kind === 'promote' || kind === 'stage' || kind === 'reject') && runId) {
-          if (kind === 'promote' && !isAdmin(ctx.viewer) && !ctx.canMutate) continue;
+          if (kind === 'promote' && !isAdmin(ctx.viewer)) continue;
           item.actions.push({ id: `${kind}_${n++}`, label: `${kind[0].toUpperCase()}${kind.slice(1)} ${runId.slice(-6)}`, method: 'POST', path: `/api/reviews/${runId}/${kind}` });
         } else if (kind === 'fix' && runId && agentId && ctx.canAct(agentId)) {
           item.actions.push({ id: `fix_${n++}`, label: `Assign fix → @${ctx.agent(agentId)?.alias ?? ctx.agent(agentId)?.name ?? 'agent'}`, method: 'POST', path: '/api/overview/fixes/assign', body: { run_id: runId, agent_id: agentId } });
@@ -430,7 +430,7 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
 
   if (t === 'release.verified') {
     const sha = str(p.sha) ?? '';
-    const item = base(event, 'report', null, `Verified on staging: ${[str(p.project), str(p.desk) ? `Desk #${str(p.desk)}` : null, sha ? `@ ${sha.slice(0, 8)}` : null].filter(Boolean).join(' ')}`);
+    const item = base(event, 'report', null, `Ready for prod: ${[str(p.project), str(p.lane) ? `lane ${str(p.lane)}` : null, str(p.desk) ? `Desk #${str(p.desk)}` : null, str(p.version) ? `v${str(p.version)}` : null, sha ? sha.slice(0, 8) : null].filter(Boolean).join(' ')}`);
     item.body = [str(p.verified_by) ? `by ${str(p.verified_by)}` : null, str(p.note)].filter(Boolean).join(' · ') || null;
     if (str(p.run_id)) item.refs = { run_id: str(p.run_id)! };
     return item;

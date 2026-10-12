@@ -199,10 +199,10 @@ function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: 
   if (f.verdict !== 'pass') return { next: f.verdict ? 'needs fixes — author fixes, refreezes, reviewer re-reviews' : 'waiting for an independent verdict', promotable: false };
   if (f.gate === 'RED') return { next: 'PASS but the remote gate is RED — not promotable until green', promotable: false };
   if (staging && (staging.status === 'sent' || staging.status === 'requested')) return { next: 'staging in progress', promotable: true };
-  if (staging?.status === 'deployed' && staging.verified_by) return { next: `verified on staging by ${staging.verified_by} — ready for production`, promotable: true };
-  if (staging?.status === 'deployed') return { next: 'on staging — verify it, then deploy to production', promotable: true };
+  if (staging?.status === 'deployed' && staging.verified_by) return { next: `Ready for prod — ${staging.verified_by}`, promotable: true };
+  if (staging?.status === 'deployed') return { next: 'on staging — mark Ready for prod', promotable: true };
   if (staging?.status === 'failed') return { next: `staging failed: ${staging.error ?? 'see report'}`, promotable: true };
-  return { next: 'reviewed — stage it, then promote', promotable: true };
+  return { next: 'reviewed — stage it, then mark Ready for prod', promotable: true };
 }
 
 export function buildBoard(now = Date.now()): Board {
@@ -311,12 +311,12 @@ export function buildBoard(now = Date.now()): Board {
       if (production && (production.status === 'sent' || production.status === 'requested')) next = 'production GO sent — waiting for the deployer';
       else if (production?.status === 'deployed') next = 'deployed to production — main will catch up on merge';
       else if (production?.status === 'failed') next = `production failed: ${production.error ?? 'see report'}`;
-      else if (v) next = `verified on staging by ${v.verified_by} — ready for the production GO`;
-      else if (staging?.status === 'deployed') next = 'on staging — verify, then GO';
+      else if (v) next = `Ready for prod — ${v.verified_by}`;
+      else if (staging?.status === 'deployed') next = 'on staging — mark Ready for prod, then an admin sends the GO';
       else if (staging && (staging.status === 'sent' || staging.status === 'requested')) next = 'staging in progress';
-      else next = 'composed — staged by the deployer on its own; verify on staging, then GO';
+      else next = 'composed — staged by the deployer on its own; mark Ready for prod, then an admin sends the GO';
       candidates.push({ project, name: c.name, tip: c.tip, committed_at: c.committed_at, lanes: contained, staging: releaseCell(staging), production: releaseCell(production), verified: v ? { by: v.verified_by, at: iso(v.verified_at)!, note: v.note } : null, next });
-      if (v && !production) attention.push({ kind: 'promotable', text: `${project} ${c.name} verified on staging by ${v.verified_by} — ready for the production GO`, sha: c.tip });
+      if (v && !production) attention.push({ kind: 'promotable', text: `${project} ${c.name} Ready for prod — ${v.verified_by}`, sha: c.tip });
     }
   }
 

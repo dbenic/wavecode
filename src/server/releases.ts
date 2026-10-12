@@ -24,7 +24,20 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { peerGetJson, peerPostJson } from './peers.js';
+import { getFreeze } from './release-freezes.js';
 import { deliverSystemLine } from './wire-lines.js';
+
+/** Returned to non-admins on every production-send path. */
+export const PRODUCTION_RELEASE_ADMIN_ONLY = 'Forbidden: only an admin can send a production release';
+/**
+ * The peer token authenticates the requesting box. That box forwards the originating
+ * user (name and role). This box accepts a production request only when the name is
+ * on `releases.production_approvers`. An empty or unset list refuses everyone.
+ */
+export const PRODUCTION_RELEASE_ORIGIN_MISSING = 'Forbidden: a production release from a peer requires the originating user (name and role)';
+export const PRODUCTION_RELEASE_NOT_APPROVER = 'Forbidden: the originating user is not in releases.production_approvers';
+/** A developer may stage only after the reviewer's PASS on that exact SHA. */
+export const STAGE_NEEDS_PASS = "Stage needs the reviewer's PASS on this exact SHA";
 
 export type ReleaseTarget = 'staging' | 'production';
 export type ReleaseStatus = 'requested' | 'sent' | 'deployed' | 'failed' | 'rejected';
@@ -118,9 +131,22 @@ export function verificationFor(sha: string): Verification | null {
   return withTable(() => (getDb().prepare('SELECT * FROM release_verifications WHERE sha = ?').get(sha) as Verification | undefined) ?? null);
 }
 
+/** Lane, desk and version already known for a SHA, so Ready for prod can name them. */
+function readyForProdContext(sha: string): { version: string | null; lane: string | null; desk: string | null } {
+  const staging = listReleases({ sha, target: 'staging', limit: 10 });
+  const staged = staging.find((r) => r.version) ?? staging[0] ?? null;
+  let freeze: { lane: string | null; desk: number | null } | null = null;
+  try { freeze = getFreeze(sha); } catch { freeze = null; }
+  return {
+    version: staged?.version ?? null,
+    lane: staged?.lane ?? freeze?.lane ?? null,
+    desk: staged?.desk ?? (freeze?.desk != null ? String(freeze.desk) : null),
+  };
+}
+
 /**
- * "Verified on staging" for a SHA — a lane or a whole candidate — recorded with the person's name.
- * Independent of who staged it: Fable stages candidates on its own, so there may be no staging record.
+ * "Ready for prod" (verified on staging) for a SHA — a lane or a whole candidate — recorded with the person's name.
+ * Developers and admins may record it. Independent of who staged it: Fable stages candidates on its own, so there may be no staging record.
  */
 export function verifySha(sha: string, project: string | null, by: { name: string }, note: string | null): Result<Verification> {
   const clean = sha.trim().toLowerCase();
@@ -130,7 +156,26 @@ export function verifySha(sha: string, project: string | null, by: { name: strin
     .run(clean, project, by.name, note?.trim().slice(0, 1000) || null));
   const v = verificationFor(clean)!;
   for (const r of listReleases({ sha: clean, target: 'staging', limit: 5 })) patch(r.id, { verified_by: v.verified_by, verified_at: v.verified_at, verification_note: v.note });
-  emit('release.verified', 'release', clean, { sha: clean, project, verified_by: by.name, note: v.note });
+  const where = readyForProdContext(clean);
+  emit('release.verified', 'release', clean, {
+    sha: clean, project, verified_by: by.name, note: v.note,
+    version: where.version, lane: where.lane, desk: where.desk,
+    wording: 'Ready for prod',
+  });
+  const body = [
+    project,
+    where.lane ? `lane ${where.lane}` : null,
+    where.desk ? `Desk #${where.desk}` : null,
+    `SHA ${clean}`,
+    where.version ? `v${where.version}` : null,
+    `by ${by.name}`,
+  ].filter(Boolean).join(' · ');
+  void notify({
+    title: `Ready for prod${project ? `: ${project}` : ''} ${clean.slice(0, 8)}${where.version ? ` v${where.version}` : ''}`,
+    body,
+    url: '/release',
+    tag: `ready-for-prod-${clean.slice(0, 12)}`,
+  }).catch(() => {});
   return { ok: true, data: v };
 }
 
@@ -197,6 +242,13 @@ export interface RequestReleaseOpts {
   reviewer?: string | null;
   /** the person who pressed Stage / Promote */
   actorName: string | null;
+  /**
+   * Production is sent only when the caller has already established the actor
+   * is an admin. Staging ignores this.
+   */
+  actorIsAdmin?: boolean;
+  /** Role of the person who pressed Promote. Forwarded with the name on a production peer request. */
+  actorRole?: string | null;
   runId?: string | null;
   /** free text forwarded to the deployer (e.g. the lanes a candidate contains) */
   note?: string | null;
@@ -209,6 +261,7 @@ export interface RequestReleaseOpts {
 export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<ReleaseRequest>> {
   if (!SHA_RE.test(opts.sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(opts.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
+  if (opts.target === 'production' && opts.actorIsAdmin !== true) return { ok: false, error: PRODUCTION_RELEASE_ADMIN_ONLY };
   const cfg = getConfig();
   const project = cfg.projects?.[opts.project];
   if (!project) return { ok: false, error: `Unknown project '${opts.project}'` };
@@ -236,7 +289,10 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const row = insert({ ...base, origin: 'local', peer: peerName, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
     const remote = await peerPostJson<{ id: string; status: string }>(peerName, '/releases', {
       sha: opts.sha, lane: opts.lane ?? null, target: opts.target, project: opts.project, desk: opts.desk ?? null,
-      reviewer: opts.reviewer ?? null, requested_by: opts.actorName, origin_id: id, origin_box: os.hostname(), note: opts.note ?? null,
+      reviewer: opts.reviewer ?? null, requested_by: opts.actorName, requester_is_admin: opts.actorIsAdmin === true,
+      // Production forwards the originating user. Staging bodies stay as they were.
+      ...(opts.target === 'production' ? { requester_role: opts.actorRole ?? null } : {}),
+      origin_id: id, origin_box: os.hostname(), note: opts.note ?? null,
     });
     if (!remote.ok || !remote.data?.id) {
       const error = remote.ok ? 'peer returned no release id' : remote.error;
@@ -263,7 +319,26 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
 
 export interface IncomingRelease {
   sha?: unknown; lane?: unknown; target?: unknown; project?: unknown; desk?: unknown; reviewer?: unknown;
-  requested_by?: unknown; origin_id?: unknown; origin_box?: unknown; note?: unknown;
+  requested_by?: unknown; requester_role?: unknown; requester_is_admin?: unknown; origin_id?: unknown; origin_box?: unknown; note?: unknown;
+}
+
+function forwardedUser(body: IncomingRelease): { name: string | null; role: string | null } {
+  const text = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+  return { name: text(body.requested_by, 64), role: text(body.requester_role, 32) };
+}
+
+/**
+ * Deploy-side gate for a production request that arrived from a peer.
+ * The originating user is the forwarded name and role. Missing either refuses.
+ * The name must be on `releases.production_approvers`; an empty or unset list refuses everyone.
+ */
+export function peerProductionAllowed(body: IncomingRelease): Result<true> {
+  const { name, role } = forwardedUser(body);
+  if (!name || !role) return { ok: false, error: PRODUCTION_RELEASE_ORIGIN_MISSING };
+  const list = getConfig().releases?.production_approvers ?? [];
+  const allowed = list.some((n) => n.trim().toLowerCase() === name.toLowerCase());
+  if (!allowed) return { ok: false, error: PRODUCTION_RELEASE_NOT_APPROVER };
+  return { ok: true, data: true };
 }
 
 /** A request from a peer box (or a local caller): store it and hand it to the deploy agent. */
@@ -271,6 +346,12 @@ export function acceptRelease(body: IncomingRelease, via: { userName: string; fr
   const sha = typeof body.sha === 'string' ? body.sha.trim().toLowerCase() : '';
   if (!SHA_RE.test(sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(body.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
+  // Before the idempotent open-request lookup, so a retry that drops the originating
+  // user cannot fetch or refresh a production GO.
+  if (body.target === 'production' && via.fromPeer) {
+    const allowed = peerProductionAllowed(body);
+    if (!allowed.ok) return allowed;
+  }
   const str = (v: unknown, max = 200) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
   const open = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
   if (open) return { ok: true, data: open }; // idempotent: a retried request is the same request
@@ -381,8 +462,8 @@ function announce(r: ReleaseRequest): void {
 }
 
 /**
- * "Verified on staging": a person (or a verify task through its user) confirms the feature works
- * on staging. Recorded on the staging release record; the production decision reads it.
+ * "Ready for prod": a developer or admin confirms the feature works on staging.
+ * Recorded on the staging release record; the production decision reads it.
  */
 export function verifyStaging(id: string, by: { name: string }, note: string | null): Result<ReleaseRequest> {
   const r = getRelease(id);
@@ -419,7 +500,13 @@ export function auditTrail(limit = 200): AuditEntry[] {
   }
   const verifications = withTable(() => getDb().prepare('SELECT * FROM release_verifications ORDER BY verified_at DESC LIMIT ?').all(limit) as Verification[]);
   for (const v of verifications) {
-    out.push({ at: v.verified_at, who: v.verified_by, action: 'verify', target: 'staging', sha: v.sha, project: v.project, desk: null, detail: v.note, release_id: null, run_id: null });
+    const ctx = readyForProdContext(v.sha);
+    const ready = 'Ready for prod';
+    out.push({
+      at: v.verified_at, who: v.verified_by, action: 'verify', target: 'staging', sha: v.sha, project: v.project,
+      desk: ctx.desk, detail: [ready, ctx.lane ? `lane ${ctx.lane}` : null, ctx.version ? `v${ctx.version}` : null, v.note].filter(Boolean).join(' — '),
+      release_id: null, run_id: null,
+    });
   }
   const rejects = getDb().prepare(
     `SELECT e.created_at, e.entity_id AS run_id, e.payload_json, u.name AS user_name FROM events e LEFT JOIN users u ON u.id = e.actor_id

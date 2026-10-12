@@ -22,7 +22,7 @@ import { evaluateRefereeForPromote } from './project-gate.js';
 import { resultPathForRun, settleRunResultFile } from './run-result.js';
 import logger from './logger.js';
 import * as peers from './peers.js';
-import { currentActorId } from './request-context.js';
+import { currentActorId, currentActorIsAdmin } from './request-context.js';
 import { OWNER_USER_ID } from './users.js';
 import * as freezes from './release-freezes.js';
 import * as releases from './releases.js';
@@ -120,6 +120,7 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
   const actor = currentActorId();
   const actorUser = actor && actor !== OWNER_USER_ID ? getUser(actor) : null;
   const actorName = actor ? (actor === OWNER_USER_ID ? 'owner' : actorUser?.ok ? actorUser.data.name : actor) : null;
+  const actorRole = actor ? (actor === OWNER_USER_ID ? 'admin' : actorUser?.ok ? actorUser.data.role : null) : null;
 
   emit('review.promoted', 'run', runId, {
     task_id: runResult.data.task_id,
@@ -133,20 +134,22 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
   }
   if (freeze) freezes.markPromoted(runId, actorName);
 
-  // projects.<name>.release_peer: the person's Promote is the GO the deployer acts on.
-  // A freeze goes as a release record (releases.ts); a plain run keeps the chat relay.
-  try {
-    if (freeze?.project) {
-      void releases.requestRelease({
-        project: freeze.project, sha: freeze.sha, lane: freeze.lane, target: 'production', desk: freeze.desk != null ? String(freeze.desk) : null,
-        reviewer: freeze.reviewer_name, actorName, runId,
-      }).then((r) => { if (!r.ok) logger.warn({ runId, error: r.error }, 'production release request failed'); })
-        .catch((e) => logger.warn({ runId, error: (e as Error).message }, 'production release request failed'));
-    } else {
-      void peers.onRunPromoted(runResult.data, actorName, freeze ?? undefined).catch((e) => logger.warn({ runId, error: (e as Error).message }, 'release relay failed'));
+  // Approving the review is open to a developer. The production GO (a release
+  // record for a freeze, the chat relay for a plain run) is admin only.
+  if (currentActorIsAdmin()) {
+    try {
+      if (freeze?.project) {
+        void releases.requestRelease({
+          project: freeze.project, sha: freeze.sha, lane: freeze.lane, target: 'production', desk: freeze.desk != null ? String(freeze.desk) : null,
+          reviewer: freeze.reviewer_name, actorName, actorRole, actorIsAdmin: true, runId,
+        }).then((r) => { if (!r.ok) logger.warn({ runId, error: r.error }, 'production release request failed'); })
+          .catch((e) => logger.warn({ runId, error: (e as Error).message }, 'production release request failed'));
+      } else {
+        void peers.onRunPromoted(runResult.data, actorName, freeze ?? undefined).catch((e) => logger.warn({ runId, error: (e as Error).message }, 'release relay failed'));
+      }
+    } catch (e) {
+      logger.warn({ runId, error: (e as Error).message }, 'release relay failed');
     }
-  } catch (e) {
-    logger.warn({ runId, error: (e as Error).message }, 'release relay failed');
   }
 
   // With approval-gated dependents, downstream tasks wait for this moment.
@@ -242,14 +245,31 @@ export function handOff(runId: string, targetAgentId: string): Result<Run> {
  * Reject: mark the work as rejected. Block dependents.
  */
 /**
- * Stage a reviewed freeze: an automated staging deploy through the release
- * pipeline, no human GO. Any verdict may be staged; a stale SHA may not.
+ * A non-pass freeze may still be staged when its SHA already sits in a composed
+ * candidate the deploy agent has deployed to staging.
  */
-export async function stage(runId: string): Promise<Result<releases.ReleaseRequest>> {
+function coveredByDeployedCandidate(freeze: { project: string | null; sha: string }): boolean {
+  const cand = freezes.candidateFor(freeze.project, freeze.sha);
+  if (!cand || !freeze.project) return false;
+  const tip = freezes.listCandidates(freeze.project).find((c) => c.name === cand.name)?.tip;
+  if (!tip) return false;
+  return releases.listReleases({ sha: tip, target: 'staging', limit: 10 }).some((r) => r.status === 'deployed');
+}
+
+/**
+ * Stage a reviewed freeze: an automated staging deploy through the release
+ * pipeline, no human GO. A developer needs the reviewer's PASS on this exact SHA.
+ * An admin may stage without it. A stale SHA may not be staged.
+ */
+export async function stage(runId: string, opts: { actorIsAdmin?: boolean } = {}): Promise<Result<releases.ReleaseRequest>> {
   const freeze = freezes.getFreezeByRun(runId);
   if (!freeze) return { ok: false, error: 'Only a release freeze can be staged (the card must carry an exact SHA)' };
   if (freeze.status === 'stale') return { ok: false, error: `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on; freeze the new SHA` };
   if (!freeze.project) return { ok: false, error: 'The freeze names no project, so no release peer can be chosen' };
+  const admin = opts.actorIsAdmin === true || currentActorIsAdmin();
+  if (freeze.verdict !== 'pass' && !admin && !coveredByDeployedCandidate(freeze)) {
+    return { ok: false, error: releases.STAGE_NEEDS_PASS };
+  }
   const actor = currentActorId();
   const actorUser = actor && actor !== OWNER_USER_ID ? getUser(actor) : null;
   const actorName = actor ? (actor === OWNER_USER_ID ? 'owner' : actorUser?.ok ? actorUser.data.name : actor) : null;

@@ -183,6 +183,19 @@ describe('code-review.ts', () => {
       ].join('\n');
       expect(countIssues(feedback)).toBe(4);
     });
+
+    it('counts R#/P# findings in a verdict file without treating a range mention as a finding', async () => {
+      const { countIssues, countVerdictIssues } = await import('./code-review.js');
+      const feedback = [
+        'R1 — P1 the balance check ignores sign',
+        'R2 (P2) rounding on the credit note',
+        '- [HIGH] a severity bullet',
+        'history NEEDS FIXES (R1–R5) is not a finding line',
+        'VERDICT: NEEDS FIXES',
+      ].join('\n');
+      expect(countIssues(feedback)).toBe(1);
+      expect(countVerdictIssues(feedback)).toBe(3);
+    });
   });
 
   describe('finalizeReview + fix loop', () => {
