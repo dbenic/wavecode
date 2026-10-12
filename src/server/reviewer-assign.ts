@@ -9,15 +9,18 @@
  * `claude1-codex`). A name listed in `reviewer_pool_by_author_glob` may still
  * review that author (`ales-*` may use `ales-codex1`).
  *
- * Tiers, first non-empty wins: vendor preference (`reviewer_prefer`),
- * the author-glob pool, the mapped route, the configured default, tagged
- * reviewers, then anyone else eligible. Inside the tier, least loaded:
- * pane idle before busy, then fewer open reviews, then fewer running tasks,
- * then least recent assignment.
+ * Tiers, first non-empty wins: the preferred independent seats, then any
+ * other independent eligible reviewer (route, default, tagged, then the
+ * rest), and only then a same-person seat named in `reviewer_pool_by_author_glob`.
+ * A same-person seat is never chosen unless that pool names it. Inside a
+ * tier, least loaded: pane idle before busy, then fewer open reviews, then
+ * fewer running tasks, then least recent assignment.
  */
 
 import { getConfig } from './config.js';
 import { getDb, listAgents, type Agent } from './db.js';
+
+export const SAME_OWNER_POOL_NOTE = 'same-owner reviewer via pool';
 
 export interface ReviewerLoad {
   busy: boolean;
@@ -163,16 +166,32 @@ export function selectReviewer(input: AssignInput): Agent | null {
     return fromLadder(agent) || listed(agent, routeNames) || listed(agent, prefer) || listed(agent, pool);
   });
 
+  const independent = (agent: Agent): boolean => !samePerson(input.author, agent);
+  const routeTarget = input.routeTarget?.toLowerCase() ?? '';
   const tiers = [
-    eligible.filter((agent) => listed(agent, prefer)),
-    eligible.filter((agent) => listed(agent, pool)),
-    eligible.filter((agent) => input.routeTarget ? listed(agent, new Set([input.routeTarget.toLowerCase()])) : false),
-    eligible.filter(isDefault),
-    eligible.filter((agent) => input.reviewTagIds.has(agent.id)),
-    eligible,
+    eligible.filter((agent) => independent(agent) && listed(agent, prefer)),
+    eligible.filter((agent) => independent(agent) && !!routeTarget && listed(agent, new Set([routeTarget]))),
+    eligible.filter((agent) => independent(agent) && isDefault(agent)),
+    eligible.filter((agent) => independent(agent) && input.reviewTagIds.has(agent.id)),
+    eligible.filter(independent),
+    eligible.filter((agent) => samePerson(input.author, agent) && listed(agent, pool)),
   ];
   const best = tiers.find((tier) => tier.length > 0) ?? [];
   return pickLeastLoaded(best, input.load);
+}
+
+/** A pooled same-person seat. Independent names in the pool are not this case. */
+export function sameOwnerPoolReviewer(
+  author: { name: string; alias?: string | null; profile?: string | null },
+  reviewer: { name: string; alias?: string | null; profile?: string | null },
+  pools: Record<string, string[]>,
+): boolean {
+  if (!samePerson(author, reviewer)) return false;
+  const pool = poolNamesFor(author.name, pools);
+  if (author.alias) {
+    for (const name of poolNamesFor(author.alias, pools)) pool.add(name);
+  }
+  return handles(reviewer).some((handle) => pool.has(handle));
 }
 
 export function pickLeastLoaded(agents: Agent[], load: (agent: Agent) => ReviewerLoad): Agent | null {

@@ -26,7 +26,7 @@ import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
-import { assignmentFacts, loadFor, projectReassignMs, selectReviewer, shouldReassign } from './reviewer-assign.js';
+import { assignmentFacts, loadFor, projectReassignMs, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign } from './reviewer-assign.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 export const PIPELINE_ACTION = 'pipeline.action';
@@ -330,9 +330,10 @@ function reviewTagIds(): Set<string> {
 }
 
 /**
- * Least-loaded eligible reviewer. A non-empty prefer tier replaces the
- * fixed route map. Never the author, a denied name, or the author's own seats
- * unless a glob pool names that seat.
+ * Least-loaded eligible reviewer. Independent seats come first: the prefer
+ * tier, then the route, the default, tagged reviewers, and the rest of the
+ * ladder. A same-person seat is last, and only when the author-glob pool
+ * names it.
  */
 export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: string | null): Agent | null {
   const review = getConfig().review;
@@ -387,15 +388,19 @@ function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 'assig
     sha: freeze.sha, reviewer_id: reviewer.id, kind, assigned_at_ms: Date.now(), reassigned: false,
   }, null);
   if (!freeze.verdict) setFreezeReviewer(freeze.sha, { id: reviewer.id, name: reviewer.name });
+  const own = sameOwnerPoolReviewer(author.data, reviewer, pipe.reviewer_pool_by_author_glob)
+    ? ` — ${SAME_OWNER_POOL_NOTE}`
+    : '';
   const shown = kind === 'green'
-    ? `auto: GREEN landed — re-pinged @${reviewer.alias ?? reviewer.name}`
-    : `auto: review requested — pinged @${reviewer.alias ?? reviewer.name}`;
+    ? `auto: GREEN landed — re-pinged @${reviewer.alias ?? reviewer.name}${own}`
+    : `auto: review requested — pinged @${reviewer.alias ?? reviewer.name}${own}`;
   note(freeze.project, freeze.lane, freeze.sha, 'review', shown);
 }
 
 /**
  * A review with no verdict that has sat on a busy seat longer than
  * `review_reassign_minutes` moves to the least-loaded eligible seat.
+ * The next seat is chosen with the same tier order as the first assignment.
  * Once per freeze, unless the new seat is idle. Returns how many moved.
  */
 export function reassignWaitingReviews(now = Date.now()): number {
@@ -431,7 +436,10 @@ export function reassignWaitingReviews(now = Date.now()): number {
     deliverSystemLine(next, ask, { kind: 'info', source: 'review' });
     const from = current.data.alias ?? current.data.name;
     const to = next.alias ?? next.name;
-    const text = `reassigned @${from} → @${to} (busy, no verdict)`;
+    const own = sameOwnerPoolReviewer(author.data, next, pipe.reviewer_pool_by_author_glob)
+      ? ` — ${SAME_OWNER_POOL_NOTE}`
+      : '';
+    const text = `reassigned @${from} → @${to} (busy, no verdict)${own}`;
     note(freeze.project, freeze.lane, freeze.sha, 'review', text);
     emit('pipeline.review', 'run', `${freeze.sha}:reassign`, {
       sha: freeze.sha, reviewer_id: next.id, kind: 'reassign', assigned_at_ms: Date.now(), reassigned: true,

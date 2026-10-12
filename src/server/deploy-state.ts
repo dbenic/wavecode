@@ -42,7 +42,7 @@ import {
   resolveStagingTip,
 } from './releases.js';
 import { readProdHealth, stagingForwardBlock, type StagingTip } from './staging-forward.js';
-import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
+import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
 import {
   buildLaneCards, buildReleaseView, conflictFilesFromNote,
@@ -1014,7 +1014,15 @@ function factFor(freeze: ReleaseFreeze, lane: DevLane | undefined, user: { name:
     reviewing_since: since ? new Date(since.at).toISOString() : freeze.created_at,
     unknown_reason: view.unknown_reason,
     live_at: row?.last_reconciled_at ?? freeze.updated_at,
+    same_owner_pool: sameOwnerOnCard(freeze),
   };
+}
+
+function sameOwnerOnCard(freeze: ReleaseFreeze): boolean {
+  if (!freeze.project || !freeze.author_name || !freeze.reviewer_name) return false;
+  const pools = getConfig().projects?.[freeze.project]?.pipeline?.reviewer_pool_by_author_glob;
+  if (!pools) return false;
+  return sameOwnerPoolReviewer({ name: freeze.author_name }, { name: freeze.reviewer_name }, pools);
 }
 
 function emptyRelease(): ReleaseView {

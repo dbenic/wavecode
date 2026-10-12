@@ -206,7 +206,7 @@ projects:
         claude: [codex2, codex3]           # Claude-authored work
         codex: [claude1, claude2]          # Codex-authored work
       reviewer_pool_by_author_glob:
-        'ales-*': [ales-codex1]            # Aleš's own seats may use this one
+        'ales-*': [ales-codex1]            # fallback only, after every independent reviewer
       review_reassign_minutes: 15          # busy seat, no verdict; 0 disables. Once, unless the next seat is idle
       freeze_dir: /home/wave/inbox/freezes
     # Off unless a freeze note declares prereqs. Commands are argv, run on the deploy box.

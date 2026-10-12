@@ -12,6 +12,7 @@ import {
   pickLeastLoaded,
   poolNamesFor,
   reviewerLoads,
+  sameOwnerPoolReviewer,
   samePerson,
   selectReviewer,
   shouldReassign,
@@ -112,18 +113,30 @@ describe('selectReviewer', () => {
     expect(picked?.name).toBe('claude2');
   });
 
-  it('lets an author glob pool use one own seat and still excludes the others', () => {
+  it('uses a pooled same-person seat only after every independent reviewer', () => {
     const ales = seat('ales-claude1', { runtime: 'claude-code' });
-    const picked = choose(ales, [
+    const pools = { 'ales-*': ['ales-codex1'] };
+    const withIndependent = choose(ales, [
       seat('ales-codex1'),
       seat('ales-codex2'),
       seat('codex3'),
-    ], {
-      prefer: {},
-      pools: { 'ales-*': ['ales-codex1'] },
-      autoPick: true,
-    });
-    expect(picked?.name).toBe('ales-codex1');
+    ], { prefer: {}, pools, autoPick: true });
+    expect(withIndependent?.name).toBe('codex3');
+
+    const preferredIndependent = choose(ales, [
+      seat('ales-codex1'),
+      seat('codex3'),
+    ], { prefer: { claude: ['ales-codex1', 'codex3'] }, pools, autoPick: true });
+    expect(preferredIndependent?.name).toBe('codex3');
+
+    const onlyOwn = choose(ales, [
+      seat('ales-codex1'),
+      seat('ales-codex2'),
+    ], { prefer: { claude: ['codex3'] }, pools, autoPick: true });
+    expect(onlyOwn?.name).toBe('ales-codex1');
+    expect(sameOwnerPoolReviewer(ales, seat('ales-codex1'), pools)).toBe(true);
+    expect(sameOwnerPoolReviewer(ales, seat('codex3'), { 'ales-*': ['ales-codex1', 'codex3'] })).toBe(false);
+    expect(sameOwnerPoolReviewer(ales, seat('ales-codex2'), pools)).toBe(false);
   });
 
   it('does not let the pool waive a deny list or the author', () => {

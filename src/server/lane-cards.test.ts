@@ -55,6 +55,10 @@ describe('lane cards', () => {
     expect(cards[0].sha?.slice(0, 8)).toBe('d7b7b1fb');
     expect(cards[0].status).toBe('In review');
     expect(cards[0].action).toBe('codex2 reviewing since 19:10');
+    const pooled = buildLaneCards([
+      fact({ sha: 'd7b7b1fb' + 'a'.repeat(32), lane: 'wc-ales-106', reviewer_name: 'ales-codex1', reviewing_since: '2026-10-12T19:10:00.000Z', same_owner_pool: true }),
+    ], [], ALES, OWNERS);
+    expect(pooled[0].action).toBe('ales-codex1 reviewing since 19:10 — same-owner reviewer via pool');
     expect(cards[0].owner_label).toBe('codex2');
     expect(cards[0].older).toHaveLength(1);
     expect(cards[0].older[0].sha.startsWith('11111111')).toBe(true);

@@ -3,6 +3,8 @@
  * Older freezes sit in its history. Wording is the next action, in plain words.
  */
 
+import { SAME_OWNER_POOL_NOTE } from './reviewer-assign.js';
+
 export type LaneOwnerKind = 'developer' | 'reviewer' | 'system' | 'denis';
 export type PipeStepId = 'freeze' | 'tests' | 'review' | 'staging' | 'ready' | 'prod';
 export type PipeMark = 'done' | 'current' | 'todo' | 'blocked';
@@ -104,6 +106,8 @@ export interface LaneFreezeFact {
   reviewing_since: string | null;
   unknown_reason: string | null;
   live_at: string | null;
+  /** The reviewer is the author's other seat, allowed only by the author-glob pool. */
+  same_owner_pool?: boolean;
 }
 
 export interface WorkingLaneFact {
@@ -434,10 +438,11 @@ function present(fact: LaneFreezeFact, who: string): Presented {
   }
   const since = hhmm(fact.reviewing_since) ?? hhmm(fact.created_at);
   const reviewer = fact.reviewer_name?.replace(/^@/, '').trim();
+  const own = fact.same_owner_pool ? ` — ${SAME_OWNER_POOL_NOTE}` : '';
   if (reviewer) {
     return {
       status: 'In review',
-      action: since ? `${reviewer} reviewing since ${since}` : `${reviewer} reviewing`,
+      action: (since ? `${reviewer} reviewing since ${since}` : `${reviewer} reviewing`) + own,
       owner: 'reviewer',
       owner_label: reviewer,
       history: false,
