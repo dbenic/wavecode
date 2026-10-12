@@ -116,6 +116,16 @@ export type FileRunnerPhase = 'queued' | 'starting' | 'running' | 'done' | 'fail
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'blocked';
 
+/** GET /api/tasks/board: open tasks in full, done/failed paged, counts per status. */
+export interface TaskBoardResponse {
+  counts: Record<TaskStatus, number>;
+  active: Task[];
+  done: Task[];
+  failed: Task[];
+  page_size: number;
+  has_more: { done: boolean; failed: boolean };
+}
+
 export interface Task {
   id: string;
   agent_id: string | null;

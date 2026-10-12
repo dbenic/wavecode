@@ -23,6 +23,9 @@ vi.mock('../db.js', () => {
   findGoal: vi.fn(),
   listRuns: vi.fn(() => []),
   listTasks: vi.fn(() => []),
+  countTasksByStatus: vi.fn(() => ({ pending: 0, running: 0, done: 0, failed: 0, blocked: 0 })),
+  latestRunsByTask: vi.fn(() => new Map()),
+  dependencyEdgesForTasks: vi.fn(() => ({ dependsOn: new Map(), dependents: new Map() })),
   updateTaskStatus: vi.fn(),
 };
 });
@@ -71,6 +74,42 @@ describe('task routes', () => {
   afterEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
+  });
+
+  it('GET /api/tasks/board returns open tasks, a page of done/failed with counts, and a slim latest run', async () => {
+    const db = await import('../db.js');
+    const task = (id: string, status: string) => ({ id, agent_id: 'a1', prompt: `p-${id}`, status, priority: 0, created_at: '2026-10-12T00:00:00Z', goal_id: null });
+    vi.mocked(db.listTasks).mockImplementation(((f: { status?: string | string[]; limit?: number }) => {
+      if (Array.isArray(f.status)) return [task('t-run', 'running'), task('t-pend', 'pending')];
+      if (f.status === 'done') return Array.from({ length: Math.min(f.limit ?? 25, 3) }, (_, i) => task(`t-done-${i}`, 'done'));
+      return [];
+    }) as never);
+    vi.mocked(db.countTasksByStatus).mockReturnValue({ pending: 1, running: 1, done: 40, failed: 0, blocked: 0 });
+    vi.mocked(db.latestRunsByTask).mockReturnValue(new Map([['t-done-0', {
+      id: 'r1', task_id: 't-done-0', agent_id: 'a1', attempt: 1, status: 'done', started_at: 's', finished_at: 'f', exit_code: 0,
+      transcript_path: null, review_status: 'approved', result_path: null, summary: 'x'.repeat(5000),
+    }]]) as never);
+    vi.mocked(db.dependencyEdgesForTasks).mockReturnValue({ dependsOn: new Map([['t-pend', ['t-run']]]), dependents: new Map([['t-run', ['t-pend']]]) });
+    const { registerTaskRoutes } = await import('./tasks.js');
+    const app = new Hono();
+    registerTaskRoutes(app as never);
+    const res = await app.request('/api/tasks/board?done=2');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.counts.done).toBe(40);
+    expect(body.active.map((t: { id: string }) => t.id)).toEqual(['t-run', 't-pend']);
+    expect(body.done).toHaveLength(2);
+    expect(body.has_more).toEqual({ done: true, failed: false });
+    expect(vi.mocked(db.listTasks)).toHaveBeenCalledWith({ status: 'done', limit: 2 });
+    expect(body.active[1].dependencies).toEqual(['t-run']);
+    expect(body.active[0].dependents).toEqual(['t-pend']);
+    // the list carries the run's id and verdict, not its prose
+    expect(body.done[0].latest_run).toMatchObject({ id: 'r1', status: 'done', review_status: 'approved' });
+    expect(body.done[0].latest_run.summary).toBeUndefined();
+    expect(JSON.stringify(body).length).toBeLessThan(3000);
+    // the flat list pages the same way
+    await app.request('/api/tasks?status=done&limit=10&offset=20');
+    expect(vi.mocked(db.listTasks)).toHaveBeenCalledWith({ status: 'done', agent_id: undefined, limit: 10, offset: 20 });
   });
 
   it('resolves create_task agent_id by existing name (not ULID only)', async () => {

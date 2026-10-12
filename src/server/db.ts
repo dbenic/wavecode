@@ -469,6 +469,10 @@ const SCHEMA_SQL = `
     ON tasks(goal_id);
   CREATE INDEX IF NOT EXISTS idx_runs_task_status
     ON runs(task_id, status);
+  CREATE INDEX IF NOT EXISTS idx_runs_task_started
+    ON runs(task_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_tasks_status_created
+    ON tasks(status, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_artifacts_source_run
     ON artifacts(source_run_id);
 
@@ -1163,12 +1167,22 @@ export function getTask(id: string): Result<Task> {
   return { ok: true, data: row };
 }
 
-export function listTasks(filters?: { status?: string; agent_id?: string; goal_id?: string }): Task[] {
+export function listTasks(filters?: {
+  status?: string | string[];
+  agent_id?: string;
+  goal_id?: string;
+  /** Page size; with it the list is newest first (the board's done/failed columns). */
+  limit?: number;
+  offset?: number;
+}): Task[] {
   let sql = 'SELECT * FROM tasks';
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  if (filters?.status) {
+  if (Array.isArray(filters?.status) && filters.status.length > 0) {
+    conditions.push(`status IN (${filters.status.map(() => '?').join(', ')})`);
+    params.push(...filters.status);
+  } else if (typeof filters?.status === 'string' && filters.status) {
     conditions.push('status = ?');
     params.push(filters.status);
   }
@@ -1184,9 +1198,59 @@ export function listTasks(filters?: { status?: string; agent_id?: string; goal_i
   if (conditions.length > 0) {
     sql += ' WHERE ' + conditions.join(' AND ');
   }
-  sql += ' ORDER BY priority DESC, created_at ASC';
+  if (filters?.limit) {
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?';
+    params.push(Math.max(1, Math.floor(filters.limit)), Math.max(0, Math.floor(filters.offset ?? 0)));
+  } else {
+    sql += ' ORDER BY priority DESC, created_at ASC';
+  }
 
   return getDb().prepare(sql).all(...params) as Task[];
+}
+
+/** Tasks per status — the board's column headers without loading the rows. */
+export function countTasksByStatus(): Record<Task['status'], number> {
+  const counts: Record<Task['status'], number> = { pending: 0, running: 0, done: 0, failed: 0, blocked: 0 };
+  const rows = getDb().prepare('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status').all() as Array<{ status: string; n: number }>;
+  for (const r of rows) if (r.status in counts) counts[r.status as Task['status']] = r.n;
+  return counts;
+}
+
+function chunked<T>(items: T[], size = 400): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/** The newest run of each task, in one query per 400 tasks (not one per task). */
+export function latestRunsByTask(taskIds: string[]): Map<string, Run> {
+  const out = new Map<string, Run>();
+  for (const ids of chunked([...new Set(taskIds)])) {
+    const rows = getDb().prepare(
+      `SELECT r.* FROM runs r
+        WHERE r.task_id IN (${ids.map(() => '?').join(', ')})
+          AND r.id = (SELECT r2.id FROM runs r2 WHERE r2.task_id = r.task_id ORDER BY r2.started_at DESC, r2.id DESC LIMIT 1)`,
+    ).all(...ids) as Run[];
+    for (const r of rows) out.set(r.task_id, r);
+  }
+  return out;
+}
+
+/** Dependency edges touching the given tasks, as two maps: task → depends on, task → dependents. */
+export function dependencyEdgesForTasks(taskIds: string[]): { dependsOn: Map<string, string[]>; dependents: Map<string, string[]> } {
+  const dependsOn = new Map<string, string[]>();
+  const dependents = new Map<string, string[]>();
+  for (const ids of chunked([...new Set(taskIds)])) {
+    const marks = ids.map(() => '?').join(', ');
+    const rows = getDb().prepare(
+      `SELECT task_id, depends_on_id FROM task_dependencies WHERE task_id IN (${marks}) OR depends_on_id IN (${marks})`,
+    ).all(...ids, ...ids) as Array<{ task_id: string; depends_on_id: string }>;
+    for (const r of rows) {
+      dependsOn.set(r.task_id, [...(dependsOn.get(r.task_id) ?? []), r.depends_on_id]);
+      dependents.set(r.depends_on_id, [...(dependents.get(r.depends_on_id) ?? []), r.task_id]);
+    }
+  }
+  return { dependsOn, dependents };
 }
 
 export function insertGoal(goal: {

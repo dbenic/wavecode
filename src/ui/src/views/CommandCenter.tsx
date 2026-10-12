@@ -19,7 +19,7 @@ import Composer, { type ComposerSend } from '../components/command-center/Compos
 import PresenceStrip from '../components/command-center/PresenceStrip';
 import Roster from '../components/command-center/Roster';
 import ThreadFeed from '../components/command-center/ThreadFeed';
-import type { Agent, Task, TemplateMetrics, ThreadAction, ThreadItem, ThreadPage, User } from '../types';
+import type { Agent, Task, TemplateMetrics, ThreadAction, ThreadItem, ThreadPage, User, TaskBoardResponse } from '../types';
 import { handleOf, STATUS_PROMPT, type Plan } from '../utils/composer-grammar';
 import {
   actionPlaceholders,
@@ -78,7 +78,8 @@ export default function CommandCenter() {
   // --- loaders ---------------------------------------------------------------
 
   const loadAgents = useCallback(() => apiGet<Agent[]>('/agents').then(setAgents).catch(() => {}), []);
-  const loadTasks = useCallback(() => apiGet<Task[]>('/tasks').then(setTasks).catch(() => {}), []);
+  // open tasks in full, the newest page of done/failed: the board hides older done work anyway
+  const loadTasks = useCallback(() => apiGet<TaskBoardResponse>('/tasks/board').then((b) => setTasks([...b.active, ...b.done, ...b.failed])).catch(() => {}), []);
   const loadMetrics = useCallback(async () => {
     try {
       const rooms = await apiGet<Array<{ project: string; is_default?: boolean }>>('/rooms');

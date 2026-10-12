@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, Goal, Task, TaskStatus } from '../types';
+import type { Agent, Goal, Task, TaskBoardResponse, TaskStatus } from '../types';
 import { isTaskEventType } from '../sse-events';
 import TaskCard from '../components/TaskCard';
 import DeskPanel from '../components/DeskPanel';
@@ -40,9 +40,22 @@ interface AgentMessage {
   created_at: string;
 }
 
+const EMPTY_BOARD: TaskBoardResponse = {
+  counts: { pending: 0, running: 0, done: 0, failed: 0, blocked: 0 },
+  active: [], done: [], failed: [], page_size: 25, has_more: { done: false, failed: false },
+};
+
+/** Trailing debounce: one refresh per burst of events, not one per event. */
+const REFRESH_DEBOUNCE_MS = 800;
+
 export default function TaskBoard() {
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [board, setBoard] = useState<TaskBoardResponse>(EMPTY_BOARD);
+  // how many done / failed rows the person has asked to see (grows with "show more")
+  const pageWant = useRef<{ done: number; failed: number }>({ done: 0, failed: 0 });
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tasks: Task[] = [...board.active, ...board.done, ...board.failed];
+  const totalTasks = Object.values(board.counts).reduce((a, b) => a + b, 0);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -78,7 +91,7 @@ export default function TaskBoard() {
 
     const loadBoard = async () => {
       const [taskResult, agentResult, messageResult, goalResult] = await Promise.allSettled([
-        apiGet<Task[]>('/tasks'),
+        apiGet<TaskBoardResponse>('/tasks/board'),
         apiGet<Agent[]>('/agents'),
         apiGet<AgentMessage[]>('/messages?limit=30'),
         apiGet<Goal[]>('/goals'),
@@ -87,7 +100,7 @@ export default function TaskBoard() {
       if (!active) return;
 
       if (taskResult.status === 'fulfilled') {
-        setTasks(taskResult.value);
+        setBoard(taskResult.value);
         setLoadError(null);
       } else {
         setLoadError((taskResult.reason as Error)?.message || 'Failed to load tasks');
@@ -106,10 +119,17 @@ export default function TaskBoard() {
     };
   }, []);
 
-  // SSE live updates
+  const boardPath = () => {
+    const q: string[] = [];
+    if (pageWant.current.done) q.push(`done=${pageWant.current.done}`);
+    if (pageWant.current.failed) q.push(`failed=${pageWant.current.failed}`);
+    return `/tasks/board${q.length ? `?${q.join('&')}` : ''}`;
+  };
+
+  // Reload the board (keeping the pages the person has opened) and the goals.
   const refreshTasks = useCallback(() => {
-    apiGet<Task[]>('/tasks').then((nextTasks) => {
-      setTasks(nextTasks);
+    apiGet<TaskBoardResponse>(boardPath()).then((next) => {
+      setBoard(next);
       setLoadError(null);
     }).catch((e) => {
       setLoadError((e as Error).message || 'Failed to refresh tasks');
@@ -117,14 +137,26 @@ export default function TaskBoard() {
     apiGet<Goal[]>('/goals').then(setGoals).catch(() => {});
   }, []);
 
+  // SSE live updates: a burst of task/run events costs one reload.
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => { refreshTimer.current = null; refreshTasks(); }, REFRESH_DEBOUNCE_MS);
+  }, [refreshTasks]);
+  useEffect(() => () => { if (refreshTimer.current) clearTimeout(refreshTimer.current); }, []);
+
+  const showMore = (col: 'done' | 'failed') => {
+    pageWant.current[col] = board[col].length + board.page_size;
+    refreshTasks();
+  };
+
   const handleSSE = useCallback((event: SSEEvent) => {
     if (isTaskEventType(event.type) || event.type === 'goal.created' || event.type === 'run.phase') {
-      refreshTasks();
+      scheduleRefresh();
     }
     if (event.type === 'message.created') {
       apiGet<AgentMessage[]>('/messages?limit=30').then(setMessages).catch(() => {});
     }
-  }, [refreshTasks]);
+  }, [scheduleRefresh]);
 
   useSSE(handleSSE);
 
@@ -153,10 +185,10 @@ export default function TaskBoard() {
     try {
       await apiPost('/goals', { goal: goalText });
       const [updated, nextGoals] = await Promise.all([
-        apiGet<Task[]>('/tasks'),
+        apiGet<TaskBoardResponse>(boardPath()),
         apiGet<Goal[]>('/goals'),
       ]);
-      setTasks(updated);
+      setBoard(updated);
       setGoals(nextGoals);
       setGoalText('');
       setGoalPlan(null);
@@ -183,8 +215,7 @@ export default function TaskBoard() {
         body.depends_on = formDeps.split(',').map((s) => s.trim()).filter(Boolean);
       }
       await apiPost('/tasks', body);
-      const updated = await apiGet<Task[]>('/tasks');
-      setTasks(updated);
+      setBoard(await apiGet<TaskBoardResponse>(boardPath()));
       setFormPrompt('');
       setFormAgentId('');
       setFormPriority(0);
@@ -199,10 +230,13 @@ export default function TaskBoard() {
 
   const getColumnTasks = (status: TaskStatus): Task[] => {
     if (status === 'pending') {
-      return tasks.filter((t) => t.status === 'pending' || t.status === 'blocked');
+      return board.active.filter((t) => t.status === 'pending' || t.status === 'blocked');
     }
-    return tasks.filter((t) => t.status === status);
+    if (status === 'done' || status === 'failed') return board[status];
+    return board.active.filter((t) => t.status === status);
   };
+  const columnCount = (status: TaskStatus): number =>
+    status === 'pending' ? board.counts.pending + board.counts.blocked : board.counts[status];
 
   const timeAgo = (iso: string) => {
     const ms = Date.now() - new Date(iso + 'Z').getTime();
@@ -240,7 +274,7 @@ export default function TaskBoard() {
                 Task Board
               </h1>
               <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">
-                {tasks.length} task{tasks.length !== 1 ? 's' : ''} &middot; DAG Pipeline
+                {totalTasks} task{totalTasks !== 1 ? 's' : ''} &middot; DAG Pipeline
               </p>
             </div>
           </div>
@@ -618,7 +652,7 @@ export default function TaskBoard() {
               Loading tasks...
             </div>
           </div>
-        ) : tasks.length === 0 && !mode ? (
+        ) : totalTasks === 0 && !mode ? (
           /* Empty state */
           <div className="flex flex-col items-center justify-center py-20 space-y-4">
             <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center">
@@ -664,8 +698,8 @@ export default function TaskBoard() {
                         {col.label}
                       </span>
                     </div>
-                    <span className="text-[10px] text-slate-600 font-mono">
-                      {colTasks.length}
+                    <span className="text-[10px] text-slate-600 font-mono" data-testid={`count-${col.key}`}>
+                      {columnCount(col.key)}
                     </span>
                   </div>
 
@@ -686,6 +720,14 @@ export default function TaskBoard() {
                           onRefresh={refreshTasks}
                         />
                       ))
+                    )}
+                    {(col.key === 'done' || col.key === 'failed') && board.has_more[col.key] && (
+                      <button
+                        onClick={() => showMore(col.key as 'done' | 'failed')}
+                        className="w-full py-1.5 rounded border border-slate-800/60 text-[10px] font-semibold tracking-wider text-slate-400 hover:text-slate-200 hover:border-slate-700"
+                      >
+                        SHOW {Math.min(board.page_size, columnCount(col.key) - colTasks.length)} MORE · {columnCount(col.key) - colTasks.length} OLDER
+                      </button>
                     )}
                   </div>
                 </div>
