@@ -4,24 +4,25 @@
  */
 
 import { getConfig } from './config.js';
-import { gitAncestor, gitText } from './git-memo.js';
+import { gitText } from './git-memo.js';
 import { getDb, getRun, listAgents, type Agent } from './db.js';
 import { getLatestCompletedReview } from './code-review.js';
-import { listFreezes, refreshProjectAsync, type ReleaseFreeze } from './release-freezes.js';
-import { currentStagingTip, listReleases } from './releases.js';
+import { listFreezes, refreshProjectAsync, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
+import { listReleases, resolveStagingTip, stageGateBlock } from './releases.js';
 import { prereqStatusNote } from './prereqs.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { latestPipelineNote } from './lane-pipeline.js';
 import logger from './logger.js';
 import {
-  BEHIND_STAGING_LINE, DEFAULT_BEFORE_FREEZE_TIP, behindMainLine, fullFailFlag, laneStatusLine, needsGreenQuick, promoteBlockReason,
+  DEFAULT_BEFORE_FREEZE_TIP, behindMainLine, fullFailFlag, laneStatusLine, needsGreenQuick, promoteBlockReason,
   QUICK_CHECK_RUNNING, type CheckState, type GateView,
 } from './lane-status.js';
 import {
   changedFilesAsync, commitsBehindAsync, isMergeOnlyDeltaAsync, mainSpec, projectRepo, reconcileBehindFreezes, resolveMainRef,
 } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
+import { stagingForwardBlock } from './staging-forward.js';
 import {
   fullRunPhrase, hasLogCommand, readLaneReport, readTestLog, selectChipRun, shaChecks, suiteNames,
   testsConfigured, watchTestRuns, type TestHostError, type TestRun,
@@ -45,6 +46,8 @@ export interface DevLane {
   freeze_sha: string | null;
   run_id: string | null;
   status_line: string;
+  /** Full gate word from the status command or the freeze note. */
+  gate: 'GREEN' | 'RED' | null;
   /** Why STAGE stays disabled. Staleness is separate. Admins are not exempt. */
   stage_block: string | null;
   promote_block: string | null;
@@ -201,7 +204,9 @@ export async function loadDevLanes(): Promise<DevLane[]> {
 
     let deployed: Array<{ lane: string | null; sha: string }> = [];
     try { deployed = listReleases({ project, target: 'staging', status: 'deployed', limit: 40 }); } catch { deployed = []; }
-    const stagingNow = (() => { try { return currentStagingTip(project); } catch { return null; } })();
+    const stagingSource = await resolveStagingTip(project).catch(() => ({ state: 'unknown' as const, tip: null }));
+    const stagingNow = stagingSource.state === 'unknown' ? null : stagingSource.tip;
+    const stagingUnknown = stagingSource.state === 'unknown';
 
     for (const lane of [...names].sort()) {
       await yieldTurn();
@@ -216,11 +221,7 @@ export async function loadDevLanes(): Promise<DevLane[]> {
       const report = readLaneReport(project, lane, sha);
       allRuns.push(...report.runs);
       watched.push({ project, lane, sha });
-      const freezeGate = freeze?.gate === 'GREEN' || freeze?.gate === 'RED' ? freeze.gate : null;
-      const viewed = checksFor(report.runs, freeze?.sha ?? sha, freezeGate, project);
-      if (viewed.full === 'green') {
-        try { pingReviewersForGreenSha(freeze?.sha ?? sha); } catch { /* table missing */ }
-      }
+      const viewed = checksFor(report.runs, freeze?.sha ?? sha, null, project);
       const files = await filesOf(lane, sha);
       const protectedPath = touches(files, pc.protected_paths ?? []);
       const hasMigration = !!pc.migrations_dir && files.some((f) => f === pc.migrations_dir || f.startsWith(`${pc.migrations_dir}/`));
@@ -236,39 +237,44 @@ export async function loadDevLanes(): Promise<DevLane[]> {
       const cardSha = freeze?.sha ?? sha;
       const onStaging = deployed.some((r) => (r.lane === lane || r.sha === cardSha) && r.sha === cardSha);
       const author = authorFor(lane, agents, freeze ?? current);
+      const shaView = viewShaChecks({
+        project, sha: cardSha, lane, gate: freeze?.gate ?? null, freeze_path: freeze?.freeze_path ?? null,
+      }, report.runs);
+      if (shaView.full === 'green') {
+        try { pingReviewersForGreenSha(cardSha); } catch { /* table missing */ }
+      }
       const fullLabel = fullRunPhrase(viewed.fullRun);
-      const stagingContains = stagingNow?.sha ? await gitAncestor(repo, stagingNow.sha, sha) : null;
-      const behindStaging = stagingContains === false;
+      const forwardBlock = stagingUnknown ? null : await stagingForwardBlock(project, cardSha, stagingNow);
       let prereqNote: string | null = null;
       try { prereqNote = prereqStatusNote(project, cardSha); } catch { prereqNote = null; }
       const status_line = laneStatusLine({
         sha, author: author.name, reviewer: freeze?.reviewer_name ?? null,
-        freeze: freeze ? { sha: freeze.sha, verdict: freeze.verdict, issues: issuesFor(freeze), gate: freezeGate } : null,
-        gate: viewed.gate, quick: viewed.quick, full: viewed.full, fullRunLabel: fullLabel,
-        behindMain: behind, behindStaging, prereqNote, protectedPath, hasMigration, overlap, onStaging,
+        freeze: freeze ? { sha: freeze.sha, verdict: freeze.verdict, issues: issuesFor(freeze), gate: shaView.gate } : null,
+        gate: shaView.full === 'green' ? { state: 'green' } : shaView.full === 'red' ? { state: 'red', failingStep: viewed.gate.failingStep ?? null } : viewed.gate,
+        quick: shaView.quick, full: shaView.full, fullRunLabel: fullLabel,
+        behindMain: behind, forwardBlock, stagingTipUnknown: stagingUnknown, prereqNote, protectedPath, hasMigration, overlap, onStaging,
         autoNote: latestPipelineNote(project, lane),
       });
       const sha8 = cardSha.slice(0, 8);
-      const fullGreen = viewed.full === 'green';
-      const stageGreen = viewed.quick === 'green' || fullGreen;
-      const testsKnown = viewed.quick !== 'unconfigured' || viewed.full !== 'unconfigured';
-      const stage_block = behind > 0
-        ? behindMainLine(behind)
-        : behindStaging
-          ? BEHIND_STAGING_LINE
-          : !testsKnown || stageGreen
-            ? null
-            : viewed.quick === 'pending'
-              ? QUICK_CHECK_RUNNING
-              : needsGreenQuick(sha8);
-      const promote_block = fullGreen || viewed.full === 'unconfigured' ? null : promoteBlockReason(sha8);
-      const full_fail_flag = onStaging && viewed.full === 'red' ? fullFailFlag(viewed.fullRun?.failing_step) : null;
+      const fullGreen = shaView.full === 'green';
+      const stageGreen = shaView.quick === 'green' || fullGreen;
+      const testsKnown = shaView.quick !== 'unconfigured' || shaView.full !== 'unconfigured';
+      const gateBlock = freeze
+        ? stageGateBlock(freeze)
+        : !testsKnown || stageGreen
+          ? null
+          : shaView.quick === 'pending'
+            ? QUICK_CHECK_RUNNING
+            : needsGreenQuick(sha8);
+      const stage_block = behind > 0 ? behindMainLine(behind) : forwardBlock ?? gateBlock;
+      const promote_block = fullGreen || shaView.full === 'unconfigured' ? null : promoteBlockReason(sha8);
+      const full_fail_flag = onStaging && shaView.full === 'red' ? fullFailFlag(viewed.fullRun?.failing_step) : null;
       out.push({
         project, lane, sha,
         author_name: author.name, author_agent_id: author.id,
         reviewer_name: freeze?.reviewer_name ?? null, reviewer_agent_id: freeze?.reviewer_agent_id ?? null,
         freeze_sha: freeze?.sha ?? null, run_id: freeze?.run_id ?? null,
-        status_line, stage_block, promote_block, full_fail_flag,
+        status_line, gate: shaView.gate, stage_block, promote_block, full_fail_flag,
         before_freeze_tip: freeze ? null : beforeFreezeTip(project),
         test_run: selectChipRun(report.runs, freeze?.sha ?? sha, lane),
         test_errors: report.errors,

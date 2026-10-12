@@ -120,6 +120,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
         ...item,
         status_line: lane.status_line,
         stage_block: lane.stage_block,
+        freeze: item.freeze ? { ...item.freeze, gate: lane.gate } : item.freeze,
         promote_block: lane.promote_block,
         full_fail_flag: lane.full_fail_flag,
         test_run: lane.test_run,

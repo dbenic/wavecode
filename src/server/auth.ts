@@ -295,9 +295,10 @@ const RESTRICTED_ALLOW: Array<[string, RegExp]> = [
   ['GET', /^\/api\/artifacts$/],
   ['GET', /^\/api\/artifacts\/[^/]+$/],
   ['GET', /^\/api\/artifacts\/[^/]+\/download$/],
-  // releases as records: a requesting box posts a request and reads the outcome
+  // releases as records: a requesting box posts a request, reads the outcome, and reads the staging tip
   ['POST', /^\/api\/releases$/],
   ['GET', /^\/api\/releases$/],
+  ['GET', /^\/api\/releases\/staging-tip$/],
   ['GET', /^\/api\/releases\/[^/]+$/],
 ];
 

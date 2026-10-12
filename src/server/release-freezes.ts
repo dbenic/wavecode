@@ -44,6 +44,7 @@ import { behindMainLine } from './lane-status.js';
 import { gitText } from './git-memo.js';
 import { commitsBehind, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
+import { readLaneTests, shaChecks, suiteNames, testsConfigured, type TestRun } from './test-runs.js';
 
 /** merged = the SHA is an ancestor of the project's main: the lane is done, whatever its last verdict said.
  *  behind-main = the SHA does not contain the project's current main, so it cannot be staged. */
@@ -194,6 +195,103 @@ function findSha(text: string, lines: string[]): string | null {
 
 const VERDICT_LINE_RE = /\bVERDICT:?\s*\**\s*(PASS|NEEDS[ -]FIXES|FAIL|REJECT)\b/i;
 
+export interface NoteChecks {
+  quick: 'green' | 'red' | null;
+  full: 'green' | 'red' | null;
+}
+
+function shaMention(line: string, sha: string): 'this' | 'other' | 'none' {
+  const mentions = [...line.toLowerCase().matchAll(/\b[0-9a-f]{7,40}\b/g)].map((m) => m[0]);
+  if (mentions.length === 0) return 'none';
+  const hit = mentions.some((m) => sha.startsWith(m) || m.startsWith(sha));
+  return hit ? 'this' : 'other';
+}
+
+function noteCheckOnLine(line: string): { kind: 'quick' | 'full'; word: 'green' | 'red' } | null {
+  const words = new Set([...line.matchAll(/\b(GREEN|RED)\b/gi)].map((m) => m[1].toUpperCase()));
+  if (words.size !== 1) return null;
+  const patterns: Array<{ kind: 'quick' | 'full'; re: RegExp }> = [
+    { kind: 'quick', re: /\bquick\s+check\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'quick', re: /\btier\s*1\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'full', re: /\bRESULT\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'full', re: /\bGATE\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'full', re: /\bfull-tuned\b\s*:?\s*(GREEN|RED)\b/i },
+  ];
+  for (const pattern of patterns) {
+    const match = line.match(pattern.re);
+    if (match) return { kind: pattern.kind, word: match[1].toLowerCase() === 'green' ? 'green' : 'red' };
+  }
+  return null;
+}
+
+/**
+ * Quick and full results written in a freeze note. A line counts when it names
+ * this SHA, or when it names none and the note's frozen SHA is this SHA.
+ * A line that names a different SHA does not count.
+ */
+export function parseNoteChecks(text: string, sha: string): NoteChecks {
+  const wanted = sha.toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(wanted)) return { quick: null, full: null };
+  const lines = text.replace(/\r/g, '').split('\n');
+  const noteForThis = findSha(text, lines) === wanted;
+  const out: NoteChecks = { quick: null, full: null };
+  for (const line of lines) {
+    const hit = noteCheckOnLine(line);
+    if (!hit) continue;
+    const named = shaMention(line, wanted);
+    if (named === 'other') continue;
+    if (named === 'none' && !noteForThis) continue;
+    out[hit.kind] = hit.word;
+  }
+  return out;
+}
+
+export interface ShaView {
+  quick: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
+  full: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
+  /** Full-gate word for the card badge. */
+  gate: 'GREEN' | 'RED' | null;
+}
+
+function readFreezeNote(filePath: string | null | undefined): string | null {
+  if (!filePath) return null;
+  try { return fs.readFileSync(filePath, 'utf8'); } catch { return null; }
+}
+
+/**
+ * Status command wins when it reports this SHA. Otherwise the freeze note.
+ * A stored gate word is the last fallback for the full result.
+ */
+export function viewShaChecks(freeze: {
+  project: string | null;
+  sha: string;
+  lane: string | null;
+  gate: string | null;
+  freeze_path?: string | null;
+}, runs?: TestRun[]): ShaView {
+  const note = readFreezeNote(freeze.freeze_path);
+  const parsed = note ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
+  const configured = !!(freeze.project && testsConfigured(freeze.project));
+  const live = configured
+    ? shaChecks(runs ?? readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project))
+    : null;
+  const sawNote = parsed.quick != null || parsed.full != null;
+  const pick = (liveState: 'green' | 'red' | 'pending' | 'missing' | undefined, noteWord: 'green' | 'red' | null): ShaView['quick'] => {
+    if (liveState && liveState !== 'missing') return liveState;
+    if (noteWord) return noteWord;
+    if (!configured && !sawNote) return 'unconfigured';
+    return 'missing';
+  };
+  let full = pick(live?.full, parsed.full);
+  let gate: 'GREEN' | 'RED' | null = full === 'green' ? 'GREEN' : full === 'red' ? 'RED' : null;
+  const stored = (freeze.gate ?? '').toUpperCase();
+  if ((full === 'missing' || full === 'unconfigured') && !parsed.full && (stored === 'GREEN' || stored === 'RED') && (!live || live.full === 'missing')) {
+    full = stored === 'GREEN' ? 'green' : 'red';
+    gate = stored === 'GREEN' ? 'GREEN' : 'RED';
+  }
+  return { quick: pick(live?.quick, parsed.quick), full, gate };
+}
+
 /** The last line that states exactly one verdict; "issue `VERDICT: PASS` or `VERDICT: NEEDS FIXES`" states two and is a request, not a verdict. */
 function findVerdict(lines: string[]): { verdict: ReviewVerdict; line: string } | null {
   let found: { verdict: ReviewVerdict; line: string } | null = null;
@@ -262,7 +360,8 @@ export function parseFreezeFile(text: string, filename: string): ParsedFreezeFil
   const project = nameAfter(/\bproject\b\**\s*[:：]\**\s*([A-Za-z][\w-]*)/i, head)
     ?? head.join('\n').match(/\bCountix\s*\/\s*([A-Za-z][\w-]*)/)?.[1] ?? null;
   const lane = nameAfter(/\b(?:lane|branch)\b\**\s*[:：]?\**\s*`?(wc-[\w./-]+|[\w./-]*\/[\w./-]+|[\w.-]+)`?/i, head);
-  const gate = (text.match(/full-tuned\b[^\n]*?\b(GREEN|RED)\b/i) ?? text.match(/\bgate\b[^\n]*?\b(GREEN|RED)\b/i))?.[1]?.toUpperCase() ?? null;
+  const noted = sha ? parseNoteChecks(text, sha) : null;
+  const gate = noted?.full === 'green' ? 'GREEN' : noted?.full === 'red' ? 'RED' : null;
   const verdictPath = v ? (v.line.match(/(\/[\w.@+-]+(?:\/[\w.@+-]+)*\.(?:md|markdown|txt))/)?.[1] ?? null) : null;
 
   return {

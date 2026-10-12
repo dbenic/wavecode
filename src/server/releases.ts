@@ -26,13 +26,13 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { peerGetJson, peerPostJson } from './peers.js';
-import { getFreeze, releaseBehindMain, staleStageBlock } from './release-freezes.js';
+import { getFreeze, releaseBehindMain, staleStageBlock, viewShaChecks } from './release-freezes.js';
 import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging } from './lane-main.js';
 import { productionPrereqGate, stepsPrompt, type GoStep } from './prereqs.js';
 import { evaluateForward, readStagingHealth, type StagingTip } from './staging-forward.js';
-import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
+import { testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { fireStagingDeployed, fireStagingVerified } from './pipeline-hooks.js';
 
@@ -262,6 +262,52 @@ function isTarget(t: unknown): t is ReleaseTarget {
   return t === 'staging' || t === 'production';
 }
 
+const STAGING_TIP_TTL_MS = 15_000;
+const STAGING_TIP_PEER_TIMEOUT_MS = 4_000;
+
+export interface ResolvedStagingTip {
+  /** `unknown` means the deploy box could not be asked. Do not trust the local record. */
+  state: 'local' | 'peer' | 'unknown';
+  tip: StagingTip | null;
+}
+
+const peerTipCache = new Map<string, { at: number; value: ResolvedStagingTip }>();
+
+export function resetStagingTipCacheForTest(): void {
+  peerTipCache.clear();
+}
+
+function normalizePeerTip(data: unknown): StagingTip | null {
+  if (!data || typeof data !== 'object') return null;
+  const row = data as { sha?: unknown; version?: unknown; lane?: unknown };
+  if (typeof row.sha !== 'string' || !/^[0-9a-f]{40}$/i.test(row.sha)) return null;
+  return {
+    sha: row.sha.toLowerCase(),
+    version: typeof row.version === 'string' ? row.version : null,
+    lane: typeof row.lane === 'string' ? row.lane : null,
+  };
+}
+
+/**
+ * A dev box with a release peer and no local health command asks the deploy
+ * box. The answer is cached for 15 seconds. A local health command, or no
+ * peer, keeps the record on this box.
+ */
+export async function resolveStagingTip(project: string): Promise<ResolvedStagingTip> {
+  const peer = getConfig().projects?.[project]?.release_peer;
+  const health = getConfig().releases?.staging_health_command;
+  if (!peer || (health && health.length > 0)) return { state: 'local', tip: currentStagingTip(project) };
+  const hit = peerTipCache.get(project);
+  if (hit && Date.now() - hit.at < STAGING_TIP_TTL_MS) return hit.value;
+  const [peerName] = peer.split('/');
+  const res = await peerGetJson<unknown>(peerName, `/releases/staging-tip?project=${encodeURIComponent(project)}`, STAGING_TIP_PEER_TIMEOUT_MS);
+  const value: ResolvedStagingTip = res.ok
+    ? { state: 'peer', tip: normalizePeerTip(res.data) }
+    : { state: 'unknown', tip: null };
+  peerTipCache.set(project, { at: Date.now(), value });
+  return value;
+}
+
 /** Health command wins when it prints a SHA. Otherwise the newest deployed staging record. */
 export function currentStagingTip(project: string): StagingTip | null {
   const health = readStagingHealth(project);
@@ -308,7 +354,7 @@ export function resolveReleaseProject(explicit: string | null | undefined, sha?:
 }
 
 /** Open staging rows that are behind main, or behind the staging tip, are rejected. The first error wins. */
-export function rejectStaleStaging(project: string | null): number {
+export function rejectStaleStaging(project: string | null, stagingTip?: StagingTip | null): number {
   let n = 0;
   const rows = listReleases({ ...(project ? { project } : {}), target: 'staging', limit: 100 });
   for (const row of rows) {
@@ -327,7 +373,7 @@ export function rejectStaleStaging(project: string | null): number {
     const verdict = evaluateForward({
       project: resolved.project,
       requestedSha: row.sha,
-      staging: currentStagingTip(resolved.project),
+      staging: stagingTip !== undefined ? stagingTip : currentStagingTip(resolved.project),
     });
     if (verdict.ok) continue;
     patch(row.id, { status: 'rejected', error: verdict.error, report: verdict.error });
@@ -392,11 +438,13 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     stepsJson = gate.steps ? JSON.stringify(gate.steps) : null;
   }
   if (opts.target === 'staging') {
-    rejectStaleStaging(opts.project);
+    const resolvedTip = await resolveStagingTip(opts.project);
+    const staging = resolvedTip.state === 'unknown' ? null : resolvedTip.tip;
+    if (resolvedTip.state !== 'unknown') rejectStaleStaging(opts.project, staging);
     const forward = evaluateForward({
       project: opts.project,
       requestedSha: opts.sha,
-      staging: currentStagingTip(opts.project),
+      staging,
       forceRollback: opts.forceRollback,
       forceReason: opts.forceReason,
       actorIsAdmin: opts.actorIsAdmin,
@@ -630,15 +678,16 @@ function stagingCommand(): string[] | null {
  * read from the test-status JSON. With no test command, the freeze file's
  * own gate line is the fallback (a named non-GREEN still blocks).
  */
-export function stageGateBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null }): string | null {
-  if (testsConfigured(freeze.project) && freeze.project) {
-    const checks = shaChecks(readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project));
-    if (checks.quick === 'green' || checks.full === 'green') return null;
-    if (checks.quick === 'pending') return QUICK_CHECK_RUNNING;
-    return needsGreenQuick(freeze.sha.slice(0, 8));
+export function stageGateBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): string | null {
+  const view = viewShaChecks(freeze);
+  if (view.quick === 'green' || view.full === 'green') return null;
+  if (view.quick === 'pending') return QUICK_CHECK_RUNNING;
+  if (!testsConfigured(freeze.project)) {
+    if (view.full === 'red') return stageNeedsGreen(view.gate ?? freeze.gate ?? 'RED');
+    if (view.quick === 'red') return needsGreenQuick(freeze.sha.slice(0, 8));
+    return null;
   }
-  if (freeze.gate && freeze.gate.toUpperCase() !== 'GREEN') return stageNeedsGreen(freeze.gate);
-  return null;
+  return needsGreenQuick(freeze.sha.slice(0, 8));
 }
 
 /**
@@ -646,15 +695,10 @@ export function stageGateBlock(freeze: { project: string | null; sha: string; la
  * on the exact SHA. A green quick check is not enough. With no test command,
  * a freeze that names a non-GREEN gate is refused; a missing gate is not.
  */
-export function promoteFullBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null }): string | null {
-  const sha8 = freeze.sha.slice(0, 8);
-  if (testsConfigured(freeze.project) && freeze.project) {
-    const checks = shaChecks(readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project));
-    if (checks.full === 'green') return null;
-    return needsGreenFull(sha8);
-  }
-  if (freeze.gate && freeze.gate.toUpperCase() !== 'GREEN') return needsGreenFull(sha8);
-  return null;
+export function promoteFullBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): string | null {
+  const view = viewShaChecks(freeze);
+  if (view.full === 'green' || view.full === 'unconfigured') return null;
+  return needsGreenFull(freeze.sha.slice(0, 8));
 }
 
 function knownStagingBlock(row: ReleaseRequest): string | null {

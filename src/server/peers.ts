@@ -104,14 +104,14 @@ export function setPeerFetchForTest(f: PeerFetch | null): void {
   peerFetch = f ?? ((...args) => fetch(...args));
 }
 
-async function peerApi<T>(peer: PeerConfig, method: 'GET' | 'POST', apiPath: string, body?: unknown): Promise<Result<T>> {
+async function peerApi<T>(peer: PeerConfig, method: 'GET' | 'POST', apiPath: string, body?: unknown, timeoutMs = POLL_WAIT_MS + 15_000): Promise<Result<T>> {
   const url = `${peer.url.replace(/\/$/, '')}/api${apiPath}`;
   try {
     const res = await peerFetch(url, {
       method,
       headers: { Authorization: `Bearer ${peer.token}`, 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(POLL_WAIT_MS + 15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const json = (await res.json().catch(() => null)) as (T & { error?: string }) | null;
     if (!res.ok) return { ok: false, error: `peer ${res.status}: ${json?.error ?? res.statusText}` };
@@ -126,11 +126,11 @@ function peerByName(name: string): Result<PeerConfig> {
   return p ? { ok: true, data: p } : { ok: false, error: `Unknown peer '${name}'` };
 }
 
-/** GET a JSON resource on a named peer (used by the fixture import). */
-export async function peerGetJson<T>(peerName: string, apiPath: string): Promise<Result<T>> {
+/** GET a JSON resource on a named peer (used by the fixture import and the staging-tip read). */
+export async function peerGetJson<T>(peerName: string, apiPath: string, timeoutMs?: number): Promise<Result<T>> {
   const p = peerByName(peerName);
   if (!p.ok) return p;
-  return peerApi<T>(p.data, 'GET', apiPath);
+  return peerApi<T>(p.data, 'GET', apiPath, undefined, timeoutMs);
 }
 
 /** POST JSON to a named peer (release requests). */
