@@ -9,14 +9,15 @@ vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: 
 vi.mock('./notifications.js', () => ({ notify: vi.fn(async () => undefined) }));
 
 const projects: Record<string, Record<string, unknown>> = {};
-const releasesCfg: { deploy_agent?: string } = {};
+const releasesCfg: { deploy_agent?: string; staging_watch_command?: string[] } = {};
 vi.mock('./config.js', () => ({
   getConfig: vi.fn(() => ({ projects, releases: releasesCfg, review: { freeze_inbox: [] }, peers: {}, paths: {}, artifacts: { storage: '' } })),
 }));
 
 import * as db from './db.js';
 import { notify } from './notifications.js';
-import { auditTrail, listReleases, reportRelease, requestRelease } from './releases.js';
+import { ensureReleaseFreezeTable } from './release-freezes.js';
+import { acceptRelease, auditTrail, listReleases, reportRelease, requestRelease, resumeStagingDeploys } from './releases.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 
@@ -58,7 +59,9 @@ describe('forward-only staging', () => {
     db.resetDbForTest();
     fs.rmSync(tmp, { recursive: true, force: true });
     delete projects.demo;
+    delete projects.other;
     delete releasesCfg.deploy_agent;
+    delete releasesCfg.staging_watch_command;
   });
 
   async function deploy(sha: string, version: string) {
@@ -127,5 +130,72 @@ describe('forward-only staging', () => {
     const sha = 'd'.repeat(40);
     const sent = await requestRelease({ project: 'demo', sha, target: 'staging', actorName: 'denis' });
     expect(sent.ok).toBe(true);
+  });
+
+  it('refuses when a staging tip exists and git cannot prove the SHA contains it', async () => {
+    await deploy(newer, '1.4.0');
+    delete projects.demo.repo;
+    const missingRepo = await requestRelease({ project: 'demo', sha: older, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+    expect(missingRepo.ok).toBe(false);
+    if (!missingRepo.ok) expect(missingRepo.error).toBe(`cannot prove ${older.slice(0, 8)} contains staging ${newer.slice(0, 8)}`);
+    projects.demo.repo = repo;
+    const missingObject = await requestRelease({ project: 'demo', sha: 'ab'.repeat(20), target: 'staging', actorName: 'denis' });
+    expect(missingObject.ok).toBe(false);
+    if (!missingObject.ok) expect(missingObject.error).toMatch(/^cannot prove /);
+  });
+
+  it('rejects an open row that is behind main, and does not resume it', async () => {
+    const sent = await requestRelease({ project: 'demo', sha: older, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+    expect(sent.ok).toBe(true);
+    if (!sent.ok) return;
+    const child = await requestRelease({ project: 'demo', sha: newer, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+    expect(child.ok).toBe(true);
+    if (!child.ok) return;
+    git(repo, 'checkout', '-q', newer);
+    fs.writeFileSync(path.join(repo, 'd.txt'), 'd');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main past staging');
+    const past = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', past);
+    const reported = reportRelease(child.data.id, { status: 'deployed', sha: newer, version: '1.6.0', note: 'up' });
+    expect(reported.ok).toBe(true);
+    const stale = listReleases({ sha: older, target: 'staging', limit: 5 })[0];
+    expect(stale?.status).toBe('rejected');
+    expect(stale?.error).toMatch(/^behind main/);
+
+    const marker = path.join(tmp, 'resumed');
+    db.getDb().prepare(`UPDATE release_requests SET status = 'sent', deploy_id = 'dep-1' WHERE id = ?`).run(sent.data.id);
+    releasesCfg.staging_watch_command = [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`];
+    resumeStagingDeploys();
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(listReleases({ sha: older, target: 'staging', limit: 5 })[0]?.status).toBe('rejected');
+  });
+
+  it('runs the forward check when the body omits the project and refuses when it cannot be resolved', async () => {
+    await deploy(newer, '1.4.0');
+    const resolved = acceptRelease({ sha: older, target: 'staging', lane: 'wc-ales' }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) expect(resolved.error).toMatch(/behind main|would roll staging back|cannot prove/);
+    projects.other = { workspace_match: '**/*', repo };
+    const refused = acceptRelease({ sha: newer, target: 'staging' }, { userName: 'denis', fromPeer: false });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toBe('project is required');
+    delete projects.other;
+  });
+
+  it('runs production prereqs when the body omits the project', async () => {
+    const note = path.join(tmp, 'freeze.md');
+    fs.writeFileSync(note, '```yaml\nprereqs:\n  - id: prod_owner_count>=2\n    order: 10\n```\n');
+    ensureReleaseFreezeTable();
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, project, lane, freeze_path, status) VALUES (?, 'demo', 'wc-ales', ?, 'open')`,
+    ).run(newer, note);
+    const refused = acceptRelease({ sha: newer, target: 'production' }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toBe('prereq prod_owner_count>=2 has no check');
+    const viaRequest = await requestRelease({ project: '', sha: newer, target: 'production', actorName: 'denis', actorIsAdmin: true });
+    expect(viaRequest.ok).toBe(false);
+    if (!viaRequest.ok) expect(viaRequest.error).toBe('prereq prod_owner_count>=2 has no check');
+    expect(listReleases({ sha: newer, target: 'production', limit: 5 })).toHaveLength(0);
   });
 });

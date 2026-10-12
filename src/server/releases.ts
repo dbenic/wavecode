@@ -265,9 +265,12 @@ function isTarget(t: unknown): t is ReleaseTarget {
 /** Health command wins when it prints a SHA. Otherwise the newest deployed staging record. */
 export function currentStagingTip(project: string): StagingTip | null {
   const health = readStagingHealth(project);
-  const row = listReleases({ project, target: 'staging', status: 'deployed', limit: 1 })[0] ?? null;
+  let row = listReleases({ project, target: 'staging', status: 'deployed', limit: 1 })[0] ?? null;
   if (health?.sha) {
     return { sha: health.sha, version: health.version ?? row?.version ?? null, lane: row?.lane ?? null };
+  }
+  if (!row) {
+    row = listReleases({ target: 'staging', status: 'deployed', limit: 20 }).find((item) => item.project == null || item.project === project) ?? null;
   }
   if (!row) return null;
   return { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version, lane: row.lane };
@@ -285,19 +288,51 @@ function recordRollback(row: ReleaseRequest, who: string | null, reason: string)
   }).catch(() => {});
 }
 
-/** Requested or sent staging rows that no longer contain the current staging SHA are rejected. */
+/**
+ * The body may omit the project. Use the freeze's project, or the only
+ * configured project. Otherwise refuse — the forward and prereq gates
+ * still have to run.
+ */
+export function resolveReleaseProject(explicit: string | null | undefined, sha?: string | null): { ok: true; project: string } | { ok: false; error: string } {
+  const named = explicit?.trim() ?? '';
+  if (named) return { ok: true, project: named };
+  if (sha) {
+    try {
+      const freeze = getFreeze(sha);
+      if (freeze?.project) return { ok: true, project: freeze.project };
+    } catch { /* freeze table unavailable */ }
+  }
+  const names = Object.keys(getConfig().projects ?? {}).map((name) => name.trim()).filter(Boolean);
+  if (names.length === 1) return { ok: true, project: names[0] };
+  return { ok: false, error: 'project is required' };
+}
+
+/** Open staging rows that are behind main, or behind the staging tip, are rejected. The first error wins. */
 export function rejectStaleStaging(project: string | null): number {
-  if (!project) return 0;
-  const tip = currentStagingTip(project);
-  if (!tip) return 0;
   let n = 0;
-  for (const row of listReleases({ project, target: 'staging', limit: 100 })) {
+  const rows = listReleases({ ...(project ? { project } : {}), target: 'staging', limit: 100 });
+  for (const row of rows) {
     if (row.status !== 'requested' && row.status !== 'sent') continue;
-    const verdict = evaluateForward({ project, requestedSha: row.sha, staging: tip });
-    if (verdict.ok || !verdict.error.startsWith('would roll staging back:')) continue;
+    const resolved = resolveReleaseProject(row.project ?? project, row.sha);
+    if (!resolved.ok) {
+      const tip = listReleases({ target: 'staging', status: 'deployed', limit: 1 })[0];
+      if (!tip) continue;
+      patch(row.id, { status: 'rejected', error: resolved.error, report: resolved.error });
+      emit('release.reported', 'release', row.id, {
+        status: 'rejected', target: 'staging', sha: row.sha, project: row.project, lane: row.lane, error: resolved.error,
+      }, null);
+      n++;
+      continue;
+    }
+    const verdict = evaluateForward({
+      project: resolved.project,
+      requestedSha: row.sha,
+      staging: currentStagingTip(resolved.project),
+    });
+    if (verdict.ok) continue;
     patch(row.id, { status: 'rejected', error: verdict.error, report: verdict.error });
     emit('release.reported', 'release', row.id, {
-      status: 'rejected', target: 'staging', sha: row.sha, project, lane: row.lane, error: verdict.error,
+      status: 'rejected', target: 'staging', sha: row.sha, project: resolved.project, lane: row.lane, error: verdict.error,
     }, null);
     n++;
   }
@@ -344,6 +379,9 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   if (!SHA_RE.test(opts.sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(opts.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
   if (opts.target === 'production' && opts.actorIsAdmin !== true) return { ok: false, error: PRODUCTION_RELEASE_ADMIN_ONLY };
+  const resolvedProject = resolveReleaseProject(opts.project, opts.sha);
+  if (!resolvedProject.ok) return resolvedProject;
+  opts = { ...opts, project: resolvedProject.project };
   const behind = releaseBehindMain(opts.project, opts.sha);
   if (behind) return { ok: false, error: behind };
   let stepsJson: string | null = null;
@@ -477,15 +515,26 @@ export function acceptRelease(body: IncomingRelease, via: { userName: string; fr
     if (!allowed.ok) return allowed;
   }
   const str = (v: unknown, max = 200) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
-  const projectName = str(body.project, 64);
+  if (!str(body.project, 64)) {
+    const openRetry = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
+    if (openRetry) {
+      if (body.target === 'staging') rejectStaleStaging(openRetry.project);
+      const fresh = getRelease(openRetry.id);
+      if (fresh && (fresh.status === 'requested' || fresh.status === 'sent')) return { ok: true, data: fresh };
+      if (fresh?.status === 'rejected') return { ok: false, error: fresh.error ?? 'rejected' };
+    }
+  }
+  const resolvedProject = resolveReleaseProject(str(body.project, 64), sha);
+  if (!resolvedProject.ok) return resolvedProject;
+  const projectName = resolvedProject.project;
   let stepsJson: string | null = typeof body.steps === 'string' ? body.steps : null;
   let rollbackReason: string | null = null;
-  if (projectName && body.target === 'production') {
+  if (body.target === 'production') {
     const gate = productionSteps(projectName, sha, str(body.requested_by, 64));
     if (!gate.ok) return gate;
     if (gate.steps) stepsJson = JSON.stringify(gate.steps);
   }
-  if (projectName && body.target === 'staging') {
+  if (body.target === 'staging') {
     rejectStaleStaging(projectName);
     const forward = evaluateForward({
       project: projectName,
@@ -774,7 +823,11 @@ export function resumeStagingDeploys(): void {
   let open: ReleaseRequest[] = [];
   try { open = listReleases({ target: 'staging', status: 'sent', limit: 50 }); } catch { return; }
   for (const row of open) {
+    if (row.status === 'rejected') continue;
     if (!row.deploy_id || stagingChildren.has(row.id)) continue;
+    rejectStaleStaging(row.project);
+    const fresh = getRelease(row.id);
+    if (!fresh || fresh.status === 'rejected' || fresh.status !== 'sent') continue;
     const argv = fillArgv(watch, { deploy_id: row.deploy_id, sha: row.sha, lane: row.lane, desk: row.desk });
     if (argv.length === 0) continue;
     spawnStaging(row, argv);

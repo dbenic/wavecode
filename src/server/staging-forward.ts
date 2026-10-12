@@ -97,10 +97,12 @@ export function evaluateForward(opts: {
 
   const staging = opts.staging;
   if (!staging?.sha) return { ok: true, rollback: false, reason: null };
-  if (!repo) return { ok: true, rollback: false, reason: null };
+  if (staging.sha.toLowerCase() === opts.requestedSha.toLowerCase()) return { ok: true, rollback: false, reason: null };
+  const unproven = `cannot prove ${opts.requestedSha.slice(0, 8)} contains staging ${staging.sha.slice(0, 8)}`;
+  if (!repo) return { ok: false, error: unproven };
 
   const contains = isAncestor(repo, staging.sha, opts.requestedSha);
-  if (contains === null) return { ok: true, rollback: false, reason: null };
+  if (contains === null) return { ok: false, error: unproven };
   if (contains) return { ok: true, rollback: false, reason: null };
 
   const count = git(repo, ['rev-list', '--count', `${opts.requestedSha}..${staging.sha}`]);
