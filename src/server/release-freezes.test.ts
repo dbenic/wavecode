@@ -227,8 +227,10 @@ describe('release-freezes.ts', () => {
 
       fs.writeFileSync(file, green.replace('RESULT GREEN\n', ''));
       expect(rf.ingestFreezeFile(file).ok).toBe(true);
-      expect(rf.getFreeze(SHA_A)?.gate).toBeNull();
-      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).not.toBe('green');
+      const cleared = rf.getFreeze(SHA_A);
+      expect(cleared?.gate).toBeNull();
+      expect(rf.viewShaChecks(cleared!).gate).toBeNull();
+      expect(rf.viewShaChecks(cleared!).full).not.toBe('green');
     });
 
     it('a freeze note carrying the reviewer PASS inline (Desk #91) creates the card and links both files', () => {

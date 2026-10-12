@@ -252,6 +252,26 @@ export function parseNoteChecks(text: string, sha: string): NoteChecks {
   return out;
 }
 
+/** A full-result line is present, but none of them count for this SHA. */
+function noteFullConflicts(text: string, sha: string): boolean {
+  if (parseNoteChecks(text, sha).full) return false;
+  return text.replace(/\r/g, '').split('\n').some((line) => noteCheckOnLine(line)?.kind === 'full');
+}
+
+/** Gate word recorded by the full-gate command, if it has already run for this SHA. */
+function recordedCommandGate(sha: string): string | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT payload_json FROM events WHERE type = 'pipeline.gate' AND entity_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(`${sha}:full`) as { payload_json: string | null } | undefined;
+    if (!row?.payload_json) return null;
+    const gate = String((JSON.parse(row.payload_json) as { gate?: string }).gate ?? '').toUpperCase();
+    return gate === 'GREEN' || gate === 'RED' || gate === 'QUEUED' || gate === 'RUNNING' ? gate : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ShaView {
   quick: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
   full: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
@@ -486,10 +506,12 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   if (project && !existing?.project) enrich.project = project;
   if (parsed.desk && !existing?.desk) enrich.desk = parsed.desk;
   if (parsed.lane && !existing?.lane) enrich.lane = parsed.lane;
-  // A freeze note is re-read in full. Missing or conflicting evidence for this
-  // SHA clears a stale GREEN instead of leaving the old column in place.
-  if (parsed.kind === 'freeze') enrich.gate = parsed.gate;
-  else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
+  if (parsed.kind === 'freeze') {
+    // Recompute from this note. Missing or conflicting evidence for this SHA
+    // clears a stale GREEN. A word already recorded by the gate command stays.
+    if (parsed.gate) enrich.gate = parsed.gate;
+    else if (noteFullConflicts(text, sha) || !recordedCommandGate(sha)) enrich.gate = null;
+  } else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
   if (author && !existing?.author_agent_id) { enrich.author_agent_id = author.id; enrich.author_name = author.name; }
 
   const verdict = parsed.verdict;
