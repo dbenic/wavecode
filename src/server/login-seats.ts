@@ -279,7 +279,17 @@ export function sweepLoginSeats(agents: Agent[], now = Date.now()): string[] {
     if (!tmux.hasSession(agent.tmux_session) || expired) {
       closeLoginSeat(agent.id, 'orphaned');
       reaped.push(agent.id);
+      continue;
     }
+    // still open and within its lease (a daemon restart lost the watcher): watch it again
+    const m = agent.name.match(/^login-(.+?)-(claude-code|codex|grok|aider|[a-z0-9-]+)$/);
+    const profile = agent.profile ?? m?.[1] ?? '';
+    const runtime = agent.runtime;
+    const deadline = Date.parse(agent.lease_expires_at!);
+    const timer = setInterval(() => checkLoginSeat(agent.id), LOGIN_SEAT_POLL_MS);
+    timer.unref?.();
+    watches.set(agent.id, { agentId: agent.id, session: agent.tmux_session, profile, runtime, deadline, timer });
+    logger.info({ agentId: agent.id, profile, runtime }, 'Login seat re-watched after restart');
   }
   return reaped;
 }

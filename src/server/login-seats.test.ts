@@ -165,10 +165,12 @@ describe('login seats', () => {
     const res = open();
     if (!res.ok) throw new Error(res.error);
     seats.resetLoginSeatsForTest(); // watcher lost
-    expect(seats.sweepLoginSeats(db.listAgents())).toEqual([]); // still within its lease, session alive
+    expect(seats.sweepLoginSeats(db.listAgents())).toEqual([]); // still within its lease, session alive → watched again
+    expect(seats.checkLoginSeat(res.data.agent.id)).toBe('open');
     tmuxHarness.sessions.delete(res.data.session);
-    expect(seats.sweepLoginSeats(db.listAgents())).toEqual([res.data.agent.id]);
+    expect(seats.checkLoginSeat(res.data.agent.id)).toBe('exited'); // the re-attached watcher reaps it
     expect(db.listAgents()).toHaveLength(0);
+    expect(seats.sweepLoginSeats(db.listAgents())).toEqual([]);
   });
 
   it('the dispatcher never sends work to a login seat', async () => {
