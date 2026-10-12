@@ -18,7 +18,7 @@ import { getConfig, type ProjectConfig } from './config.js';
 import { getAgent, getDb, getRun, listAgents, resolveAgent, type Agent, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
-import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, mainSpec, mainTip, projectRepo, resolveMainRef } from './lane-main.js';
+import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, laneAutomationDenied, mainSpec, mainTip, projectRepo, resolveMainRef } from './lane-main.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
@@ -195,8 +195,19 @@ function branchOf(workspace: string): string | null {
   }
 }
 
-/** Merge origin/main. A conflict aborts and names the files. Never pushes. */
-export function mergeMainClean(workspace: string, mainRef: string): { ok: true } | { ok: false; files: string[] } {
+/** A checkout owned by a `review_deny` seat (name or alias) is not auto-merged. */
+function workspaceOwnedByDenied(workspace: string): boolean {
+  const resolved = path.resolve(workspace);
+  const owners = listAgents().filter((agent) => agent.workspace && path.resolve(agent.workspace) === resolved);
+  if (owners.length === 0) return false;
+  const project = projectForWorkspace(workspace);
+  const names = project ? [project] : Object.keys(getConfig().projects ?? {});
+  return owners.some((owner) => names.some((name) => laneAutomationDenied(name, owner)));
+}
+
+/** Merge origin/main. A conflict aborts and names the files. A review_deny owner's workspace is left untouched. Never pushes. */
+export function mergeMainClean(workspace: string, mainRef: string): { ok: true } | { ok: false; files: string[]; skipped?: boolean } {
+  if (workspaceOwnedByDenied(workspace)) return { ok: false, files: [], skipped: true };
   try {
     git(workspace, ['merge', '--no-ff', '--no-edit', '-m', 'merge origin/main', mainRef]);
     return { ok: true };
@@ -539,8 +550,10 @@ export function onAuthorDone(agentId: string): Result<{ sha: string }> {
     if (!sha) return { ok: false, error: 'no HEAD' };
     const behind = commitsBehind(project, sha);
     if (behind != null && behind > 0) {
+      if (laneAutomationDenied(project, agent.data)) return { ok: false, error: 'excluded from lane automation' };
       const merged = mergeMainClean(agent.data.workspace, mainRef);
       if (!merged.ok) {
+        if (merged.skipped) return { ok: false, error: 'excluded from lane automation' };
         const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
         alertBehind({ lane, project, authorAgentId: agent.data.id, authorName: agent.data.name });
         const text = behindConflict(lane);
@@ -561,7 +574,7 @@ function behindConflict(lane: string): string {
   return `Your lane ${lane} is behind main. Run: git fetch origin && git merge origin/main, fix any conflicts, run the quick check, then write your freeze note. Nothing else to do.`;
 }
 
-/** Main moved: clean-merge every open lane that is now behind, then refreeze. */
+/** Main moved: clean-merge every open lane that is now behind, then refreeze. `review_deny` seats are left alone. */
 export function onMainAdvanced(project: string, mainSha?: string): void {
   const pipe = pipelineOf(project);
   if (!pipe.auto_merge_main) return;
@@ -581,13 +594,14 @@ export function onMainAdvanced(project: string, mainSha?: string): void {
   for (const lane of lanes) {
     if (laneRefError(project, lane)) continue;
     const author = listAgents().find((agent) => agent.workspace && branchOf(agent.workspace) === lane);
-    if (!author?.workspace) continue;
+    if (!author?.workspace || laneAutomationDenied(project, author)) continue;
     const before = headOf(author.workspace);
     if (!before) continue;
     const behind = commitsBehind(project, before);
     if (behind == null || behind <= 0) continue;
     const merged = mergeMainClean(author.workspace, mainRef);
     if (!merged.ok) {
+      if (merged.skipped) continue;
       const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
       const shaNow = mainSha ?? mainTip(repo, project)?.sha ?? '';
       if (shaNow) alertBehind({ lane, project, authorAgentId: author.id, authorName: author.name });
