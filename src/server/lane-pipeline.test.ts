@@ -22,10 +22,13 @@ import * as db from './db.js';
 import { notify } from './notifications.js';
 import { commitsBehind } from './lane-main.js';
 import { laneStatusLine } from './lane-status.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, latestPipelineNote, onAuthorDone, onMainAdvanced, setPipelineExecForTest,
 } from './lane-pipeline.js';
-import { getFreeze, ingestFreezeFile } from './release-freezes.js';
+import { listPendingReviews } from './review-queue.js';
+import { ensureReleaseFreezeTable, getFreeze, ingestFreezeFile, listReviewFreezes, setFetchDisabledForTest } from './release-freezes.js';
+import { loadDevLanes, requestLaneReview } from './dev-lanes.js';
 import { auditTrail, listReleases, reportRelease, verifyStaging } from './releases.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -419,6 +422,70 @@ describe('hands-free lane pipeline', () => {
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(messages(author.id).join('\n')).toMatch(/Your lane wc-ales is behind main\./);
     expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  it('gives a denied lane and agent no ping, auto merge, freeze card, or reviewer', async () => {
+    pipe.lane_deny = ['wc-codex1'];
+    pipe.agent_deny = ['codex1'];
+    pipe.review_deny = [];
+    pipe.auto_merge_main = true;
+    pipe.auto_freeze = true;
+    pipe.auto_review = true;
+    pipe.review_routes = { ales: 'codex1' };
+    const sha = branch('wc-codex1', 'codex.txt', 'lane');
+    const author = agent('codex1', repo);
+    const reviewer = agent('codex3', path.join(tmp, 'codex3'));
+    moveMain('main.txt', 'later');
+    git(repo, 'checkout', '-q', 'wc-codex1');
+    const mainSha = git(repo, 'rev-parse', 'origin/main');
+    onMainAdvanced('wave');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
+    expect(messages(author.id)).toEqual([]);
+    expect(pingLaneAboutMain({ lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved', authorName: 'codex1' })).toBe(false);
+    expect(alertBehind({ lane: 'wc-codex1', project: 'wave', authorName: 'codex1' })).toBe(false);
+    expect(alertMerged({ lane: 'wc-codex1', project: 'wave', mainSha, authorName: 'codex1' })).toBe(false);
+    expect(messages(author.id)).toEqual([]);
+
+    const frozen = onAuthorDone(author.id);
+    expect(frozen.ok).toBe(false);
+    if (!frozen.ok) expect(frozen.error).toMatch(/denied/);
+    const written = fs.existsSync(freezeDir) ? fs.readdirSync(freezeDir).filter((name) => name.includes('auto-freeze')) : [];
+    expect(written).toEqual([]);
+    const ingested = ingestFreezeFile(passNote('codex1', 'wc-codex1', sha));
+    expect(ingested.ok).toBe(false);
+    expect(getFreeze(sha)).toBeNull();
+    expect(listPendingReviews()).toEqual([]);
+    expect(messages(reviewer.id).join('\n')).not.toMatch(/Please review/);
+
+    ensureReleaseFreezeTable();
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, project, lane, author_name, status) VALUES (?, 'wave', 'wc-codex1', 'codex1', 'open')`,
+    ).run(sha);
+    expect(listReviewFreezes().some((row) => row.lane === 'wc-codex1')).toBe(false);
+    projects.wave.lane_glob = 'wc-ales';
+    alertLanesPastStaging('wave', mainSha);
+    expect(messages(author.id)).toEqual([]);
+
+    const other = branch('wc-ales', 'ales.txt', 'ales');
+    const ales = agent('ales', path.join(tmp, 'ales'));
+    const allowed = ingestFreezeFile(passNote('ales', 'wc-ales', other));
+    expect(allowed.ok).toBe(true);
+    expect(listPendingReviews().some((item) => item.freeze?.lane === 'wc-ales')).toBe(true);
+    expect(listPendingReviews().some((item) => item.freeze?.lane === 'wc-codex1')).toBe(false);
+    expect(messages(author.id).join('\n')).not.toMatch(/Please review/);
+    expect(messages(reviewer.id).join('\n')).toMatch(/Please review/);
+    expect(messages(ales.id).join('\n')).not.toMatch(/Please review/);
+
+    setFetchDisabledForTest(true);
+    const lanes = await loadDevLanes();
+    expect(lanes.some((lane) => lane.lane === 'wc-codex1')).toBe(false);
+    const alesLane = lanes.find((lane) => lane.lane === 'wc-ales');
+    expect(alesLane).toBeTruthy();
+    expect(alesLane?.reviewers.some((row) => row.name === 'codex1')).toBe(false);
+    expect(alesLane?.reviewers.some((row) => row.name === 'codex3')).toBe(true);
+    const asked = await requestLaneReview({ project: 'wave', lane: 'wc-codex1', reviewer: 'codex3' });
+    expect(asked.ok).toBe(false);
+    setFetchDisabledForTest(false);
   });
 
   it('queues one full gate for a new freeze SHA', () => {

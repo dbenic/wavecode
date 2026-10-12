@@ -191,7 +191,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   // Release freezes reviewed by files (release-freezes.ts). The watcher ingests
   // the freeze inbox on its own; a reviewer may also hand a file in directly.
-  app.get('/api/reviews/freezes', (c) => c.json(freezes.listFreezes().map(freezes.toCard)));
+  app.get('/api/reviews/freezes', (c) => c.json(freezes.listReviewFreezes().map(freezes.toCard)));
 
   app.post('/api/reviews/freezes/ingest', async (c) => {
     const user = getActingUser(c);

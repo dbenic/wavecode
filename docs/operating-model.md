@@ -199,6 +199,8 @@ projects:
         claude1: codex2
         codex2: claude1
       review_deny: [codex1]
+      lane_deny: ['wc-codex1']             # globs: no merge, ping, freeze, or Reviews card
+      agent_deny: [codex1]                 # names or aliases; also never chosen as a reviewer
       freeze_dir: /home/wave/inbox/freezes
     # Off unless a freeze note declares prereqs. Commands are argv, run on the deploy box.
     prereq_checks:

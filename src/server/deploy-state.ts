@@ -19,6 +19,7 @@ import { pipelineHooks } from './pipeline-hooks.js';
 import { getConfig } from './config.js';
 import {
   applyNoteLabels,
+  freezeOnReviews,
   getFreeze,
   listFreezes,
   viewShaChecks,
@@ -775,7 +776,7 @@ export function reviewBoard(user: { name: string; role: string }, lanes: DevLane
   const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
   const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
   let freezes: ReleaseFreeze[] = [];
-  try { freezes = listFreezes(); } catch { freezes = []; }
+  try { freezes = listFreezes().filter(freezeOnReviews); } catch { freezes = []; }
   const items: BoardItem[] = [];
   const seen = new Set<string>();
   for (const freeze of freezes) {

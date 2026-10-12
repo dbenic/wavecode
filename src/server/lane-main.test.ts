@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data: undefined })) }));
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
-const projects: Record<string, { repo?: string; workspace_match?: string; lane_glob?: string }> = {};
+const projects: Record<string, { repo?: string; workspace_match?: string; lane_glob?: string; pipeline?: { lane_deny?: string[]; agent_deny?: string[] } }> = {};
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest } from './lane-main.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -136,6 +136,39 @@ describe('lane main ancestry', () => {
     ).run(mainSha);
     now += 30 * 60 * 1000;
     expect(ping()).toBe(false);
+  });
+
+  it('does not ping a denied lane or its agent', () => {
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'checkout', '-q', '-b', 'wc-codex1');
+    fs.writeFileSync(path.join(repo, 'codex.txt'), 'codex');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'codex lane');
+    const laneSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-codex1', laneSha);
+    const codex = db.insertAgent({ name: 'codex1', runtime: 'codex', tmux_session: 'wc-codex1', workspace: repo, mode: 'spawned', status: 'idle' });
+    if (!codex.ok) throw new Error(codex.error);
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'm.txt'), 'moved');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main moved');
+    const mainSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
+    projects.wave.pipeline = { lane_deny: ['wc-codex1'], agent_deny: ['codex1'] };
+    projects.wave.lane_glob = 'wc-ales';
+    expect(pingLaneAboutMain({ lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved' })).toBe(false);
+    expect(alertBehind({ lane: 'wc-codex1', project: 'wave' })).toBe(false);
+    expect(alertMerged({ lane: 'wc-codex1', project: 'wave', mainSha })).toBe(false);
+    ensureReleaseFreezeTable();
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, project, lane, author_name, status) VALUES (?, 'wave', 'wc-codex1', 'codex1', 'open')`,
+    ).run(laneSha);
+    alertLanesPastStaging('wave', mainSha);
+    const pings = db.getDb().prepare('SELECT entity_id FROM events WHERE type = ?').all(MAIN_PING) as { entity_id: string }[];
+    expect(pings.some((row) => row.entity_id.startsWith('wc-codex1:'))).toBe(false);
+    expect(pings.some((row) => row.entity_id.startsWith('wc-ales:'))).toBe(true);
+    const sent = db.listAgentMessages({ to_agent_id: codex.data.id }).map((row) => row.message);
+    expect(sent).toEqual([]);
   });
 
   it('uses the auto-merge sentence and does not also send the behind alert', () => {

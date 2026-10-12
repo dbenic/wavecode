@@ -11,6 +11,7 @@ import { getAgent, getDb, listAgents, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
+import { countixDenied } from './pipeline-deny.js';
 import { fireMainAdvanced } from './pipeline-hooks.js';
 
 export const MAIN_PING = 'lane.main_ping';
@@ -333,17 +334,22 @@ function stillUnreviewed(project: string | null, lane: string, mainSha: string):
   return true;
 }
 
-function authorForLane(lane: string, authorAgentId: string | null, authorName: string | null): Agent | null {
+function authorForLane(lane: string, authorAgentId: string | null, authorName: string | null, project: string | null): Agent | null {
+  let agent: Agent | null = null;
   if (authorAgentId) {
     const a = getAgent(authorAgentId);
-    if (a.ok) return a.data;
+    if (a.ok) agent = a.data;
   }
-  if (authorName) {
+  if (!agent && authorName) {
     const a = resolveAgent(authorName);
-    if (a.ok) return a.data;
+    if (a.ok) agent = a.data;
   }
-  const bare = lane.replace(/^wc-/, '');
-  return listAgents().find((a) => a.tmux_session === lane || a.name === bare || a.name === lane || a.alias === bare) ?? null;
+  if (!agent) {
+    const bare = lane.replace(/^wc-/, '');
+    agent = listAgents().find((a) => a.tmux_session === lane || a.name === bare || a.name === lane || a.alias === bare) ?? null;
+  }
+  if (!agent || countixDenied(project, lane, agent)) return null;
+  return agent;
 }
 
 /**
@@ -364,12 +370,13 @@ export function pingLaneAboutMain(opts: {
   kind: 'freeze' | 'moved' | 'merged';
 }): boolean {
   if (!opts.lane || !opts.mainSha) return false;
+  if (countixDenied(opts.project, opts.lane, opts.authorName ? { name: opts.authorName } : null)) return false;
   const latest = latestPing(opts.lane, opts.mainSha);
   if (latest) {
     if (nowMs() - latest.at < REPEAT_MS) return false;
     if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) return false;
   }
-  const agent = authorForLane(opts.lane, opts.authorAgentId ?? null, opts.authorName ?? null);
+  const agent = authorForLane(opts.lane, opts.authorAgentId ?? null, opts.authorName ?? null, opts.project);
   if (!agent) return false;
   const text = opts.kind === 'merged' ? mergedMainAlert(opts.lane) : behindMainAlert(opts.lane);
   deliverSystemLine(agent, text, { kind: 'info', source: 'main' });
@@ -386,6 +393,7 @@ export function alertBehind(opts: {
   authorAgentId?: string | null;
   authorName?: string | null;
 }): boolean {
+  if (countixDenied(opts.project, opts.lane, opts.authorName ? { name: opts.authorName } : null)) return false;
   const repo = projectRepo(opts.project);
   const tip = repo ? mainTip(repo, opts.project) : null;
   if (!tip) return false;
@@ -403,6 +411,7 @@ export function alertMerged(opts: {
   authorAgentId?: string | null;
   authorName?: string | null;
 }): boolean {
+  if (countixDenied(opts.project, opts.lane, opts.authorName ? { name: opts.authorName } : null)) return false;
   return pingLaneAboutMain({ ...opts, kind: 'merged' });
 }
 
@@ -462,15 +471,16 @@ function notifyBehindLanes(project: string, repo: string, mainSha: string, subje
   for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
     const name = short.replace(/^[^/]+\//, '');
     if (name === 'HEAD' || name === mainSpec(project).branch) continue;
-    if (re.test(name)) names.add(name);
+    if (re.test(name) && !countixDenied(project, name)) names.add(name);
   }
   try {
     const rows = getDb().prepare(
       "SELECT lane FROM release_freezes WHERE project = ? AND status IN ('open', 'behind-main') AND lane IS NOT NULL",
     ).all(project) as { lane: string }[];
-    for (const row of rows) names.add(row.lane);
+    for (const row of rows) if (!countixDenied(project, row.lane)) names.add(row.lane);
   } catch { /* table missing */ }
   for (const lane of names) {
+    if (countixDenied(project, lane)) continue;
     const ref = git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${mainSpec(project).remote}/${lane}^{commit}`])
       ?? git(repo, ['rev-parse', '--verify', '--quiet', `${lane}^{commit}`]);
     if (!ref || !/^[0-9a-f]{40}$/i.test(ref)) continue;
@@ -502,15 +512,19 @@ export function alertLanesPastStaging(project: string | null, stagingSha: string
   for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
     const name = short.replace(/^[^/]+\//, '');
     if (name === 'HEAD' || name === mainSpec(project).branch) continue;
-    if (re.test(name)) names.add(name);
+    if (re.test(name) && !countixDenied(project, name)) names.add(name);
   }
   try {
     const rows = getDb().prepare(
       "SELECT lane FROM release_freezes WHERE project = ? AND lane IS NOT NULL",
     ).all(project) as { lane: string }[];
-    for (const row of rows) if (re.test(row.lane) || row.lane.startsWith('wc-')) names.add(row.lane);
+    for (const row of rows) {
+      if (countixDenied(project, row.lane)) continue;
+      if (re.test(row.lane) || row.lane.startsWith('wc-')) names.add(row.lane);
+    }
   } catch { /* table missing */ }
   for (const lane of names) {
+    if (countixDenied(project, lane)) continue;
     const ref = laneTipSha(project, lane);
     if (!ref) continue;
     if (isAncestor(repo, stagingSha, ref) !== false) continue;
@@ -527,6 +541,7 @@ export function reconcileBehindFreezes(): void {
     return;
   }
   for (const f of rows) {
+    if (countixDenied(f.project, f.lane, { name: f.author_name })) continue;
     const n = commitsBehind(f.project, f.sha);
     if (n == null || n <= 0) continue;
     if (f.status === 'open') {

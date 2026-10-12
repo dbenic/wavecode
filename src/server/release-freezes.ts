@@ -43,6 +43,7 @@ import { archiveDocumentFile } from './fixtures.js';
 import { behindMainLine } from './lane-status.js';
 import { gitText } from './git-memo.js';
 import { commitsBehind, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
+import { countixDenied } from './pipeline-deny.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured, type TestRun } from './test-runs.js';
 
@@ -156,6 +157,16 @@ export function setFreezeGate(sha: string, gate: string): void {
 
 export function listFreezes(): ReleaseFreeze[] {
   return withTable(() => getDb().prepare('SELECT * FROM release_freezes ORDER BY created_at DESC').all() as ReleaseFreeze[]);
+}
+
+/** A denied lane or author is not a Reviews card and is not a developer lane on that page. */
+export function freezeOnReviews(freeze: { project: string | null; lane: string | null; author_name?: string | null }): boolean {
+  return !countixDenied(freeze.project, freeze.lane, freeze.author_name ? { name: freeze.author_name } : null);
+}
+
+/** Freezes the Reviews page may show. Denied lanes and agents are left out. */
+export function listReviewFreezes(): ReleaseFreeze[] {
+  return listFreezes().filter(freezeOnReviews);
 }
 
 export function toCard(f: ReleaseFreeze): FreezeCard {
@@ -549,6 +560,10 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   const reviewer = firstAgent(parsed.reviewerCandidates);
   const reviewerName = reviewer?.name ?? parsed.reviewerCandidates[0] ?? null;
   const project = projectFor(parsed, text);
+  const authorLabel = author ?? (parsed.authorCandidates[0] ? { name: parsed.authorCandidates[0] } : null);
+  if (countixDenied(project, parsed.lane, authorLabel)) {
+    return { ok: false, error: `${path.basename(filePath)}: denied lane or agent` };
+  }
 
   // Keep the file itself: the inbox is transient, the library is not.
   let archivedPath: string | null = null;

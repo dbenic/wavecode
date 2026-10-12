@@ -139,9 +139,19 @@ export interface ProjectConfig {
     quick_check_command?: string[];
     push_command?: string[];
     gate_command?: string[];
-    /** Author name → reviewer name. The author and `review_deny` are never chosen. */
+    /** Author name → reviewer name. The author, `review_deny`, and `agent_deny` are never chosen. */
     review_routes?: Record<string, string>;
     review_deny?: string[];
+    /**
+     * Globs over lane branch names that get no Countix automation
+     * (no merge, ping, freeze, or Reviews card).
+     */
+    lane_deny?: string[];
+    /**
+     * Agent names or aliases that get no Countix automation.
+     * Also excluded from reviewer choice, the same as `review_deny`.
+     */
+    agent_deny?: string[];
     /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
     freeze_dir?: string;
   };
@@ -446,6 +456,12 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
   }
   if (pipeline.review_deny !== undefined && (!Array.isArray(pipeline.review_deny) || pipeline.review_deny.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
     throw new Error(`projects.${name}.pipeline.review_deny must be a list of agent names`);
+  }
+  if (pipeline.agent_deny !== undefined && (!Array.isArray(pipeline.agent_deny) || pipeline.agent_deny.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
+    throw new Error(`projects.${name}.pipeline.agent_deny must be a list of agent names or aliases`);
+  }
+  if (pipeline.lane_deny !== undefined && (!Array.isArray(pipeline.lane_deny) || pipeline.lane_deny.some((s) => typeof s !== 'string' || !s.trim() || s.length > 80 || s.includes('..')))) {
+    throw new Error(`projects.${name}.pipeline.lane_deny must be a list of globs`);
   }
   if (pipeline.review_routes !== undefined) {
     if (typeof pipeline.review_routes !== 'object' || pipeline.review_routes === null || Array.isArray(pipeline.review_routes)) {

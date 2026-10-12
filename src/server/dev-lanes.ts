@@ -7,9 +7,10 @@ import { getConfig } from './config.js';
 import { gitText } from './git-memo.js';
 import { getDb, getRun, listAgents, type Agent } from './db.js';
 import { getLatestCompletedReview } from './code-review.js';
-import { listFreezes, refreshProjectAsync, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
+import { freezeOnReviews, listFreezes, refreshProjectAsync, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
 import { listReleases, resolveStagingTip, stageGateBlock } from './releases.js';
 import { prereqStatusNote } from './prereqs.js';
+import { agentIsDenied, countixDenied } from './pipeline-deny.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { latestPipelineNote } from './lane-pipeline.js';
@@ -131,9 +132,9 @@ async function deltaFor(repo: string, mainSha: string, lane: string, head: strin
   return { label: 'delta review: merge only', previous_sha: previous.sha, verdict_path: previous.verdict_path };
 }
 
-function reviewerChoices(authorId: string | null): DevLane['reviewers'] {
+function reviewerChoices(project: string, authorId: string | null): DevLane['reviewers'] {
   return listAgents()
-    .filter((a) => a.id !== authorId && a.role !== 'orchestrator' && a.mode !== 'file')
+    .filter((a) => a.id !== authorId && a.role !== 'orchestrator' && a.mode !== 'file' && !agentIsDenied(project, a))
     .map((a) => ({ id: a.id, name: a.name, alias: a.alias ?? null }));
 }
 
@@ -189,9 +190,11 @@ export async function loadDevLanes(): Promise<DevLane[]> {
       const name = short.startsWith(`${spec.remote}/`) ? short.slice(spec.remote.length + 1) : short;
       if (name === 'HEAD' || name === spec.branch || name.startsWith(spec.branch + '/')) continue;
       if (pc.candidate_refs && globToRe(pc.candidate_refs).test(name)) continue;
-      if (re.test(name)) names.add(name);
+      if (re.test(name) && !countixDenied(project, name)) names.add(name);
     }
-    for (const f of freezes) if (f.project === project && f.lane && (f.status === 'open' || f.status === 'behind-main')) names.add(f.lane);
+    for (const f of freezes) {
+      if (f.project === project && f.lane && (f.status === 'open' || f.status === 'behind-main') && freezeOnReviews(f)) names.add(f.lane);
+    }
 
     const fileCache = new Map<string, string[]>();
     const filesOf = async (lane: string, sha: string) => {
@@ -209,6 +212,7 @@ export async function loadDevLanes(): Promise<DevLane[]> {
     const stagingUnknown = stagingSource.state === 'unknown';
 
     for (const lane of [...names].sort()) {
+      if (countixDenied(project, lane)) continue;
       await yieldTurn();
       const sha = await tipOf(repo, spec.remote, lane);
       if (!sha || !await ahead(repo, mainSha, sha)) continue;
@@ -279,7 +283,7 @@ export async function loadDevLanes(): Promise<DevLane[]> {
         test_run: selectChipRun(report.runs, freeze?.sha ?? sha, lane),
         test_errors: report.errors,
         test_log: hasLogCommand(project),
-        reviewers: reviewerChoices(author.id),
+        reviewers: reviewerChoices(project, author.id),
         delta_review: freeze ? await deltaFor(repo, mainSha, lane, sha, freezes) : null,
       });
     }
@@ -351,6 +355,7 @@ export async function requestLaneReview(opts: { project: string; lane: string; r
   const lane = opts.lane?.trim();
   const reviewer = opts.reviewer?.trim();
   if (!project || !lane || !reviewer) return { ok: false, error: 'project, lane, and reviewer are required' };
+  if (countixDenied(project, lane)) return { ok: false, error: `refusing ${lane}: denied` };
   let freeze: ReleaseFreeze | null = null;
   try {
     const rows = getDb().prepare(
@@ -370,6 +375,7 @@ export async function requestLaneReview(opts: { project: string; lane: string; r
     { explicit: reviewer },
   );
   if (!picked.ok) return { ok: false, error: picked.reason };
+  if (agentIsDenied(project, picked.agent)) return { ok: false, error: `${picked.agent.alias ?? picked.agent.name} is denied` };
   const repo = projectRepo(project);
   const mainRef = repo ? resolveMainRef(repo, project) : null;
   const delta = repo && mainRef ? await deltaFor(repo, mainRef, lane, freeze.sha, listFreezes()) : null;

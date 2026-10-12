@@ -45,7 +45,7 @@ export interface ReviewItem {
  */
 export function listPendingReviews(): ReviewItem[] {
   const runs = listReviewableRuns();
-  return runs.map(runToReviewItem).filter((r): r is ReviewItem => r !== null);
+  return runs.map(runToReviewItem).filter((r): r is ReviewItem => r !== null && (!r.freeze || freezes.freezeOnReviews(r.freeze)));
 }
 
 /**
