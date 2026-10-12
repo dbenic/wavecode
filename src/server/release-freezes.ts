@@ -36,6 +36,7 @@ import {
   type Result,
 } from './db.js';
 import { countVerdictIssues, type ReviewVerdict } from './code-review.js';
+import { queueNamedSuite } from './test-runs.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
@@ -319,7 +320,18 @@ export function ingestFreezeFile(filePath: string, opts: IngestOptions = {}): Re
   } catch (e) {
     return { ok: false, error: `cannot read ${filePath}: ${(e as Error).message}` };
   }
-  return ingestFreezeText(text, filePath, opts);
+  const result = ingestFreezeText(text, filePath, opts);
+  if (result.ok) {
+    try {
+      const row = getFreeze(result.data.sha);
+      if (row && (row.status === 'open' || row.status === 'behind-main')) {
+        queueNamedSuite({ project: row.project, lane: row.lane, sha: row.sha, kind: 'quick' });
+      }
+    } catch (e) {
+      logger.debug({ sha: result.data.sha, error: (e as Error).message }, 'Quick check not queued');
+    }
+  }
+  return result;
 }
 
 export function ingestFreezeText(text: string, filePath: string, opts: IngestOptions = {}): Result<IngestOutcome> {

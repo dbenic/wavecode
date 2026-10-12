@@ -12,6 +12,8 @@
 
 import { execFileSync } from 'node:child_process';
 import { getConfig, type ProjectConfig } from './config.js';
+import { getDb } from './db.js';
+import { emit } from './event-bus.js';
 import logger from './logger.js';
 
 export const TEST_STATES = ['queued', 'running', 'pass', 'fail', 'hung', 'superseded', 'duplicate', 'cancelled'] as const;
@@ -341,10 +343,10 @@ export function testChipLabel(run: TestRun): string {
   }
 }
 
-const WHOLE = /^\{(sha|lane|id|log)\}$/;
+const WHOLE = /^\{(sha|lane|id|log|suite)\}$/;
 
-/** Fill `{sha}` `{lane}` `{id}` `{log}`. An empty whole-arg placeholder drops itself and a preceding `--flag`. */
-export function fillTestArgv(template: string[], vars: { sha?: string | null; lane?: string | null; id?: string | null; log?: string | null }): string[] {
+/** Fill `{sha}` `{lane}` `{id}` `{log}` `{suite}`. An empty whole-arg placeholder drops itself and a preceding `--flag`. */
+export function fillTestArgv(template: string[], vars: { sha?: string | null; lane?: string | null; id?: string | null; log?: string | null; suite?: string | null }): string[] {
   const value = (key: string): string => {
     const v = vars[key as keyof typeof vars];
     return v == null ? '' : String(v);
@@ -361,7 +363,7 @@ export function fillTestArgv(template: string[], vars: { sha?: string | null; la
       out.push(filled);
       continue;
     }
-    out.push(arg.replace(/\{(sha|lane|id|log)\}/g, (_, key: string) => value(key)));
+    out.push(arg.replace(/\{(sha|lane|id|log|suite)\}/g, (_, key: string) => value(key)));
   }
   return out;
 }
@@ -477,4 +479,38 @@ export function watchTestRuns(targets: Array<{ project: string; lane: string; sh
 export function stopTestRunPoller(): void {
   if (timer) clearInterval(timer);
   timer = null;
+}
+
+/** One row per SHA per kind. A failed queue is not retried, and a full run is not queued twice. */
+export const TESTS_QUEUED = 'tests.queued';
+
+function alreadyQueued(sha: string, kind: 'quick' | 'full'): boolean {
+  const row = getDb().prepare('SELECT id FROM events WHERE type = ? AND entity_id = ? LIMIT 1').get(TESTS_QUEUED, `${sha}:${kind}`) as { id: number } | undefined;
+  return !!row;
+}
+
+/**
+ * Enqueue one check for this SHA. `quick` runs on a freeze; `full` runs once
+ * when that SHA is deployed to staging. No command, or a SHA already queued
+ * for that kind, does nothing. The suite name is the project's first
+ * configured name for that kind.
+ */
+export function queueNamedSuite(opts: { project: string | null; lane: string | null; sha: string; kind: 'quick' | 'full' }): boolean {
+  if (!opts.project || !/^[0-9a-f]{40}$/i.test(opts.sha)) return false;
+  const cmd = projectTests(opts.project)?.queue_command;
+  if (!cmd?.length) return false;
+  try {
+    if (alreadyQueued(opts.sha, opts.kind)) return false;
+  } catch {
+    return false;
+  }
+  const names = suiteNames(opts.project);
+  const suite = opts.kind === 'quick' ? names.quick[0] : names.full[0];
+  if (!suite) return false;
+  const argv = fillTestArgv(cmd, { sha: opts.sha, lane: opts.lane, suite });
+  runCommand(argv);
+  const recorded = emit(TESTS_QUEUED, 'run', `${opts.sha}:${opts.kind}`, {
+    project: opts.project, lane: opts.lane, sha: opts.sha, suite, kind: opts.kind,
+  }, null);
+  return recorded != null;
 }

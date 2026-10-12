@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_FULL_SUITES, DEFAULT_QUICK_SUITES, fullRunPhrase, HOST_UNREACHABLE, isFullRun, isQuickRun,
-  liveGateForRuns, parseTestReport, shaChecks, suiteNames, testChipLabel,
+  fillTestArgv, liveGateForRuns, parseTestReport, shaChecks, suiteNames, testChipLabel,
 } from './test-runs.js';
 
 const SHA = 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00';
@@ -104,6 +104,13 @@ describe('shaChecks', () => {
     expect(shaChecks(runs, SHA, names).quick).toBe('green');
     expect(shaChecks(runs, SHA, NAMES).quick).toBe('missing');
     expect(suiteNames(null)).toEqual({ quick: DEFAULT_QUICK_SUITES, full: DEFAULT_FULL_SUITES });
+  });
+
+  it('fills a {suite} placeholder and drops an empty lane flag', () => {
+    expect(fillTestArgv(['test-queue', '{suite}', '{sha}', '{lane}'], { suite: 'quick', sha: SHA, lane: 'wc-a' }))
+      .toEqual(['test-queue', 'quick', SHA, 'wc-a']);
+    expect(fillTestArgv(['test-queue', '{suite}', '--lane', '{lane}'], { suite: 'full-tuned', lane: null }))
+      .toEqual(['test-queue', 'full-tuned']);
   });
 
   it('labels the chip', () => {

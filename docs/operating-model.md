@@ -182,6 +182,7 @@ projects:
       log_command: [test-log, '{id}']
       quick_suites: [quick, tier1]           # a green one of these can stage
       full_suites: [full-tuned, full]        # production Promote needs one of these green
+      queue_command: [test-queue, '{suite}', '{sha}', '{lane}']  # quick on freeze, full once on staging
   max_fix_loops: 2               # bounded fix→re-review rounds
   require_pass_to_promote: true  # promote gate even without auto_review
   gate_dependents_on_approval: true  # DAG advances on approval, not 'done'

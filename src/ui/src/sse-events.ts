@@ -42,6 +42,7 @@ export const SSE_EVENT_TYPES = [
   'review.gate_pinged',
   'lane.main_ping',
   'tests.updated',
+  'tests.queued',
   'release.requested',
   'release.reported',
   'release.progress',
