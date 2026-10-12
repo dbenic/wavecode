@@ -29,7 +29,7 @@ import { peerGetJson, peerPostJson } from './peers.js';
 import { getFreeze, staleStageBlock } from './release-freezes.js';
 import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
-import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
+import { queueNamedSuite, readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 /** Returned to non-admins on every production-send path. */
@@ -698,6 +698,13 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     deploy_agent_id: report.byAgentId ?? done.deploy_agent_id, requested_by: done.requested_by,
   }, null);
   if (done.origin === 'local') announce(done);
+  if (done.status === 'deployed' && done.target === 'staging') {
+    try {
+      queueNamedSuite({ project: done.project, lane: done.lane, sha: done.sha, kind: 'full' });
+    } catch (e) {
+      logger.debug({ sha: done.sha, error: (e as Error).message }, 'Full gate not queued');
+    }
+  }
   return { ok: true, data: done };
 }
 

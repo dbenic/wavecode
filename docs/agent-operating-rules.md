@@ -98,6 +98,8 @@ A lane is released from the Review queue, not from chat. The queue reads the age
   the new SHA. The person's Promote on the card is the only GO; you never relay one (§3b).
   Stage needs the reviewer's PASS plus a green quick check (or a green full run) on the exact SHA.
   Promote needs a green full gate on that same SHA, and only an admin can send it.
+  WaveCode queues a quick check when the freeze is recorded, and queues the full gate
+  once when that SHA lands on staging. You do not queue those yourself.
 
 ## 3a2. Fixtures: the Library is for sanitized files only
 

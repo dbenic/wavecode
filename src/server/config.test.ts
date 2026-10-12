@@ -82,6 +82,33 @@ releases:
     expect(() => missing.loadConfig(configPath)).toThrow(/staging_command must include \{sha\}/);
   });
 
+  it('requires {sha} and {suite} on a test queue command', async () => {
+    fs.writeFileSync(configPath, `
+projects:
+  wavepulse:
+    workspace_match: '**/wavepulse*'
+    tests:
+      queue_command: ["test-queue", "{suite}", "{sha}", "{lane}"]
+      quick_suites: [tier1]
+      full_suites: [nightly]
+`, 'utf8');
+    const { loadConfig } = await import('./config.js');
+    const loaded = loadConfig(configPath);
+    expect(loaded.projects?.wavepulse?.tests?.queue_command).toEqual(['test-queue', '{suite}', '{sha}', '{lane}']);
+    expect(loaded.projects?.wavepulse?.tests?.quick_suites).toEqual(['tier1']);
+
+    fs.writeFileSync(configPath, `
+projects:
+  wavepulse:
+    workspace_match: '**/wavepulse*'
+    tests:
+      queue_command: ["test-queue", "{sha}"]
+`, 'utf8');
+    vi.resetModules();
+    const missing = await import('./config.js');
+    expect(() => missing.loadConfig(configPath)).toThrow(/queue_command must include \{sha\} and \{suite\}/);
+  });
+
   it('loads a per-project referee profile from yaml', async () => {
     fs.writeFileSync(configPath, `
 projects:

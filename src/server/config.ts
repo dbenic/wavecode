@@ -113,6 +113,13 @@ export interface ProjectConfig {
      * Default `full-tuned` and `full`. Production Promote needs one of these green.
      */
     full_suites?: string[];
+    /**
+     * Argv that enqueues a run. `{suite}` is the quick or full suite name,
+     * `{sha}` the freeze SHA, `{lane}` the lane when known. No shell.
+     * A quick check is queued on every open freeze SHA. A full gate is queued
+     * once when that SHA is deployed to staging.
+     */
+    queue_command?: string[];
   };
 }
 
@@ -437,6 +444,10 @@ export function validateConfig(cfg: WaveConfig): void {
       validateArgvTemplate(`projects.${name}.tests.log_command`, project.tests.log_command, '{id}');
       validateSuiteNames(`projects.${name}.tests.quick_suites`, project.tests.quick_suites);
       validateSuiteNames(`projects.${name}.tests.full_suites`, project.tests.full_suites);
+      validateArgvList(`projects.${name}.tests.queue_command`, project.tests.queue_command);
+      if (project.tests.queue_command && (!project.tests.queue_command.some((a) => a.includes('{sha}')) || !project.tests.queue_command.some((a) => a.includes('{suite}')))) {
+        throw new Error(`projects.${name}.tests.queue_command must include {sha} and {suite}`);
+      }
     }
     if (project.release_peer !== undefined) {
       const m = /^([a-z][a-z0-9_-]*)\/(@?[\w.-]+)$/.exec(project.release_peer);
