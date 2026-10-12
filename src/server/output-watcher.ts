@@ -1,6 +1,6 @@
 import { getAgent, updateAgentStatus, listRuns, listTasks, updateTaskStatus, type Agent } from './db.js';
 import { getConfig } from './config.js';
-import { capturePane, sendRawKeys } from './session-manager.js';
+import { capturePane, registerPaneClassifier, sendRawKeys } from './session-manager.js';
 import { emit } from './event-bus.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import { verifyTaskCompletion } from './task-verifier.js';
@@ -690,3 +690,5 @@ function finishOneStuckRun(agentId: string, run: { id: string; task_id: string }
     'Auto-closed run (working -> idle); verdict from result file only',
   );
 }
+
+registerPaneClassifier(detectStatus);

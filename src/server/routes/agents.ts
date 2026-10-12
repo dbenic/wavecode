@@ -368,7 +368,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       const updated = updateAgentSocket(agent.id, socket);
       if (!updated.ok) return c.json({ error: updated.error }, 500);
       bindSessionSocket(updated.data.tmux_session, socket);
-      agent = updated.data;
+      agent = sessionManager.reprobeAgent(updated.data);
     }
     if (body.model === undefined && body.effort === undefined) {
       if (!hasIdentity && role.role === undefined && body.tmux_socket === undefined) {
@@ -396,7 +396,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       { agentId: result.data.id, model: result.data.model, effort: result.data.effort },
       'Agent pin updated',
     );
-    return c.json(enrichAgent(result.data, getActingUser(c)));
+    return c.json(enrichAgent(sessionManager.reprobeAgent(result.data), getActingUser(c)));
   });
 
   app.post('/api/agents/spawn', async (c) => {

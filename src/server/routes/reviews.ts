@@ -77,8 +77,8 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json({ ok: true });
   });
 
-  app.get('/api/reviews/lanes', (c) => {
-    try { return c.json(devLanes.listDevLanes()); } catch (e) {
+  app.get('/api/reviews/lanes', async (c) => {
+    try { return c.json(await devLanes.lanesForRequest()); } catch (e) {
       logger.warn({ error: (e as Error).message }, 'Lane list failed');
       return c.json([]);
     }
@@ -88,7 +88,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<{ project?: string; lane?: string; reviewer?: string }>().catch(() => ({} as { project?: string; lane?: string; reviewer?: string }));
-    const result = devLanes.requestLaneReview({
+    const result = await devLanes.requestLaneReview({
       project: body.project ?? '', lane: body.lane ?? '', reviewer: body.reviewer ?? '',
     });
     if (!result.ok) return c.json({ error: result.error }, 400);
@@ -104,10 +104,10 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result.data);
   });
 
-  app.get('/api/reviews', (c) => {
+  app.get('/api/reviews', async (c) => {
     const items = reviewQueue.listPendingReviews();
     let lanes: devLanes.DevLane[] = [];
-    try { lanes = devLanes.listDevLanes(); } catch (e) {
+    try { lanes = await devLanes.lanesForRequest(); } catch (e) {
       logger.warn({ error: (e as Error).message }, 'Lane list failed');
     }
     const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));

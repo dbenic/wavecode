@@ -19,6 +19,7 @@ import { startHealthMonitor, stopHealthMonitor } from './health-monitor.js';
 import { pruneOldArtifacts } from './artifact-manager.js';
 import { reconcileStartupState, type StartupReconcileResult } from './startup-reconcile.js';
 import { rebindAgentSockets } from './session-manager.js';
+import { startLaneBoard, stopLaneBoard } from './dev-lanes.js';
 import logger from './logger.js';
 
 /** Pick up out-of-band pending inserts (CLI fallback, scripts) that skipped HTTP. */
@@ -49,6 +50,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   notifications.getVapidPublicKey();
 
   rebindAgentSockets();
+  startLaneBoard();
 
   const startupReconciliation = await reconcileStartupState();
 
@@ -78,6 +80,7 @@ export function shutdownApplication(): void {
   overlord.stopOverlord();
   productDesk.stopDeskRefresh();
   usageProbe.stopUsageProbe();
+  stopLaneBoard();
   outputWatcher.stopAll();
   teamManager.stopAllCommsWatchers();
 

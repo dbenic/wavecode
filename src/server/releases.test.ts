@@ -117,6 +117,7 @@ describe('releases.ts', () => {
 
   afterEach(() => {
     rel.stopReleasePollers();
+    peers.stopPeerPollers();
     peers.setPeerFetchForTest(null);
     db.resetDbForTest();
     fs.rmSync(tmp, { recursive: true, force: true });
