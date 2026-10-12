@@ -24,7 +24,7 @@ vi.mock('./config.js', () => ({
 
 import { setFetchDisabledForTest } from './release-freezes.js';
 import { parseNoteChecks, viewShaChecks } from './release-freezes.js';
-import { promoteFullBlock, requestRelease, resetStagingTipCacheForTest, stageGateBlock } from './releases.js';
+import { promoteFullBlock, requestRelease, resetStagingTipCacheForTest, resolveStagingTip, stageGateBlock } from './releases.js';
 import { resetForwardMemoForTest, stagingForwardBlock } from './staging-forward.js';
 import { setGitExecForTest, type GitResult } from './git-memo.js';
 import { refreshLaneBoard, resetLaneBoardForTest } from './dev-lanes.js';
@@ -249,6 +249,42 @@ describe('staging tip on the card', () => {
     resetStagingTipCacheForTest();
     await refreshLaneBoard();
     expect(fetches).toBe(0);
+  });
+
+  it('caches a failed peer ask for 5 seconds and a successful one for 15', async () => {
+    const start = 1_700_000_000_000;
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start);
+    try {
+      setPeerFetchForTest(async () => { fetches += 1; throw new Error('down'); });
+      expect((await resolveStagingTip('demo')).state).toBe('unknown');
+      now.mockReturnValue(start + 4_999);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(1);
+      now.mockReturnValue(start + 5_000);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(2);
+
+      fetches = 0;
+      resetStagingTipCacheForTest();
+      now.mockReturnValue(start);
+      const stagingSha = git(repo, 'rev-parse', 'HEAD');
+      setPeerFetchForTest(async (input, init) => {
+        fetches += 1;
+        const url = new URL(String(input));
+        expect(url.searchParams.get('local')).toBe('1');
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        return Response.json({ sha: stagingSha, version: '1.4.0', lane: 'wc-ship' });
+      });
+      expect((await resolveStagingTip('demo')).tip?.sha).toBe(stagingSha);
+      now.mockReturnValue(start + 5_000);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(1);
+      now.mockReturnValue(start + 15_000);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(2);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('requestRelease refuses from the peer tip even when the local record would allow it', async () => {

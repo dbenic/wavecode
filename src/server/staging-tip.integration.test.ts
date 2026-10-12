@@ -204,4 +204,53 @@ describe('staging tip is proxied from the release peer', () => {
       'Staging tip source',
     );
   });
+
+  it('does not recurse when both boxes forward, and each answers from the other local tip', async () => {
+    const shaA = '1111111111111111111111111111111111111111';
+    const shaB = '2222222222222222222222222222222222222222';
+    const healthA = path.join(tmp, 'health-a.cjs');
+    const healthB = path.join(tmp, 'health-b.cjs');
+    fs.writeFileSync(healthA, `process.stdout.write(${JSON.stringify(shaA)} + '\\n');\n`);
+    fs.writeFileSync(healthB, `process.stdout.write(${JSON.stringify(shaB)} + '\\n');\n`);
+    devConfig.projects.wavepulse = { ...devConfig.projects.wavepulse, release_peer: 'deploy/fable' };
+    devConfig.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+    devConfig.releases = { staging_health_command: [process.execPath, healthA] };
+    deployConfig.projects.wavepulse = { ...deployConfig.projects.wavepulse, release_peer: 'dev/fable' };
+    deployConfig.peers.dev = { url: 'http://dev.test', token: 'peer-token-0123456789' };
+    deployConfig.releases = { deploy_agent: 'fable', staging_health_command: [process.execPath, healthB] };
+    resetStagingTipCacheForTest();
+
+    const calls: string[] = [];
+    setPeerFetchForTest(async (input, init) => {
+      const url = new URL(String(input));
+      calls.push(`${url.hostname}${url.pathname}${url.search}`);
+      if (calls.length > 4) return Response.json({ error: 'proxy loop' }, { status: 508 });
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      const target = url.hostname === 'dev.test' ? dev : deploy;
+      return target.fetch(new Request(`http://box.local${url.pathname}${url.search}`, {
+        method: init?.method ?? 'GET',
+        headers: init?.headers,
+      }));
+    });
+
+    const fromDev = await dev.fetch(new Request('http://dev.local/api/releases/staging-tip?project=wavepulse'));
+    expect(await fromDev.json()).toMatchObject({ sha: shaB, source: 'peer' });
+    expect(calls).toEqual(['deploy.test/api/releases/staging-tip?project=wavepulse&local=1']);
+
+    calls.length = 0;
+    resetStagingTipCacheForTest();
+    const fromDeploy = await deploy.fetch(new Request('http://deploy.local/api/releases/staging-tip?project=wavepulse'));
+    expect(await fromDeploy.json()).toMatchObject({ sha: shaA, source: 'peer' });
+    expect(calls).toEqual(['dev.test/api/releases/staging-tip?project=wavepulse&local=1']);
+
+    calls.length = 0;
+    const localDev = await dev.fetch(new Request('http://dev.local/api/releases/staging-tip?project=wavepulse&local=1'));
+    expect(await localDev.json()).toMatchObject({ sha: shaA, source: 'health' });
+    const viaHeader = await dev.fetch(new Request('http://dev.local/api/releases/staging-tip?project=wavepulse', {
+      headers: { 'X-WaveCode-Proxied': '1' },
+    }));
+    expect(await viaHeader.json()).toMatchObject({ sha: shaA, source: 'health' });
+    expect(calls).toEqual([]);
+    delete deployConfig.peers.dev;
+  });
 });

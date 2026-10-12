@@ -264,6 +264,7 @@ function isTarget(t: unknown): t is ReleaseTarget {
 }
 
 const STAGING_TIP_TTL_MS = 15_000;
+const STAGING_TIP_FAILURE_TTL_MS = 5_000;
 const STAGING_TIP_PEER_TIMEOUT_MS = 4_000;
 
 export interface ResolvedStagingTip {
@@ -318,14 +319,21 @@ export function releaseForwardTarget(project: string): { peer: string; agent: st
  * that same peer. The local release row is not authoritative, and a local
  * health command does not override the peer. Otherwise the health command
  * wins, then the newest deployed staging record. A peer answer is cached 15s.
- * A failed ask stays `unknown` and does not fall back to the local row.
+ * A failed ask stays `unknown`, is cached 5s, and does not fall back to the local row.
+ * The outbound ask sets `local=1` so the peer answers from its own health command
+ * or deployed row and does not proxy again.
  */
-export async function resolveStagingTip(project: string): Promise<ResolvedStagingTip> {
-  const forward = releaseForwardTarget(project);
+export async function resolveStagingTip(project: string, opts?: { localOnly?: boolean }): Promise<ResolvedStagingTip> {
+  const forward = opts?.localOnly ? null : releaseForwardTarget(project);
   if (forward) {
     const hit = peerTipCache.get(project);
-    if (hit && Date.now() - hit.at < STAGING_TIP_TTL_MS) return hit.value;
-    const res = await peerGetJson<unknown>(forward.peer, `/releases/staging-tip?project=${encodeURIComponent(project)}`, STAGING_TIP_PEER_TIMEOUT_MS);
+    const ttl = hit?.value.state === 'unknown' ? STAGING_TIP_FAILURE_TTL_MS : STAGING_TIP_TTL_MS;
+    if (hit && Date.now() - hit.at < ttl) return hit.value;
+    const res = await peerGetJson<unknown>(
+      forward.peer,
+      `/releases/staging-tip?project=${encodeURIComponent(project)}&local=1`,
+      STAGING_TIP_PEER_TIMEOUT_MS,
+    );
     const value: ResolvedStagingTip = res.ok
       ? { state: 'peer', source: 'peer', tip: normalizePeerTip(res.data) }
       : { state: 'unknown', source: 'peer', tip: null };
@@ -336,8 +344,8 @@ export async function resolveStagingTip(project: string): Promise<ResolvedStagin
   return { state: 'local', source: local.source, tip: local.tip };
 }
 
-export async function stagingTipPayload(project: string): Promise<StagingTipPayload> {
-  const resolved = await resolveStagingTip(project);
+export async function stagingTipPayload(project: string, opts?: { localOnly?: boolean }): Promise<StagingTipPayload> {
+  const resolved = await resolveStagingTip(project, opts);
   return {
     sha: resolved.tip?.sha ?? null,
     version: resolved.tip?.version ?? null,
