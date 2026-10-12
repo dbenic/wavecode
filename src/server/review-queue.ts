@@ -277,8 +277,9 @@ export async function stage(runId: string, opts: { actorIsAdmin?: boolean } = {}
   if (stale) return { ok: false, error: stale };
   const behind = freezes.behindMainBlock(freeze);
   if (behind) return { ok: false, error: behind };
-  // Closed, merged, superseded, contained, forward-only, and the gate. The
-  // same sentence is what the card shows before the button is pressed.
+  // Behind main, rollback, nothing new, superseded, rejected, and the gate.
+  // The same sentence is what the card shows before the button is pressed.
+  // A merged SHA that is on main and forward of staging is still stageable.
   const blocked = await shaStageBlock(freeze);
   if (blocked) return { ok: false, error: blocked };
   if (!freeze.project) return { ok: false, error: 'The freeze names no project, so no release peer can be chosen' };

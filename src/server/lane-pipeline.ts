@@ -557,6 +557,14 @@ export async function drainStagingQueue(project: string): Promise<void> {
     note(row.project, row.lane, row.sha, 'hold', `auto: waiting for GREEN on ${row.sha.slice(0, 8)}`);
     return;
   }
+  const { stageEligibility } = await import('./sha-stage-block.js');
+  const eligible = await stageEligibility(row.sha, row.project, { markStale: true });
+  if (eligible.error) {
+    note(row.project, row.lane, row.sha, 'hold', `auto: ${eligible.error}`);
+    getDb().prepare('DELETE FROM pipeline_queue WHERE sha = ?').run(row.sha);
+    logger.warn({ sha: row.sha, error: eligible.error }, 'Auto-stage refused');
+    return;
+  }
   const dump = row.kind === 'dump';
   // Staging only. This function has no production target.
   const sent = await requestRelease({
@@ -629,6 +637,12 @@ export async function considerAutoStage(sha: string): Promise<void> {
     return;
   }
   const hasMigration = !!project?.migrations_dir && files.some((file) => file === project.migrations_dir || file.startsWith(`${project.migrations_dir}/`));
+  const { stageEligibility } = await import('./sha-stage-block.js');
+  const eligible = await stageEligibility(freeze.sha, freeze.project, { markStale: true });
+  if (eligible.error) {
+    note(freeze.project, freeze.lane, freeze.sha, 'hold', `auto: ${eligible.error}`);
+    return;
+  }
   if (alreadyQueued(freeze.sha)) {
     await drainStagingQueue(freeze.project);
     return;

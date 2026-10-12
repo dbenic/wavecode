@@ -38,12 +38,11 @@ import {
   PRODUCTION_RELEASE_NOT_APPROVER,
   clearSettledReleaseErrors,
   listReleases,
-  stageGateBlock,
   verificationFor,
   resolveStagingTip,
 } from './releases.js';
-import { shaStageBlock, stageRefusal } from './sha-stage-block.js';
-import { readProdHealth, stagingForwardBlock, type StagingTip } from './staging-forward.js';
+import { shaStageBlock, stageEligibility } from './sha-stage-block.js';
+import { readProdHealth } from './staging-forward.js';
 import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
 import {
@@ -433,28 +432,20 @@ async function tipsFor(project: string): Promise<ProjectTips> {
   return out;
 }
 
-/** The card's stage reason, from this SHA: closed or contained, behind main, forward-only, then the gate. */
-async function stageBlockFor(freeze: ReleaseFreeze, facts: DeriveFacts, pair: ProjectTips): Promise<string | null> {
-  let forward: string | null = null;
+/** The card's stage reason. Same guard as Stage, measured against the tip this pass stored. */
+async function stageBlockFor(freeze: ReleaseFreeze, _facts: DeriveFacts, pair: ProjectTips): Promise<string | null> {
+  const tip = pair.staging.sha
+    ? { sha: pair.staging.sha, version: pair.staging.version, lane: pair.staging.lane }
+    : null;
   try {
-    if (pair.stagingKnown && freeze.project && pair.staging.sha) {
-      const tip: StagingTip = { sha: pair.staging.sha, version: pair.staging.version, lane: pair.staging.lane };
-      forward = await stagingForwardBlock(freeze.project, freeze.sha, tip);
-    }
-  } catch { forward = null; }
-  const refusal = stageRefusal({
-    sha: freeze.sha,
-    status: freeze.status,
-    lane: freeze.lane,
-    supersededBy: freeze.superseded_by,
-    onMain: facts.mergedToMain === true,
-    behind: facts.behindMain === true,
-    inStaging: facts.containedInStaging === true,
-    inProd: facts.containedInProd === true,
-    forward,
-  });
-  if (refusal) return refusal;
-  try { return stageGateBlock(freeze); } catch { return null; }
+    const eligible = await stageEligibility(freeze.sha, freeze.project, {
+      includeGate: true,
+      markStale: false,
+      tipResolved: pair.stagingKnown,
+      tip,
+    });
+    return eligible.error;
+  } catch { return null; }
 }
 
 async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<string, ProjectTips>): Promise<DeriveFacts> {

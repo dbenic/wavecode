@@ -132,16 +132,15 @@ describe('ReviewItem freeze card', () => {
     expect(screen.getByTestId('stage-lock').textContent).toBe(blocked.stage_block);
   });
 
-  it('locks STAGE on a merged freeze and shows that it is already on main', () => {
+  it('keeps STAGE available on a merged freeze when the SHA is not otherwise blocked', () => {
     render(
       <MemoryRouter>
         <ReviewItem item={item({ status: 'merged', verdict: 'pass' })} agents={[]} onAction={() => {}} index={0} isAdmin />
       </MemoryRouter>,
     );
     const stage = screen.getByRole('button', { name: 'STAGE' });
-    expect((stage as HTMLButtonElement).disabled).toBe(true);
-    expect(stage.getAttribute('title')).toBe('Freeze 2431f684 is already on main');
-    expect(screen.getByTestId('stage-lock').textContent).toBe('Freeze 2431f684 is already on main');
+    expect((stage as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId('stage-lock')).toBeNull();
   });
 
   it('keeps PROMOTE disabled until the full run is green, and shows a failure after staging', () => {

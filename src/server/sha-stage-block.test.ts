@@ -42,14 +42,16 @@ function git(repo: string, ...args: string[]): string {
 describe('stageRefusal', () => {
   const sha = 'b1729c93aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
-  it('refuses closed, merged, superseded, and contained SHAs before a forward move', () => {
-    expect(stageRefusal({ sha, status: 'merged' })).toBe('Freeze b1729c93 is already on main');
-    expect(stageRefusal({ sha, status: 'open', onMain: true })).toBe('Freeze b1729c93 is already on main');
+  it('refuses behind, rollback, contained, superseded, and rejected; merged and on main stay open', () => {
+    expect(stageRefusal({ sha, status: 'merged' })).toBeNull();
+    expect(stageRefusal({ sha, status: 'open', onMain: true })).toBeNull();
+    expect(stageRefusal({ sha, status: 'promoted' })).toBeNull();
     expect(stageRefusal({ sha, status: 'rejected' })).toBe('Freeze b1729c93 was rejected');
-    expect(stageRefusal({ sha, status: 'promoted' })).toBe('Freeze b1729c93 was already promoted');
+    expect(stageRefusal({ sha, status: 'abandoned' })).toBe('Freeze b1729c93 was abandoned');
     expect(stageRefusal({ sha, status: 'stale', lane: 'canary-e2e', supersededBy: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' })).toMatch(/stale/);
     expect(stageRefusal({ sha, status: 'open', behind: true })).toBe('behind main: merge main');
-    expect(stageRefusal({ sha, status: 'open', inProd: true, forward: 'would roll staging back' })).toBe('Freeze b1729c93 is already in production');
+    expect(stageRefusal({ sha, status: 'open', inProd: true, forward: 'would roll staging back' })).toMatch(/would roll staging back/);
+    expect(stageRefusal({ sha, status: 'open', inProd: true })).toBeNull();
     expect(stageRefusal({ sha, status: 'open', forward: 'would roll staging back: b1729c93 is missing 2 commits now on staging' })).toMatch(/would roll staging back/);
     expect(stageRefusal({ sha, status: 'open', inStaging: true })).toBe('Freeze b1729c93 is already on staging');
     expect(stageRefusal({ sha, status: 'open' })).toBeNull();
@@ -141,7 +143,7 @@ describe('stage block from the card SHA', () => {
     expect(listed.status).toBe(200);
     const cards = await listed.json() as Array<{ task: { prompt: string }; stage_block: string | null }>;
     const byPrompt = new Map(cards.map((card) => [card.task.prompt, card.stage_block]));
-    expect(byPrompt.get('older card')).toBe(`Freeze ${base.slice(0, 8)} is already on main`);
+    expect(byPrompt.get('older card')).toMatch(/would roll staging back/);
     expect(byPrompt.get('unknown lane')).toMatch(/would roll staging back/);
     expect(byPrompt.get('already staged')).toBe(`Freeze ${stagingSha.slice(0, 8)} is already on staging`);
 
@@ -150,7 +152,7 @@ describe('stage block from the card SHA', () => {
 
     const stagedOlder = await stage(older);
     expect(stagedOlder.ok).toBe(false);
-    if (!stagedOlder.ok) expect(stagedOlder.error).toBe(`Freeze ${base.slice(0, 8)} is already on main`);
+    if (!stagedOlder.ok) expect(stagedOlder.error).toMatch(/would roll staging back/);
 
     const stagedContained = await stage(contained);
     expect(stagedContained.ok).toBe(false);
@@ -167,19 +169,17 @@ describe('stage block from the card SHA', () => {
     expect(stillListed.some((card) => card.task.prompt === 'unknown lane')).toBe(false);
     const stagedMerged = await stage(canary);
     expect(stagedMerged.ok).toBe(false);
-    if (!stagedMerged.ok) expect(stagedMerged.error).toBe(`Freeze ${laneSha.slice(0, 8)} is already on main`);
+    if (!stagedMerged.ok) expect(stagedMerged.error).toMatch(/would roll staging back/);
 
     db.getDb().prepare("UPDATE release_freezes SET status = 'stale', superseded_by = ? WHERE run_id = ?").run(laneSha, contained);
     const stagedStale = await stage(contained);
     expect(stagedStale.ok).toBe(false);
     if (!stagedStale.ok) expect(stagedStale.error).toMatch(/stale/);
 
-    const prod = path.join(tmp, 'prod.cjs');
-    fs.writeFileSync(prod, `process.stdout.write(${JSON.stringify(stagingSha)} + '\\n');\n`);
-    releases.prod_health_command = [process.execPath, prod];
-    const prodBlock = await shaStageBlock({
+    db.getDb().prepare("UPDATE release_freezes SET status = 'open', superseded_by = NULL WHERE sha = ?").run(stagingSha);
+    const containedBlock = await shaStageBlock({
       sha: stagingSha, project: 'wave', lane: 'canary-e2e', gate: 'GREEN', status: 'open', superseded_by: null,
     });
-    expect(prodBlock).toBe(`Freeze ${stagingSha.slice(0, 8)} is already in production`);
+    expect(containedBlock).toBe(`Freeze ${stagingSha.slice(0, 8)} is already on staging`);
   });
 });

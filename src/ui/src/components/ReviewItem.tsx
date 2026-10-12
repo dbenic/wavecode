@@ -132,15 +132,9 @@ export default function ReviewItem({
   const staleTitle = freeze
     ? `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on; freeze the new SHA`
     : '';
-  const settledTitle = !freeze
-    ? null
-    : freeze.status === 'merged'
-      ? `Freeze ${freeze.sha.slice(0, 8)} is already on main`
-      : freeze.status === 'rejected'
-        ? `Freeze ${freeze.sha.slice(0, 8)} was rejected`
-        : freeze.status === 'promoted'
-          ? `Freeze ${freeze.sha.slice(0, 8)} was already promoted`
-          : null;
+  const settledTitle = freeze?.status === 'rejected'
+    ? `Freeze ${freeze.sha.slice(0, 8)} was rejected`
+    : null;
   // A freeze card promotes only on an independent PASS on the exact SHA, and only once the full gate is green. A stale SHA never.
   const passOk = !freeze || (freeze.verdict === 'pass' && !freezeStale);
   const promoteReason = freezeStale

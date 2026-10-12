@@ -53,7 +53,7 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
         return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})` }, 403);
       }
     }
-    const r = releases.acceptRelease(
+    const r = await releases.acceptRelease(
       { ...body, requested_by: fromPeer ? body.requested_by : user.name },
       { userName: user.name, fromPeer, actorIsAdmin: isAdmin(user) && !fromPeer },
     );
@@ -95,6 +95,11 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
       if (!deployed && lanes.some((l) => l.verdict !== 'pass')) {
         return c.json({ error: releases.STAGE_NEEDS_PASS }, 403);
       }
+    }
+    if (action === 'stage') {
+      const { stageEligibility } = await import('../sha-stage-block.js');
+      const eligible = await stageEligibility(cand.tip, project, { markStale: true });
+      if (eligible.error) return c.json({ error: eligible.error }, 400);
     }
     const r = await releases.requestRelease({
       project, sha: cand.tip, lane: cand.name, target: action === 'promote' ? 'production' : 'staging',

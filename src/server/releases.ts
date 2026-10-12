@@ -539,26 +539,23 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const resolvedTip = await resolveStagingTip(opts.project);
     const staging = resolvedTip.state === 'unknown' ? null : resolvedTip.tip;
     if (resolvedTip.state !== 'unknown') rejectStaleStaging(opts.project, staging);
-    const forward = evaluateForward({
-      project: opts.project,
-      requestedSha: opts.sha,
-      staging,
+    const { stageEligibility } = await import('./sha-stage-block.js');
+    const eligible = await stageEligibility(opts.sha, opts.project, {
+      tipResolved: true,
+      tip: staging,
       forceRollback: opts.forceRollback,
       forceReason: opts.forceReason,
       actorIsAdmin: opts.actorIsAdmin,
+      markStale: true,
     });
-    if (!forward.ok) {
-      if (opts.lane) alertBehind({ lane: opts.lane, project: opts.project });
-      return forward;
+    if (eligible.error) {
+      if (opts.lane && laneAlert(eligible.error)) alertBehind({ lane: opts.lane, project: opts.project });
+      return { ok: false, error: eligible.error };
     }
-    if (forward.rollback && forward.reason) rollbackReason = forward.reason;
+    if (eligible.rollbackReason) rollbackReason = eligible.rollbackReason;
   }
   try {
     const freeze = getFreeze(opts.sha);
-    if (freeze && opts.target === 'staging') {
-      const stale = staleStageBlock(freeze);
-      if (stale) return { ok: false, error: stale };
-    }
     if (freeze && opts.target === 'production') {
       const full = promoteFullBlock(freeze);
       if (full) return { ok: false, error: full };
@@ -650,8 +647,13 @@ export function peerProductionAllowed(body: IncomingRelease): Result<true> {
   return { ok: true, data: true };
 }
 
+/** A forward or behind refusal is the lane's problem. A closed or contained SHA is not. */
+function laneAlert(error: string): boolean {
+  return /^(behind main|would roll staging back|cannot prove|force_rollback)/.test(error);
+}
+
 /** A request from a peer box (or a local caller): store it and hand it to the deploy agent. */
-export function acceptRelease(body: IncomingRelease, via: { userName: string; fromPeer: boolean; actorIsAdmin?: boolean }): Result<ReleaseRequest> {
+export async function acceptRelease(body: IncomingRelease, via: { userName: string; fromPeer: boolean; actorIsAdmin?: boolean }): Promise<Result<ReleaseRequest>> {
   const sha = typeof body.sha === 'string' ? body.sha.trim().toLowerCase() : '';
   if (!SHA_RE.test(sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(body.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
@@ -683,20 +685,20 @@ export function acceptRelease(body: IncomingRelease, via: { userName: string; fr
   }
   if (body.target === 'staging') {
     rejectStaleStaging(projectName);
-    const forward = evaluateForward({
-      project: projectName,
-      requestedSha: sha,
-      staging: currentStagingTip(projectName),
+    const { stageEligibility } = await import('./sha-stage-block.js');
+    const eligible = await stageEligibility(sha, projectName, {
+      localTip: true,
       forceRollback: body.force_rollback === true,
       forceReason: typeof body.force_reason === 'string' ? body.force_reason : null,
       actorIsAdmin: via.actorIsAdmin === true,
+      markStale: true,
     });
-    if (!forward.ok) {
+    if (eligible.error) {
       const lane = str(body.lane, 120);
-      if (lane) alertBehind({ lane, project: projectName });
-      return forward;
+      if (lane && laneAlert(eligible.error)) alertBehind({ lane, project: projectName });
+      return { ok: false, error: eligible.error };
     }
-    if (forward.rollback && forward.reason) rollbackReason = forward.reason;
+    if (eligible.rollbackReason) rollbackReason = eligible.rollbackReason;
   }
   const open = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
   if (open) return { ok: true, data: open }; // idempotent: a retried request is the same request

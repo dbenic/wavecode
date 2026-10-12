@@ -1,103 +1,190 @@
 /**
- * Stage lock for one freeze SHA. The lane board only knows configured lanes,
- * so a card whose lane is missing (or an older SHA on a known lane) used to
- * ship with `stage_block: null` and an enabled Stage button. This reads the
- * SHA itself: closed, merged, superseded, already contained, behind main,
- * then forward-only, then the gate.
+ * One Stage guard for every path that can put a SHA on staging.
+ *
+ * Containing current main is required. A SHA that already sits on main is
+ * still stageable when it moves staging forward, including a freeze closed
+ * as merged — that is the normal path after the lane lands. Refuse only when
+ * the SHA is behind main (it does not contain main), would roll staging
+ * back, is already the staging tip (nothing new), is superseded by a newer
+ * freeze in its lane, or the freeze is closed as rejected or abandoned.
+ * `force_rollback` skips only the ancestor check.
  */
 
-import { gitAncestorSync } from './git-memo.js';
-import { commitsBehind, projectRepo } from './lane-main.js';
+import { commitsBehind } from './lane-main.js';
 import { behindMainLine } from './lane-status.js';
-import { isOnMain, staleStageMessage, type ReleaseFreeze } from './release-freezes.js';
-import { listReleases, resolveStagingTip, stageGateBlock } from './releases.js';
-import { readProdHealth, stagingForwardBlock } from './staging-forward.js';
+import {
+  getFreeze, listFreezes, releaseBehindMain, staleStageBlock, staleStageMessage, type ReleaseFreeze,
+} from './release-freezes.js';
+import { currentStagingTip, resolveStagingTip, stageGateBlock } from './releases.js';
+import { evaluateForward, type StagingTip } from './staging-forward.js';
 
 export interface StageFacts {
   sha: string;
   status?: string | null;
   lane?: string | null;
   supersededBy?: string | null;
+  /** Ignored. Being on main is required, not a refusal. */
   onMain?: boolean | null;
   behind?: boolean | null;
   inStaging?: boolean | null;
+  /** Ignored. Production containment is not a staging refusal. */
   inProd?: boolean | null;
   /** Set when staging this SHA would move staging backwards. */
   forward?: string | null;
-}
-
-export function alreadyOnMain(sha: string): string {
-  return `Freeze ${sha.slice(0, 8)} is already on main`;
 }
 
 export function alreadyOnStaging(sha: string): string {
   return `Freeze ${sha.slice(0, 8)} is already on staging`;
 }
 
-export function alreadyInProduction(sha: string): string {
-  return `Freeze ${sha.slice(0, 8)} is already in production`;
-}
-
-/** Why Stage must refuse, before the test gate. Null when none of these apply. */
+/**
+ * Fact-only form of the guard, for a caller that already measured the SHA.
+ * Same sentences as `stageEligibility`. Merged and on-main are not refusals.
+ */
 export function stageRefusal(facts: StageFacts): string | null {
   const status = facts.status ?? '';
-  if (status === 'merged' || facts.onMain === true) return alreadyOnMain(facts.sha);
   if (status === 'rejected') return `Freeze ${facts.sha.slice(0, 8)} was rejected`;
-  if (status === 'promoted') return `Freeze ${facts.sha.slice(0, 8)} was already promoted`;
+  if (status === 'abandoned') return `Freeze ${facts.sha.slice(0, 8)} was abandoned`;
   if (status === 'stale') return staleStageMessage({ sha: facts.sha, lane: facts.lane ?? null }, facts.supersededBy ?? null);
   if (facts.behind === true || status === 'behind-main') return behindMainLine(1);
-  if (facts.inProd === true) return alreadyInProduction(facts.sha);
   if (facts.forward) return facts.forward;
   if (facts.inStaging === true) return alreadyOnStaging(facts.sha);
   return null;
+}
+
+export interface StageEligibilityOpts {
+  /**
+   * Deploy box: measure against `currentStagingTip` (this box's health command
+   * or deployed row), not the release peer.
+   */
+  localTip?: boolean;
+  /** Caller already resolved the tip. `null` means there is no known tip. */
+  tipResolved?: boolean;
+  tip?: StagingTip | null;
+  forceRollback?: boolean;
+  forceReason?: string | null;
+  actorIsAdmin?: boolean;
+  /** Card and `stage()` include the test gate. A release request does not. */
+  includeGate?: boolean;
+  /** Mark a moved lane tip stale. Card reads stay read-only. */
+  markStale?: boolean;
+  /** Patch the freeze and ping the lane when the SHA is behind main. */
+  recordBehind?: boolean;
+}
+
+export interface StageEligibility {
+  error: string | null;
+  /** Set when an admin force-rollback is allowed through. */
+  rollbackReason: string | null;
+}
+
+const CLEAR: StageEligibility = { error: null, rollbackReason: null };
+
+function refused(error: string): StageEligibility {
+  return { error, rollbackReason: null };
+}
+
+function closedStatus(freeze: ReleaseFreeze): string | null {
+  const status = freeze.status as string;
+  if (status === 'rejected') return `Freeze ${freeze.sha.slice(0, 8)} was rejected`;
+  if (status === 'abandoned') return `Freeze ${freeze.sha.slice(0, 8)} was abandoned`;
+  return null;
+}
+
+/** A later freeze on the same lane. Rejected and abandoned rows do not count. */
+function newerInLane(freeze: ReleaseFreeze): string | null {
+  if (!freeze.project || !freeze.lane) return null;
+  let newer: string | null = null;
+  try {
+    for (const other of listFreezes()) {
+      if (other.sha === freeze.sha || other.project !== freeze.project || other.lane !== freeze.lane) continue;
+      const status = other.status as string;
+      if (status === 'rejected' || status === 'abandoned') continue;
+      if (other.created_at > freeze.created_at) newer = other.sha;
+    }
+  } catch { /* freeze table unavailable */ }
+  return newer;
+}
+
+function behindLine(project: string, sha: string, freeze: ReleaseFreeze | null): string | null {
+  let n: number | null = null;
+  try { n = commitsBehind(project, sha); } catch { n = null; }
+  if (freeze?.status === 'behind-main') {
+    if (n != null && n > 0) return behindMainLine(n);
+    return 'behind main: merge main';
+  }
+  if (n != null && n > 0) return behindMainLine(n);
+  return null;
+}
+
+/**
+ * Whether this SHA may be staged. Null error means yes.
+ * Dev box passes the peer tip (`tipResolved`). Deploy box passes `localTip`.
+ */
+export async function stageEligibility(sha: string, project: string | null, opts: StageEligibilityOpts = {}): Promise<StageEligibility> {
+  if (!project) return CLEAR;
+  let freeze: ReleaseFreeze | null = null;
+  try { freeze = getFreeze(sha); } catch { freeze = null; }
+
+  if (freeze) {
+    const closed = closedStatus(freeze);
+    if (closed) return refused(closed);
+    if (opts.markStale) {
+      const stale = staleStageBlock(freeze);
+      if (stale) return refused(stale);
+      try { freeze = getFreeze(sha) ?? freeze; } catch { /* keep the row we had */ }
+    } else if (freeze.status === 'stale') {
+      return refused(staleStageMessage(freeze, freeze.superseded_by));
+    }
+    const newer = newerInLane(freeze);
+    if (newer) return refused(staleStageMessage(freeze, newer));
+  }
+
+  if (opts.recordBehind) {
+    try {
+      const behind = releaseBehindMain(project, sha);
+      if (behind) return refused(behind);
+    } catch { /* the count below still runs */ }
+  }
+  const behind = behindLine(project, sha, freeze);
+  if (behind) return refused(behind);
+
+  let tip: StagingTip | null = null;
+  if (opts.localTip) tip = currentStagingTip(project);
+  else if (opts.tipResolved) tip = opts.tip ?? null;
+  else {
+    try {
+      const resolved = await resolveStagingTip(project);
+      tip = resolved.state === 'unknown' ? null : resolved.tip;
+    } catch { tip = null; }
+  }
+
+  const forward = evaluateForward({
+    project,
+    requestedSha: sha,
+    staging: tip,
+    forceRollback: opts.forceRollback,
+    forceReason: opts.forceReason,
+    actorIsAdmin: opts.actorIsAdmin,
+  });
+  if (!forward.ok) return refused(forward.error);
+  if (tip?.sha && tip.sha.toLowerCase() === sha.toLowerCase()) return refused(alreadyOnStaging(sha));
+
+  if (opts.includeGate && freeze) {
+    try {
+      const gate = stageGateBlock(freeze);
+      if (gate) return refused(gate);
+    } catch { /* unreadable gate: do not invent a lock */ }
+  }
+  return { error: null, rollbackReason: forward.rollback ? forward.reason : null };
 }
 
 type ShaFreeze = Pick<ReleaseFreeze, 'sha' | 'project' | 'lane' | 'gate' | 'status' | 'superseded_by'> & {
   freeze_path?: string | null;
 };
 
-/** Behind main, forward-only, and closed/contained, from this SHA. The lane name is not required. */
+/** Card sentence for one freeze SHA. Same guard as Stage, plus the test gate. */
 export async function shaStageBlock(freeze: ShaFreeze): Promise<string | null> {
-  let onMain: boolean | null = null;
-  let behind: boolean | null = freeze.status === 'behind-main' ? true : null;
-  let inStaging: boolean | null = null;
-  let inProd: boolean | null = null;
-  let forward: string | null = null;
-  const project = freeze.project;
-  if (project) {
-    try { onMain = isOnMain(project, freeze.sha); } catch { onMain = null; }
-    try {
-      const n = commitsBehind(project, freeze.sha);
-      if (n != null) behind = n > 0 || behind === true;
-    } catch { /* keep the status bit */ }
-    try {
-      const resolved = await resolveStagingTip(project);
-      const tip = resolved.state === 'unknown' ? null : resolved.tip;
-      const repo = projectRepo(project);
-      if (tip?.sha && repo) inStaging = gitAncestorSync(repo, freeze.sha, tip.sha);
-      if (tip?.sha) forward = await stagingForwardBlock(project, freeze.sha, tip);
-    } catch { /* unknown tip: do not invent a forward block */ }
-    try {
-      const health = readProdHealth(project);
-      const row = listReleases({ project, target: 'production', status: 'deployed', limit: 1 })[0]
-        ?? listReleases({ target: 'production', status: 'deployed', limit: 20 }).find((r) => r.project == null || r.project === project)
-        ?? null;
-      const prodSha = health?.sha ?? (row ? (row.deployed_sha || row.sha) : null);
-      const repo = projectRepo(project);
-      if (prodSha && repo) inProd = gitAncestorSync(repo, freeze.sha, prodSha);
-    } catch { inProd = null; }
-  }
-  const refusal = stageRefusal({
-    sha: freeze.sha,
-    status: freeze.status,
-    lane: freeze.lane,
-    supersededBy: freeze.superseded_by,
-    onMain,
-    behind,
-    inStaging,
-    inProd,
-    forward,
-  });
-  if (refusal) return refusal;
-  try { return stageGateBlock(freeze); } catch { return null; }
+  const result = await stageEligibility(freeze.sha, freeze.project, { includeGate: true, markStale: false });
+  return result.error;
 }

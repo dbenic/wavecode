@@ -165,13 +165,9 @@ export default function Release() {
     const st = cellLabel(l.staging);
     const openReq = !!l.staging && (l.staging.status === 'sent' || l.staging.status === 'requested');
     const closed = l.status === 'merged' || l.status === 'rejected' || l.status === 'promoted';
-    const closedTitle = l.status === 'merged'
-      ? `Freeze ${l.sha.slice(0, 8)} is already on main`
-      : l.status === 'rejected'
-        ? `Freeze ${l.sha.slice(0, 8)} was rejected`
-        : l.status === 'promoted'
-          ? `Freeze ${l.sha.slice(0, 8)} was already promoted`
-          : null;
+    const closedTitle = l.status === 'rejected'
+      ? `Freeze ${l.sha.slice(0, 8)} was rejected`
+      : null;
     const verified = l.staging?.verified_by ?? null;
     return (
       <tr className={l.status !== 'open' ? 'opacity-60' : ''} data-testid={`lane-${l.sha.slice(0, 8)}`}>
