@@ -272,8 +272,9 @@ export function mergedMainAlert(lane: string): string {
 function latestPing(lane: string, mainSha: string): { at: number } | null {
   try {
     const row = getDb().prepare(
-      'SELECT payload_json, created_at FROM events WHERE type = ? AND entity_id = ? ORDER BY id DESC LIMIT 1',
-    ).get(MAIN_PING, pingKey(lane, mainSha)) as { payload_json: string | null; created_at: string } | undefined;
+      // entity_type first so idx_events_entity serves it; (type, entity_id) alone scans the whole table
+      "SELECT payload_json, created_at FROM events WHERE entity_type = 'lane' AND entity_id = ? AND type = ? ORDER BY id DESC LIMIT 1",
+    ).get(pingKey(lane, mainSha), MAIN_PING) as { payload_json: string | null; created_at: string } | undefined;
     if (!row) return null;
     if (row.payload_json) {
       const payload = JSON.parse(row.payload_json) as { at?: unknown };
@@ -362,6 +363,13 @@ function authorForLane(lane: string, authorAgentId: string | null, authorName: s
  * that contains this main. `merged` is the auto-merge sentence and shares
  * the same dedupe key. An agent in `review_deny` (name or alias) is not delivered to.
  */
+/** (lane, main SHA) pairs found no longer behind or already reviewed: not re-asked for REPEAT_MS. */
+const caughtUp = new Map<string, number>();
+
+export function resetMainPingMemoForTest(): void {
+  caughtUp.clear();
+}
+
 export function pingLaneAboutMain(opts: {
   lane: string;
   project: string | null;
@@ -372,10 +380,18 @@ export function pingLaneAboutMain(opts: {
   kind: 'freeze' | 'moved' | 'merged';
 }): boolean {
   if (!opts.lane || !opts.mainSha) return false;
+  const key = pingKey(opts.lane, opts.mainSha);
   const latest = latestPing(opts.lane, opts.mainSha);
   if (latest) {
     if (nowMs() - latest.at < REPEAT_MS) return false;
-    if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) return false;
+    // A lane that has caught up with this main cannot fall behind the same main again, so
+    // the git questions are asked once per lane and main, not on every board refresh.
+    const settled = caughtUp.get(key);
+    if (settled !== undefined && nowMs() - settled < REPEAT_MS) return false;
+    if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) {
+      caughtUp.set(key, nowMs());
+      return false;
+    }
   }
   const agent = authorForLane(opts.lane, opts.authorAgentId ?? null, opts.authorName ?? null, opts.project);
   if (!agent || laneAutomationDenied(opts.project, agent)) return false;
