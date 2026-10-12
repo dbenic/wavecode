@@ -9,6 +9,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
+import { gitAncestor, gitText } from './git-memo.js';
 import { behindMainLine } from './lane-status.js';
 import { commitsBehind, projectRepo } from './lane-main.js';
 
@@ -115,4 +116,40 @@ export function evaluateForward(opts: {
     return { ok: true, rollback: true, reason };
   }
   return { ok: false, error };
+}
+
+/** Ancestor result for one lane tip against one staging tip. A repeat refresh does not ask git again. */
+const forwardMemo = new Map<string, string | null>();
+
+export function resetForwardMemoForTest(): void {
+  forwardMemo.clear();
+}
+
+/**
+ * The card's forward check. Same refusal as `evaluateForward` when the SHA
+ * does not contain the staging tip, cached by (lane SHA, staging tip).
+ */
+export async function stagingForwardBlock(project: string, requestedSha: string, staging: StagingTip | null): Promise<string | null> {
+  if (!staging?.sha || !/^[0-9a-f]{40}$/i.test(requestedSha)) return null;
+  const laneSha = requestedSha.toLowerCase();
+  const stagingSha = staging.sha.toLowerCase();
+  if (stagingSha === laneSha) return null;
+  const repo = projectRepo(project);
+  const key = `${repo ?? ''}:${stagingSha}:${laneSha}`;
+  if (forwardMemo.has(key)) return forwardMemo.get(key) ?? null;
+  const unproven = `cannot prove ${laneSha.slice(0, 8)} contains staging ${stagingSha.slice(0, 8)}`;
+  let block: string | null;
+  if (!repo) block = unproven;
+  else {
+    const contains = await gitAncestor(repo, stagingSha, laneSha);
+    if (contains === null) block = unproven;
+    else if (contains) block = null;
+    else {
+      const count = await gitText(repo, ['rev-list', '--count', `${laneSha}..${stagingSha}`]);
+      const missing = count && /^\d+$/.test(count) ? Number(count) : 0;
+      block = rollbackRefusal(laneSha, missing, staging.version, staging.lane);
+    }
+  }
+  forwardMemo.set(key, block);
+  return block;
 }

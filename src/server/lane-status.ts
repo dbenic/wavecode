@@ -37,6 +37,10 @@ export interface LaneStatusInput {
   behindMain: number;
   /** SHA does not contain what is on staging now. Ignored while behind main. */
   behindStaging?: boolean;
+  /** Same refusal evaluateForward returns. Disables Stage. Ignored while behind main. */
+  forwardBlock?: string | null;
+  /** The deploy box could not be asked for its staging tip. Stage stays enabled. */
+  stagingTipUnknown?: boolean;
   /** First failing operational prereq, shown but not a Stage lock. */
   prereqNote?: string | null;
   /** First configured protected path the diff touches. */
@@ -130,8 +134,10 @@ function processStep(input: LaneStatusInput): string | null {
 /** The single visible line. Behind-main wins on its own: the lane cannot move until it is merged up. */
 export function laneStatusLine(input: LaneStatusInput): string {
   if (input.behindMain > 0) return behindMainLine(input.behindMain);
+  if (input.forwardBlock) return input.forwardBlock;
   if (input.behindStaging) return BEHIND_STAGING_LINE;
   const notes: string[] = [];
+  if (input.stagingTipUnknown) notes.push('staging tip unknown');
   if (input.protectedPath) notes.push(`touches ${input.protectedPath} — dev lanes must not`);
   if (input.hasMigration) notes.push('has migration — deploy agent stages it');
   if (input.overlap && input.overlap.files > 0) {

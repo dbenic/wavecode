@@ -44,6 +44,7 @@ import { behindMainLine } from './lane-status.js';
 import { gitText } from './git-memo.js';
 import { commitsBehind, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
+import { readLaneTests, shaChecks, suiteNames, testsConfigured, type TestRun } from './test-runs.js';
 
 /** merged = the SHA is an ancestor of the project's main: the lane is done, whatever its last verdict said.
  *  behind-main = the SHA does not contain the project's current main, so it cannot be staged. */
@@ -194,6 +195,148 @@ function findSha(text: string, lines: string[]): string | null {
 
 const VERDICT_LINE_RE = /\bVERDICT:?\s*\**\s*(PASS|NEEDS[ -]FIXES|FAIL|REJECT)\b/i;
 
+export interface NoteChecks {
+  quick: 'green' | 'red' | null;
+  full: 'green' | 'red' | null;
+}
+
+function prefixMatches(mention: string, sha: string): boolean {
+  return sha.startsWith(mention) || mention.startsWith(sha);
+}
+
+/** 'other' when any 7+ hex token is not a prefix of this SHA. One matching prefix does not rescue the line. */
+function shaMention(line: string, sha: string): 'this' | 'other' | 'none' {
+  const mentions = [...line.toLowerCase().matchAll(/\b[0-9a-f]{7,40}\b/g)].map((m) => m[0]);
+  if (mentions.length === 0) return 'none';
+  if (mentions.some((m) => !prefixMatches(m, sha))) return 'other';
+  return 'this';
+}
+
+function noteCheckOnLine(line: string): { kind: 'quick' | 'full'; word: 'green' | 'red' } | null {
+  const words = new Set([...line.matchAll(/\b(GREEN|RED)\b/gi)].map((m) => m[1].toUpperCase()));
+  if (words.size !== 1) return null;
+  const patterns: Array<{ kind: 'quick' | 'full'; re: RegExp }> = [
+    { kind: 'quick', re: /\bquick\s+check\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'quick', re: /\btier\s*1\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'full', re: /\bRESULT\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'full', re: /\bGATE\b\s*:?\s*(GREEN|RED)\b/i },
+    { kind: 'full', re: /\bfull-tuned\b\s*:?\s*(GREEN|RED)\b/i },
+  ];
+  for (const pattern of patterns) {
+    const match = line.match(pattern.re);
+    if (match) return { kind: pattern.kind, word: match[1].toLowerCase() === 'green' ? 'green' : 'red' };
+  }
+  return null;
+}
+
+/**
+ * Quick and full results written in a freeze note. A line counts when every
+ * 7+ hex token on it is a prefix of this SHA, or when it names no SHA and the
+ * note's frozen SHA is this SHA. Any token that is not a prefix of this SHA
+ * rejects the whole line.
+ */
+export function parseNoteChecks(text: string, sha: string): NoteChecks {
+  const wanted = sha.toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(wanted)) return { quick: null, full: null };
+  const lines = text.replace(/\r/g, '').split('\n');
+  const noteForThis = findSha(text, lines) === wanted;
+  const out: NoteChecks = { quick: null, full: null };
+  for (const line of lines) {
+    const hit = noteCheckOnLine(line);
+    if (!hit) continue;
+    const named = shaMention(line, wanted);
+    if (named === 'other') continue;
+    if (named === 'none' && !noteForThis) continue;
+    out[hit.kind] = hit.word;
+  }
+  return out;
+}
+
+type CommandGate = 'GREEN' | 'RED' | 'QUEUED' | 'RUNNING';
+
+/** Latest full-gate command word for this exact SHA, if one was recorded. */
+function recordedCommandGate(sha: string): CommandGate | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT payload_json FROM events WHERE type = 'pipeline.gate' AND entity_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(`${sha.toLowerCase()}:full`) as { payload_json: string | null } | undefined;
+    if (!row?.payload_json) return null;
+    const payload = JSON.parse(row.payload_json) as { gate?: string; sha?: string };
+    if (payload.sha && payload.sha.toLowerCase() !== sha.toLowerCase()) return null;
+    const gate = String(payload.gate ?? '').toUpperCase();
+    if (gate === 'GREEN' || gate === 'RED' || gate === 'QUEUED' || gate === 'RUNNING') return gate;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Column GREEN only when the note confirms GREEN for this SHA or the latest
+ * command event for this SHA is GREEN. Any other command word replaces a
+ * stale note GREEN; with no command word the column is null.
+ */
+function storedFreezeGate(sha: string, noteGate: string | null): string | null {
+  const command = recordedCommandGate(sha);
+  if ((noteGate ?? '').toUpperCase() === 'GREEN' || command === 'GREEN') return 'GREEN';
+  if (command) return command;
+  return null;
+}
+
+export interface ShaView {
+  quick: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
+  full: 'green' | 'red' | 'pending' | 'missing' | 'unconfigured';
+  /** Full-gate word for the card badge. */
+  gate: 'GREEN' | 'RED' | null;
+}
+
+function readFreezeNote(filePath: string | null | undefined): string | null {
+  if (!filePath) return null;
+  try { return fs.readFileSync(filePath, 'utf8'); } catch { return null; }
+}
+
+/**
+ * Status command wins when it reports this SHA. Otherwise the freeze note, then
+ * a latest command event of GREEN for this SHA. A stored column GREEN is not
+ * enough once the note was read and does not confirm this SHA.
+ */
+export function viewShaChecks(freeze: {
+  project: string | null;
+  sha: string;
+  lane: string | null;
+  gate: string | null;
+  freeze_path?: string | null;
+}, runs?: TestRun[]): ShaView {
+  const note = readFreezeNote(freeze.freeze_path);
+  const parsed = note != null ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
+  const configured = !!(freeze.project && testsConfigured(freeze.project));
+  const live = configured
+    ? shaChecks(runs ?? readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project))
+    : null;
+  const sawNote = parsed.quick != null || parsed.full != null;
+  const pick = (liveState: 'green' | 'red' | 'pending' | 'missing' | undefined, noteWord: 'green' | 'red' | null): ShaView['quick'] => {
+    if (liveState && liveState !== 'missing') return liveState;
+    if (noteWord) return noteWord;
+    if (!configured && !sawNote) return 'unconfigured';
+    return 'missing';
+  };
+  let full = pick(live?.full, parsed.full);
+  let gate: 'GREEN' | 'RED' | null = full === 'green' ? 'GREEN' : full === 'red' ? 'RED' : null;
+  // A command GREEN for this SHA counts. A stored column GREEN does not, once
+  // the note was read and does not itself confirm this SHA.
+  if (full !== 'green' && full !== 'red' && recordedCommandGate(freeze.sha) === 'GREEN') {
+    full = 'green';
+    gate = 'GREEN';
+  }
+  const stored = (freeze.gate ?? '').toUpperCase();
+  const staleGreen = stored === 'GREEN' && note != null && !parsed.full;
+  if (!staleGreen && (full === 'missing' || full === 'unconfigured') && !parsed.full && (stored === 'GREEN' || stored === 'RED') && (!live || live.full === 'missing')) {
+    full = stored === 'GREEN' ? 'green' : 'red';
+    gate = stored === 'GREEN' ? 'GREEN' : 'RED';
+  }
+  return { quick: pick(live?.quick, parsed.quick), full, gate };
+}
+
 /** The last line that states exactly one verdict; "issue `VERDICT: PASS` or `VERDICT: NEEDS FIXES`" states two and is a request, not a verdict. */
 function findVerdict(lines: string[]): { verdict: ReviewVerdict; line: string } | null {
   let found: { verdict: ReviewVerdict; line: string } | null = null;
@@ -262,7 +405,8 @@ export function parseFreezeFile(text: string, filename: string): ParsedFreezeFil
   const project = nameAfter(/\bproject\b\**\s*[:：]\**\s*([A-Za-z][\w-]*)/i, head)
     ?? head.join('\n').match(/\bCountix\s*\/\s*([A-Za-z][\w-]*)/)?.[1] ?? null;
   const lane = nameAfter(/\b(?:lane|branch)\b\**\s*[:：]?\**\s*`?(wc-[\w./-]+|[\w./-]*\/[\w./-]+|[\w.-]+)`?/i, head);
-  const gate = (text.match(/full-tuned\b[^\n]*?\b(GREEN|RED)\b/i) ?? text.match(/\bgate\b[^\n]*?\b(GREEN|RED)\b/i))?.[1]?.toUpperCase() ?? null;
+  const noted = sha ? parseNoteChecks(text, sha) : null;
+  const gate = noted?.full === 'green' ? 'GREEN' : noted?.full === 'red' ? 'RED' : null;
   const verdictPath = v ? (v.line.match(/(\/[\w.@+-]+(?:\/[\w.@+-]+)*\.(?:md|markdown|txt))/)?.[1] ?? null) : null;
 
   return {
@@ -378,7 +522,9 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   if (project && !existing?.project) enrich.project = project;
   if (parsed.desk && !existing?.desk) enrich.desk = parsed.desk;
   if (parsed.lane && !existing?.lane) enrich.lane = parsed.lane;
-  if (parsed.gate && (!existing?.gate || parsed.kind === 'freeze')) enrich.gate = parsed.gate;
+  const gateToStore = parsed.kind === 'freeze' ? storedFreezeGate(sha, parsed.gate) : parsed.gate;
+  if (parsed.kind === 'freeze') enrich.gate = gateToStore;
+  else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
   if (author && !existing?.author_agent_id) { enrich.author_agent_id = author.id; enrich.author_name = author.name; }
 
   const verdict = parsed.verdict;
@@ -396,7 +542,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
       getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, freeze_path, verdict_path, gate, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
         .run(sha, project, parsed.desk, parsed.lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
-          parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+          parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       supersedeOlder(sha, project, parsed.lane, parsed.desk);
       settleBehind(sha, project);
       return { ok: true, data: { sha, effect: 'stored', run_id: null } };
@@ -428,7 +574,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, freeze_path, verdict_path, gate, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
       .run(sha, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName,
-        parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+        parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
     settleBehind(sha, project);
     return { ok: true, data: { sha, effect: 'stored', run_id: null } };
   }
@@ -465,7 +611,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         getDb().prepare(`INSERT INTO release_freezes (sha, run_id, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, verdict, freeze_path, verdict_path, gate, status)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
           .run(sha, runId, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName, verdict,
-            parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+            parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       } else {
         patch(sha, { ...enrich, run_id: runId, author_agent_id: authorId, author_name: authorName, reviewer_agent_id: reviewer?.id ?? null, reviewer_name: reviewerName, verdict });
       }

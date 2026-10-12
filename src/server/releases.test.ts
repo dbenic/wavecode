@@ -39,7 +39,13 @@ const flush = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 
 /** The deploy box at the fetch boundary: accepts release requests, serves their state and an event log. */
 function fakeDeployBox() {
-  const state = { requests: new Map<string, Record<string, unknown>>(), events: [] as Array<{ id: number; type: string; entity_id: string }>, nextEvent: 10, posts: [] as Record<string, unknown>[] };
+  const state = {
+    requests: new Map<string, Record<string, unknown>>(),
+    events: [] as Array<{ id: number; type: string; entity_id: string }>,
+    nextEvent: 10,
+    posts: [] as Record<string, unknown>[],
+    stagingTip: null as { sha: string; version: string | null; lane: string | null } | null,
+  };
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const auth = (init?.headers as Record<string, string>)?.Authorization;
@@ -51,6 +57,7 @@ function fakeDeployBox() {
       state.requests.set(id, { id, ...body, status: 'sent', version: null, deployed_sha: null, report: null, error: null, deploy_agent_id: 'r-fable', reported_at: null });
       return Response.json({ id, status: 'sent' }, { status: 201 });
     }
+    if (url.pathname === '/api/releases/staging-tip') return Response.json(state.stagingTip);
     const one = /^\/api\/releases\/([^/]+)$/.exec(url.pathname);
     if (one) {
       const r = state.requests.get(one[1]);
@@ -531,6 +538,8 @@ describe('releases.ts', () => {
       expect(candAdmin.status).toBe(202);
       const staged = rel.listReleases({ sha: tip, target: 'staging' })[0];
       expect(rel.reportRelease(staged.id, { status: 'deployed', sha: tip, version: '0.1.0' }).ok).toBe(true);
+      box.state.stagingTip = { sha: tip, version: '0.1.0', lane: 'fable/rc-0443-2' };
+      rel.resetStagingTipCacheForTest();
 
       const allowed = await runWithActor(dev.data.user.id, async () => rq.stage(card.run.id));
       expect(allowed.ok).toBe(false);
@@ -821,10 +830,25 @@ describe('releases.ts', () => {
       expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'deployed', version: '1.2.3', staging_url: 'https://staging.example/app' });
     });
 
+    it('GET /api/releases/staging-tip returns the deployed staging tip', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
+      cfg.releases = { deploy_agent: 'fable' };
+      agent('fable');
+      const sent = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
+      expect(sent.ok).toBe(true);
+      if (!sent.ok) return;
+      expect(rel.reportRelease(sent.data.id, { status: 'deployed', sha: SHA, version: '9.9.9' }).ok).toBe(true);
+      const res = await app.fetch(new Request('http://x/api/releases/staging-tip?project=wavepulse'));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ sha: SHA, version: '9.9.9' });
+      expect((await app.fetch(new Request('http://x/api/releases/staging-tip'))).status).toBe(400);
+    });
+
     it('the peer token may post requests and read outcomes, nothing else', async () => {
       const auth = await import('./auth.js');
       expect(auth.restrictedPathAllowed('POST', '/api/releases')).toBe(true);
       expect(auth.restrictedPathAllowed('GET', '/api/releases/R1')).toBe(true);
+      expect(auth.restrictedPathAllowed('GET', '/api/releases/staging-tip')).toBe(true);
       expect(auth.restrictedPathAllowed('POST', '/api/releases/R1/report')).toBe(false);
       expect(auth.restrictedPathAllowed('POST', '/api/reviews/r1/stage')).toBe(false);
     });

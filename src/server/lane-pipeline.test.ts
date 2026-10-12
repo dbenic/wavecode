@@ -315,6 +315,42 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
+  it('does not auto-stage a retracted note GREEN unless the latest command word is GREEN', async () => {
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    agent('ales', path.join(tmp, 'ales'));
+    agent('codex3', path.join(tmp, 'codex3'));
+    const file = passNote('ales', 'wc-ales', sha);
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('GREEN');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('gate GREEN\n', ''));
+    const event = (gate: string) => {
+      const saved = db.insertEvent({
+        type: 'pipeline.gate', entity_type: 'run', entity_id: `${sha}:full`, payload: { sha, gate },
+      });
+      expect(saved.ok).toBe(true);
+    };
+    event('QUEUED');
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('QUEUED');
+    pipe.auto_stage = true;
+    await considerAutoStage(sha);
+    expect(listReleases({ sha })).toEqual([]);
+    expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/waiting for GREEN/);
+
+    event('RED');
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('RED');
+    await considerAutoStage(sha);
+    expect(listReleases({ sha })).toEqual([]);
+
+    event('GREEN');
+    ingestFreezeFile(file);
+    expect(getFreeze(sha)?.gate).toBe('GREEN');
+    await considerAutoStage(sha);
+    expect(listReleases({ project: 'wave', target: 'staging' })).toHaveLength(1);
+    expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
   it('hands a migration lane to deploy flagged for a pre-deploy dump', async () => {
     const sha = branch('wc-ales', 'db/migrations/001.sql', 'create table t(id int);');
     agent('ales', path.join(tmp, 'ales'));

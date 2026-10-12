@@ -576,6 +576,7 @@ deployed_sha, report, error, deploy_id, progress_phase, progress_status, pin_unt
 staging_url, rollback_status, rollback_to, created_at, updated_at, reported_at`.
 
 - `GET /api/releases?project=&sha=&target=&status=&limit=` — newest first.
+- `GET /api/releases/staging-tip?project=` — read-only `currentStagingTip` (`{ sha, version, lane }` or `null`). A dev box with a release peer and no `staging_health_command` reads this from the deploy box. Authenticated; a restricted peer token may GET it.
 - `GET /api/releases/:id`
 - `POST /api/reviews/:runId/stage` — stage a freeze card. A developer needs the reviewer's PASS on that exact SHA (403 `Stage needs the reviewer's PASS on this exact SHA` otherwise). An admin may stage without it. A freeze already inside a composed candidate the deploy agent has deployed to staging may be staged without that PASS. Never a stale SHA. 202 with the record.
 - `POST /api/reviews/:runId/promote` approves the review for a developer or an admin. The production

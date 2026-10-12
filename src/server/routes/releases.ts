@@ -23,6 +23,13 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
   // Who did what: requests, verifications, rejects, deployer outcomes
   app.get('/api/releases/audit', (c) => c.json(releases.auditTrail(Math.min(500, Number(c.req.query('limit') ?? 200) || 200))));
 
+  // Read-only. A dev box with no local health command asks its deploy peer for this.
+  app.get('/api/releases/staging-tip', (c) => {
+    const project = c.req.query('project')?.trim();
+    if (!project) return c.json({ error: 'project is required' }, 400);
+    return c.json(releases.currentStagingTip(project));
+  });
+
   app.get('/api/releases/:id', (c) => {
     const r = releases.getRelease(c.req.param('id'));
     if (!r) return c.json({ error: 'Release not found' }, 404);
