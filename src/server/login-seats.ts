@@ -194,7 +194,8 @@ function joinWrappedUrls(clean: string): string[] {
  */
 export function loginAutoAdvanceKey(paneText: string): 'Enter' | null {
   if (/Select login method/i.test(paneText) && /❯\s*1\.\s*Claude account/i.test(paneText)) return 'Enter';
-  if (/(Choose the text style|Select a theme|Dark mode|Light mode)/i.test(paneText) && /Enter to confirm|to confirm/i.test(paneText) && !/Select login method/i.test(paneText)) return 'Enter';
+  // the theme picker prints no "Enter to confirm" hint; the preselected dark theme is fine for a seat
+  if (/Choose the text style|Select a theme|run \/theme/i.test(paneText) && /Dark mode|Light mode/i.test(paneText) && !/Select login method/i.test(paneText)) return 'Enter';
   return null;
 }
 
