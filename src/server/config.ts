@@ -215,8 +215,19 @@ export interface WaveConfig {
    * `production_approvers` is the deploy box's allow-list of user names that may originate
    * a production release forwarded by a peer. Empty or unset refuses every such request.
    * Staging requests from peers are not checked against it.
+   *
+   * `staging_command` is an argv template. When set, a staging release runs it directly
+   * instead of prompting the deploy agent. `{sha}` is required; `{lane}` and `{desk}` are
+   * optional and dropped (with the preceding `--flag`) when empty. Production always
+   * stays with the deploy agent. `staging_watch_command` re-attaches after a restart
+   * and must include `{deploy_id}`.
    */
-  releases?: { deploy_agent?: string | null; production_approvers?: string[] };
+  releases?: {
+    deploy_agent?: string | null;
+    production_approvers?: string[];
+    staging_command?: string[];
+    staging_watch_command?: string[];
+  };
   /**
    * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
    * calls `model` on the configured LLM key (llm.anthropic_api_key), posts reports with
@@ -295,6 +306,14 @@ export function loadConfig(cfgPath?: string): WaveConfig {
  * actionable error rather than letting the daemon boot and crash on first
  * request. Currently checks that artifacts.storage is creatable and writable.
  */
+function validateArgvTemplate(name: string, argv: string[] | undefined, placeholder: string): void {
+  if (argv === undefined) return;
+  if (!Array.isArray(argv) || argv.length === 0 || argv.some((a) => typeof a !== 'string' || !a.trim() || a.length > 200)) {
+    throw new Error(`${name} must be a non-empty list of arguments`);
+  }
+  if (!argv.some((a) => a.includes(placeholder))) throw new Error(`${name} must include ${placeholder}`);
+}
+
 export function validateConfig(cfg: WaveConfig): void {
   const profileErrors = validateProfilesConfig(cfg);
   if (profileErrors.length > 0) {
@@ -320,6 +339,8 @@ export function validateConfig(cfg: WaveConfig): void {
       throw new Error('releases.production_approvers must be a list of user names (an empty list refuses every peer production request)');
     }
   }
+  validateArgvTemplate('releases.staging_command', cfg.releases?.staging_command, '{sha}');
+  validateArgvTemplate('releases.staging_watch_command', cfg.releases?.staging_watch_command, '{deploy_id}');
   if (cfg.artifacts.fixture_inbox !== undefined) {
     if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
       throw new Error('artifacts.fixture_inbox must be a list of directory paths');

@@ -275,7 +275,10 @@ export interface LaneBoardRow {
   promotable: boolean;
   candidate: string | null;
   summary: string | null;
-  staging: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
+  staging: {
+    status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null;
+    phase?: string | null; progress?: string | null; pin_until?: string | null; url?: string | null; error?: string | null; rollback_status?: string | null;
+  } | null;
   production: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
   next: string;
   updated_at: string;
@@ -446,6 +449,13 @@ export interface ReleaseRequest {
   verified_by: string | null;
   verified_at: string | null;
   verification_note: string | null;
+  deploy_id?: string | null;
+  progress_phase?: string | null;
+  progress_status?: string | null;
+  pin_until?: string | null;
+  staging_url?: string | null;
+  rollback_status?: string | null;
+  rollback_to?: string | null;
   created_at: string;
   updated_at: string;
   reported_at: string | null;

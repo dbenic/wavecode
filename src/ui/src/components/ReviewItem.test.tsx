@@ -115,6 +115,23 @@ describe('ReviewItem freeze card', () => {
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/reviews/r1/reject', { reason: 'wrong base' }));
   });
 
+  it('STAGE becomes the live chip while staging is in flight, and comes back after a failure', () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <ReviewItem item={item({})} agents={[]} onAction={() => {}} index={0} staging={{ id: 'rel-1', sha: SHA, status: 'sent', phase: 'verify', progress: 'heartbeat' }} />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('button', { name: 'STAGE' })).toBeNull();
+    expect(screen.getByTestId('phase-verify').className).toMatch(/animate-pulse/);
+    rerender(
+      <MemoryRouter>
+        <ReviewItem item={item({})} agents={[]} onAction={() => {}} index={0} staging={{ id: 'rel-1', sha: SHA, status: 'failed', phase: 'build', progress: 'fail', error: 'BUILD: build failed in fixture', rollbackStatus: 'ok' }} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId('stage-chip').textContent).toContain('Failed at build');
+    expect(screen.getByRole('button', { name: 'STAGE' })).toBeTruthy();
+  });
+
   it('a normal run card is unchanged: no freeze block, retry and hand-off present', () => {
     renderItem(item(null));
     expect(screen.queryByTestId('freeze-card')).toBeNull();

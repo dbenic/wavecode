@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 
 vi.mock('./event-bus.js', () => ({ emit: vi.fn(() => ({ id: 1 })) }));
@@ -13,7 +14,7 @@ vi.mock('./task-dispatcher.js', () => ({ dispatchNext: vi.fn(), unblockDependent
 const cfg = {
   projects: {} as Record<string, { workspace_match: string; release_peer?: string; repo?: string; candidate_refs?: string }>,
   peers: {} as Record<string, { url: string; token: string; agents?: string[] }>,
-  releases: {} as { deploy_agent?: string | null; production_approvers?: string[] },
+  releases: {} as { deploy_agent?: string | null; production_approvers?: string[]; staging_command?: string[]; staging_watch_command?: string[] },
   review: { auto_review: false, default_reviewer: 'x', self_review: true, max_fix_loops: 2, require_pass_to_promote: false, gate_dependents_on_approval: false, auto_pick: true, freeze_inbox: [] as string[] },
   artifacts: { storage: '', retention_days: 30 },
   paths: {},
@@ -31,6 +32,7 @@ import { notify } from './notifications.js';
 import * as sessionManager from './session-manager.js';
 
 const SHA = '2431f684b9e960b84e73a4e98b5068869664ffb4';
+const FIXTURE_SHA = 'abc123abc123abc123abc123abc123abc123abcd';
 const SHA_B = 'e65a2ab5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const flush = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 
@@ -147,6 +149,31 @@ describe('releases.ts', () => {
       expect(vi.mocked(notify)).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^Staging deployed: wavepulse 2431f684 v0\.442\.10/) }));
       expect(rel.releaseStateFor(SHA).staging?.status).toBe('deployed');
       expect(rel.releaseStateFor(SHA).production).toBeNull();
+    });
+
+    it('mirrors staging progress from the peer while the request is still open', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const r = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const remote = box.state.requests.get(r.data.peer_request_id!)!;
+      Object.assign(remote, {
+        progress_phase: 'build', progress_status: 'heartbeat', deploy_id: '20261012T120000Z-abc123abc',
+        pin_until: '2026-10-12T18:00:00Z', staging_url: 'https://staging.example/app',
+      });
+      box.state.events.push({ id: box.state.nextEvent++, type: 'release.progress', entity_id: r.data.peer_request_id! });
+      for (let i = 0; i < 40 && rel.getRelease(r.data.id)?.progress_phase !== 'build'; i++) await flush(25);
+      expect(rel.getRelease(r.data.id)).toMatchObject({
+        status: 'sent', progress_phase: 'build', progress_status: 'heartbeat',
+        deploy_id: '20261012T120000Z-abc123abc', pin_until: '2026-10-12T18:00:00Z', staging_url: 'https://staging.example/app',
+      });
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.progress', 'release', r.data.id, expect.objectContaining({ phase: 'build', url: 'https://staging.example/app' }), null);
+      box.deployed(r.data.peer_request_id!, '1.2.3');
+      for (let i = 0; i < 40 && rel.getRelease(r.data.id)!.status !== 'deployed'; i++) await flush(25);
+      expect(rel.getRelease(r.data.id)).toMatchObject({ status: 'deployed', version: '1.2.3', progress_phase: 'build', staging_url: 'https://staging.example/app' });
     });
 
     it('a person marks a deployed staging as verified; the audit trail lists stage, deployer outcome and verification with names', async () => {
@@ -556,6 +583,98 @@ describe('releases.ts', () => {
       expect(rel.getRelease(a.data.id)).toMatchObject({ status: 'deployed', version: '0.442.10', deployed_sha: SHA });
       expect(rel.getRelease(b.data.id)).toMatchObject({ status: 'failed', error: 'migration 0442 refused on prod replica' });
       expect(rel.detectReleaseLines(fable.id, pane)).toBe(0); // same lines again: nothing new
+    });
+
+    it('a staging command streams progress and closes the release; production still prompts the agent', async () => {
+      const fable = agent('fable');
+      agent('claude2');
+      const marker = path.join(tmp, 'ran');
+      const replay = path.join(tmp, 'replay.cjs');
+      fs.writeFileSync(replay, "const fs=require('fs'); fs.writeSync(1, 'not-json\\n'+fs.readFileSync(process.argv[2],'utf8')); process.exit(Number(process.argv[3]||0));\n");
+      const success = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'staging-progress', 'success.ndjson');
+      const failed = success.replace('success.ndjson', 'failed.ndjson');
+      const note = path.join(tmp, 'freeze-pass.md');
+      fs.writeFileSync(note, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${FIXTURE_SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- gate: GREEN\n`);
+      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'], staging_command: ['node', replay, success, '0', '{sha}', '--lane', '{lane}', '--desk', '{desk}'] };
+      const staged = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', lane: 'lane-a', desk: '7', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      for (let i = 0; i < 50 && rel.getRelease(staged.data.id)!.status !== 'deployed'; i++) await flush(20);
+      const done = rel.getRelease(staged.data.id)!;
+      expect(done).toMatchObject({
+        status: 'deployed', version: '1.2.3', staging_url: 'https://staging.example/app',
+        pin_until: '2026-10-12T18:00:00Z', deploy_id: '20261012T120000Z-abc123abc', progress_phase: 'done',
+      });
+      expect(typedInto(fable.id)).toHaveLength(0);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.progress', 'release', staged.data.id, expect.objectContaining({ phase: 'build', deploy_id: '20261012T120000Z-abc123abc' }), null);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.reported', 'release', staged.data.id, expect.objectContaining({ status: 'deployed', version: '1.2.3' }), null);
+
+      cfg.releases = { ...cfg.releases, staging_command: ['node', replay, failed, '1', '{sha}'] };
+      const broke = rel.acceptRelease({ sha: SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      expect(broke.ok).toBe(true);
+      if (!broke.ok) return;
+      for (let i = 0; i < 50 && rel.getRelease(broke.data.id)!.status !== 'failed'; i++) await flush(20);
+      expect(rel.getRelease(broke.data.id)).toMatchObject({
+        status: 'failed', progress_phase: 'build', rollback_status: 'ok', version: '1.2.3',
+        error: expect.stringContaining('build failed in fixture'),
+      });
+
+      cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'], staging_command: ['node', replay, success, '0', '{sha}'] };
+      fs.writeFileSync(path.join(tmp, 'touch.cjs'), "require('fs').writeFileSync(process.argv[2], 'ran');\n");
+      cfg.releases.staging_command = ['node', path.join(tmp, 'touch.cjs'), marker, '{sha}'];
+      const prod = rel.acceptRelease({ sha: SHA_B, target: 'production', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
+      expect(prod.ok).toBe(true);
+      expect(typedInto(fable.id)[0]).toMatch(/authorization for PRODUCTION/);
+      await flush(40);
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it('refuses a staging command when the known freeze is not PASS or not GREEN', () => {
+      agent('claude2');
+      const marker = path.join(tmp, 'ran');
+      const touch = path.join(tmp, 'touch.cjs');
+      fs.writeFileSync(touch, "require('fs').writeFileSync(process.argv[2], 'ran');\n");
+      cfg.releases = { staging_command: ['node', touch, marker, '{sha}'] };
+      const needs = path.join(tmp, 'freeze-needs.md');
+      fs.writeFileSync(needs, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${FIXTURE_SHA}\`\n- Review: @codex3 **VERDICT: NEEDS FIXES** on this exact SHA: /r/v.md\n`);
+      expect(rf.ingestFreezeFile(needs).ok).toBe(true);
+      const blocked = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.error).toBe(rel.STAGE_NEEDS_PASS);
+      expect(rel.listReleases({ sha: FIXTURE_SHA })[0]).toMatchObject({ status: 'failed', error: rel.STAGE_NEEDS_PASS });
+      expect(fs.existsSync(marker)).toBe(false);
+
+      const redSha = SHA;
+      fs.writeFileSync(path.join(tmp, 'freeze-red.md'), `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${redSha}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- gate: RED\n`);
+      expect(rf.ingestFreezeFile(path.join(tmp, 'freeze-red.md')).ok).toBe(true);
+      const red = rel.acceptRelease({ sha: redSha, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      expect(red.ok).toBe(false);
+      if (!red.ok) expect(red.error).toBe(rel.stageNeedsGreen('RED'));
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it('re-attaches a staging deploy with the watch command after the command is dropped', async () => {
+      const hold = path.join(tmp, 'hold.cjs');
+      const watch = path.join(tmp, 'watch.cjs');
+      const success = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'staging-progress', 'success.ndjson');
+      fs.writeFileSync(hold, "const fs=require('fs'); const id='20261012T120000Z-abc123abc'; fs.writeSync(1, JSON.stringify({v:1,ts:'2026-10-12T12:00:00.000Z',deploy_id:id,phase:'queued',status:'start'})+'\\n'); setInterval(()=>{},60000);\n");
+      fs.writeFileSync(watch, "const fs=require('fs'); fs.writeSync(1, fs.readFileSync(process.argv[3],'utf8')); process.exit(0);\n");
+      cfg.releases = {
+        staging_command: ['node', hold, '{sha}'],
+        staging_watch_command: ['node', watch, '{deploy_id}', success],
+      };
+      const staged = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      for (let i = 0; i < 50 && rel.getRelease(staged.data.id)?.deploy_id !== '20261012T120000Z-abc123abc'; i++) await flush(20);
+      expect(rel.getRelease(staged.data.id)?.status).toBe('sent');
+      rel.stopStagingDeploys();
+      await flush(30);
+      expect(rel.getRelease(staged.data.id)?.status).toBe('sent');
+      rel.resumeStagingDeploys();
+      for (let i = 0; i < 50 && rel.getRelease(staged.data.id)?.status !== 'deployed'; i++) await flush(20);
+      expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'deployed', version: '1.2.3', staging_url: 'https://staging.example/app' });
     });
 
     it('the peer token may post requests and read outcomes, nothing else', async () => {

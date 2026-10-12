@@ -91,8 +91,10 @@ exact SHA, target, lane, desk and reviewer. A production request also carries th
 user's name (`requested_by`) and role (`requester_role`). The deploy box accepts that production
 request only when the name is in `releases.production_approvers`; an empty or unset list refuses
 every peer production request, including one that omits the user. Staging requests are not checked
-against the list. The deploy box hands an accepted request to `releases.deploy_agent` and reports
-back; the dev box mirrors `release.reported`.
+against the list. The deploy box hands an accepted production request to `releases.deploy_agent`.
+A staging request uses `releases.staging_command` when that argv is set, and the dev box mirrors
+`release.progress` as well as `release.reported`. Without the command, staging still prompts the
+deploy agent.
 
 Deploy-box setup (the old box):
 
@@ -100,6 +102,10 @@ Deploy-box setup (the old box):
 releases:
   deploy_agent: fable      # alias, name or id of the agent that runs the runbook
   production_approvers: [denis]  # empty or omitted: refuse every peer production request
+  # Optional. Staging only. Omit the key to keep prompting the deploy agent.
+  # {lane} and {desk} are their own arguments so an empty value drops the flag.
+  staging_command: ["staging-deploy", "--exact-sha", "{sha}", "--progress-json", "--lane", "{lane}", "--desk", "{desk}"]
+  staging_watch_command: ["staging-deploy", "watch", "{deploy_id}"]
 ```
 
 The peer user's restricted token may `POST /api/releases` and read `GET /api/releases/:id`
@@ -112,6 +118,7 @@ RELEASE FAILED <id>: <why>
 ```
 
 Only the agent the request was handed to may report it. A production request always carries
-`[Release GO <id> from <person> via WaveCode Promote …]`; a staging request carries
-`[Staging request <id> … Automated: deploy to STAGING only …]` — the agent must never treat
-a staging request as a production authorization.
+`[Release GO <id> from <person> via WaveCode Promote …]`; a staging request that still goes to
+the agent carries `[Staging request <id> … Automated: deploy to STAGING only …]` — the agent
+must never treat a staging request as a production authorization. A configured staging command
+does not prompt the agent.

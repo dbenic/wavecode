@@ -65,6 +65,23 @@ describe('config.ts — security', () => {
     expect(() => bad.loadConfig(configPath)).toThrow(/production_approvers/);
   });
 
+  it('loads a staging command argv and requires its placeholder', async () => {
+    fs.writeFileSync(configPath, `
+releases:
+  staging_command: ["staging-deploy", "--exact-sha", "{sha}", "--lane", "{lane}", "--desk", "{desk}"]
+  staging_watch_command: ["staging-deploy", "watch", "{deploy_id}"]
+`, 'utf8');
+    const { loadConfig } = await import('./config.js');
+    const loaded = loadConfig(configPath);
+    expect(loaded.releases?.staging_command).toEqual(['staging-deploy', '--exact-sha', '{sha}', '--lane', '{lane}', '--desk', '{desk}']);
+    expect(loaded.releases?.staging_watch_command?.[2]).toBe('{deploy_id}');
+
+    fs.writeFileSync(configPath, 'releases:\n  staging_command: ["staging-deploy", "--progress-json"]\n', 'utf8');
+    vi.resetModules();
+    const missing = await import('./config.js');
+    expect(() => missing.loadConfig(configPath)).toThrow(/staging_command must include \{sha\}/);
+  });
+
   it('loads a per-project referee profile from yaml', async () => {
     fs.writeFileSync(configPath, `
 projects:

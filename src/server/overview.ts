@@ -69,7 +69,10 @@ export interface LaneBoardRow {
   candidate: string | null;
   /** first lines of the freeze note (scope of the change), for grouping decisions */
   summary: string | null;
-  staging: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
+  staging: {
+    status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null;
+    phase?: string | null; progress?: string | null; pin_until?: string | null; url?: string | null; error?: string | null; rollback_status?: string | null;
+  } | null;
   production: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
   /** deterministic next step, before any model opinion */
   next: string;
@@ -180,7 +183,12 @@ function pendingReviewFor(agentId: string): { runId: string; needsReviewer: bool
 function releaseCell(r: ReleaseRequest | null): LaneBoardRow['staging'] {
   if (!r) return null;
   const v = verificationFor(r.sha);
-  return { status: r.status, version: r.version, at: iso(r.updated_at)!, by: r.requested_by, verified_by: v?.verified_by ?? r.verified_by ?? null, verified_at: v ? iso(v.verified_at) : r.verified_at ? iso(r.verified_at) : null };
+  return {
+    status: r.status, version: r.version, at: iso(r.updated_at)!, by: r.requested_by,
+    verified_by: v?.verified_by ?? r.verified_by ?? null, verified_at: v ? iso(v.verified_at) : r.verified_at ? iso(r.verified_at) : null,
+    phase: r.progress_phase, progress: r.progress_status, pin_until: r.pin_until, url: r.staging_url,
+    error: r.error, rollback_status: r.rollback_status,
+  };
 }
 
 function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null): { next: string; promotable: boolean } {
