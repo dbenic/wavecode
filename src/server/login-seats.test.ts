@@ -25,6 +25,7 @@ vi.mock('./tmux.js', () => ({
   sendTextAndEnter: vi.fn(),
   capturePane: vi.fn(() => ({ ok: true, data: '╭─╮\n│ > │\n  ? for shortcuts' })),
   capturePaneJoined: vi.fn(() => ({ ok: true, data: '' })),
+  sendRawKey: vi.fn(),
   isValidSessionName: vi.fn((s: string) => /^[a-zA-Z0-9._-]+$/.test(s)),
 }));
 
@@ -273,6 +274,25 @@ describe('login seats', () => {
       expect(h.code).toBeNull();
       expect(h.awaiting_code).toBe(true);
       expect(h.tail.join('\n')).not.toContain('\x1b');
+    });
+
+    it('parseLoginPane joins a link the CLI broke over several rows; the watcher answers the first-run screens', async () => {
+      const { parseLoginPane, loginAutoAdvanceKey, checkLoginSeat, openLoginSeat } = await import('./login-seats.js');
+      const pane = ' Browser didn\'t open? Use the url below to sign in (c to copy)\n https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+use\nr%3Amcp_servers&code_challenge=N0tp-ntWGs&code_challenge_method=S256&stat\ne=rZcQH_nJq\n Paste code here if prompted >';
+      expect(parseLoginPane(pane).url).toBe('https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Amcp_servers&code_challenge=N0tp-ntWGs&code_challenge_method=S256&state=rZcQH_nJq');
+      expect(loginAutoAdvanceKey(' Choose the text style that looks best with your terminal:\n ❯ Dark mode\n   Light mode\n Enter to confirm · Esc to exit')).toBe('Enter');
+      expect(loginAutoAdvanceKey(' Select login method:\n ❯ 1. Claude account with subscription · Pro, Max\n   2. Anthropic Console account')).toBe('Enter');
+      expect(loginAutoAdvanceKey(' Browser didn\'t open? Use the url below\n https://claude.com/cai/oauth/authorize?x=1\n Paste code here if prompted >')).toBeNull();
+      const tmuxMod = await import('./tmux.js');
+      const res = openLoginSeat({ profile: 'ana', runtime: 'claude-code', user: { id: 'u-ana', role: 'developer', profile: 'ana' } });
+      if (!res.ok) throw new Error(res.error);
+      vi.mocked(tmuxMod.capturePaneJoined).mockReturnValueOnce({ ok: true, data: ' Select login method:\n ❯ 1. Claude account with subscription' });
+      expect(checkLoginSeat(res.data.agent.id)).toBe('open');
+      expect(vi.mocked(tmuxMod.sendRawKey)).toHaveBeenCalledWith(res.data.session, 'Enter');
+      vi.mocked(tmuxMod.sendRawKey).mockClear();
+      vi.mocked(tmuxMod.capturePaneJoined).mockReturnValueOnce({ ok: true, data: ' Paste code here if prompted >' });
+      expect(checkLoginSeat(res.data.agent.id)).toBe('open');
+      expect(vi.mocked(tmuxMod.sendRawKey)).not.toHaveBeenCalled();
     });
 
     it('GET …/login/:runtime reports the seat hint; POST …/login/:runtime/code types the code into it; strangers get 403', async () => {

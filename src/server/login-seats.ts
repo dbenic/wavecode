@@ -155,13 +155,47 @@ export interface LoginHint {
 export function parseLoginPane(text: string): LoginHint {
   // eslint-disable-next-line no-control-regex
   const clean = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-  const urls = [...clean.matchAll(/https?:\/\/[^\s"'<>\\\]]+/g)].map((m) => m[0].replace(/[.,;)]+$/, ''));
+  const urls = joinWrappedUrls(clean).map((u) => u.replace(/[.,;)]+$/, ''));
   // prefer the sign-in link over anything else the CLI printed
   const url = urls.find((u) => /auth|oauth|device|login|sign/i.test(u)) ?? urls[urls.length - 1] ?? null;
   const code = clean.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b/)?.[1] ?? null;
   const awaiting = /paste code here|enter the code|authorization code/i.test(clean);
   const tail = clean.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() && !/^[\s*░▓█▄.]+$/.test(l)).slice(-8);
   return { url, code, awaiting_code: awaiting, tail };
+}
+
+/**
+ * The CLI prints a long OAuth link over several rows (its own line breaks, so
+ * tmux -J cannot join them): a line that starts a URL continues while the
+ * following lines consist of URL characters only.
+ */
+function joinWrappedUrls(clean: string): string[] {
+  const lines = clean.split('\n').map((l) => l.trim());
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/https?:\/\/[^\s"'<>\\\]]+/);
+    if (!m) continue;
+    let url = m[0];
+    // continuation rows: no spaces, URL charset, and the row before was filled to its end by the URL
+    while (i + 1 < lines.length && lines[i].endsWith(url.slice(-8)) && /^[A-Za-z0-9%._~:/?#@!$&'()*+,;=-]+$/.test(lines[i + 1])) {
+      url += lines[i + 1];
+      i++;
+    }
+    out.push(url);
+  }
+  return out;
+}
+
+/**
+ * First-run screens Claude Code shows before the sign-in link. The watcher
+ * answers them so the seat reaches the link by itself (exported for tests):
+ * the theme picker takes Enter, the login-method menu takes option 1
+ * (Claude account with subscription — the only kind a profile may use).
+ */
+export function loginAutoAdvanceKey(paneText: string): 'Enter' | null {
+  if (/Select login method/i.test(paneText) && /❯\s*1\.\s*Claude account/i.test(paneText)) return 'Enter';
+  if (/(Choose the text style|Select a theme|Dark mode|Light mode)/i.test(paneText) && /Enter to confirm|to confirm/i.test(paneText) && !/Select login method/i.test(paneText)) return 'Enter';
+  return null;
 }
 
 /** The hint for an open login seat, or null when the seat is gone. */
@@ -198,6 +232,13 @@ export function checkLoginSeat(agentId: string, now = Date.now()): 'open' | 'exi
   if (now >= watch.deadline) {
     closeLoginSeat(agentId, 'timeout');
     return 'timeout';
+  }
+  const cap = tmux.capturePaneJoined(watch.session, 40);
+  if (cap.ok) {
+    const key = loginAutoAdvanceKey(cap.data);
+    if (key) {
+      try { tmux.sendRawKey(watch.session, key); } catch { /* the seat may have just exited */ }
+    }
   }
   return 'open';
 }
