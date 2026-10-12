@@ -23,11 +23,14 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
   // Who did what: requests, verifications, rejects, deployer outcomes
   app.get('/api/releases/audit', (c) => c.json(releases.auditTrail(Math.min(500, Number(c.req.query('limit') ?? 200) || 200))));
 
-  // Read-only. A dev box with no local health command asks its deploy peer for this.
-  app.get('/api/releases/staging-tip', (c) => {
+  // Read-only. A box that forwards this project's releases proxies the deploy peer.
+  // The local deployed row is not authoritative there. `source` is peer, health, or local.
+  // `local=1` or `X-WaveCode-Proxied: 1` answers from this box only (one hop).
+  app.get('/api/releases/staging-tip', async (c) => {
     const project = c.req.query('project')?.trim();
     if (!project) return c.json({ error: 'project is required' }, 400);
-    return c.json(releases.currentStagingTip(project));
+    const localOnly = c.req.query('local') === '1' || c.req.header('x-wavecode-proxied') === '1';
+    return c.json(await releases.stagingTipPayload(project, { localOnly }));
   });
 
   app.get('/api/releases/:id', (c) => {

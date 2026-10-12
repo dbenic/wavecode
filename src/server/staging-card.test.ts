@@ -24,7 +24,7 @@ vi.mock('./config.js', () => ({
 
 import { setFetchDisabledForTest } from './release-freezes.js';
 import { parseNoteChecks, viewShaChecks } from './release-freezes.js';
-import { promoteFullBlock, requestRelease, resetStagingTipCacheForTest, stageGateBlock } from './releases.js';
+import { promoteFullBlock, requestRelease, resetStagingTipCacheForTest, resolveStagingTip, stageGateBlock } from './releases.js';
 import { resetForwardMemoForTest, stagingForwardBlock } from './staging-forward.js';
 import { setGitExecForTest, type GitResult } from './git-memo.js';
 import { refreshLaneBoard, resetLaneBoardForTest } from './dev-lanes.js';
@@ -234,11 +234,57 @@ describe('staging tip on the card', () => {
     expect(lanes[0].stage_block).toBeNull();
   });
 
-  it('does not ask the peer when this box has a health command', async () => {
+  it('asks the peer even when a local health command is set, because releases are forwarded', async () => {
     releasesCfg.staging_health_command = ['true'];
+    resetStagingTipCacheForTest();
+    const lanes = await refreshLaneBoard();
+    expect(fetches).toBe(1);
+    expect(lanes[0].stage_block).toMatch(/would roll staging back: .*missing \d+ commits now on staging/);
+  });
+
+  it('uses the health command and does not ask a peer when this box deploys the release', async () => {
+    delete projects.demo.release_peer;
+    releasesCfg.staging_health_command = ['true'];
+    releasesCfg.deploy_agent = 'fable';
     resetStagingTipCacheForTest();
     await refreshLaneBoard();
     expect(fetches).toBe(0);
+  });
+
+  it('caches a failed peer ask for 5 seconds and a successful one for 15', async () => {
+    const start = 1_700_000_000_000;
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start);
+    try {
+      setPeerFetchForTest(async () => { fetches += 1; throw new Error('down'); });
+      expect((await resolveStagingTip('demo')).state).toBe('unknown');
+      now.mockReturnValue(start + 4_999);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(1);
+      now.mockReturnValue(start + 5_000);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(2);
+
+      fetches = 0;
+      resetStagingTipCacheForTest();
+      now.mockReturnValue(start);
+      const stagingSha = git(repo, 'rev-parse', 'HEAD');
+      setPeerFetchForTest(async (input, init) => {
+        fetches += 1;
+        const url = new URL(String(input));
+        expect(url.searchParams.get('local')).toBe('1');
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        return Response.json({ sha: stagingSha, version: '1.4.0', lane: 'wc-ship' });
+      });
+      expect((await resolveStagingTip('demo')).tip?.sha).toBe(stagingSha);
+      now.mockReturnValue(start + 5_000);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(1);
+      now.mockReturnValue(start + 15_000);
+      await resolveStagingTip('demo');
+      expect(fetches).toBe(2);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('requestRelease refuses from the peer tip even when the local record would allow it', async () => {

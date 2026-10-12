@@ -118,6 +118,19 @@ describe('ReviewItem freeze card', () => {
     expect(stage.getAttribute('title')).toMatch(/stale/);
   });
 
+  it('disables STAGE when stage_block is set, including for an admin', () => {
+    const blocked = item({});
+    blocked.stage_block = 'would roll staging back: 2431f684 is missing 2 commits now on staging (v1.4.0, wc-ship)';
+    render(
+      <MemoryRouter>
+        <ReviewItem item={blocked} agents={[]} onAction={() => {}} index={0} isAdmin />
+      </MemoryRouter>,
+    );
+    const stage = screen.getByRole('button', { name: 'STAGE' });
+    expect((stage as HTMLButtonElement).disabled).toBe(true);
+    expect(stage.getAttribute('title')).toBe(blocked.stage_block);
+  });
+
   it('keeps PROMOTE disabled until the full run is green, and shows a failure after staging', () => {
     const withBlock = item({});
     withBlock.promote_block = 'full run not green on 2431f684';

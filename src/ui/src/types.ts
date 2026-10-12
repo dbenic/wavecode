@@ -362,6 +362,8 @@ export interface DevLane {
   run_id: string | null;
   freeze_sha: string | null;
   status_line: string;
+  /** Why STAGE stays disabled. Null when the lane may be staged. */
+  stage_block: string | null;
   promote_block: string | null;
   full_fail_flag: string | null;
   before_freeze_tip: string | null;

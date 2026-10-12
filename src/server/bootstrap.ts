@@ -62,6 +62,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   releaseFreezes.startFreezeWatchers();
   fixtures.startFixtureWatchers();
   releases.startReleasePollers();
+  releases.startStagingTipLog();
   overlord.startOverlord();
   productDesk.startDeskRefresh();
   usageProbe.startUsageProbe();
@@ -79,6 +80,7 @@ export function shutdownApplication(): void {
   releaseFreezes.stopFreezeWatchers();
   fixtures.stopFixtureWatchers();
   releases.stopReleasePollers();
+  releases.stopStagingTipLog();
   overlord.stopOverlord();
   productDesk.stopDeskRefresh();
   usageProbe.stopUsageProbe();

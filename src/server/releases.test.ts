@@ -840,7 +840,7 @@ describe('releases.ts', () => {
       expect(rel.reportRelease(sent.data.id, { status: 'deployed', sha: SHA, version: '9.9.9' }).ok).toBe(true);
       const res = await app.fetch(new Request('http://x/api/releases/staging-tip?project=wavepulse'));
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ sha: SHA, version: '9.9.9' });
+      expect(await res.json()).toMatchObject({ sha: SHA, version: '9.9.9', source: 'local' });
       expect((await app.fetch(new Request('http://x/api/releases/staging-tip'))).status).toBe(400);
     });
 

@@ -11,6 +11,7 @@ import * as outputWatcher from '../output-watcher.js';
 import logger from '../logger.js';
 import { getActingUser, getPublicAuthStatus, type NodeAppEnv } from '../auth.js';
 import { isAdmin, isRestrictedUser, agentAllowedFor } from '../users.js';
+import { stagingTipStatuses } from '../staging-tip-status.js';
 
 export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/auth/status', (c) => {
@@ -80,6 +81,7 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
       runtimes: Object.keys(cfg.runtimes),
       projects: Object.entries(cfg.projects ?? {}).map(([name, p]) => ({ name, repo: p.repo ?? null })),
       spawn: { max_per_user: cfg.spawn?.max_per_user ?? null },
+      staging_tips: stagingTipStatuses(),
     });
   });
 
