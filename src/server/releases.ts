@@ -265,7 +265,7 @@ function isTarget(t: unknown): t is ReleaseTarget {
 /** Health command wins when it prints a SHA. Otherwise the newest deployed staging record. */
 export function currentStagingTip(project: string): StagingTip | null {
   const health = readStagingHealth(project);
-  let row = listReleases({ project, target: 'staging', status: 'deployed', limit: 1 })[0] ?? null;
+  let row: ReleaseRequest | null = listReleases({ project, target: 'staging', status: 'deployed', limit: 1 })[0] ?? null;
   if (health?.sha) {
     return { sha: health.sha, version: health.version ?? row?.version ?? null, lane: row?.lane ?? null };
   }
