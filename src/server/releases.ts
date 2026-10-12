@@ -3,12 +3,13 @@
  *
  * A person presses Stage or Promote on a freeze card (or the Release view). The
  * dev box posts a release request to the project's release peer (the deploy
- * box's WaveCode) over the peer API; that daemon stores it, hands it to its
- * deploy agent as one prompt with the right header (a human GO for production,
- * an automated request for staging), and the agent reports back through the
- * `report_release` MCP tool or by printing `RELEASED <id>: …` /
- * `RELEASE FAILED <id>: …`, which the pane watcher detects. The requester polls
- * the peer for `release.reported` and mirrors the outcome, so the Release view
+ * box's WaveCode) over the peer API; that daemon stores it and either runs
+ * `releases.staging_command` (staging, when configured) or hands it to its
+ * deploy agent as one prompt (production, and staging when no command is set).
+ * The agent reports back through the `report_release` MCP tool or by printing
+ * `RELEASED <id>: …` / `RELEASE FAILED <id>: …`, which the pane watcher detects.
+ * A staging command streams NDJSON progress onto the same record. The requester
+ * polls the peer for `release.*` and mirrors the outcome, so the Release view
  * always shows what is on staging and in production.
  *
  * Both roles live in this one module: `requestRelease` (requester side),
@@ -16,6 +17,7 @@
  * `releases.deploy_agent` and no `release_peer` serves itself.
  */
 
+import { spawn, type ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
@@ -25,6 +27,7 @@ import logger from './logger.js';
 import { notify } from './notifications.js';
 import { peerGetJson, peerPostJson } from './peers.js';
 import { getFreeze } from './release-freezes.js';
+import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 /** Returned to non-admins on every production-send path. */
@@ -38,6 +41,10 @@ export const PRODUCTION_RELEASE_ORIGIN_MISSING = 'Forbidden: a production releas
 export const PRODUCTION_RELEASE_NOT_APPROVER = 'Forbidden: the originating user is not in releases.production_approvers';
 /** A developer may stage only after the reviewer's PASS on that exact SHA. */
 export const STAGE_NEEDS_PASS = "Stage needs the reviewer's PASS on this exact SHA";
+/** Deploy-side re-check when the freeze's gate is known and is not GREEN. */
+export function stageNeedsGreen(gate: string): string {
+  return `Stage needs a GREEN gate (this SHA is ${gate})`;
+}
 
 export type ReleaseTarget = 'staging' | 'production';
 export type ReleaseStatus = 'requested' | 'sent' | 'deployed' | 'failed' | 'rejected';
@@ -71,6 +78,14 @@ export interface ReleaseRequest {
   verified_by: string | null;
   verified_at: string | null;
   verification_note: string | null;
+  /** staging command progress (schema v1). Null when the deploy agent handles the request. */
+  deploy_id: string | null;
+  progress_phase: string | null;
+  progress_status: string | null;
+  pin_until: string | null;
+  staging_url: string | null;
+  rollback_status: string | null;
+  rollback_to: string | null;
   created_at: string;
   updated_at: string;
   reported_at: string | null;
@@ -111,7 +126,11 @@ export function ensureReleaseTables(): void {
     CREATE INDEX IF NOT EXISTS idx_release_requests_sha ON release_requests(sha, target);
     CREATE INDEX IF NOT EXISTS idx_release_requests_status ON release_requests(status);
   `);
-  for (const col of ['verified_by TEXT', 'verified_at TEXT', 'verification_note TEXT']) {
+  for (const col of [
+    'verified_by TEXT', 'verified_at TEXT', 'verification_note TEXT',
+    'deploy_id TEXT', 'progress_phase TEXT', 'progress_status TEXT',
+    'pin_until TEXT', 'staging_url TEXT', 'rollback_status TEXT', 'rollback_to TEXT',
+  ]) {
     try { getDb().exec(`ALTER TABLE release_requests ADD COLUMN ${col}`); } catch { /* exists */ }
   }
   getDb().exec(`
@@ -220,7 +239,7 @@ function patch(id: string, fields: Partial<ReleaseRequest>): void {
     .run(...keys.map((k) => fields[k] ?? null), id);
 }
 
-function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note'>): ReleaseRequest {
+function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note' | 'deploy_id' | 'progress_phase' | 'progress_status' | 'pin_until' | 'staging_url' | 'rollback_status' | 'rollback_to'>): ReleaseRequest {
   withTable(() => getDb().prepare(`INSERT INTO release_requests (id, project, sha, lane, target, desk, reviewer, requested_by, origin, peer, peer_request_id, origin_id, run_id, deploy_agent_id, status, version, deployed_sha, report, error)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(row.id, row.project, row.sha, row.lane, row.target, row.desk, row.reviewer, row.requested_by, row.origin, row.peer, row.peer_request_id, row.origin_id, row.run_id, row.deploy_agent_id, row.status, row.version, row.deployed_sha, row.report, row.error));
@@ -403,7 +422,189 @@ export function releasePromptText(r: ReleaseRequest): string {
   ].filter(Boolean).join('\n');
 }
 
+function stagingCommand(): string[] | null {
+  const cmd = getConfig().releases?.staging_command;
+  return cmd && cmd.length > 0 ? cmd : null;
+}
+
+/**
+ * Re-check the reviewer PASS and, when the freeze names one, a GREEN gate.
+ * An unknown freeze is allowed: the staging command enforces the same gates.
+ */
+function knownStagingBlock(row: ReleaseRequest): string | null {
+  let freeze: ReturnType<typeof getFreeze> = null;
+  try { freeze = getFreeze(row.sha); } catch { return null; }
+  if (!freeze) return null;
+  if (freeze.verdict && freeze.verdict !== 'pass') return STAGE_NEEDS_PASS;
+  if (freeze.gate && freeze.gate.toUpperCase() !== 'GREEN') return stageNeedsGreen(freeze.gate);
+  return null;
+}
+
+interface StagingChild {
+  child: ChildProcess;
+  abandoned: boolean;
+}
+
+const stagingChildren = new Map<string, StagingChild>();
+
+function applyProgress(id: string, raw: string): boolean {
+  const line = parseProgressLine(raw);
+  if (!line) return false;
+  const row = getRelease(id);
+  if (!row) return false;
+  if (row.status === 'deployed' || row.status === 'failed' || row.status === 'rejected') {
+    return line.phase === 'done' || line.phase === 'failed';
+  }
+  // Keep the phase that failed (build, verify, …) so the chip can name it.
+  // Later rollback / failed lines still update pin, url, version and rollback.
+  const heldFail = row.progress_status === 'fail'
+    && !!row.progress_phase
+    && row.progress_phase !== 'failed'
+    && row.progress_phase !== 'done';
+  const fields: Partial<ReleaseRequest> = { deploy_id: line.deploy_id };
+  if (!heldFail) {
+    fields.progress_phase = line.phase;
+    fields.progress_status = line.status;
+  }
+  if (line.pin_until !== undefined) fields.pin_until = line.pin_until;
+  if (line.url !== undefined) fields.staging_url = line.url;
+  if (line.rollback_to !== undefined) fields.rollback_to = line.rollback_to;
+  if (line.rollback_status !== undefined) fields.rollback_status = line.rollback_status;
+  else if (line.phase === 'rollback' && (line.status === 'ok' || line.status === 'fail')) fields.rollback_status = line.status;
+  if (line.version) fields.version = line.version;
+  if (line.status === 'fail' && line.error) fields.error = `${line.error.code}: ${line.error.msg}`.slice(0, 1000);
+  patch(id, fields);
+  const updated = getRelease(id)!;
+  emit('release.progress', 'release', id, {
+    phase: updated.progress_phase, status: line.status, version: updated.version,
+    pin_until: updated.pin_until, url: updated.staging_url, error: updated.error,
+    rollback_status: updated.rollback_status, rollback_to: updated.rollback_to,
+    sha: updated.sha, target: updated.target, deploy_id: updated.deploy_id, origin_id: updated.origin_id,
+  }, null);
+  if (line.status !== 'heartbeat') {
+    logger.info({ releaseId: id, phase: line.phase, status: line.status, deployId: line.deploy_id }, 'Staging progress');
+  }
+  if (line.phase === 'done') {
+    const sha = line.staging_sha && /^[0-9a-f]{40}$/i.test(line.staging_sha) ? line.staging_sha.toLowerCase() : null;
+    reportRelease(id, { status: 'deployed', version: line.version ?? updated.version, sha, note: line.url ?? updated.staging_url });
+    return getRelease(id)?.status === 'deployed';
+  }
+  if (line.phase === 'failed') {
+    const msg = line.error ? `${line.error.code}: ${line.error.msg}` : (updated.error ?? 'staging deploy failed');
+    reportRelease(id, { status: 'failed', version: line.version ?? updated.version, note: msg });
+    return getRelease(id)?.status === 'failed';
+  }
+  return false;
+}
+
+function spawnStaging(row: ReleaseRequest, argv: string[]): void {
+  if (stagingChildren.has(row.id) || argv.length === 0) return;
+  let child: ChildProcess;
+  try {
+    child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) {
+    reportRelease(row.id, { status: 'failed', note: (err as Error).message });
+    return;
+  }
+  const handle: StagingChild = { child, abandoned: false };
+  stagingChildren.set(row.id, handle);
+  let buf = '';
+  let stderr = '';
+  let sawTerminal = false;
+  const take = (chunk: string) => {
+    if (handle.abandoned) return;
+    buf += chunk;
+    const parts = buf.split(/\r?\n/);
+    buf = parts.pop() ?? '';
+    for (const part of parts) {
+      try { if (applyProgress(row.id, part)) sawTerminal = true; } catch (err) {
+        logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging progress line failed');
+      }
+    }
+  };
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', take);
+  child.stderr?.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-2000); });
+  child.on('error', (err) => {
+    if (stagingChildren.get(row.id) === handle) stagingChildren.delete(row.id);
+    if (handle.abandoned) return;
+    try {
+      const current = getRelease(row.id);
+      if (current && current.status !== 'deployed' && current.status !== 'failed' && current.status !== 'rejected') {
+        reportRelease(row.id, { status: 'failed', note: err.message });
+      }
+    } catch { /* db already closed */ }
+  });
+  child.on('close', (code) => {
+    if (stagingChildren.get(row.id) === handle) stagingChildren.delete(row.id);
+    if (handle.abandoned) return;
+    try {
+      if (buf.trim()) {
+        const rest = buf;
+        buf = '';
+        if (applyProgress(row.id, rest)) sawTerminal = true;
+      }
+      const current = getRelease(row.id);
+      if (!current || current.status === 'deployed' || current.status === 'failed' || current.status === 'rejected') return;
+      if (!sawTerminal) {
+        reportRelease(row.id, { status: 'failed', note: stderr.trim().slice(-500) || `staging command exited ${code ?? 'null'}` });
+      }
+    } catch (err) {
+      logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging command close handler failed');
+    }
+  });
+  logger.info({ releaseId: row.id, command: argv[0], sha: row.sha }, 'Staging deploy command started');
+}
+
+function failStaging(row: ReleaseRequest, error: string): Result<ReleaseRequest> {
+  patch(row.id, { status: 'failed', error });
+  emit('release.reported', 'release', row.id, { status: 'failed', target: row.target, sha: row.sha, project: row.project, error, origin_id: row.origin_id }, null);
+  return { ok: false, error };
+}
+
+function startStagingCommand(row: ReleaseRequest): Result<ReleaseRequest> {
+  const block = knownStagingBlock(row);
+  if (block) return failStaging(row, block);
+  const template = stagingCommand();
+  if (!template) return failStaging(row, 'releases.staging_command is not configured');
+  const argv = fillArgv(template, { sha: row.sha, lane: row.lane, desk: row.desk });
+  if (argv.length === 0) return failStaging(row, 'releases.staging_command is empty');
+  patch(row.id, { status: 'sent' });
+  const sent = getRelease(row.id)!;
+  emit('release.requested', 'release', row.id, {
+    target: row.target, sha: row.sha, project: row.project, lane: row.lane, desk: row.desk,
+    requested_by: row.requested_by, origin: row.origin, origin_id: row.origin_id, staging_command: true,
+  }, null);
+  spawnStaging(sent, argv);
+  return { ok: true, data: sent };
+}
+
+/** Drop in-flight staging commands without marking their releases failed. */
+export function stopStagingDeploys(): void {
+  for (const [id, handle] of [...stagingChildren]) {
+    handle.abandoned = true;
+    stagingChildren.delete(id);
+    try { handle.child.kill('SIGTERM'); } catch { /* already gone */ }
+  }
+}
+
+/** After a restart, follow any staging deploy that already printed a deploy id. */
+export function resumeStagingDeploys(): void {
+  const watch = getConfig().releases?.staging_watch_command;
+  if (!watch || watch.length === 0) return;
+  let open: ReleaseRequest[] = [];
+  try { open = listReleases({ target: 'staging', status: 'sent', limit: 50 }); } catch { return; }
+  for (const row of open) {
+    if (!row.deploy_id || stagingChildren.has(row.id)) continue;
+    const argv = fillArgv(watch, { deploy_id: row.deploy_id, sha: row.sha, lane: row.lane, desk: row.desk });
+    if (argv.length === 0) continue;
+    spawnStaging(row, argv);
+  }
+}
+
 function handToDeployAgent(row: ReleaseRequest): Result<ReleaseRequest> {
+  if (row.target === 'staging' && stagingCommand()) return startStagingCommand(row);
   const agent = deployAgent();
   if (!agent.ok) {
     patch(row.id, { status: 'failed', error: agent.error });
@@ -589,7 +790,7 @@ async function pollLoop(peer: string, handle: { stop: boolean }): Promise<void> 
     for (const r of open) { await mirrorOne(peer, r); if (handle.stop) return; }
     if (openForwarded(peer).length === 0) return;
     const events = await peerGetJson<{ events: Array<{ id: number; type: string; entity_id: string }>; last_id: number }>(
-      peer, `/events/log?since=${cursor}&wait_ms=${POLL_WAIT_MS}&types=release.reported`,
+      peer, `/events/log?since=${cursor}&wait_ms=${POLL_WAIT_MS}&types=release.*`,
     );
     if (handle.stop) return;
     if (!events.ok) {
@@ -606,19 +807,51 @@ async function pollLoop(peer: string, handle: { stop: boolean }): Promise<void> 
   }
 }
 
+function mirrorProgress(local: ReleaseRequest, remote: ReleaseRequest): void {
+  const phase = remote.progress_phase;
+  if (!phase) return;
+  const same = phase === local.progress_phase
+    && (remote.progress_status ?? null) === (local.progress_status ?? null)
+    && (remote.deploy_id ?? null) === (local.deploy_id ?? null)
+    && (remote.rollback_status ?? null) === (local.rollback_status ?? null);
+  if (same) return;
+  const fields: Partial<ReleaseRequest> = {
+    deploy_id: remote.deploy_id ?? local.deploy_id,
+    progress_phase: phase,
+    progress_status: remote.progress_status ?? null,
+  };
+  if (Object.prototype.hasOwnProperty.call(remote, 'pin_until')) fields.pin_until = remote.pin_until ?? null;
+  if (remote.staging_url) fields.staging_url = remote.staging_url;
+  if (remote.rollback_status) fields.rollback_status = remote.rollback_status;
+  if (remote.rollback_to) fields.rollback_to = remote.rollback_to;
+  if (remote.version) fields.version = remote.version;
+  if (remote.error) fields.error = remote.error;
+  patch(local.id, fields);
+  const updated = getRelease(local.id)!;
+  emit('release.progress', 'release', local.id, {
+    phase: updated.progress_phase, status: updated.progress_status, version: updated.version,
+    pin_until: updated.pin_until, url: updated.staging_url, error: updated.error,
+    rollback_status: updated.rollback_status, rollback_to: updated.rollback_to,
+    sha: updated.sha, target: updated.target, deploy_id: updated.deploy_id, origin_id: updated.origin_id,
+  }, null);
+}
+
 async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   if (!r.peer_request_id) return;
   const remote = await peerGetJson<ReleaseRequest>(peer, `/releases/${r.peer_request_id}`);
   if (!remote.ok || !remote.data) return;
   if (!pollers.has(peer)) return; // stopped while the request was in flight
+  const local = getRelease(r.id) ?? r;
+  mirrorProgress(local, remote.data);
   const s = remote.data.status;
   if (s !== 'deployed' && s !== 'failed' && s !== 'rejected') return;
+  const fresh = getRelease(r.id) ?? local;
   patch(r.id, {
     status: s,
-    version: remote.data.version ?? null,
+    version: remote.data.version ?? fresh.version ?? null,
     deployed_sha: remote.data.deployed_sha ?? null,
     report: remote.data.report ?? null,
-    error: remote.data.error ?? null,
+    error: remote.data.error ?? fresh.error ?? null,
     deploy_agent_id: remote.data.deploy_agent_id ?? null,
     reported_at: remote.data.reported_at ?? new Date().toISOString().replace('T', ' ').slice(0, 19),
   });
@@ -634,9 +867,11 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
 export function startReleasePollers(): void {
   const peers = withTable(() => getDb().prepare("SELECT DISTINCT peer FROM release_requests WHERE origin = 'local' AND status = 'sent' AND peer IS NOT NULL").all() as Array<{ peer: string }>);
   for (const { peer } of peers) ensureReleasePoller(peer);
+  resumeStagingDeploys();
 }
 
 export function stopReleasePollers(): void {
   for (const h of pollers.values()) h.stop = true;
   pollers.clear();
+  stopStagingDeploys();
 }

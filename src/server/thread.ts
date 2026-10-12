@@ -457,6 +457,15 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
     return item;
   }
 
+  if (t === 'release.progress') {
+    if (str(p.status) === 'heartbeat') return null;
+    const sha = str(p.sha) ?? '';
+    const phase = str(p.phase) ?? 'progress';
+    const item = base(event, 'report', null, `Staging ${phase}${sha ? `: ${sha.slice(0, 8)}` : ''}`);
+    item.body = [str(p.status), str(p.version) ? `v${str(p.version)}` : null, str(p.error)].filter(Boolean).join(' · ') || null;
+    return item;
+  }
+
   if (t === 'review.ai_completed') {
     const run = ctx.run(event.entity_id);
     const verdict = str(p.verdict) ?? 'needs-fixes';

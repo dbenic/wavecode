@@ -96,6 +96,7 @@ describe('Release view (candidates are the unit of production)', () => {
     fireEvent.click(ready);
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/releases/verify', { sha: TIP, project: 'wavepulse', note: 'invoices checked' }));
     const row = within(screen.getByTestId('lanes')).getByTestId(`lane-${SHA_A.slice(0, 8)}`);
+    expect(row.textContent).toMatch(/On staging: 2431f684b v0\.443\.3-rc/);
     expect(within(row).getByText('READY FOR PROD')).toBeTruthy(); // staged, not yet marked
     fireEvent.click(within(row).getByText('STAGE'));
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/reviews/run-2431/stage'));

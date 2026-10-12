@@ -2,10 +2,38 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, ReviewItem as ReviewItemType, User } from '../types';
+import type { Agent, ReleaseRequest, ReviewItem as ReviewItemType, User } from '../types';
+import type { StageProgress } from '../components/StageChip';
 import { isReviewEventType } from '../sse-events';
 import ReviewItemCard from '../components/ReviewItem';
 import RoomProposals from '../components/RoomProposals';
+
+function indexStaging(rows: ReleaseRequest[]): Map<string, StageProgress & { id?: string }> {
+  const open = new Map<string, ReleaseRequest>();
+  const newest = new Map<string, ReleaseRequest>();
+  for (const row of rows) {
+    if (row.target !== 'staging') continue;
+    if (!newest.has(row.sha)) newest.set(row.sha, row);
+    if ((row.status === 'sent' || row.status === 'requested') && !open.has(row.sha)) open.set(row.sha, row);
+  }
+  const out = new Map<string, StageProgress & { id?: string }>();
+  for (const [sha, row] of newest) {
+    const picked = open.get(sha) ?? row;
+    out.set(sha, {
+      id: picked.id,
+      sha: picked.sha,
+      status: picked.status,
+      phase: picked.progress_phase ?? null,
+      progress: picked.progress_status ?? null,
+      version: picked.version,
+      pinUntil: picked.pin_until ?? null,
+      url: picked.staging_url ?? null,
+      error: picked.error,
+      rollbackStatus: picked.rollback_status ?? null,
+    });
+  }
+  return out;
+}
 
 export default function ReviewQueue() {
   const navigate = useNavigate();
@@ -14,16 +42,19 @@ export default function ReviewQueue() {
   const [loaded, setLoaded] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [proposalsVersion, setProposalsVersion] = useState(0);
+  const [stagingBySha, setStagingBySha] = useState<Map<string, StageProgress & { id?: string }>>(new Map());
 
   const fetchData = useCallback(() => {
     Promise.all([
       apiGet<ReviewItemType[]>('/reviews'),
       apiGet<Agent[]>('/agents'),
       apiGet<User>('/me').catch(() => null),
-    ]).then(([r, a, me]) => {
+      apiGet<ReleaseRequest[]>('/releases?target=staging&limit=200').catch(() => [] as ReleaseRequest[]),
+    ]).then(([r, a, me, releases]) => {
       setReviews(r);
       setAgents(a);
       setIsAdmin(me?.role === 'admin');
+      setStagingBySha(indexStaging(releases));
       setLoaded(true);
     }).catch(() => setLoaded(true));
   }, []);
@@ -99,6 +130,7 @@ export default function ReviewQueue() {
                 onAction={fetchData}
                 index={i}
                 isAdmin={isAdmin}
+                staging={item.freeze ? stagingBySha.get(item.freeze.sha) ?? null : null}
               />
             ))}
           </div>

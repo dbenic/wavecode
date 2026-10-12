@@ -4,6 +4,7 @@ import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import type { AuditEntry, Board, CandidateRow, LaneBoardRow, OverviewResponse, ReviewItem, User } from '../types';
 import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
+import StageChip, { type StageProgress } from '../components/StageChip';
 
 /**
  * Releases follow the deployer's model: a composed candidate is the unit that goes to
@@ -21,6 +22,14 @@ function cellLabel(r: LaneBoardRow['staging']): { text: string; cls: string } {
     case 'rejected': return { text: 'rejected', cls: 'text-red-300' };
     default: return { text: r.status, cls: 'text-slate-400' };
   }
+}
+
+function stageView(sha: string, r: NonNullable<LaneBoardRow['staging']>, id?: string): StageProgress & { id?: string } {
+  return {
+    id, sha, status: r.status, phase: r.phase ?? null, progress: r.progress ?? null,
+    version: r.version, pinUntil: r.pin_until ?? null, url: r.url ?? null, error: r.error ?? null,
+    rollbackStatus: r.rollback_status ?? null,
+  };
 }
 
 function when(iso: string | null): string {
@@ -171,8 +180,8 @@ export default function Release() {
             {card?.verdict_path && <a href={fileViewHref(card.verdict_path)} onClick={openFile} className="text-sky-300 underline underline-offset-2">verdict</a>}
           </div>
         </td>
-        <td className={`px-3 py-2 align-top ${st.cls}`}>
-          {st.text}
+        <td className={`px-3 py-2 align-top ${l.staging ? '' : st.cls}`}>
+          {l.staging ? <StageChip progress={stageView(l.sha, l.staging)} /> : st.text}
           {l.staging && <div className="text-[9px] text-slate-600">{when(l.staging.at)}{l.staging.by ? ` · ${l.staging.by}` : ''}</div>}
           {verified && <div className="text-[9px] font-semibold text-violet-300" data-testid="ready-for-prod">Ready for prod · {verified}</div>}
         </td>
@@ -256,7 +265,7 @@ export default function Release() {
                           ))}
                         </div>
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
-                          <span>staging: <span className={st.cls}>{st.text}</span>{c.verified ? <span className="text-violet-300" data-testid="ready-for-prod"> · Ready for prod · {c.verified.by}{c.verified.note ? ` — ${c.verified.note}` : ''}</span> : <span className="text-amber-300"> · not ready for prod</span>}</span>
+                          <span>staging: {c.staging ? <StageChip progress={stageView(c.tip, c.staging)} /> : <span className={st.cls}>{st.text}</span>}{c.verified ? <span className="text-violet-300" data-testid="ready-for-prod"> · Ready for prod · {c.verified.by}{c.verified.note ? ` — ${c.verified.note}` : ''}</span> : <span className="text-amber-300"> · not ready for prod</span>}</span>
                           <span>production: <span className={pr.cls}>{pr.text}</span>{c.production?.by ? <span className="text-slate-500"> · GO by {c.production.by}</span> : null}</span>
                           <span className="ml-auto flex items-center gap-1.5">
                             <button onClick={() => candidateStage(c)} disabled={acting !== null || stageLocked || (!!c.staging && (c.staging.status === 'sent' || c.staging.status === 'requested'))} title={stageLocked ? "Stage needs the reviewer's PASS on this exact SHA" : 'Ask the deployer to put this candidate on staging'} className="px-2 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 disabled:opacity-40">

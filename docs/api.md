@@ -466,15 +466,18 @@ runtime with the most weekly budget; never below 10%).
 
 Releases are records, not chat (`src/server/releases.ts`). A person presses **Stage** (automated
 staging deploy, no GO) or **Promote** (the production GO) on a freeze card or in the Release
-view; the daemon posts a release request to the project's `release_peer` box, which hands it to
-its deploy agent (`releases.deploy_agent`) as one prompt with the right header and waits for
-the agent's report. The requester mirrors the outcome, so `/release` shows what is on staging
-and in production per lane.
+view; the daemon posts a release request to the project's `release_peer` box. Production is
+handed to the deploy agent (`releases.deploy_agent`) as one prompt. Staging does the same
+unless `releases.staging_command` is set, in which case the deploy box runs that argv and
+streams progress onto the release record. The requester mirrors `release.*`, so `/release`
+shows what is on staging and in production per lane. The STAGE control becomes a live phase
+chip (queued → lock → fetch → build → verify → pin) and, on success, "On staging".
 
 Record fields: `id, project, sha, lane, target ('staging'|'production'), desk, reviewer,
 requested_by, origin ('local'|'peer'), peer, peer_request_id, origin_id, run_id,
 deploy_agent_id, status ('requested'|'sent'|'deployed'|'failed'|'rejected'), version,
-deployed_sha, report, error, created_at, updated_at, reported_at`.
+deployed_sha, report, error, deploy_id, progress_phase, progress_status, pin_until,
+staging_url, rollback_status, rollback_to, created_at, updated_at, reported_at`.
 
 - `GET /api/releases?project=&sha=&target=&status=&limit=` — newest first.
 - `GET /api/releases/:id`
@@ -489,6 +492,15 @@ deployed_sha, report, error, created_at, updated_at, reported_at`.
   stays that person's name. Staging requests from peers are not checked against the list.
   Idempotent while a request for the same SHA + target is open. The deploy agent receives
   `[Release GO <id> from <person> via WaveCode Promote …]` or `[Staging request <id> … Automated …]`.
+  When `releases.staging_command` is set, a staging request runs that command instead of the
+  prompt. The argv is a template: `{sha}` is required, `{lane}` and `{desk}` are omitted (with
+  the preceding flag) when empty. Before it runs, the deploy box re-checks a known freeze:
+  the reviewer's PASS, and GREEN when a gate is recorded. Unknown freezes are left to the
+  command. Progress lines (schema v1; unknown fields ignored) update the record and emit
+  `release.progress`. A `done` line is `deployed`; a `failed` line is `failed`. If the daemon
+  restarts mid-deploy and `releases.staging_watch_command` includes `{deploy_id}`, it
+  re-attaches. Production is unchanged and always uses the deploy agent. Without
+  `staging_command`, staging keeps today's prompt.
 - Candidates are the unit of production when `projects.<p>.candidate_refs` is set: the board lists each
   unreleased candidate with its tip SHA and the lanes it contains; a lane alone is then never promotable.
   `POST /api/releases/candidates/:name/stage` `{ project }` requests staging. A developer needs every contained lane's reviewer PASS, unless that composed candidate is already deployed to staging. An admin may stage either way.
@@ -506,8 +518,9 @@ deployed_sha, report, error, created_at, updated_at, reported_at`.
   the deploy agent's outcome (MCP `report_release`, or the pane line `RELEASED <id>: deployed <sha> version <x.y.z> to <target>`
   / `RELEASE FAILED <id>: <why>`, detected by the watcher). A deployed report must name the requested SHA.
   Final: a second report is a no-op.
-- Events: `release.requested`, `release.reported` (entity `release`). Both are visible to a peer's
-  restricted token so the requester can mirror them; a deployed/failed outcome also notifies (ntfy / push).
+- Events: `release.requested`, `release.progress`, `release.reported` (entity `release`). All are
+  visible to a peer's restricted token so the requester can mirror them; a deployed/failed outcome
+  also notifies (ntfy / push). Progress heartbeats are stored and mirrored; they are not threaded.
 
 ## Reviews
 

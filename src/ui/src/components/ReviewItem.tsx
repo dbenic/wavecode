@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import type { ReviewItem as ReviewItemType, Agent, CodeReview } from '../types';
 import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
+import StageChip, { type StageProgress } from './StageChip';
 
 function formatDuration(seconds: number | null): string {
   if (seconds === null) return '--:--';
@@ -25,6 +26,7 @@ export default function ReviewItem({
   onAction,
   index,
   isAdmin = false,
+  staging = null,
 }: {
   item: ReviewItemType;
   agents: Agent[];
@@ -32,6 +34,8 @@ export default function ReviewItem({
   index: number;
   /** Admins may stage a freeze that does not have the reviewer's PASS. */
   isAdmin?: boolean;
+  /** Latest staging release for this freeze, so STAGE can show live progress. */
+  staging?: StageProgress & { id?: string } | null;
 }) {
   const navigate = useNavigate();
   const [acting, setActing] = useState<string | null>(null);
@@ -214,7 +218,10 @@ export default function ReviewItem({
               {acting === 'promote' ? '...' : 'PROMOTE'}
             </button>
           )}
-          {freeze && !freezeStale && (
+          {staging && (staging.status === 'sent' || staging.status === 'requested' || staging.status === 'deployed' || staging.status === 'failed') && (
+            <StageChip releaseId={staging.id} progress={staging} />
+          )}
+          {freeze && !freezeStale && staging?.status !== 'sent' && staging?.status !== 'requested' && staging?.status !== 'deployed' && (
             <button
               onClick={() => act('stage')}
               disabled={acting !== null || stageLocked}
