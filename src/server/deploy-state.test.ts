@@ -26,13 +26,20 @@ describe('deriveDeployState', () => {
     expect(deriveDeployState(facts({ containedInStaging: true, readyForProd: true }))).toBe('awaiting_prod_go');
   });
 
-  it('behind main is stale even when the deploy tips are unknown', () => {
+  it('behind main stays actionable, and a superseded card is history', () => {
     expect(deriveDeployState(facts({
       behindMain: true,
       containedInStaging: null,
       containedInProd: null,
       mergedToMain: null,
-    }))).toBe('stale');
+    }))).toBe('unknown');
+    expect(deriveDeployState(facts({
+      behindMain: true,
+      verdict: null,
+      quick: 'missing',
+      full: 'missing',
+    }))).toBe('awaiting_review');
+    expect(deriveDeployState(facts({ superseded: true, behindMain: true }))).toBe('superseded');
   });
 
   it('an unknown staging or prod tip is unknown, never ready to stage', () => {

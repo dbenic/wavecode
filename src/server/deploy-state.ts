@@ -13,7 +13,7 @@ import { getDb } from './db.js';
 import { emit } from './event-bus.js';
 import { gitAncestor, gitText } from './git-memo.js';
 import logger from './logger.js';
-import { commitsBehind, projectRepo, resolveMainRef } from './lane-main.js';
+import { commitsBehind, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef } from './lane-main.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { getConfig } from './config.js';
@@ -35,7 +35,8 @@ import {
   resolveStagingTip,
 } from './releases.js';
 import { readProdHealth } from './staging-forward.js';
-import { reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
+import { countixDenied } from './pipeline-deny.js';
+import { reviewStatusForVerdict, reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
 import { readLaneTests, shaChecks, suiteNames, type TestRun } from './test-runs.js';
 
 export const RECONCILE_INTERVAL_MS = 90_000;
@@ -78,14 +79,14 @@ export interface DeriveFacts {
 
 /**
  * One state per card. Order is deliberate:
- * a newer lane freeze retires the card; a SHA contained in prod is live;
- * behind main is stale; a missing tip, main ancestry, or test probe is unknown;
+ * a newer lane freeze retires the card (History); a SHA contained in prod is live;
+ * a missing tip, main ancestry, or test probe is unknown;
+ * behind main stays in the column the review and tests decide, and locks the buttons;
  * only then do staging, review and tests decide the actionable column.
  */
 export function deriveDeployState(facts: DeriveFacts): DeployState {
   if (facts.superseded) return 'superseded';
   if (facts.containedInProd === true) return 'live_on_prod';
-  if (facts.behindMain === true) return 'stale';
   if (
     facts.containedInStaging === null
     || facts.containedInProd === null
@@ -422,6 +423,66 @@ function noteText(freeze: ReleaseFreeze): string | null {
   try { return fs.readFileSync(freeze.freeze_path, 'utf8'); } catch { return null; }
 }
 
+/** Freeze verdict for this SHA, else the latest done code review on its run. */
+function exactShaVerdict(freeze: ReleaseFreeze): string | null {
+  const row = getFreeze(freeze.sha) ?? freeze;
+  if (row.verdict) return row.verdict;
+  if (!row.run_id) return null;
+  try {
+    const review = getDb().prepare(
+      `SELECT verdict FROM code_reviews
+       WHERE run_id = ? AND status = 'done' AND verdict IS NOT NULL
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ).get(row.run_id) as { verdict: string } | undefined;
+    return review?.verdict ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write the derived status onto runs that are still pending. Approved and rejected rows stay. */
+function backfillRunReviewStatus(freeze: ReleaseFreeze): void {
+  const row = getFreeze(freeze.sha) ?? freeze;
+  if (!row.run_id) return;
+  const derived = reviewStatusForVerdict(exactShaVerdict(row));
+  if (derived === 'pending') return;
+  try {
+    getDb().prepare(
+      `UPDATE runs SET review_status = ? WHERE id = ? AND review_status = 'pending'`,
+    ).run(derived, row.run_id);
+  } catch (e) {
+    logger.debug({ sha: row.sha, error: (e as Error).message }, 'Review status backfill skipped');
+  }
+}
+
+/**
+ * Authors of behind-main cards that are still actionable (not superseded, not
+ * already in staging or prod) get the merge-and-refreeze checklist once per
+ * lane and main SHA. Denied lanes and agents are skipped.
+ */
+function pingBehindMain(freeze: ReleaseFreeze, facts: DeriveFacts): void {
+  if (facts.behindMain !== true || facts.superseded) return;
+  if (facts.containedInStaging === true || facts.containedInProd === true) return;
+  if (!freeze.project || !freeze.lane) return;
+  if (countixDenied(freeze.project, freeze.lane, freeze.author_name ? { name: freeze.author_name } : null)) return;
+  const repo = projectRepo(freeze.project);
+  const tip = repo ? mainTip(repo, freeze.project) : null;
+  if (!tip) return;
+  try {
+    pingLaneAboutMain({
+      lane: freeze.lane,
+      project: freeze.project,
+      mainSha: tip.sha,
+      subject: tip.subject,
+      authorAgentId: freeze.author_agent_id,
+      authorName: freeze.author_name,
+      kind: 'freeze',
+    });
+  } catch (e) {
+    logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Behind-main ping skipped');
+  }
+}
+
 /** Recompute every freeze. Returns the number of cards written. */
 export async function reconcileDeployStates(now = new Date()): Promise<number> {
   ensureDeployStateTable();
@@ -446,6 +507,8 @@ export async function reconcileDeployStates(now = new Date()): Promise<number> {
     const pair = project ? tips.get(project)! : { staging: { sha: null, version: null }, prod: { sha: null, version: null } };
     const facts = await factsFor(freeze, freezes, tips);
     const state = deriveDeployState(facts);
+    backfillRunReviewStatus(freeze);
+    pingBehindMain(freeze, facts);
     if (facts.superseded || facts.containedInStaging === true || facts.containedInProd === true) {
       try { clearSettledReleaseErrors(freeze.sha); } catch { /* release table missing */ }
     }
@@ -629,6 +692,11 @@ function promoteLock(user: { name: string; role: string }, project: string | nul
 }
 
 function actionsFor(row: DeployRow, stageBlock: string | null, promoteBlock: string | null, user: { name: string; role: string }, project: string | null): Pick<DeployView, 'action' | 'action_lock' | 'admin_bypass'> {
+  const behindOpen = row.behind_main === 1 && row.superseded !== 1 && row.in_staging !== 1 && row.in_prod !== 1
+    && row.state !== 'superseded' && row.state !== 'live_on_prod';
+  if (behindOpen) {
+    return { action: 'none', action_lock: 'Behind main — merge main and freeze the new SHA', admin_bypass: false };
+  }
   if (row.state === 'ready_to_stage') return { action: 'stage', action_lock: stageBlock, admin_bypass: false };
   if (row.state === 'on_staging') {
     return { action: 'ready', action_lock: user.role === 'observer' ? 'Observers cannot mark Ready for prod' : null, admin_bypass: false };

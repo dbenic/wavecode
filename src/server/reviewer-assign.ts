@@ -205,6 +205,17 @@ export function shouldReassign(opts: {
   return true;
 }
 
+/**
+ * The run column `review_status` stays `pending` after a verdict is written.
+ * The verdict on the exact SHA is the source: pass approves, needs-fixes and
+ * reject reject, and no verdict stays pending. Queue depth uses this, not the column.
+ */
+export function reviewStatusForVerdict(verdict: string | null | undefined): 'pending' | 'approved' | 'rejected' {
+  if (verdict === 'pass') return 'approved';
+  if (verdict === 'needs-fixes' || verdict === 'reject') return 'rejected';
+  return 'pending';
+}
+
 export function loadFor(agent: Agent): ReviewerLoad {
   return {
     busy: agent.status === 'working' || agent.status === 'error',
@@ -214,11 +225,25 @@ export function loadFor(agent: Agent): ReviewerLoad {
   };
 }
 
+/**
+ * Open reviews for this seat. Pending means no reviewer verdict on the exact
+ * SHA: the freeze verdict, else the latest done code review on that run.
+ * `runs.review_status` is not read — it stays pending after a verdict.
+ */
 function openReviews(agentId: string): number {
   try {
     const row = getDb().prepare(
-      `SELECT COUNT(*) AS n FROM release_freezes
-       WHERE reviewer_agent_id = ? AND verdict IS NULL AND status IN ('open', 'behind-main')`,
+      `SELECT COUNT(*) AS n FROM release_freezes f
+       WHERE f.reviewer_agent_id = ?
+         AND f.status IN ('open', 'behind-main')
+         AND COALESCE(
+           f.verdict,
+           (
+             SELECT c.verdict FROM code_reviews c
+             WHERE c.run_id = f.run_id AND c.status = 'done' AND c.verdict IS NOT NULL
+             ORDER BY c.created_at DESC, c.rowid DESC LIMIT 1
+           )
+         ) IS NULL`,
     ).get(agentId) as { n: number };
     return row?.n ?? 0;
   } catch {

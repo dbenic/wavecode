@@ -17,6 +17,7 @@ import {
   shouldReassign,
   vendorOf,
   assignmentFacts,
+  reviewStatusForVerdict,
   type AssignInput,
   type ReviewerLoad,
 } from './reviewer-assign.js';
@@ -211,6 +212,16 @@ describe('selectReviewer', () => {
   });
 });
 
+describe('reviewStatusForVerdict', () => {
+  it('maps the exact-SHA verdict and leaves a missing verdict pending', () => {
+    expect(reviewStatusForVerdict('pass')).toBe('approved');
+    expect(reviewStatusForVerdict('needs-fixes')).toBe('rejected');
+    expect(reviewStatusForVerdict('reject')).toBe('rejected');
+    expect(reviewStatusForVerdict(null)).toBe('pending');
+    expect(reviewStatusForVerdict(undefined)).toBe('pending');
+  });
+});
+
 describe('shouldReassign', () => {
   const base = {
     hasVerdict: false,
@@ -279,6 +290,22 @@ describe('live reviewer load', () => {
     emit('pipeline.review', 'run', `${sha}:reassign`, {
       sha, reviewer_id: idle.data.id, assigned_at_ms: 1_700_000_100_000, reassigned: true,
     }, null);
+    const taskForRun = db.insertTask({ agent_id: busy.data.id, prompt: 'reviewed' });
+    if (!taskForRun.ok) throw new Error(taskForRun.error);
+    const run = db.insertRun({ task_id: taskForRun.data.id, agent_id: busy.data.id });
+    if (!run.ok) throw new Error(run.error);
+    db.finishRun(run.data.id, 0);
+    const decided = 'c'.repeat(40);
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, run_id, reviewer_agent_id, verdict, status) VALUES (?, ?, ?, NULL, 'open')`,
+    ).run(decided, run.data.id, busy.data.id);
+    db.getDb().prepare(
+      `INSERT INTO code_reviews (id, run_id, reviewer_type, reviewer_agent_id, status, verdict)
+       VALUES ('rv-decided', ?, 'cross-model', ?, 'done', 'pass')`,
+    ).run(run.data.id, busy.data.id);
+    const stored = db.getRun(run.data.id);
+    if (!stored.ok) throw new Error(stored.error);
+    expect(stored.data.review_status).toBe('pending');
 
     expect(loadFor(busy.data)).toMatchObject({ busy: true, openReviews: 1, runningTasks: 1, lastAssignedAt: 1_700_000_000_000 });
     expect(loadFor(idle.data).busy).toBe(false);

@@ -2,7 +2,7 @@
 
 import '../../test-setup';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import ReviewQueue from './ReviewQueue';
 import type { SSEEvent } from '../hooks/useSSE';
@@ -97,6 +97,36 @@ describe('ReviewQueue', () => {
     expect(await screen.findByTestId('reviewer-load')).toBeInTheDocument();
     expect(screen.getByTestId('reviewer-load-codex2')).toHaveTextContent('@codex2 busy · queue 2');
     expect(screen.getByTestId('reviewer-load-codex3')).toHaveTextContent('@c3 idle · queue 0');
+  });
+
+  it('keeps a behind-main card actionable and puts a superseded card in History', async () => {
+    const useApi = await import('../hooks/useApi');
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/reviews/board') {
+        return {
+          last_reconciled_at: '2026-10-12T18:00:00.000Z',
+          stale: false,
+          reviewers: [],
+          items: [
+            { ...makeReviewItem('Merge main'), deploy: { state: 'awaiting_review' } },
+            { ...makeReviewItem('Old freeze'), deploy: { state: 'superseded' } },
+          ],
+        } as never;
+      }
+      if (path === '/agents') return [] as never;
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    render(
+      <MemoryRouter>
+        <ReviewQueue />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Merge main')).toBeInTheDocument();
+    expect(screen.queryByText('Old freeze')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('history-toggle'));
+    expect(screen.getByText('Old freeze')).toBeInTheDocument();
   });
 });
 
