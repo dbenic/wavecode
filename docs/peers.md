@@ -109,7 +109,9 @@ releases:
 ```
 
 The peer user's restricted token may `POST /api/releases`, read `GET /api/releases/:id`
-and `GET /api/releases/staging-tip`, and read `release.*` events; nothing else changes. The deploy agent reports with the MCP tool
+and `GET /api/releases/staging-tip`, and read `release.*` events; nothing else changes.
+A dev box that forwards releases proxies `GET /api/releases/staging-tip` to that same peer
+and reports `source: peer`. Its own deployed row is not the staging tip. The deploy agent reports with the MCP tool
 `report_release` (id, status, sha, version, note) or, without MCP, by printing one line:
 
 ```

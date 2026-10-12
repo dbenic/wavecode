@@ -518,7 +518,10 @@ peer `POST /api/releases`) refuses unless the requested SHA contains the SHA now
 check, and is audited as `rollback` (ops are notified). The normal Stage button never sends
 it. A requested or sent staging row that no longer contains the new staging SHA is marked
 `rejected` with that reason. Optional `releases.staging_health_command` (argv, `{project}`)
-prints the live SHA; when it does, that SHA wins over the deployed record. Off unless set.
+prints the live SHA; on the box that serves the release, that SHA wins over the deployed record.
+A box that forwards the project's releases (`projects.<p>.release_peer`, the same peer
+`requestRelease` posts to) never treats its own row or health command as the tip: it proxies
+the peer. Off unless set.
 
 A freeze note may declare operational prerequisites in a fenced YAML block (not CURRENT.md
 prose). A candidate's list is the union of the freeze notes whose SHAs it contains;
@@ -576,7 +579,7 @@ deployed_sha, report, error, deploy_id, progress_phase, progress_status, pin_unt
 staging_url, rollback_status, rollback_to, created_at, updated_at, reported_at`.
 
 - `GET /api/releases?project=&sha=&target=&status=&limit=` — newest first.
-- `GET /api/releases/staging-tip?project=` — read-only `currentStagingTip` (`{ sha, version, lane }` or `null`). A dev box with a release peer and no `staging_health_command` reads this from the deploy box. Authenticated; a restricted peer token may GET it.
+- `GET /api/releases/staging-tip?project=` — `{ sha, version, lane, source }` where `source` is `peer`, `health`, or `local`. `sha` is null when the tip is unknown. A forwarding box proxies its release peer and always reports `source: peer` (the local deployed row is not used). The deploy box reports `health` when `staging_health_command` prints a SHA, otherwise `local`. Authenticated; a restricted peer token may GET it. `GET /api/settings` includes `staging_tips`: one `{ project, source, sha, peer }` per project, refreshed at startup and every minute.
 - `GET /api/releases/:id`
 - `POST /api/reviews/:runId/stage` — stage a freeze card. A developer needs the reviewer's PASS on that exact SHA (403 `Stage needs the reviewer's PASS on this exact SHA` otherwise). An admin may stage without it. A freeze already inside a composed candidate the deploy agent has deployed to staging may be staged without that PASS. Never a stale SHA. 202 with the record.
 - `POST /api/reviews/:runId/promote` approves the review for a developer or an admin. The production

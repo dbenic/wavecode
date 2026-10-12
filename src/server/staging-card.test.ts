@@ -234,8 +234,18 @@ describe('staging tip on the card', () => {
     expect(lanes[0].stage_block).toBeNull();
   });
 
-  it('does not ask the peer when this box has a health command', async () => {
+  it('asks the peer even when a local health command is set, because releases are forwarded', async () => {
     releasesCfg.staging_health_command = ['true'];
+    resetStagingTipCacheForTest();
+    const lanes = await refreshLaneBoard();
+    expect(fetches).toBe(1);
+    expect(lanes[0].stage_block).toMatch(/would roll staging back: .*missing \d+ commits now on staging/);
+  });
+
+  it('uses the health command and does not ask a peer when this box deploys the release', async () => {
+    delete projects.demo.release_peer;
+    releasesCfg.staging_health_command = ['true'];
+    releasesCfg.deploy_agent = 'fable';
     resetStagingTipCacheForTest();
     await refreshLaneBoard();
     expect(fetches).toBe(0);

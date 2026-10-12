@@ -115,11 +115,12 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(items.map((item) => {
       const lane = (item.freeze && bySha.get(item.freeze.sha))
         || (item.freeze?.lane ? byLane.get(`${item.freeze.project}:${item.freeze.lane}`) : undefined);
-      if (!lane) return item;
+      const stage_block = lane?.stage_block ?? null;
+      if (!lane) return { ...item, stage_block };
       return {
         ...item,
         status_line: lane.status_line,
-        stage_block: lane.stage_block,
+        stage_block,
         freeze: item.freeze ? { ...item.freeze, gate: lane.gate } : item.freeze,
         promote_block: lane.promote_block,
         full_fail_flag: lane.full_fail_flag,

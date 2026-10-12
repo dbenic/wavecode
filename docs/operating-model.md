@@ -214,7 +214,8 @@ projects:
   require_pass_to_promote: true  # promote gate even without auto_review
   gate_dependents_on_approval: true  # DAG advances on approval, not 'done'
 releases:
-  # Optional. Prints the SHA actually on staging; wins over the deployed record. Off unless set.
+  # Optional. On the box that serves the release, a printed SHA wins over the deployed record.
+  # A box that forwards via projects.<p>.release_peer proxies the peer instead. Off unless set.
   staging_health_command: [staging-health, '{project}']
 autonomy:
   verify_completion: true        # LLM sanity-check on task completion
