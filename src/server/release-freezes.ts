@@ -39,9 +39,13 @@ import { countVerdictIssues, type ReviewVerdict } from './code-review.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
+import { behindMainLine } from './lane-status.js';
+import { commitsBehind, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
+import { pingReviewersForGreenSha } from './gate-ping.js';
 
-/** merged = the SHA is an ancestor of the project's main: the lane is done, whatever its last verdict said */
-export type FreezeStatus = 'open' | 'promoted' | 'rejected' | 'stale' | 'merged';
+/** merged = the SHA is an ancestor of the project's main: the lane is done, whatever its last verdict said.
+ *  behind-main = the SHA does not contain the project's current main, so it cannot be staged. */
+export type FreezeStatus = 'open' | 'promoted' | 'rejected' | 'stale' | 'merged' | 'behind-main';
 
 export interface ReleaseFreeze {
   sha: string;
@@ -383,10 +387,12 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         .run(sha, project, parsed.desk, parsed.lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
           parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
       supersedeOlder(sha, project, parsed.lane, parsed.desk);
+      settleBehind(sha, project);
       return { ok: true, data: { sha, effect: 'stored', run_id: null } };
     }
     const changed = Object.keys(enrich).some((k) => (existing as unknown as Record<string, unknown>)[k] !== (enrich as Record<string, unknown>)[k]);
     patch(sha, enrich);
+    settleBehind(sha, project ?? existing.project);
     return { ok: true, data: { sha, effect: changed ? 'updated' : 'noop', run_id: existing.run_id } };
   }
 
@@ -405,12 +411,14 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     // Backfill keeps the queue to what can be promoted; the freeze is still recorded so a later PASS completes it.
     if (existing) {
       patch(sha, enrich);
+      settleBehind(sha, project ?? existing.project);
       return { ok: true, data: { sha, effect: 'noop', run_id: null } };
     }
     getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, freeze_path, verdict_path, gate, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
       .run(sha, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName,
         parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, parsed.gate);
+    settleBehind(sha, project);
     return { ok: true, data: { sha, effect: 'stored', run_id: null } };
   }
 
@@ -471,7 +479,35 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   }
   supersedeOlder(sha, project ?? existing?.project ?? null, parsed.lane ?? existing?.lane ?? null, parsed.desk ?? existing?.desk ?? null);
   logger.info({ sha, runId, verdict, reviewer: reviewerName, author: authorName, file: filePath }, 'Release freeze ingested');
+  settleBehind(sha, project ?? existing?.project ?? null);
+  if (verdict === 'needs-fixes' && (parsed.gate ?? existing?.gate) === 'GREEN') {
+    try { pingReviewersForGreenSha(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Gate ping skipped'); }
+  }
   return { ok: true, data: { sha, effect, run_id: runId } };
+}
+
+/**
+ * A freeze file cannot be refused at write time. If the SHA does not contain
+ * the project's current main, the card is `behind-main` and the author is
+ * told once to merge (not rebase) and refreeze.
+ */
+function settleBehind(sha: string, project: string | null): void {
+  try {
+    const n = commitsBehind(project, sha);
+    if (n == null || n <= 0) return;
+    const row = getFreeze(sha);
+    if (!row || (row.status !== 'open' && row.status !== 'behind-main')) return;
+    if (row.status === 'open') patch(sha, { status: 'behind-main' });
+    const repo = project ? getConfig().projects?.[project]?.repo : undefined;
+    const tip = repo ? mainTip(repo, project) : null;
+    if (!tip || !row.lane) return;
+    pingLaneAboutMain({
+      lane: row.lane, project, mainSha: tip.sha, subject: tip.subject,
+      authorAgentId: row.author_agent_id, authorName: row.author_name, kind: 'freeze',
+    });
+  } catch (e) {
+    logger.debug({ sha, error: (e as Error).message }, 'behind-main check skipped');
+  }
 }
 
 /** A newer commit on the same lane invalidates older open freezes (spec rule 3). */
@@ -507,11 +543,20 @@ function refreshMain(repo: string, now: number): void {
   const last = fetchedAt.get(repo) ?? 0;
   if (now - last < FETCH_TTL_MS) return;
   fetchedAt.set(repo, now);
-  try {
-    execFileSync('git', ['-C', repo, 'fetch', '--quiet', '--prune', 'origin'], { stdio: 'ignore', timeout: 30_000 });
-  } catch (e) {
-    logger.debug({ repo, error: (e as Error).message }, 'Base clone fetch skipped');
+  if (!fetchDisabled) {
+    try {
+      execFileSync('git', ['-C', repo, 'fetch', '--quiet', '--prune', 'origin'], { stdio: 'ignore', timeout: 30_000 });
+    } catch (e) {
+      logger.debug({ repo, error: (e as Error).message }, 'Base clone fetch skipped');
+    }
   }
+  try { observeRepo(repo); } catch (e) { logger.debug({ repo, error: (e as Error).message }, 'Main tip not observed'); }
+}
+
+/** Fetch (unless tests disabled it) and notice a moved main. Used before lane listing. */
+export function refreshProject(project: string, now = Date.now()): void {
+  const repo = getConfig().projects?.[project]?.repo;
+  if (repo) refreshMain(repo, now);
 }
 
 /** Test hook: a repo may be probed without fetching (no remote). */
@@ -665,10 +710,10 @@ export function resetMergedCacheForTest(): void {
 function laneHead(freeze: ReleaseFreeze): string | null {
   if (!freeze.lane || !freeze.author_agent_id) return null;
   const agent = getAgent(freeze.author_agent_id);
-  if (!agent.ok || !agent.data.workspace) return null;
+  if (!agent.ok || !agent.data.workspace || !fs.existsSync(agent.data.workspace)) return null;
   for (const ref of [freeze.lane, `origin/${freeze.lane}`]) {
     try {
-      const out = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { encoding: 'utf-8', timeout: 5000 }).trim();
+      const out = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       if (SHA40.test(out)) return out;
     } catch { /* try the next ref */ }
   }
@@ -681,10 +726,56 @@ function laneHead(freeze: ReleaseFreeze): string | null {
  * reviewer ≠ author, and the SHA must still be the lane's tip. A stale SHA is
  * refused outright; no override, because that is the one thing the rule is for.
  */
+/**
+ * The freeze SHA must contain the project's current main. Returns the
+ * what's-missing line when it does not, and records `behind-main`.
+ */
+/** Shown when Stage is refused because the lane moved past this freeze. No admin override. */
+export function staleStageMessage(freeze: { sha: string; lane: string | null }, movedTo?: string | null): string {
+  const onto = movedTo ? ` to ${movedTo.slice(0, 8)}` : '';
+  return `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on${onto}; freeze the new SHA`;
+}
+
+/**
+ * Stage and Promote both refuse a stale SHA, including one whose lane tip has
+ * moved since the freeze was written. Marks the row stale. Admins are not exempt.
+ */
+export function staleStageBlock(freeze: ReleaseFreeze): string | null {
+  if (freeze.status === 'stale') return staleStageMessage(freeze, freeze.superseded_by);
+  const head = laneHead(freeze);
+  if (head && head !== freeze.sha) {
+    patch(freeze.sha, { status: 'stale', superseded_by: head });
+    if (freeze.run_id) emit('review.superseded', 'run', freeze.run_id, { sha: freeze.sha, superseded_by: head, lane: freeze.lane }, null);
+    return staleStageMessage(freeze, head);
+  }
+  return null;
+}
+
+export function behindMainBlock(freeze: ReleaseFreeze): string | null {
+  const n = freeze.status === 'behind-main' ? (commitsBehind(freeze.project, freeze.sha) ?? 0) : commitsBehind(freeze.project, freeze.sha);
+  if (freeze.status !== 'behind-main' && (n == null || n <= 0)) return null;
+  if (n != null && n > 0 && freeze.status === 'open') patch(freeze.sha, { status: 'behind-main' });
+  if (n != null && n > 0) {
+    const repo = projectRepo(freeze.project);
+    const tip = repo ? mainTip(repo, freeze.project) : null;
+    if (tip && freeze.lane) {
+      pingLaneAboutMain({
+        lane: freeze.lane, project: freeze.project, mainSha: tip.sha, subject: tip.subject,
+        authorAgentId: freeze.author_agent_id, authorName: freeze.author_name, kind: 'freeze',
+      });
+    }
+    return behindMainLine(n);
+  }
+  if (freeze.status === 'behind-main') return 'behind main — merge latest main';
+  return null;
+}
+
 export function checkPromotable(freeze: ReleaseFreeze, opts: { overrideReason?: string | null } = {}): Result<ReleaseFreeze> {
   const short = freeze.sha.slice(0, 8);
   if (freeze.status === 'promoted') return { ok: false, error: `Freeze ${short} was already promoted` };
   if (freeze.status === 'rejected') return { ok: false, error: `Freeze ${short} was rejected` };
+  const behind = behindMainBlock(freeze);
+  if (behind) return { ok: false, error: `Promotion refused: ${behind}` };
   if (freeze.status === 'stale') {
     return { ok: false, error: `Promotion refused: freeze ${short} is stale — lane ${freeze.lane ?? '?'} moved on to ${freeze.superseded_by?.slice(0, 8) ?? 'a newer commit'}. Freeze and review the new SHA.` };
   }

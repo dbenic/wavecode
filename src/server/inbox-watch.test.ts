@@ -53,6 +53,39 @@ describe('hand-off folder watcher', () => {
     expect(vi.mocked(sessionManager.sendKeys)).toHaveBeenCalledTimes(1);
   });
 
+  it('announces a heading that names several agents, and skips a name that does not resolve', () => {
+    const a = agent('ales-codex1');
+    const b = agent('ales-claude1');
+    const dir = path.join(tmp, 'from-fable'); fs.mkdirSync(dir);
+    const file = path.join(dir, 'maestro-note.md');
+    fs.writeFileSync(file, '# Maestro → @ales-codex1, @ales-claude1, @missing-agent: please look\n');
+    announceFile(file, 'deploy/fable');
+    const sent = vi.mocked(sessionManager.sendKeys).mock.calls.map((c) => c[0]);
+    expect(sent).toEqual(expect.arrayContaining([a.id, b.id]));
+    expect(sent).toHaveLength(2);
+  });
+
+  it('picks the longest hyphen-prefix of the file name that resolves', () => {
+    agent('ales');
+    const codex = agent('ales-codex1');
+    const dir = path.join(tmp, 'from-fable'); fs.mkdirSync(dir);
+    const file = path.join(dir, 'ales-codex1-foo.md');
+    fs.writeFileSync(file, 'no address line\n');
+    announceFile(file, 'deploy/fable');
+    expect(vi.mocked(sessionManager.sendKeys).mock.calls.map((c) => c[0])).toEqual([codex.id]);
+  });
+
+  it('posts an unrouted hand-off when nothing resolves', () => {
+    const dir = path.join(tmp, 'from-fable'); fs.mkdirSync(dir);
+    const file = path.join(dir, 'general-notice.md');
+    fs.writeFileSync(file, 'To: @nobody-known\n\nhello\n');
+    announceFile(file, 'deploy/fable');
+    const info = vi.mocked(emit).mock.calls.find((c) => c[0] === 'message.created');
+    expect(info?.[3]).toMatchObject({ unrouted: true, notice: 'unrouted hand-off' });
+    const row = db.listAgentMessages({ limit: 5 })[0];
+    expect(row.message.startsWith('unrouted hand-off:')).toBe(true);
+  });
+
   it('falls back to the file name prefix, waits for a working agent, and posts unaddressed files to the thread', () => {
     const codex = agent('codex1', 'working', 'codex1');
     const dir = path.join(tmp, 'from-fable'); fs.mkdirSync(dir);

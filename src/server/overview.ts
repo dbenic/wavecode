@@ -9,7 +9,10 @@ import { getDb, getTask, listAgents, listAgentMessages, listRuns, type Agent, ty
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
 import { candidateFor, listCandidates, listFreezes, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
+import { commitsBehind } from './lane-main.js';
+import { behindMainLine, fullFailFlag, needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { listReleases, verificationFor, type ReleaseRequest } from './releases.js';
+import { readLaneTests, shaChecks, suiteNames, testsConfigured, type ShaChecks } from './test-runs.js';
 import { deskConfig, OPEN_STATUSES, type DeskItem } from './product-desk.js';
 import * as productDesk from './product-desk.js';
 
@@ -76,6 +79,10 @@ export interface LaneBoardRow {
   production: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
   /** deterministic next step, before any model opinion */
   next: string;
+  /** Set when a full run failed after this SHA was staged. */
+  full_fail_flag: string | null;
+  /** Why Promote stays disabled until a green full gate exists. */
+  promote_block: string | null;
   updated_at: string;
 }
 
@@ -191,8 +198,22 @@ function releaseCell(r: ReleaseRequest | null): LaneBoardRow['staging'] {
   };
 }
 
-function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null): { next: string; promotable: boolean } {
+function liveChecks(f: ReleaseFreeze): ShaChecks | null {
+  if (!f.project || !testsConfigured(f.project)) return null;
+  try {
+    return shaChecks(readLaneTests(f.project, f.lane ?? '', f.sha), f.sha, suiteNames(f.project));
+  } catch {
+    return null;
+  }
+}
+
+function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null, checks: ShaChecks | null): { next: string; promotable: boolean } {
   if (f.status === 'merged') return { next: 'on main — merged or deployed outside this pipeline', promotable: false };
+  if (f.status === 'behind-main') {
+    let n: number | null = null;
+    try { n = commitsBehind(f.project, f.sha); } catch { n = null; }
+    return { next: n && n > 0 ? behindMainLine(n) : 'behind main — merge latest main', promotable: false };
+  }
   if (candidate) return { next: `in candidate ${candidate} — ships with that release`, promotable: false };
   if (f.project && getConfig().projects?.[f.project]?.candidate_refs) {
     if (f.status !== 'open') return { next: f.status, promotable: false };
@@ -205,8 +226,19 @@ function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: 
   if (production && (production.status === 'sent' || production.status === 'requested')) return { next: 'production GO sent — waiting for the deployer', promotable: false };
   if (production?.status === 'failed') return { next: `production failed: ${production.error ?? 'see report'} — fix, refreeze or retry`, promotable: f.verdict === 'pass' };
   if (f.verdict !== 'pass') return { next: f.verdict ? 'needs fixes — author fixes, refreezes, reviewer re-reviews' : 'waiting for an independent verdict', promotable: false };
-  if (f.gate === 'RED') return { next: 'PASS but the remote gate is RED — not promotable until green', promotable: false };
+  const sha8 = f.sha.slice(0, 8);
+  const fullGreen = checks ? checks.full === 'green' : f.gate === 'GREEN' || !f.gate;
+  const stageGreen = checks ? checks.quick === 'green' || checks.full === 'green' : f.gate !== 'RED';
+  if (!checks && f.gate === 'RED') return { next: 'PASS but the remote gate is RED — not promotable until green', promotable: false };
+  if (checks && !stageGreen) {
+    if (checks.quick === 'pending') return { next: QUICK_CHECK_RUNNING, promotable: false };
+    return { next: needsGreenQuick(sha8), promotable: false };
+  }
   if (staging && (staging.status === 'sent' || staging.status === 'requested')) return { next: 'staging in progress', promotable: true };
+  if (staging?.status === 'deployed' && !fullGreen) {
+    if (checks?.full === 'red') return { next: fullFailFlag(checks.fullRun?.failing_step), promotable: false };
+    return { next: needsGreenFull(sha8), promotable: false };
+  }
   if (staging?.status === 'deployed' && staging.verified_by) return { next: `Ready for prod — ${staging.verified_by}`, promotable: true };
   if (staging?.status === 'deployed') return { next: 'on staging — mark Ready for prod', promotable: true };
   if (staging?.status === 'failed') return { next: `staging failed: ${staging.error ?? 'see report'}`, promotable: true };
@@ -264,14 +296,19 @@ export function buildBoard(now = Date.now()): Board {
     });
 
   const lanes: LaneBoardRow[] = freezes
-    .filter((f) => f.run_id && (f.status === 'open' || f.status === 'stale' || (f.status === 'promoted' && minutesSince(iso(f.updated_at), now)! < 24 * 60)))
+    .filter((f) => f.run_id && (f.status === 'open' || f.status === 'stale' || f.status === 'behind-main' || (f.status === 'promoted' && minutesSince(iso(f.updated_at), now)! < 24 * 60)))
     .map((f) => {
       const rels = listReleases({ sha: f.sha, limit: 20 });
       const staging = rels.find((r) => r.target === 'staging') ?? null;
       const production = rels.find((r) => r.target === 'production') ?? null;
       let candidate: string | null = null;
       try { candidate = f.status === 'open' || f.status === 'stale' ? candidateFor(f.project, f.sha, now)?.name ?? null : null; } catch { candidate = null; }
-      const { next, promotable } = nextStep(f, staging, production, candidate);
+      const checks = liveChecks(f);
+      const { next, promotable } = nextStep(f, staging, production, candidate, checks);
+      const sha8 = f.sha.slice(0, 8);
+      const fullGreen = checks ? checks.full === 'green' : f.gate === 'GREEN' || !f.gate;
+      const full_fail_flag = staging?.status === 'deployed' && checks?.full === 'red' ? fullFailFlag(checks.fullRun?.failing_step) : null;
+      const promote_block = fullGreen ? null : (checks || f.gate === 'RED' ? `full run not green on ${sha8}` : null);
       if (f.status === 'stale' && !candidate) attention.push({ kind: 'stale', text: `${f.project ?? ''} ${f.lane ?? ''} ${f.sha.slice(0, 8)} is stale`, sha: f.sha, run_id: f.run_id! });
       if (promotable && f.status === 'open') attention.push({ kind: 'promotable', text: `${f.project ?? ''}${f.desk ? ` Desk #${f.desk}` : ''} ${f.sha.slice(0, 8)}: ${next}`, sha: f.sha, run_id: f.run_id! });
       for (const r of [staging, production]) if (r?.status === 'failed') attention.push({ kind: 'release_failed', text: `${r.target} failed for ${f.sha.slice(0, 8)}: ${r.error ?? ''}`, sha: f.sha, run_id: f.run_id! });
@@ -280,7 +317,7 @@ export function buildBoard(now = Date.now()): Board {
         sha: f.sha, run_id: f.run_id, project: f.project, desk: f.desk, lane: f.lane, author: f.author_name, reviewer: f.reviewer_name,
         verdict: f.verdict, gate: f.gate, status: f.status, superseded_by: f.superseded_by, promotable, candidate,
         summary: summaryRow?.summary ? summaryRow.summary.replace(/\s+/g, ' ').slice(0, 600) : null,
-        staging: releaseCell(staging), production: releaseCell(production), next, updated_at: iso(f.updated_at)!,
+        staging: releaseCell(staging), production: releaseCell(production), next, full_fail_flag, promote_block, updated_at: iso(f.updated_at)!,
       };
     });
 

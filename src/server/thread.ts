@@ -242,6 +242,12 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
       return item;
     }
 
+    if (p.unrouted === true || (msg?.message ?? '').startsWith('unrouted hand-off')) {
+      const item = base(event, 'alert', null, 'Unrouted hand-off');
+      item.body = msg?.message ?? null;
+      item.needs_attention = true;
+      return item;
+    }
     const isRequest = type === 'request';
     // A message from an agent is about that agent; a human message is about its recipient.
     const agentId = msg?.from_agent_id ?? str(p.from_agent_id) ?? msg?.to_agent_id ?? str(p.to_agent_id);

@@ -213,6 +213,51 @@ export interface ReviewItem {
   } | null;
   /** Set when the card stands for a release freeze reviewed by files (exact SHA + reviewer verdict). */
   freeze: ReleaseFreezeCard | null;
+  /** One line: what is missing before this lane can move, and who does it. */
+  status_line?: string | null;
+  stage_block?: string | null;
+  promote_block?: string | null;
+  full_fail_flag?: string | null;
+  test_run?: TestRunChip | null;
+  test_errors?: Array<{ host: string | null; msg: string }>;
+  test_log?: boolean;
+  delta_review?: { label: string; previous_sha: string; verdict_path: string | null } | null;
+  reviewers?: Array<{ id: string; name: string; alias: string | null }>;
+  before_freeze_tip?: string | null;
+}
+
+/** A row from the test-status JSON, already parsed by the server. */
+export interface TestRunChip {
+  id: string;
+  sha: string | null;
+  lane: string | null;
+  suite: string | null;
+  state: string;
+  queue_pos: number | null;
+  host: string | null;
+  wait_s: number | null;
+  run_s: number | null;
+  failing_step: string | null;
+  summary: string | null;
+  superseded_by: string | null;
+}
+
+export interface DevLane {
+  project: string;
+  lane: string;
+  sha: string;
+  author_name: string | null;
+  run_id: string | null;
+  freeze_sha: string | null;
+  status_line: string;
+  promote_block: string | null;
+  full_fail_flag: string | null;
+  before_freeze_tip: string | null;
+  test_run: TestRunChip | null;
+  test_errors: Array<{ host: string | null; msg: string }>;
+  test_log: boolean;
+  reviewers: Array<{ id: string; name: string; alias: string | null }>;
+  delta_review: { label: string; previous_sha: string; verdict_path: string | null } | null;
 }
 
 /** The board (src/server/overview.ts) and the overlord's report (src/server/overlord.ts). */
@@ -270,7 +315,7 @@ export interface LaneBoardRow {
   reviewer: string | null;
   verdict: string | null;
   gate: string | null;
-  status: 'open' | 'promoted' | 'rejected' | 'stale' | 'merged';
+  status: 'open' | 'promoted' | 'rejected' | 'stale' | 'merged' | 'behind-main';
   superseded_by: string | null;
   promotable: boolean;
   candidate: string | null;
@@ -281,6 +326,8 @@ export interface LaneBoardRow {
   } | null;
   production: { status: string; version: string | null; at: string; by: string | null; verified_by: string | null; verified_at: string | null } | null;
   next: string;
+  full_fail_flag?: string | null;
+  promote_block?: string | null;
   updated_at: string;
 }
 
@@ -485,7 +532,7 @@ export interface ReleaseFreezeCard {
   freeze_path: string | null;
   verdict_path: string | null;
   gate: string | null;
-  status: 'open' | 'promoted' | 'rejected' | 'stale' | 'merged';
+  status: 'open' | 'promoted' | 'rejected' | 'stale' | 'merged' | 'behind-main';
   superseded_by: string | null;
 }
 

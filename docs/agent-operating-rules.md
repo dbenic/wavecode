@@ -57,7 +57,11 @@ AGENTS.md, and win when they conflict.
 - When **you** review: run the tests yourself (§4), never trust the author's
   summary, check that new tests actually fail without the change, check the
   diff against `SPEC.md`. Answer in the fixed format, ending with a standalone
-  line `VERDICT: PASS`, `VERDICT: NEEDS FIXES` or `VERDICT: REJECT`.
+  line `VERDICT: PASS`, `VERDICT: PASS (gate pending)`, `VERDICT: NEEDS FIXES`, or
+  `VERDICT: REJECT`. If the code is OK and the only open item is the gate, write
+  `VERDICT: PASS (gate pending)`. Never write `NEEDS FIXES` just to wait for the
+  gate. Stage still needs a green quick check (or a green full run) on that SHA;
+  Promote needs a green full gate. Those are separate from the verdict.
 - **Where documents go.** Anything worth finding again — a specification, an
   analysis, a review, a decision record, a diagram set — goes into the
   project room: `~/.wavecode-data/rooms/<project>/REPORTS/<YYYY-MM-DD>-<topic>.md`
@@ -83,9 +87,17 @@ A lane is released from the Review queue, not from chat. The queue reads the age
   you are quoting a reviewer's verdict (`@x **VERDICT: PASS** on this exact SHA: <path>`).
 - **Verdict file** `<you>-verdict-<topic>-<sha8>-<date>.md`: the exact 40-char SHA in the title
   (`(exact SHA …)`), `reviewer @you`, which freeze note you reviewed, and the **last line**
-  `VERDICT: PASS` or `VERDICT: NEEDS FIXES`. One verdict per file. You may not review your own SHA.
+  `VERDICT: PASS`, `VERDICT: PASS (gate pending)`, or `VERDICT: NEEDS FIXES`. One verdict per file.
+  You may not review your own SHA. `PASS (gate pending)` means the code is OK and the full gate
+  is still running. Do not write `NEEDS FIXES` as a hold for the gate.
+- Start each lane from the latest `origin/main` (the project's configured main). Merge that main
+  in before every freeze. Never rebase a lane that has already been reviewed — a rebase throws
+  away the SHAs the reviews name. Never edit a protected path (the project's `protected_paths`,
+  such as the version file). A lane that does not contain current main cannot be staged.
 - A new commit on the lane invalidates every earlier verdict on that lane: refreeze and re-review
   the new SHA. The person's Promote on the card is the only GO; you never relay one (§3b).
+  Stage needs the reviewer's PASS plus a green quick check (or a green full run) on the exact SHA.
+  Promote needs a green full gate on that same SHA, and only an admin can send it.
 
 ## 3a2. Fixtures: the Library is for sanitized files only
 
@@ -154,7 +166,7 @@ own and WaveCode delivers it into that agent's terminal when it is free:
     TO @claude1: please review /home/wave/inbox/spec.md and answer with VERDICT: PASS|NEEDS FIXES
 
 Use the agent's alias or name from the roster (`@claude1`, `@codex2`,
-`@pm-denis`). Put the full path of any file you refer to in the line. The
+`@pm-<you>`). Put the full path of any file you refer to in the line. The
 message is recorded in the thread, so people see the hand-off too. If the
 name is unknown you get `[TO @x failed: …]` back. Replies come to you the
 same way, as `[Message from @claude1] …`.

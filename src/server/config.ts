@@ -80,6 +80,40 @@ export interface ProjectConfig {
    * "in candidate": it ships with that release, is not an open fix and is not promoted alone.
    */
   candidate_refs?: string;
+  /**
+   * Remote and branch that lanes must contain before they can be frozen or staged.
+   * Default `origin` / `main`.
+   */
+  main_remote?: string;
+  main_branch?: string;
+  /** Glob over remote branch names (without the remote) that are developer lanes. Default `wc-*`. */
+  lane_glob?: string;
+  /** Paths a developer lane must not change. The status line names the path as configured. */
+  protected_paths?: string[];
+  /** Directory of schema migrations, relative to the repo. A lane that touches it is not staged with STAGE. */
+  migrations_dir?: string;
+  /** Shown on a lane card that has no freeze yet. Default text lives in lane-status.ts. */
+  before_freeze_tip?: string;
+  /**
+   * Test runner for this project. Each command is an argv template.
+   * `{lane}` and `{sha}` fill status and history; `{id}` fills the log command.
+   * The process prints one JSON document (schema v1). No shell.
+   */
+  tests?: {
+    status_command?: string[];
+    history_command?: string[];
+    log_command?: string[];
+    /**
+     * Suite names that count as the quick check. Default `quick` and `tier1`.
+     * A green one of these, or a green full run, is enough to stage.
+     */
+    quick_suites?: string[];
+    /**
+     * Suite names that count as the full gate, along with `kind: gate`.
+     * Default `full-tuned` and `full`. Production Promote needs one of these green.
+     */
+    full_suites?: string[];
+  };
 }
 
 export interface PeerConfig {
@@ -314,6 +348,25 @@ function validateArgvTemplate(name: string, argv: string[] | undefined, placehol
   if (!argv.some((a) => a.includes(placeholder))) throw new Error(`${name} must include ${placeholder}`);
 }
 
+function validateArgvList(name: string, argv: string[] | undefined): void {
+  if (argv === undefined) return;
+  if (!Array.isArray(argv) || argv.length === 0 || argv.some((a) => typeof a !== 'string' || !a.trim() || a.length > 200)) {
+    throw new Error(`${name} must be a non-empty list of arguments`);
+  }
+}
+
+const SUITE_NAME = /^[a-z0-9][a-z0-9._+-]{0,40}$/;
+
+function validateSuiteNames(name: string, suites: string[] | undefined): void {
+  if (suites === undefined) return;
+  if (!Array.isArray(suites) || suites.length === 0 || suites.some((s) => typeof s !== 'string' || !SUITE_NAME.test(s))) {
+    throw new Error(`${name} must be a list of suite names (letters, digits, . _ + -)`);
+  }
+}
+
+const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
+const SAFE_REL_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
 export function validateConfig(cfg: WaveConfig): void {
   const profileErrors = validateProfilesConfig(cfg);
   if (profileErrors.length > 0) {
@@ -352,6 +405,39 @@ export function validateConfig(cfg: WaveConfig): void {
     }
   }
   for (const [name, project] of Object.entries(cfg.projects ?? {})) {
+    if (project.main_remote !== undefined && !SAFE_REF.test(project.main_remote)) {
+      throw new Error(`projects.${name}.main_remote must be a remote name`);
+    }
+    if (project.main_branch !== undefined && !SAFE_REF.test(project.main_branch)) {
+      throw new Error(`projects.${name}.main_branch must be a branch name`);
+    }
+    if (project.lane_glob !== undefined && (typeof project.lane_glob !== 'string' || !project.lane_glob.trim())) {
+      throw new Error(`projects.${name}.lane_glob must be a glob`);
+    }
+    if (project.protected_paths !== undefined) {
+      if (!Array.isArray(project.protected_paths) || project.protected_paths.some((p) => typeof p !== 'string' || !SAFE_REL_PATH.test(p) || p.includes('..'))) {
+        throw new Error(`projects.${name}.protected_paths must be a list of relative paths`);
+      }
+    }
+    if (project.migrations_dir !== undefined && (typeof project.migrations_dir !== 'string' || !SAFE_REL_PATH.test(project.migrations_dir) || project.migrations_dir.includes('..'))) {
+      throw new Error(`projects.${name}.migrations_dir must be a relative path`);
+    }
+    if (project.before_freeze_tip !== undefined && (typeof project.before_freeze_tip !== 'string' || project.before_freeze_tip.length > 400)) {
+      throw new Error(`projects.${name}.before_freeze_tip must be a short string`);
+    }
+    if (project.tests) {
+      validateArgvList(`projects.${name}.tests.status_command`, project.tests.status_command);
+      if (project.tests.status_command && !project.tests.status_command.some((a) => a.includes('{lane}') || a.includes('{sha}'))) {
+        throw new Error(`projects.${name}.tests.status_command must include {lane} or {sha}`);
+      }
+      validateArgvList(`projects.${name}.tests.history_command`, project.tests.history_command);
+      if (project.tests.history_command && !project.tests.history_command.some((a) => a.includes('{lane}') || a.includes('{sha}'))) {
+        throw new Error(`projects.${name}.tests.history_command must include {lane} or {sha}`);
+      }
+      validateArgvTemplate(`projects.${name}.tests.log_command`, project.tests.log_command, '{id}');
+      validateSuiteNames(`projects.${name}.tests.quick_suites`, project.tests.quick_suites);
+      validateSuiteNames(`projects.${name}.tests.full_suites`, project.tests.full_suites);
+    }
     if (project.release_peer !== undefined) {
       const m = /^([a-z][a-z0-9_-]*)\/(@?[\w.-]+)$/.exec(project.release_peer);
       if (!m) throw new Error(`projects.${name}.release_peer must look like peer/agent (e.g. deploy/fable)`);

@@ -122,6 +122,12 @@ describe('code-review.ts', () => {
       expect(parseVerdict('verdict: reject')).toBe('reject');
     });
 
+    it('treats VERDICT: PASS (gate pending) as PASS', async () => {
+      const { parseVerdict } = await import('./code-review.js');
+      expect(parseVerdict('The code is fine.\nVERDICT: PASS (gate pending)')).toBe('pass');
+      expect(parseVerdict('VERDICT: [PASS / NEEDS FIXES / REJECT]\nVERDICT: PASS (gate pending)')).toBe('pass');
+    });
+
     it('falls back to REVIEW PASS marker, and defaults to needs-fixes', async () => {
       const { parseVerdict } = await import('./code-review.js');
       expect(parseVerdict('REVIEW PASS: no issues found.')).toBe('pass');

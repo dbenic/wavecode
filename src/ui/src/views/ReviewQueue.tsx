@@ -1,12 +1,61 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiGet } from '../hooks/useApi';
+import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, ReleaseRequest, ReviewItem as ReviewItemType, User } from '../types';
+import type { Agent, DevLane, ReleaseRequest, ReviewItem as ReviewItemType, User } from '../types';
 import type { StageProgress } from '../components/StageChip';
 import { isReviewEventType } from '../sse-events';
 import ReviewItemCard from '../components/ReviewItem';
 import RoomProposals from '../components/RoomProposals';
+
+function LaneSection({ lanes, onSent }: { lanes: DevLane[]; onSent: () => void }) {
+  const [pick, setPick] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  if (lanes.length === 0) return null;
+  return (
+    <section id="lanes" className="space-y-2 pt-4" data-testid="lanes">
+      <h2 className="text-[10px] font-bold tracking-[0.2em] text-slate-500 uppercase">Lanes</h2>
+      {lanes.map((lane) => (
+        <div key={`${lane.project}:${lane.lane}`} className="rounded-lg border border-slate-800/50 bg-slate-900/40 p-3 space-y-2" data-testid={`lane-${lane.lane}`}>
+          <div className="flex flex-wrap items-center gap-2 text-[10px]">
+            <span className="font-mono text-slate-300">{lane.lane}</span>
+            <span className="font-mono text-slate-500">{lane.sha.slice(0, 8)}</span>
+            {lane.author_name && <span className="text-cyan-300">@{lane.author_name}</span>}
+          </div>
+          <p className="text-[11px] text-slate-200" data-testid="lane-status">{lane.status_line}</p>
+          {lane.full_fail_flag && <p className="text-[11px] font-semibold text-red-300" data-testid="full-fail-flag">{lane.full_fail_flag}</p>}
+          {lane.before_freeze_tip && <p className="text-[10px] text-slate-500" data-testid="before-freeze-tip">{lane.before_freeze_tip}</p>}
+          {lane.reviewers.length > 0 && lane.freeze_sha && (
+            <div className="flex items-center gap-2">
+              <select
+                value={pick[lane.lane] ?? ''}
+                onChange={(e) => setPick((p) => ({ ...p, [lane.lane]: e.target.value }))}
+                className="flex-1 px-2 py-1 rounded border border-slate-800/60 bg-slate-950/50 text-xs text-slate-300 font-mono"
+              >
+                <option value="">Request review…</option>
+                {lane.reviewers.map((r) => <option key={r.id} value={r.id}>@{r.alias ?? r.name}</option>)}
+              </select>
+              <button
+                type="button"
+                disabled={busy === lane.lane || !pick[lane.lane]}
+                onClick={() => {
+                  setBusy(lane.lane);
+                  apiPost('/reviews/lanes/request-review', { project: lane.project, lane: lane.lane, reviewer: pick[lane.lane] })
+                    .then(() => onSent())
+                    .catch(() => {})
+                    .finally(() => setBusy(null));
+                }}
+                className="px-2 py-1 rounded border border-cyan-500/30 text-[10px] font-semibold text-cyan-300 disabled:opacity-40"
+              >
+                Request review
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+    </section>
+  );
+}
 
 function indexStaging(rows: ReleaseRequest[]): Map<string, StageProgress & { id?: string }> {
   const open = new Map<string, ReleaseRequest>();
@@ -43,6 +92,7 @@ export default function ReviewQueue() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [proposalsVersion, setProposalsVersion] = useState(0);
   const [stagingBySha, setStagingBySha] = useState<Map<string, StageProgress & { id?: string }>>(new Map());
+  const [lanes, setLanes] = useState<DevLane[]>([]);
 
   const fetchData = useCallback(() => {
     Promise.all([
@@ -50,11 +100,13 @@ export default function ReviewQueue() {
       apiGet<Agent[]>('/agents'),
       apiGet<User>('/me').catch(() => null),
       apiGet<ReleaseRequest[]>('/releases?target=staging&limit=200').catch(() => [] as ReleaseRequest[]),
-    ]).then(([r, a, me, releases]) => {
+      apiGet<DevLane[]>('/reviews/lanes').catch(() => [] as DevLane[]),
+    ]).then(([r, a, me, releases, laneRows]) => {
       setReviews(r);
       setAgents(a);
       setIsAdmin(me?.role === 'admin');
       setStagingBySha(indexStaging(releases));
+      setLanes(Array.isArray(laneRows) ? laneRows : []);
       setLoaded(true);
     }).catch(() => setLoaded(true));
   }, []);
@@ -62,7 +114,7 @@ export default function ReviewQueue() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSSE = useCallback((event: SSEEvent) => {
-    if (isReviewEventType(event.type) || event.type === 'run.finished' || event.type.startsWith('release.')) {
+    if (isReviewEventType(event.type) || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.')) {
       fetchData();
     }
     if (event.type.startsWith('room.proposal_')) setProposalsVersion((v) => v + 1);
@@ -94,6 +146,7 @@ export default function ReviewQueue() {
               </h1>
               <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">
                 {reviews.length} pending &middot; Quality Gate
+                {lanes.length > 0 && <> &middot; <a href="#lanes" className="text-sky-400/80 hover:text-sky-300">Lanes</a></>}
               </p>
             </div>
           </div>
@@ -108,20 +161,21 @@ export default function ReviewQueue() {
               Loading reviews...
             </div>
           </div>
-        ) : reviews.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 gap-4">
-            <div className="w-16 h-16 rounded-lg border border-dashed border-slate-800 flex items-center justify-center">
-              <span className="text-2xl text-slate-700">&#10003;</span>
-            </div>
-            <div className="text-center">
-              <p className="text-sm text-slate-500">Queue clear</p>
-              <p className="text-[11px] text-slate-600 mt-1">
-                All runs reviewed. Check back when agents complete tasks.
-              </p>
-            </div>
-          </div>
         ) : (
           <div className="space-y-3">
+            {reviews.length === 0 && lanes.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-20 gap-4">
+                <div className="w-16 h-16 rounded-lg border border-dashed border-slate-800 flex items-center justify-center">
+                  <span className="text-2xl text-slate-700">&#10003;</span>
+                </div>
+                <div className="text-center">
+                  <p className="text-sm text-slate-500">Queue clear</p>
+                  <p className="text-[11px] text-slate-600 mt-1">
+                    All runs reviewed. Check back when agents complete tasks.
+                  </p>
+                </div>
+              </div>
+            )}
             {reviews.map((item, i) => (
               <ReviewItemCard
                 key={item.run.id}
@@ -133,6 +187,7 @@ export default function ReviewQueue() {
                 staging={item.freeze ? stagingBySha.get(item.freeze.sha) ?? null : null}
               />
             ))}
+            <LaneSection lanes={lanes.filter((l) => !reviews.some((r) => r.run.id === l.run_id || (l.freeze_sha && r.freeze?.sha === l.freeze_sha)))} onSent={fetchData} />
           </div>
         )}
       </main>

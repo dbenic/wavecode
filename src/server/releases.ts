@@ -26,8 +26,10 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { peerGetJson, peerPostJson } from './peers.js';
-import { getFreeze } from './release-freezes.js';
+import { getFreeze, staleStageBlock } from './release-freezes.js';
 import { fillArgv, parseProgressLine } from './staging-progress.js';
+import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
+import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 /** Returned to non-admins on every production-send path. */
@@ -281,6 +283,17 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   if (!SHA_RE.test(opts.sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(opts.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
   if (opts.target === 'production' && opts.actorIsAdmin !== true) return { ok: false, error: PRODUCTION_RELEASE_ADMIN_ONLY };
+  try {
+    const freeze = getFreeze(opts.sha);
+    if (freeze && opts.target === 'staging') {
+      const stale = staleStageBlock(freeze);
+      if (stale) return { ok: false, error: stale };
+    }
+    if (freeze && opts.target === 'production') {
+      const full = promoteFullBlock(freeze);
+      if (full) return { ok: false, error: full };
+    }
+  } catch { /* freeze table unavailable: the deploy command still enforces its own gates */ }
   const cfg = getConfig();
   const project = cfg.projects?.[opts.project];
   if (!project) return { ok: false, error: `Unknown project '${opts.project}'` };
@@ -431,13 +444,46 @@ function stagingCommand(): string[] | null {
  * Re-check the reviewer PASS and, when the freeze names one, a GREEN gate.
  * An unknown freeze is allowed: the staging command enforces the same gates.
  */
+/**
+ * Staging needs a green quick check or a green full run on the exact SHA,
+ * read from the test-status JSON. With no test command, the freeze file's
+ * own gate line is the fallback (a named non-GREEN still blocks).
+ */
+export function stageGateBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null }): string | null {
+  if (testsConfigured(freeze.project) && freeze.project) {
+    const checks = shaChecks(readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project));
+    if (checks.quick === 'green' || checks.full === 'green') return null;
+    if (checks.quick === 'pending') return QUICK_CHECK_RUNNING;
+    return needsGreenQuick(freeze.sha.slice(0, 8));
+  }
+  if (freeze.gate && freeze.gate.toUpperCase() !== 'GREEN') return stageNeedsGreen(freeze.gate);
+  return null;
+}
+
+/**
+ * Production Promote needs a green full gate (`kind=gate` or a full suite)
+ * on the exact SHA. A green quick check is not enough. With no test command,
+ * a freeze that names a non-GREEN gate is refused; a missing gate is not.
+ */
+export function promoteFullBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null }): string | null {
+  const sha8 = freeze.sha.slice(0, 8);
+  if (testsConfigured(freeze.project) && freeze.project) {
+    const checks = shaChecks(readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project));
+    if (checks.full === 'green') return null;
+    return needsGreenFull(sha8);
+  }
+  if (freeze.gate && freeze.gate.toUpperCase() !== 'GREEN') return needsGreenFull(sha8);
+  return null;
+}
+
 function knownStagingBlock(row: ReleaseRequest): string | null {
   let freeze: ReturnType<typeof getFreeze> = null;
   try { freeze = getFreeze(row.sha); } catch { return null; }
   if (!freeze) return null;
+  const stale = staleStageBlock(freeze);
+  if (stale) return stale;
   if (freeze.verdict && freeze.verdict !== 'pass') return STAGE_NEEDS_PASS;
-  if (freeze.gate && freeze.gate.toUpperCase() !== 'GREEN') return stageNeedsGreen(freeze.gate);
-  return null;
+  return stageGateBlock(freeze);
 }
 
 interface StagingChild {

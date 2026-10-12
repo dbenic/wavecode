@@ -82,6 +82,9 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
   if (freeze) {
     const rule = freezes.checkPromotable(freeze, { overrideReason });
     if (!rule.ok) return rule;
+    // A green full gate is required even when an admin overrides a non-PASS verdict.
+    const full = releases.promoteFullBlock(freeze);
+    if (full) return { ok: false, error: `Promotion blocked: ${full}` };
   } else {
     const referee = evaluateRefereeForPromote(
       runId,
@@ -264,7 +267,12 @@ function coveredByDeployedCandidate(freeze: { project: string | null; sha: strin
 export async function stage(runId: string, opts: { actorIsAdmin?: boolean } = {}): Promise<Result<releases.ReleaseRequest>> {
   const freeze = freezes.getFreezeByRun(runId);
   if (!freeze) return { ok: false, error: 'Only a release freeze can be staged (the card must carry an exact SHA)' };
-  if (freeze.status === 'stale') return { ok: false, error: `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on; freeze the new SHA` };
+  const stale = freezes.staleStageBlock(freeze);
+  if (stale) return { ok: false, error: stale };
+  const behind = freezes.behindMainBlock(freeze);
+  if (behind) return { ok: false, error: behind };
+  const gateBlock = releases.stageGateBlock(freeze);
+  if (gateBlock) return { ok: false, error: gateBlock };
   if (!freeze.project) return { ok: false, error: 'The freeze names no project, so no release peer can be chosen' };
   const admin = opts.actorIsAdmin === true || currentActorIsAdmin();
   if (freeze.verdict !== 'pass' && !admin && !coveredByDeployedCandidate(freeze)) {

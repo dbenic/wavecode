@@ -87,7 +87,8 @@ export function ensureReviewTable(): void {
  * treated as needs-fixes — an unparseable review must never count as a pass.
  */
 export function parseVerdict(feedback: string): ReviewVerdict {
-  const matches = [...feedback.matchAll(/^\s*VERDICT:\s*\[?\s*(PASS|NEEDS[ _-]?FIXES|REJECT)\s*\]?\s*$/gim)];
+  // `PASS (gate pending)` is a PASS. Stage still requires a GREEN gate on its own.
+  const matches = [...feedback.matchAll(/^\s*VERDICT:\s*\[?\s*(PASS|NEEDS[ _-]?FIXES|REJECT)\b(?:\s*\([^)\n]*\))?\s*\]?\s*$/gim)];
   const last = matches[matches.length - 1]?.[1]?.toUpperCase();
   if (last === 'PASS') return 'pass';
   if (last === 'REJECT') return 'reject';

@@ -20,6 +20,7 @@ import logger from './logger.js';
 import { notify } from './notifications.js';
 import { buildBoard, type Board } from './overview.js';
 import * as releases from './releases.js';
+import { getFreeze, staleStageBlock } from './release-freezes.js';
 
 export const DEFAULT_MODEL = 'claude-sonnet-5-5';
 
@@ -85,7 +86,13 @@ export function overlordConfig() {
 export async function autoStage(board: Board): Promise<number> {
   let n = 0;
   for (const l of board.lanes) {
-    if (l.status !== 'open' || l.verdict !== 'pass' || l.gate === 'RED' || l.candidate || l.staging || !l.project) continue;
+    if (l.status !== 'open' || l.verdict !== 'pass' || l.candidate || l.staging || !l.project) continue;
+    try {
+      const freeze = getFreeze(l.sha);
+      if (freeze && staleStageBlock(freeze)) continue;
+    } catch { /* freeze table unavailable */ }
+    const block = releases.stageGateBlock({ project: l.project, sha: l.sha, lane: l.lane, gate: l.gate });
+    if (block) continue;
     const r = await releases.requestRelease({ project: l.project, sha: l.sha, lane: l.lane, target: 'staging', desk: l.desk != null ? String(l.desk) : null, reviewer: l.reviewer, actorName: 'overlord', runId: l.run_id });
     if (r.ok) n++;
     else logger.warn({ sha: l.sha, error: r.error }, 'Overlord auto-stage failed');

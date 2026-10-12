@@ -296,7 +296,7 @@ export async function onRunPromoted(
   const [peerName, remoteHandle] = p.release_peer!.split('/');
   let head = freeze?.sha ?? 'unknown';
   let branch = freeze?.lane ?? 'unknown';
-  if (!freeze && agent.data.workspace) {
+  if (!freeze && agent.data.workspace && fs.existsSync(agent.data.workspace)) {
     try { head = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', 'HEAD'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
     try { branch = execFileSync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
   }
