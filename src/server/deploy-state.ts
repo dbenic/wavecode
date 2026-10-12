@@ -30,13 +30,19 @@ import {
   PRODUCTION_RELEASE_ADMIN_ONLY,
   PRODUCTION_RELEASE_NOT_APPROVER,
   clearSettledReleaseErrors,
+  currentStagingTip,
   listReleases,
   verificationFor,
   resolveStagingTip,
 } from './releases.js';
 import { readProdHealth } from './staging-forward.js';
 import { countixDenied } from './pipeline-deny.js';
-import { reviewStatusForVerdict, reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
+import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, type ReviewerLoadView } from './reviewer-assign.js';
+import { developerFor, developerRoster } from './developers.js';
+import {
+  buildLaneCards, buildReleaseView, conflictFilesFromNote,
+  type LaneCard, type LaneFreezeFact, type ReleaseView, type WorkingLaneFact,
+} from './lane-cards.js';
 import { readLaneTests, shaChecks, suiteNames, type TestRun } from './test-runs.js';
 
 export const RECONCILE_INTERVAL_MS = 90_000;
@@ -183,6 +189,9 @@ export interface ReviewBoard {
   stale: boolean;
   items: BoardItem[];
   reviewers: ReviewerLoadView[];
+  cards: LaneCard[];
+  viewer: { name: string | null };
+  release: ReleaseView;
 }
 
 const KV_AT = 'deploy_reconcile_at';
@@ -849,8 +858,121 @@ const NOT_RECONCILED: DeployView = {
   last_reconciled_at: null,
 };
 
+function pipelineFlag(project: string | null, flag: 'auto_merge_main' | 'auto_stage'): boolean {
+  if (!project) return false;
+  try { return getConfig().projects?.[project]?.pipeline?.[flag] === true; } catch { return false; }
+}
+
+function pipelineNote(project: string | null, lane: string | null): string | null {
+  if (!project || !lane) return null;
+  try {
+    const row = getDb().prepare(
+      `SELECT payload_json FROM events WHERE type = 'pipeline.action' AND entity_id = ? ORDER BY id DESC LIMIT 1`,
+    ).get(`${project}:${lane}`) as { payload_json: string | null } | undefined;
+    if (!row?.payload_json) return null;
+    const payload = JSON.parse(row.payload_json) as { note?: string };
+    return payload.note ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function quickCheck(lane: DevLane | undefined, sha: string): { running: boolean; etaMin: number | null } {
+  const run = lane?.test_run;
+  if (!run || (run.sha && run.sha !== sha)) return { running: false, etaMin: null };
+  const active = run.state === 'running' || run.state === 'queued';
+  if (!active) return { running: false, etaMin: null };
+  let quick = true;
+  const suite = (run.suite ?? '').trim().toLowerCase();
+  if (suite) {
+    try {
+      const names = suiteNames(lane?.project ?? null);
+      quick = names.quick.includes(suite) || suite === 'quick' || suite === 'tier1';
+    } catch {
+      quick = suite === 'quick' || suite === 'tier1';
+    }
+  }
+  if (!quick) return { running: false, etaMin: null };
+  const etaMin = run.wait_s != null && run.wait_s > 0 ? Math.max(1, Math.ceil(run.wait_s / 60)) : null;
+  return { running: true, etaMin };
+}
+
+function factFor(freeze: ReleaseFreeze, lane: DevLane | undefined, user: { name: string; role: string }): LaneFreezeFact {
+  const row = readRow(freeze.sha);
+  const view = row
+    ? toView(row, user, freeze.project, lane?.stage_block ?? null, lane?.promote_block ?? null, !!freeze.run_id)
+    : { ...NOT_RECONCILED, run_backed: !!freeze.run_id };
+  const behind = !!row && row.behind_main === 1 && row.superseded !== 1 && row.in_staging !== 1 && row.in_prod !== 1
+    && row.state !== 'superseded' && row.state !== 'live_on_prod';
+  const quick = quickCheck(lane, freeze.sha);
+  const since = assignmentFacts(freeze.sha);
+  return {
+    sha: freeze.sha,
+    project: freeze.project,
+    lane: row?.lane ?? freeze.lane,
+    desk: row?.desk ?? freeze.desk,
+    title: row?.title ?? null,
+    summary: row?.summary ?? null,
+    author_name: freeze.author_name,
+    reviewer_name: freeze.reviewer_name,
+    verdict: row?.verdict ?? freeze.verdict,
+    verdict_path: freeze.verdict_path,
+    created_at: freeze.created_at,
+    state: view.state,
+    version: row?.version ?? null,
+    behind_main: behind,
+    superseded: row?.superseded === 1 || freeze.status === 'stale',
+    in_staging: row?.in_staging === 1,
+    in_prod: row?.in_prod === 1,
+    action: view.action,
+    action_lock: view.action_lock,
+    run_id: freeze.run_id,
+    run_backed: view.run_backed,
+    quick_running: quick.running && view.state !== 'needs_fixes',
+    eta_min: quick.etaMin,
+    conflict_files: behind ? conflictFilesFromNote(pipelineNote(freeze.project, freeze.lane)) : [],
+    auto_merge_main: pipelineFlag(freeze.project, 'auto_merge_main'),
+    auto_stage: pipelineFlag(freeze.project, 'auto_stage'),
+    reviewing_since: since ? new Date(since.at).toISOString() : freeze.created_at,
+    unknown_reason: view.unknown_reason,
+    live_at: row?.last_reconciled_at ?? freeze.updated_at,
+  };
+}
+
+function emptyRelease(): ReleaseView {
+  return { prod: { version: null, sha: null }, staging: { version: null, sha: null }, next_version: null, queued: [] };
+}
+
+function deployTips(): { prod: { version: string | null; sha: string | null }; staging: { version: string | null; sha: string | null } } {
+  const empty = { version: null as string | null, sha: null as string | null };
+  const out = { prod: { ...empty }, staging: { ...empty } };
+  let projects: string[] = [];
+  try { projects = Object.keys(getConfig().projects ?? {}); } catch { projects = []; }
+  for (const project of projects) {
+    if (!out.prod.sha) {
+      try {
+        const health = readProdHealth(project);
+        if (health?.sha) out.prod = { sha: health.sha, version: health.version };
+      } catch { /* unknown until a probe works */ }
+      if (!out.prod.sha) {
+        try {
+          const row = listReleases({ project, target: 'production', status: 'deployed', limit: 1 })[0];
+          if (row) out.prod = { sha: (row.deployed_sha || row.sha).toLowerCase(), version: row.version };
+        } catch { /* no release table */ }
+      }
+    }
+    if (!out.staging.sha) {
+      try {
+        const tip = currentStagingTip(project);
+        if (tip?.sha) out.staging = { sha: tip.sha, version: tip.version };
+      } catch { /* unknown */ }
+    }
+  }
+  return out;
+}
+
 /** The Reviews page. Reads the last reconcile; it does not run git. */
-export function reviewBoard(user: { name: string; role: string }, lanes: DevLane[]): ReviewBoard {
+export function reviewBoard(user: { name: string; role: string }, lanes: DevLane[], token: string | null = null): ReviewBoard {
   const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
   const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
   let freezes: ReleaseFreeze[] = [];
@@ -882,10 +1004,45 @@ export function reviewBoard(user: { name: string; role: string }, lanes: DevLane
   }
   let reviewers: ReviewerLoadView[] = [];
   try { reviewers = reviewerLoads(); } catch { reviewers = []; }
+  let cards: LaneCard[] = [];
+  let release = emptyRelease();
+  let viewerName: string | null = null;
+  try {
+    const viewerDev = developerFor(user, token);
+    viewerName = viewerDev?.name ?? null;
+    const viewer = viewerDev ? { name: viewerDev.name, lanes: viewerDev.lanes } : null;
+    const owners = developerRoster();
+    const facts: LaneFreezeFact[] = [];
+    for (const freeze of freezes) {
+      if (!freeze.lane) continue;
+      const lane = bySha.get(freeze.sha) ?? byLane.get(`${freeze.project}:${freeze.lane}`);
+      facts.push(factFor(freeze, lane, user));
+    }
+    const working: WorkingLaneFact[] = [];
+    for (const lane of lanes) {
+      if (lane.freeze_sha) continue;
+      if (countixDenied(lane.project, lane.lane, lane.author_name ? { name: lane.author_name } : null)) continue;
+      working.push({
+        project: lane.project,
+        lane: lane.lane,
+        sha: lane.sha,
+        author_name: lane.author_name,
+        title: null,
+        desk: null,
+      });
+    }
+    cards = buildLaneCards(facts, working, viewer, owners);
+    release = buildReleaseView(cards, deployTips());
+  } catch (e) {
+    logger.debug({ error: (e as Error).message }, 'Lane cards skipped');
+  }
   return {
     last_reconciled_at: lastReconciledAt(),
     stale: reconcileIsStale(),
     items,
     reviewers,
+    cards,
+    viewer: { name: viewerName },
+    release,
   };
 }

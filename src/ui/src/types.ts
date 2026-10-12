@@ -272,11 +272,60 @@ export interface ReviewerLoadView {
   queue: number;
 }
 
+export type LaneOwnerKind = 'developer' | 'reviewer' | 'system' | 'denis';
+export type PipeMark = 'done' | 'current' | 'todo' | 'blocked';
+
+export interface LanePipeStep {
+  id: string;
+  label: string;
+  mark: PipeMark;
+  reason: string | null;
+}
+
+export interface LaneCardButton {
+  kind: 'stage' | 'ready' | 'promote';
+  label: string;
+  run_id: string | null;
+  sha: string;
+  project: string | null;
+}
+
+export interface LaneCard {
+  key: string;
+  project: string | null;
+  lane: string | null;
+  title: string;
+  desk: number | null;
+  sha: string | null;
+  status: string;
+  action: string;
+  owner: LaneOwnerKind;
+  owner_label: string;
+  needs_you: boolean;
+  mine: boolean;
+  history: boolean;
+  button: LaneCardButton | null;
+  pipeline: LanePipeStep[];
+  older: Array<{ sha: string; title: string; when: string }>;
+  link: { label: string; path: string } | null;
+  version: string | null;
+}
+
+export interface ReleaseView {
+  prod: { version: string | null; sha: string | null };
+  staging: { version: string | null; sha: string | null };
+  next_version: string | null;
+  queued: Array<{ lane: string | null; title: string; sha: string; version: string | null; desk: number | null }>;
+}
+
 export interface ReviewBoard {
   last_reconciled_at: string | null;
   stale: boolean;
   items: ReviewItem[];
   reviewers?: ReviewerLoadView[];
+  cards?: LaneCard[];
+  viewer?: { name: string | null };
+  release?: ReleaseView;
 }
 
 /** A row from the test-status JSON, already parsed by the server. */

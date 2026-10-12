@@ -200,6 +200,13 @@ export interface ProfileConfig {
   public?: boolean;
 }
 
+export interface DeveloperConfig {
+  name: string;
+  users?: string[];
+  tokens?: string[];
+  lanes: string[];
+}
+
 export interface WaveConfig {
   server: {
     port: number;
@@ -305,6 +312,12 @@ export interface WaveConfig {
      */
     freeze_inbox?: string[];
   };
+  /**
+   * Who is looking at Reviews. `users` matches the logged-in user name.
+   * `tokens` matches the bearer token they presented. `lanes` are globs.
+   * An identity that matches nobody sees every lane.
+   */
+  developers?: DeveloperConfig[];
   /**
    * Releases (src/server/releases.ts). On the deploy box: the agent that receives staging
    * and production requests (alias, name or id). A box without it forwards requests to
@@ -566,6 +579,34 @@ function validateSuiteNames(name: string, suites: string[] | undefined): void {
 
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
 const SAFE_REL_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const DEVELOPER_NAME = /^[\p{L}][\p{L}0-9 .'_-]{0,40}$/u;
+const DEVELOPER_USER = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+function validateDevelopers(list: DeveloperConfig[] | undefined): void {
+  if (list === undefined) return;
+  if (!Array.isArray(list)) throw new Error('developers must be a list');
+  for (const [i, dev] of list.entries()) {
+    const at = `developers[${i}]`;
+    if (!dev || typeof dev !== 'object' || Array.isArray(dev)) throw new Error(`${at} must be a developer`);
+    if (typeof dev.name !== 'string' || !DEVELOPER_NAME.test(dev.name.trim())) {
+      throw new Error(`${at}.name must be a person's name`);
+    }
+    const users = dev.users ?? [];
+    const tokens = dev.tokens ?? [];
+    if (!Array.isArray(users) || users.some((u) => typeof u !== 'string' || !DEVELOPER_USER.test(u))) {
+      throw new Error(`${at}.users must be a list of user names`);
+    }
+    if (!Array.isArray(tokens) || tokens.some((t) => typeof t !== 'string' || !t.trim() || /\s/.test(t) || t.length > 200)) {
+      throw new Error(`${at}.tokens must be a list of bearer tokens`);
+    }
+    if (users.length === 0 && tokens.length === 0) {
+      throw new Error(`${at} needs users or tokens`);
+    }
+    if (!Array.isArray(dev.lanes) || dev.lanes.length === 0 || dev.lanes.some((s) => typeof s !== 'string' || !s.trim() || s.length > 80 || s.includes('..'))) {
+      throw new Error(`${at}.lanes must be a list of globs`);
+    }
+  }
+}
 
 export function validateConfig(cfg: WaveConfig): void {
   const profileErrors = validateProfilesConfig(cfg);
@@ -606,6 +647,7 @@ export function validateConfig(cfg: WaveConfig): void {
       throw new Error('review.freeze_inbox must be a list of directory paths');
     }
   }
+  validateDevelopers(cfg.developers);
   for (const [name, project] of Object.entries(cfg.projects ?? {})) {
     if (project.main_remote !== undefined && !SAFE_REF.test(project.main_remote)) {
       throw new Error(`projects.${name}.main_remote must be a remote name`);
@@ -849,6 +891,7 @@ function buildDefaults(baseDir: string): WaveConfig {
       gate_dependents_on_approval: false,
       auto_pick: true,
     },
+    developers: [],
     llm: {
       provider: 'anthropic',
       api_key: null,

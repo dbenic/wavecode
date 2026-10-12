@@ -232,6 +232,18 @@ autonomy:
   max_task_retries: 2
 ```
 
+Reviews opens on the logged-in developer's lanes. `developers[].users` is their user name, `developers[].tokens` is a bearer token that means the same person, and `developers[].lanes` is lane globs. An identity that matches nobody sees every lane.
+
+```yaml
+developers:
+  - name: Antonio
+    users: [antonio]
+    lanes: ['wc-s3-*', 'wc-eba-*', 'wc-canary', 'wc-pd111*']
+  - name: Aleš
+    users: [ales]
+    lanes: ['wc-ales-*', 'wc-recognition-*']
+```
+
 ## 7. Known limits (deliberate, current)
 
 - Verdict capture from *agent* reviewers scrapes the reviewer's terminal for

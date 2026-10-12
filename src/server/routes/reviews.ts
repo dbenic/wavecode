@@ -6,7 +6,7 @@ import * as reviewQueue from '../review-queue.js';
 import * as codeReview from '../code-review.js';
 import { presentRunResult } from '../run-result.js';
 import { presentFileRun } from '../file-runner.js';
-import { getActingUser, type NodeAppEnv } from '../auth.js';
+import { getActingUser, resolveRequestToken, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
 import { canMutate, isAdmin } from '../users.js';
 import * as freezes from '../release-freezes.js';
@@ -111,7 +111,8 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     try { lanes = await devLanes.lanesForRequest(); } catch (e) {
       logger.warn({ error: (e as Error).message }, 'Lane list failed');
     }
-    return c.json(deployState.reviewBoard({ name: user.name, role: user.role }, lanes));
+    const token = resolveRequestToken(c.req.path, c.req.raw.headers, c.req.query('access_token'));
+    return c.json(deployState.reviewBoard({ name: user.name, role: user.role }, lanes, token));
   });
 
   app.get('/api/reviews', async (c) => {
