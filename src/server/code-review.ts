@@ -105,9 +105,24 @@ export function countIssues(feedback: string): number {
   return [...feedback.matchAll(/^\s*- \[(?:severity:\s*)?(HIGH|MED|LOW)\b/gim)].length;
 }
 
+/**
+ * Issue count for a verdict file. Severity bullets, plus one finding per line
+ * written as `R1 — P1` or `R2 (P2)` (the reviewer's numbered findings).
+ * A line that matches both is one issue. The verdict itself is not an issue.
+ */
+export function countVerdictIssues(feedback: string): number {
+  const finding = /^\s*(?:[-*]\s+|#{1,6}\s+)?(?:\*\*|__)?R\d+\s*(?:(?:—|–|--|-)\s*P\d+|\(\s*P\d+\s*\))/i;
+  const bullet = /^\s*- \[(?:severity:\s*)?(HIGH|MED|LOW)\b/i;
+  let n = 0;
+  for (const line of feedback.split('\n')) {
+    if (bullet.test(line) || finding.test(line)) n++;
+  }
+  return n;
+}
+
 export function getReviewsForRun(runId: string): CodeReview[] {
   return getDb().prepare(
-    'SELECT * FROM code_reviews WHERE run_id = ? ORDER BY created_at DESC, id DESC'
+    'SELECT * FROM code_reviews WHERE run_id = ? ORDER BY created_at DESC, rowid DESC'
   ).all(runId) as CodeReview[];
 }
 
@@ -118,7 +133,7 @@ export function getReviewsForRun(runId: string): CodeReview[] {
 export function getLatestCompletedReview(runId: string): CodeReview | null {
   return (getDb().prepare(
     `SELECT * FROM code_reviews WHERE run_id = ? AND status = 'done'
-     ORDER BY created_at DESC, id DESC LIMIT 1`
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`
   ).get(runId) as CodeReview | undefined) ?? null;
 }
 

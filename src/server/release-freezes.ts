@@ -35,7 +35,7 @@ import {
   type Agent,
   type Result,
 } from './db.js';
-import { countIssues, type ReviewVerdict } from './code-review.js';
+import { countVerdictIssues, type ReviewVerdict } from './code-review.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
@@ -452,12 +452,13 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
       }
       const reviewId = ulid();
       const feedback = text.slice(0, FEEDBACK_MAX);
+      const issuesFound = countVerdictIssues(feedback);
       getDb().prepare(`INSERT INTO code_reviews (id, run_id, reviewer_type, reviewer_agent_id, reviewer_runtime, status, diff, feedback, issues_found, verdict, fix_round)
         VALUES (?, ?, 'cross-model', ?, ?, 'done', NULL, ?, ?, ?, 0)`)
-        .run(reviewId, runId, reviewer?.id ?? null, reviewer?.runtime ?? null, feedback, countIssues(feedback), verdict);
+        .run(reviewId, runId, reviewer?.id ?? null, reviewer?.runtime ?? null, feedback, issuesFound, verdict);
       emit('review.ai_completed', 'run', runId, {
         review_id: reviewId,
-        issues_found: countIssues(feedback),
+        issues_found: issuesFound,
         verdict,
         fix_round: 0,
         reviewer_agent: reviewerName,

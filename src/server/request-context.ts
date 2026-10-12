@@ -13,13 +13,15 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 interface ActorScope {
   actorId: string;
+  /** Effective role after auth (a seat token is never admin). */
+  admin: boolean;
   active: boolean;
 }
 
 const storage = new AsyncLocalStorage<ActorScope>();
 
-export async function runWithActor<T>(actorId: string, fn: () => Promise<T>): Promise<T> {
-  const scope: ActorScope = { actorId, active: true };
+export async function runWithActor<T>(actorId: string, fn: () => Promise<T>, opts?: { admin?: boolean }): Promise<T> {
+  const scope: ActorScope = { actorId, admin: opts?.admin === true, active: true };
   try {
     return await storage.run(scope, fn);
   } finally {
@@ -31,4 +33,13 @@ export async function runWithActor<T>(actorId: string, fn: () => Promise<T>): Pr
 export function currentActorId(): string | null {
   const scope = storage.getStore();
   return scope?.active ? scope.actorId : null;
+}
+
+/**
+ * True only when this request's effective role is admin. A seat token, a
+ * developer, an agent token, and anything outside a request are not.
+ */
+export function currentActorIsAdmin(): boolean {
+  const scope = storage.getStore();
+  return scope?.active === true && scope.admin === true;
 }

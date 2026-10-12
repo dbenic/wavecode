@@ -14,7 +14,9 @@ vi.mock('../hooks/useApi', () => ({
 
 const SHA = '2431f684b9e960b84e73a4e98b5068869664ffb4';
 
-function item(freeze: Partial<ReleaseFreezeCard> | null): ReviewItemType {
+function item(freeze: (Partial<ReleaseFreezeCard> & { latestReviewIssues?: number }) | null): ReviewItemType {
+  const issues = freeze?.latestReviewIssues ?? 0;
+  if (freeze) delete freeze.latestReviewIssues;
   const base: ReleaseFreezeCard = {
     sha: SHA, project: 'wavepulse', desk: 91, lane: 'wc-claude2', author_name: 'claude2', reviewer_name: 'codex3',
     verdict: 'pass', freeze_path: '/home/wave/inbox/desk91-freeze-2431f684.md',
@@ -27,7 +29,7 @@ function item(freeze: Partial<ReleaseFreezeCard> | null): ReviewItemType {
     agentName: 'claude2',
     artifacts: [],
     duration: 1,
-    latestReview: { id: 'cr1', verdict: freeze?.verdict ?? 'pass', issues_found: 0, fix_round: 0, created_at: '' },
+    latestReview: { id: 'cr1', verdict: freeze?.verdict ?? 'pass', issues_found: issues, fix_round: 0, created_at: '' },
     freeze: freeze ? { ...base, ...freeze } : null,
   };
 }
@@ -60,10 +62,43 @@ describe('ReviewItem freeze card', () => {
     await waitFor(() => expect(screen.getByText('REJECT')).toBeTruthy());
   });
 
-  it('NEEDS FIXES: card without Promote', () => {
-    renderItem(item({ verdict: 'needs-fixes' }));
+  it('NEEDS FIXES: card without Promote, verdict chip is not a green PASS, and STAGE needs a PASS', async () => {
+    const api = await import('../hooks/useApi');
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (String(p).includes('ai-reviews')) {
+        return [{
+          id: 'cr1', run_id: 'r1', reviewer_type: 'cross-model', reviewer_agent_id: null, reviewer_runtime: null,
+          status: 'done', diff: null, feedback: 'R1 — P1\nVERDICT: NEEDS FIXES', issues_found: 0,
+          verdict: 'needs-fixes', fix_round: 0, fixes_sent_at: null, created_at: '',
+        }];
+      }
+      return [];
+    });
+    renderItem(item({ verdict: 'needs-fixes', latestReviewIssues: 0 }));
     expect(screen.queryByText('PROMOTE')).toBeNull();
     expect(screen.getByText('no PASS — not promotable')).toBeTruthy();
+    expect(screen.getByText('@codex3 VERDICT')).toBeTruthy();
+    const chip = screen.getByTestId('review-chip');
+    expect(chip.textContent).toMatch(/NEEDS FIXES/);
+    expect(chip.textContent).not.toMatch(/PASS/);
+    expect(chip.className).toMatch(/amber/);
+    const stage = screen.getByText('STAGE');
+    expect((stage as HTMLButtonElement).disabled).toBe(true);
+    expect(stage.getAttribute('title')).toMatch(/reviewer's PASS on this exact SHA/);
+    await waitFor(() => expect(chip.textContent).not.toMatch(/✓ PASS/));
+  });
+
+  it('an admin can still stage a freeze that is not a PASS', async () => {
+    const api = await import('../hooks/useApi');
+    render(
+      <MemoryRouter>
+        <ReviewItem item={item({ verdict: 'needs-fixes' })} agents={[]} onAction={() => {}} index={0} isAdmin />
+      </MemoryRouter>,
+    );
+    const stage = screen.getByText('STAGE');
+    expect((stage as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(stage);
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/reviews/r1/stage', undefined));
   });
 
   it('a stale SHA shows what superseded it and cannot be promoted', () => {

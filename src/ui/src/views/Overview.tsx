@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Board, ChatAction, ChatTurn, FixRow, OverlordReport, OverviewResponse, Recommendation } from '../types';
+import type { Board, ChatAction, ChatTurn, FixRow, OverlordReport, OverviewResponse, Recommendation, User } from '../types';
 
 function ago(min: number | null): string {
   if (min === null) return '';
@@ -54,12 +54,15 @@ export default function Overview() {
   const [acting, setActing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [assignPick, setAssignPick] = useState<Record<string, string>>({});
+  const [me, setMe] = useState<Pick<User, 'role'> | null>(null);
+  const isAdmin = me?.role === 'admin';
   const chatEnd = useRef<HTMLDivElement>(null);
 
   const fetchData = useCallback(() => {
     apiGet<OverviewResponse>('/overview')
       .then((r) => { setBoard(r.board); setReport(r.report); setOverlord(r.overlord); setLoaded(true); })
       .catch(() => setLoaded(true));
+    apiGet<User>('/me').then(setMe).catch(() => setMe(null));
   }, []);
   const fetchChat = useCallback(() => {
     apiGet<ChatTurn[]>('/overview/chat').then(setChat).catch(() => setChat([]));
@@ -116,6 +119,7 @@ export default function Overview() {
       return act(key, () => apiPost('/overview/fixes/assign', body));
     }
     if ((a.kind === 'stage' || a.kind === 'promote' || a.kind === 'reject') && a.run_id) {
+      if (a.kind === 'promote' && !isAdmin) return;
       const runId = a.run_id;
       if (a.kind === 'promote' && !window.confirm(`Send the PRODUCTION GO for ${a.sha?.slice(0, 8) ?? 'this lane'}?`)) return;
       if (a.kind === 'reject') {
@@ -140,6 +144,7 @@ export default function Overview() {
   const runRecommendation = (r: Recommendation, i: number) => {
     const key = `rec-${i}`;
     if ((r.kind === 'promote' || r.kind === 'stage' || r.kind === 'reject') && r.run_id) {
+      if (r.kind === 'promote' && !isAdmin) return;
       const runId = r.run_id;
       if (r.kind === 'promote' && !window.confirm(`Send the PRODUCTION GO for ${r.sha?.slice(0, 8) ?? 'this lane'}?`)) return;
       if (r.kind === 'reject') {
@@ -215,12 +220,12 @@ export default function Overview() {
                 {t.text}
                 {t.actions && t.actions.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1.5" data-testid={`chat-actions-${t.id}`}>
-                    {t.actions.map((a, i) => (
+                    {t.actions.filter((a) => a.kind !== 'promote' || isAdmin).map((a, i) => (
                       <button
                         key={i}
                         onClick={() => runChatAction(a, `chat-${t.id}-${i}`)}
                         disabled={acting !== null}
-                        title={a.kind === 'send' && a.text ? a.text : a.label}
+                        title={a.kind === 'promote' ? 'Send the production GO. Admin only.' : a.kind === 'send' && a.text ? a.text : a.label}
                         className="px-2 py-0.5 rounded border border-violet-400/50 bg-violet-500/10 text-[10px] font-semibold tracking-wider text-violet-100 hover:bg-violet-500/25 disabled:opacity-40"
                       >
                         {acting === `chat-${t.id}-${i}` ? '...' : a.label}
@@ -278,7 +283,7 @@ export default function Overview() {
               {report && report.recommendations.length > 0 && (
                 <ul className="space-y-1.5">
                   {report.recommendations.map((r, i) => {
-                    const actionable = ((r.kind === 'promote' || r.kind === 'stage' || r.kind === 'reject') && r.run_id) || (r.kind === 'nudge' && r.agent_id) || (r.kind === 'fix' && r.run_id && r.agent_id);
+                    const actionable = ((r.kind === 'stage' || r.kind === 'reject') && r.run_id) || (r.kind === 'promote' && !!r.run_id && isAdmin) || (r.kind === 'nudge' && r.agent_id) || (r.kind === 'fix' && r.run_id && r.agent_id);
                     return (
                       <li key={i} className="flex items-start gap-2 text-[11px]">
                         <span className={`shrink-0 text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border uppercase ${KIND_CLS[r.kind] ?? KIND_CLS.info}`}>{r.kind}</span>

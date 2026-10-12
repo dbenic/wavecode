@@ -87,14 +87,19 @@ the file path as a link. A question nobody answers in 30 minutes becomes
 
 Promote used to type a GO into the deploy agent's pane as a question. Releases are now records
 (`docs/api.md` → Releases): the dev box posts `POST /api/releases` to the deploy box with the
-exact SHA, target, lane, desk, reviewer and the person's name; the deploy box hands it to
-`releases.deploy_agent` and reports back; the dev box mirrors `release.reported`.
+exact SHA, target, lane, desk and reviewer. A production request also carries the originating
+user's name (`requested_by`) and role (`requester_role`). The deploy box accepts that production
+request only when the name is in `releases.production_approvers`; an empty or unset list refuses
+every peer production request, including one that omits the user. Staging requests are not checked
+against the list. The deploy box hands an accepted request to `releases.deploy_agent` and reports
+back; the dev box mirrors `release.reported`.
 
 Deploy-box setup (the old box):
 
 ```yaml
 releases:
   deploy_agent: fable      # alias, name or id of the agent that runs the runbook
+  production_approvers: [denis]  # empty or omitted: refuse every peer production request
 ```
 
 The peer user's restricted token may `POST /api/releases` and read `GET /api/releases/:id`

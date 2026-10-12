@@ -49,6 +49,22 @@ describe('config.ts — security', () => {
     expect(getConfig().projects).toEqual({});
   });
 
+  it('loads production_approvers and rejects a list that is not user names', async () => {
+    fs.writeFileSync(configPath, 'releases:\n  production_approvers: [denis]\n', 'utf8');
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig(configPath).releases?.production_approvers).toEqual(['denis']);
+
+    fs.writeFileSync(configPath, 'releases:\n  production_approvers: []\n', 'utf8');
+    vi.resetModules();
+    const empty = await import('./config.js');
+    expect(empty.loadConfig(configPath).releases?.production_approvers).toEqual([]);
+
+    fs.writeFileSync(configPath, 'releases:\n  production_approvers: [Denis Admin]\n', 'utf8');
+    vi.resetModules();
+    const bad = await import('./config.js');
+    expect(() => bad.loadConfig(configPath)).toThrow(/production_approvers/);
+  });
+
   it('loads a per-project referee profile from yaml', async () => {
     fs.writeFileSync(configPath, `
 projects:

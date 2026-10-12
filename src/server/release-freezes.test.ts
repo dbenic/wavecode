@@ -219,6 +219,14 @@ describe('release-freezes.ts', () => {
       expect(item.freeze!.verdict_path).toContain('code-review-codex3.md');
     });
 
+    it('a verdict file stores R#/P# findings as issues and keeps the needs-fixes verdict', () => {
+      const text = `# Verdict: Codex2 Desk (exact SHA ${SHA_C})\nProject: wavepulse · reviewer Claude1 · Author: codex2\n\nR1 — P1 the balance check ignores sign\nR2 (P2) rounding on the credit note\n\nVERDICT: NEEDS FIXES\n`;
+      expect(rf.ingestFreezeFile(write(`claude1-verdict-rp-${SHA_C.slice(0, 8)}.md`, text)).ok).toBe(true);
+      const [item] = rq.listPendingReviews();
+      expect(item.latestReview).toMatchObject({ verdict: 'needs-fixes', issues_found: 2 });
+      expect(item.freeze?.verdict).toBe('needs-fixes');
+    });
+
     it('NEEDS FIXES creates a card without Promote: the server refuses to promote it', () => {
       const file = write(`claude1-verdict-codex2-si-aop-${SHA_C.slice(0, 8)}-20261009.md`, VERDICT_NEEDS_FIXES);
       expect(rf.ingestFreezeFile(file).ok).toBe(true);
@@ -401,7 +409,8 @@ describe('release-freezes.ts', () => {
       expect(rf.ingestFreezeFile(file).ok).toBe(true);
       const [item] = rq.listPendingReviews();
 
-      const r = rq.promote(item.run.id);
+      const { runWithActor } = await import('./request-context.js');
+      const r = await runWithActor('owner', async () => rq.promote(item.run.id), { admin: true });
       expect(r.ok).toBe(true);
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.promoted', 'run', item.run.id,
         expect.objectContaining({ verdict: 'pass', override_reason: null, freeze: expect.objectContaining({ sha: SHA_A, reviewer: 'codex3', author: 'claude2', desk: 91 }) }));

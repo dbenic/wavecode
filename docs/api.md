@@ -478,26 +478,30 @@ deployed_sha, report, error, created_at, updated_at, reported_at`.
 
 - `GET /api/releases?project=&sha=&target=&status=&limit=` — newest first.
 - `GET /api/releases/:id`
-- `POST /api/reviews/:runId/stage` — stage a freeze card (any verdict; never a stale SHA). 202 with the record.
-- `POST /api/reviews/:runId/promote` on a freeze card creates the production request (the GO) after the usual rules.
-- `POST /api/releases` `{ sha, target, project?, lane?, desk?, reviewer?, requested_by?, origin_id?, origin_box? }` —
-  deploy side: accept a request (a peer's restricted token, or a local user; production locally is admin only).
+- `POST /api/reviews/:runId/stage` — stage a freeze card. A developer needs the reviewer's PASS on that exact SHA (403 `Stage needs the reviewer's PASS on this exact SHA` otherwise). An admin may stage without it. A freeze already inside a composed candidate the deploy agent has deployed to staging may be staged without that PASS. Never a stale SHA. 202 with the record.
+- `POST /api/reviews/:runId/promote` approves the review for a developer or an admin. The production
+  request (the GO) is sent only when the acting user is an admin. A developer approve does not send one.
+- `POST /api/releases` `{ sha, target, project?, lane?, desk?, reviewer?, requested_by?, requester_role?, requester_is_admin?, origin_id?, origin_box? }` —
+  deploy side: accept a request. Production is admin only for a local caller. A peer (restricted token)
+  must forward the originating user: `requested_by` (name) and `requester_role`. The name is accepted
+  only when it is listed in `releases.production_approvers` (for example `[denis]`). An empty or unset
+  list refuses every peer production request, and a missing name or role refuses too. `requested_by`
+  stays that person's name. Staging requests from peers are not checked against the list.
   Idempotent while a request for the same SHA + target is open. The deploy agent receives
   `[Release GO <id> from <person> via WaveCode Promote …]` or `[Staging request <id> … Automated …]`.
 - Candidates are the unit of production when `projects.<p>.candidate_refs` is set: the board lists each
   unreleased candidate with its tip SHA and the lanes it contains; a lane alone is then never promotable.
-  `POST /api/releases/candidates/:name/stage` and `…/promote` `{ project }` request staging or the
-  production GO for the candidate's tip (the contained lanes go to the deployer in the note).
-- `POST /api/releases/verify` `{ sha, project?, note? }` — "verified on staging" for any SHA (a lane or a
-  candidate tip), keyed by SHA and recorded with the person's name; event `release.verified` (entity = sha).
-- `POST /api/releases/:id/verify` `{ note? }` — the same for a deployed staging record (delegates to the SHA);
-  a person records that the feature works on staging
-  (`verified_by`, `verified_at`, `verification_note` on the staging record; event `release.verified`).
-  The production confirmation shows whether the lane was verified and by whom; the overlord puts only
-  verified lanes into production groups.
+  `POST /api/releases/candidates/:name/stage` `{ project }` requests staging. A developer needs every contained lane's reviewer PASS, unless that composed candidate is already deployed to staging. An admin may stage either way.
+  `…/promote` sends the production GO for the candidate's tip and is admin only (403 otherwise).
+- `POST /api/releases/verify` `{ sha, project?, note? }` — **Ready for prod** (verified on staging) for any SHA
+  (a lane or a candidate tip), keyed by SHA and recorded with the person's name. Developers and admins.
+  Event `release.verified` (entity = sha) carries `sha`, `version`, `lane`, `desk`, `verified_by`; the same
+  fields go out through the existing notifiers (ntfy / Telegram / web push). There is no GitHub PR comment client.
+- `POST /api/releases/:id/verify` `{ note? }` — the same Ready for prod action for a deployed staging record
+  (delegates to the SHA). The release card shows Ready for prod once it is recorded.
 - `GET /api/releases/audit?limit=` — who did what, newest first: `stage` / `auto-stage` / `promote`
-  (the person, or `overlord` for auto-stage), `verify`, `reject` (with reason), and the deployer's
-  `deployed` / `failed` outcomes with version. Shown on the Release page.
+  (the person, or `overlord` for auto-stage), `verify` (shown as Ready for prod, with lane, version and desk),
+  `reject` (with reason), and the deployer's `deployed` / `failed` outcomes with version. Shown on the Release page.
 - `POST /api/releases/:id/report` `{ status: 'deployed'|'failed'|'rejected', sha?, version?, note? }` —
   the deploy agent's outcome (MCP `report_release`, or the pane line `RELEASED <id>: deployed <sha> version <x.y.z> to <target>`
   / `RELEASE FAILED <id>: <why>`, detected by the watcher). A deployed report must name the requested SHA.

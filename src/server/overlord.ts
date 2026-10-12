@@ -292,7 +292,7 @@ When your answer involves doing something, also return it as actions the person 
 - "send": a full prompt for an agent (the exact text to type into its pane; complete and self-contained, with paths and the expected deliverable).
 - "assign_fix": queue a fix for a lane (run_id from the board's fixes) to an agent.
 - "stage" / "promote" / "reject": a lane's run_id (promote only where no candidates exist; otherwise say which candidate to GO).
-- "verify": a sha verified on staging.
+- "verify": a sha marked Ready for prod (checked on staging).
 
 Answer with one JSON object and nothing else:
 {"answer": "<plain text, at most ~12 lines>", "actions": [{"kind": "send", "agent": "@codex1", "text": "<the prompt>"}, {"kind": "assign_fix", "agent": "@claude1", "run_id": "<run id>"}, {"kind": "stage|promote|reject", "run_id": "<run id>"}, {"kind": "verify", "sha": "<sha>"}]}`;
@@ -338,7 +338,7 @@ function parseChat(raw: string): { answer: string; actions: ChatAction[] } {
         if (kind === 'assign_fix' && (!agentId || !runId)) return [];
         if ((kind === 'stage' || kind === 'promote' || kind === 'reject') && !runId) return [];
         if (kind === 'verify' && !sha) return [];
-        const label = kind === 'send' ? `Send to @${agentName}` : kind === 'assign_fix' ? `Assign fix → @${agentName}` : kind === 'verify' ? `Verified on staging ${sha!.slice(0, 8)}` : `${kind[0].toUpperCase()}${kind.slice(1)} ${runId!.slice(-6)}`;
+        const label = kind === 'send' ? `Send to @${agentName}` : kind === 'assign_fix' ? `Assign fix → @${agentName}` : kind === 'verify' ? `Ready for prod ${sha!.slice(0, 8)}` : `${kind[0].toUpperCase()}${kind.slice(1)} ${runId!.slice(-6)}`;
         return [{ kind, agent: agentName, agent_id: agentId, text, run_id: runId, sha, label }];
       }).slice(0, 8)
     : [];

@@ -5,7 +5,7 @@ import { getConfig, type WaveConfig } from './config.js';
 import { emit } from './event-bus.js';
 import type { User } from './db.js';
 import { runWithActor } from './request-context.js';
-import { canMutate, OWNER_USER, resolveUserByToken, isRestrictedUser, restrictedAgentRefs } from './users.js';
+import { canMutate, isAdmin, OWNER_USER, resolveUserByToken, isRestrictedUser, restrictedAgentRefs } from './users.js';
 
 export interface NodeAppBindings {
   incoming?: IncomingMessage | Http2ServerRequest | {
@@ -257,7 +257,7 @@ export function createAuthMiddleware(
     }
 
     c.set('user', user);
-    await runWithActor(user.id, () => next());
+    await runWithActor(user.id, () => next(), { admin: isAdmin(user) });
   };
 }
 
