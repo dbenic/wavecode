@@ -361,12 +361,33 @@ export function loadConfig(cfgPath?: string): WaveConfig {
  * actionable error rather than letting the daemon boot and crash on first
  * request. Currently checks that artifacts.storage is creatable and writable.
  */
+const SHELL_BINS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh']);
+/** `{lane}` may be one whole argument, or a refspec like `HEAD:{lane}`. */
+const LANE_REFSPEC = /^\+?(?:HEAD|\{lane\}):\{lane\}$/;
+
+function isShellArgv(argv: string[]): boolean {
+  const bin = (argv[0] ?? '').split(/[/\\]/).pop() ?? '';
+  if (!SHELL_BINS.has(bin)) return false;
+  return argv.slice(1).some((arg) => arg === '-c' || arg === '-lc' || /^-[a-zA-Z]*c$/.test(arg));
+}
+
+function validateLanePlaceholder(name: string, argv: string[]): void {
+  if (!argv.some((arg) => arg.includes('{lane}'))) return;
+  if (isShellArgv(argv)) throw new Error(`${name} must not pass {lane} through a shell`);
+  for (const arg of argv) {
+    if (!arg.includes('{lane}')) continue;
+    if (arg === '{lane}' || LANE_REFSPEC.test(arg)) continue;
+    throw new Error(`${name} must use {lane} as its own argument or as a HEAD:{lane} refspec`);
+  }
+}
+
 function validateArgvTemplate(name: string, argv: string[] | undefined, placeholder: string): void {
   if (argv === undefined) return;
   if (!Array.isArray(argv) || argv.length === 0 || argv.some((a) => typeof a !== 'string' || !a.trim() || a.length > 200)) {
     throw new Error(`${name} must be a non-empty list of arguments`);
   }
   if (!argv.some((a) => a.includes(placeholder))) throw new Error(`${name} must include ${placeholder}`);
+  validateLanePlaceholder(name, argv);
 }
 
 function validateArgvList(name: string, argv: string[] | undefined): void {

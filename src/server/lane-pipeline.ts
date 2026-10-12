@@ -81,6 +81,28 @@ function fill(template: string[], vars: Record<string, string>): string[] {
   return template.map((arg) => arg.replace(/\{(workspace|lane|sha|remote|project)\}/g, (_, key: string) => vars[key] ?? ''));
 }
 
+/** Branch names git accepts, with no shell metacharacters. */
+const SAFE_LANE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
+const PROTECTED_BRANCHES = new Set(['main', 'master', 'HEAD', 'trunk', 'develop', 'development', 'release', 'production', 'staging']);
+
+function laneGlobRe(glob: string): RegExp {
+  return new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+}
+
+/**
+ * A lane may be merged or pushed only when it is a safe ref, matches the
+ * project lane glob, and is not main or another protected branch.
+ */
+export function laneRefError(project: string, lane: string): string | null {
+  if (!SAFE_LANE.test(lane)) return `refusing ${lane}: not a safe branch name`;
+  const projectCfg = getConfig().projects?.[project];
+  const mainBranch = projectCfg?.main_branch?.trim() || 'main';
+  if (lane === mainBranch || PROTECTED_BRANCHES.has(lane)) return `refusing ${lane}: protected branch`;
+  const glob = projectCfg?.lane_glob?.trim() || 'wc-*';
+  if (!laneGlobRe(glob).test(lane)) return `refusing ${lane}: not a developer lane`;
+  return null;
+}
+
 function runArgv(argv: string[]): ExecResult {
   if (argv.length === 0) return { code: 1, stdout: '' };
   if (execForTest) return execForTest(argv);
@@ -197,6 +219,8 @@ function freezeDir(project: string, pipe: PipelineSwitches): string | null {
 function publishFreeze(opts: {
   workspace: string; project: string; lane: string; sha: string; author: Agent; pipe: PipelineSwitches;
 }): Result<{ sha: string }> {
+  const refused = laneRefError(opts.project, opts.lane);
+  if (refused) return { ok: false, error: refused };
   const spec = mainSpec(opts.project);
   const vars = { workspace: opts.workspace, lane: opts.lane, sha: opts.sha, remote: spec.remote, project: opts.project };
   if (opts.pipe.push_command?.length) {
@@ -507,9 +531,8 @@ export function onAuthorDone(agentId: string): Result<{ sha: string }> {
     if (!pipe.auto_freeze) return { ok: false, error: 'auto-freeze off' };
     const lane = branchOf(agent.data.workspace);
     const spec = mainSpec(project);
-    const glob = getConfig().projects?.[project]?.lane_glob || 'wc-*';
-    const re = new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
-    if (!lane || !re.test(lane)) return { ok: false, error: 'not a developer lane' };
+    const refused = lane ? laneRefError(project, lane) : 'not a developer lane';
+    if (!lane || refused) return { ok: false, error: refused ?? 'not a developer lane' };
     const repo = projectRepo(project) ?? agent.data.workspace;
     const mainRef = resolveMainRef(repo, project) ?? `${spec.remote}/${spec.branch}`;
     let sha = headOf(agent.data.workspace);
@@ -545,14 +568,15 @@ export function onMainAdvanced(project: string): void {
   if (!mainRef) return;
   const lanes = new Set<string>();
   for (const freeze of listFreezes()) {
-    if (freeze.project === project && freeze.lane && (freeze.status === 'open' || freeze.status === 'behind-main')) lanes.add(freeze.lane);
+    if (freeze.project === project && freeze.lane && !laneRefError(project, freeze.lane) && (freeze.status === 'open' || freeze.status === 'behind-main')) lanes.add(freeze.lane);
   }
   for (const agent of listAgents()) {
     if (!agent.workspace) continue;
     const branch = branchOf(agent.workspace);
-    if (branch) lanes.add(branch);
+    if (branch && !laneRefError(project, branch)) lanes.add(branch);
   }
   for (const lane of lanes) {
+    if (laneRefError(project, lane)) continue;
     const author = listAgents().find((agent) => agent.workspace && branchOf(agent.workspace) === lane);
     if (!author?.workspace) continue;
     const before = headOf(author.workspace);

@@ -101,6 +101,17 @@ projects:
     vi.resetModules();
     const missing = await import('./config.js');
     expect(() => missing.loadConfig(configPath)).toThrow(/push_command must include \{lane\}/);
+
+    const refuse = async (yaml: string, pattern: RegExp) => {
+      fs.writeFileSync(configPath, yaml, 'utf8');
+      vi.resetModules();
+      const loaded = await import('./config.js');
+      expect(() => loaded.loadConfig(configPath)).toThrow(pattern);
+    };
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [bash, -c, "git push origin HEAD:{lane}"]\n', /must not pass \{lane\} through a shell/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [sh, -c, "git push origin {lane}"]\n', /must not pass \{lane\} through a shell/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [bash, -lc, "git push origin HEAD:{lane}"]\n', /must not pass \{lane\} through a shell/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [git, push, origin, "refs/heads/{lane}"]\n', /its own argument or as a HEAD:\{lane\} refspec/);
   });
 
   it('loads a per-project referee profile from yaml', async () => {

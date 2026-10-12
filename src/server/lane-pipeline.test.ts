@@ -176,6 +176,48 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
+  it('does not merge or push main, a non-lane branch, or an unsafe ref', () => {
+    const localMain = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', '-B', 'side');
+    fs.writeFileSync(path.join(repo, 'later.txt'), 'later');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'origin moved');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    git(repo, 'checkout', '-q', 'main');
+    const maintainer = agent('maintainer', repo);
+    pipe.auto_merge_main = true;
+    pipe.auto_freeze = true;
+    onMainAdvanced('wave');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(localMain);
+    expect(git(repo, 'branch', '--show-current')).toBe('main');
+    expect(calls.some((argv) => argv.join(' ').includes('main'))).toBe(false);
+    expect(onAuthorDone(maintainer.id).ok).toBe(false);
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(localMain);
+
+    git(repo, 'checkout', '-q', '-B', 'topic');
+    fs.writeFileSync(path.join(repo, 'topic.txt'), 'topic');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'topic');
+    const topic = git(repo, 'rev-parse', 'HEAD');
+    const topicAuthor = agent('topic', repo);
+    expect(onAuthorDone(topicAuthor.id)).toMatchObject({ ok: false, error: 'refusing topic: not a developer lane' });
+    onMainAdvanced('wave');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(topic);
+
+    git(repo, 'checkout', '-q', '-B', 'wc-$(id)');
+    fs.writeFileSync(path.join(repo, 'unsafe.txt'), 'unsafe');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'unsafe');
+    const unsafe = git(repo, 'rev-parse', 'HEAD');
+    const unsafeAuthor = agent('unsafe', repo);
+    const refused = onAuthorDone(unsafeAuthor.id);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toMatch(/not a safe branch name/);
+    onMainAdvanced('wave');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(unsafe);
+    expect(calls.filter((argv) => argv[0] === 'push-lane')).toEqual([]);
+  });
+
   it('does nothing while auto-freeze is off', () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', repo);
