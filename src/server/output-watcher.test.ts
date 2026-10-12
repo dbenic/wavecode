@@ -287,6 +287,21 @@ Do you want to proceed?
     expect(sendRawKeys).toHaveBeenCalledTimes(4);
   });
 
+  it('accepts the trust-folder check (Down, Enter) and clears press-Enter screens (Enter)', () => {
+    const trust = ' Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel';
+    expect(maybeDismissFirstRunDialog('agent-2', trust, 1_000_000)).toBe(true);
+    expect(sendRawKeys).toHaveBeenNthCalledWith(1, 'agent-2', 'Down');
+    expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'agent-2', 'Enter');
+    vi.mocked(sendRawKeys).mockClear();
+    const notes = ' Security notes:\n 1. Claude can make mistakes.\n 2. Due to prompt injection risks, only use it with code you trust\n Press Enter to continue…';
+    expect(maybeDismissFirstRunDialog('agent-3', notes, 1_000_000)).toBe(true);
+    expect(sendRawKeys).toHaveBeenCalledTimes(1);
+    expect(sendRawKeys).toHaveBeenCalledWith('agent-3', 'Enter');
+    vi.mocked(sendRawKeys).mockClear();
+    // an old "Press Enter to continue" far up the scrollback is not a screen
+    expect(maybeDismissFirstRunDialog('agent-4', 'Press Enter to continue…\n' + Array(10).fill('working on src/a.ts').join('\n') + '\n❯ ', 1_000_000)).toBe(false);
+  });
+
   it('does not send keys for unrelated pane text', () => {
     expect(maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.')).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

@@ -129,10 +129,16 @@ export function createWorktree(agentName: string, repo: string, branch?: string)
     try {
       execFileSync('git', ['-C', repo, 'pull', '--ff-only', '--quiet'], { encoding: 'utf-8', timeout: 60000, stdio: ['ignore', 'ignore', 'ignore'] });
     } catch { /* no network or diverged main: the worktree still gets created from what is there */ }
-    execFileSync('git', ['-C', repo, 'worktree', 'add', workspace, '-b', branch ?? `wc-${agentName}`], {
-      encoding: 'utf-8',
-      timeout: 15000,
-    });
+    const branchName = branch ?? `wc-${agentName}`;
+    const git = (args: string[], timeout = 15000) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
+    // An agent killed earlier keeps its worktree and branch (its work is not thrown away);
+    // spawning the same name again reuses them instead of failing on "branch already exists".
+    const registered = git(['worktree', 'list', '--porcelain']).split('\n').some((l) => l === `worktree ${workspace}`);
+    if (registered && fs.existsSync(workspace)) return { ok: true, data: workspace };
+    if (registered) git(['worktree', 'prune']);
+    const branchExists = (() => { try { git(['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`]); return true; } catch { return false; } })();
+    if (branchExists) git(['worktree', 'add', workspace, branchName]);
+    else git(['worktree', 'add', workspace, '-b', branchName]);
     return { ok: true, data: workspace };
   } catch (e) {
     return { ok: false, error: `Failed to create worktree: ${(e as Error).message}` };

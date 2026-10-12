@@ -38,7 +38,18 @@ describe('runtime-launcher.ts', () => {
     vi.resetModules();
   });
 
+  /** git as the launcher sees it: no worktree registered, the branch does not exist. */
+  function gitFresh(opts: { registered?: string; branchExists?: boolean } = {}) {
+    vi.mocked(child_process.execFileSync).mockImplementation(((cmd: string, args: string[]) => {
+      if (cmd !== 'git') return '';
+      if (args.includes('--porcelain')) return opts.registered ? `worktree ${opts.registered}\nHEAD abc\nbranch refs/heads/x\n` : '';
+      if (args.includes('rev-parse')) { if (opts.branchExists) return 'abc'; throw new Error('not a branch'); }
+      return '';
+    }) as never);
+  }
+
   it('creates git worktrees under the configured root', async () => {
+    gitFresh();
     const { createWorktree } = await import('./runtime-launcher.js');
 
     const result = createWorktree('agent-a', '/repo/project', 'wc-agent-a');
@@ -54,6 +65,22 @@ describe('runtime-launcher.ts', () => {
       ['-C', '/repo/project', 'worktree', 'add', '/tmp/wavecode/worktrees/agent-a', '-b', 'wc-agent-a'],
       expect.objectContaining({ timeout: 15000 }),
     );
+  });
+
+  it('spawning a name again reuses the branch a killed agent left behind, and the worktree when it still exists', async () => {
+    const fs = await import('node:fs');
+    gitFresh({ branchExists: true });
+    const { createWorktree } = await import('./runtime-launcher.js');
+    expect(createWorktree('agent-a', '/repo/project', 'wc-agent-a')).toEqual({ ok: true, data: '/tmp/wavecode/worktrees/agent-a' });
+    expect(vi.mocked(child_process.execFileSync)).toHaveBeenCalledWith(
+      'git', ['-C', '/repo/project', 'worktree', 'add', '/tmp/wavecode/worktrees/agent-a', 'wc-agent-a'], expect.anything(),
+    );
+    vi.mocked(child_process.execFileSync).mockClear();
+    gitFresh({ registered: '/tmp/wavecode/worktrees/agent-a', branchExists: true });
+    const exists = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    expect(createWorktree('agent-a', '/repo/project', 'wc-agent-a')).toEqual({ ok: true, data: '/tmp/wavecode/worktrees/agent-a' });
+    expect(vi.mocked(child_process.execFileSync).mock.calls.some((c) => c[0] === 'git' && (c[1] as string[]).includes('add'))).toBe(false);
+    exists.mockRestore();
   });
 
   it('launches codex with the configured command', async () => {

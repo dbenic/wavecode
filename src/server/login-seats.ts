@@ -194,6 +194,10 @@ function joinWrappedUrls(clean: string): string[] {
  */
 export function loginAutoAdvanceKey(paneText: string): 'Enter' | null {
   if (/Select login method/i.test(paneText) && /❯\s*1\.\s*Claude account/i.test(paneText)) return 'Enter';
+  // "Login successful" / "Security notes" screens after the code was accepted
+  if (/Press Enter to continue/i.test(paneText.split('\n').filter((l) => l.trim()).slice(-4).join('\n'))) return 'Enter';
+  // the workspace trust check on the profile dir: "No, exit" is preselected — exiting ends the seat, logged in
+  if (/Yes,\s*I trust this folder/i.test(paneText) && /❯\s*No,\s*exit/i.test(paneText)) return 'Enter';
   // the theme picker prints no "Enter to confirm" hint; the preselected dark theme is fine for a seat
   if (/Choose the text style|Select a theme|run \/theme/i.test(paneText) && /Dark mode|Light mode/i.test(paneText) && !/Select login method/i.test(paneText)) return 'Enter';
   return null;

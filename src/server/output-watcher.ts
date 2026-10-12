@@ -33,30 +33,54 @@ export function isClaudeBypassAcceptDialog(output: string): boolean {
 }
 
 /**
- * Dismiss the Claude first-run accept dialog with Down then Enter.
- * Returns true when keys were sent (or attempted). Cooldown is ~8s.
+ * Claude Code's workspace trust check ("Is this a project you created or one
+ * you trust?"). The accept action is the second radio row; the first exits.
+ * WaveCode created the worktree, so trusting it is the right answer.
+ */
+export function isClaudeTrustFolderDialog(output: string): boolean {
+  return /Yes,\s*I trust this folder/i.test(output) && /No,\s*exit/i.test(output);
+}
+
+/** Informational first-run screens ("Security notes", "Login successful") that only want Enter. */
+export function isPressEnterToContinueScreen(output: string): boolean {
+  const tail = output.split('\n').filter((l) => l.trim()).slice(-6).join('\n');
+  return /Press Enter to continue/i.test(tail);
+}
+
+/** Which keys clear a Claude first-run screen, or null when none is showing (exported for tests). */
+export function firstRunDialogKeys(output: string): { keys: string[]; what: string } | null {
+  if (isClaudeBypassAcceptDialog(output)) return { keys: ['Down', 'Enter'], what: 'Bypass Permissions dialog' };
+  if (isClaudeTrustFolderDialog(output)) return { keys: ['Down', 'Enter'], what: 'trust-folder dialog' };
+  if (isPressEnterToContinueScreen(output)) return { keys: ['Enter'], what: 'press-Enter screen' };
+  return null;
+}
+
+/**
+ * Dismiss a Claude first-run screen (bypass-permissions accept, trust-folder
+ * check, "Press Enter to continue"). Returns true when keys were sent (or
+ * attempted). Cooldown is ~8s per agent.
  */
 export function maybeDismissFirstRunDialog(
   agentId: string,
   output: string,
   now = Date.now(),
 ): boolean {
-  if (!isClaudeBypassAcceptDialog(output)) return false;
+  const dialog = firstRunDialogKeys(output);
+  if (!dialog) return false;
 
   const last = lastDialogDismissAt.get(agentId) ?? 0;
   if (now - last < CLAUDE_BYPASS_DIALOG_COOLDOWN_MS) return false;
 
   lastDialogDismissAt.set(agentId, now);
 
-  const down = sendRawKeys(agentId, 'Down');
-  const enter = sendRawKeys(agentId, 'Enter');
-  if (!down.ok) {
-    logger.warn({ agentId, error: down.error }, 'Failed to dismiss Claude first-run dialog');
-  } else if (!enter.ok) {
-    logger.warn({ agentId, error: enter.error }, 'Failed to dismiss Claude first-run dialog');
-  } else {
-    logger.info({ agentId }, 'Dismissed Claude Bypass Permissions dialog');
+  for (const key of dialog.keys) {
+    const r = sendRawKeys(agentId, key);
+    if (!r.ok) {
+      logger.warn({ agentId, key, error: r.error }, 'Failed to dismiss Claude first-run dialog');
+      return true;
+    }
   }
+  logger.info({ agentId, dialog: dialog.what }, 'Dismissed Claude first-run screen');
   return true;
 }
 
