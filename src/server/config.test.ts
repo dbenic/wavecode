@@ -82,6 +82,38 @@ releases:
     expect(() => missing.loadConfig(configPath)).toThrow(/staging_command must include \{sha\}/);
   });
 
+  it('keeps pipeline switches off unless set, and requires the push placeholder', async () => {
+    fs.writeFileSync(configPath, `
+projects:
+  demo:
+    pipeline:
+      auto_freeze: false
+      push_command: [git, '-C', '{workspace}', 'push', 'origin', 'HEAD:{lane}']
+      review_deny: [codex1]
+`, 'utf8');
+    const { loadConfig } = await import('./config.js');
+    const loaded = loadConfig(configPath);
+    expect(loaded.projects?.demo.pipeline?.auto_freeze).toBe(false);
+    expect(loaded.projects?.demo.pipeline?.auto_stage).toBeUndefined();
+    expect(loaded.projects?.demo.pipeline?.review_deny).toEqual(['codex1']);
+
+    fs.writeFileSync(configPath, 'projects:\n  demo:\n    pipeline:\n      push_command: [git, push]\n', 'utf8');
+    vi.resetModules();
+    const missing = await import('./config.js');
+    expect(() => missing.loadConfig(configPath)).toThrow(/push_command must include \{lane\}/);
+
+    const refuse = async (yaml: string, pattern: RegExp) => {
+      fs.writeFileSync(configPath, yaml, 'utf8');
+      vi.resetModules();
+      const loaded = await import('./config.js');
+      expect(() => loaded.loadConfig(configPath)).toThrow(pattern);
+    };
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [bash, -c, "git push origin HEAD:{lane}"]\n', /must not pass \{lane\} through a shell/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [sh, -c, "git push origin {lane}"]\n', /must not pass \{lane\} through a shell/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [bash, -lc, "git push origin HEAD:{lane}"]\n', /must not pass \{lane\} through a shell/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [git, push, origin, "refs/heads/{lane}"]\n', /its own argument or as a HEAD:\{lane\} refspec/);
+  });
+
   it('loads a per-project referee profile from yaml', async () => {
     fs.writeFileSync(configPath, `
 projects:

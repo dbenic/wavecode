@@ -511,7 +511,7 @@ export interface ReleaseRequest {
 export interface AuditEntry {
   at: string;
   who: string;
-  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage';
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto';
   target: 'staging' | 'production' | null;
   sha: string | null;
   project: string | null;

@@ -469,7 +469,11 @@ staging deploy, no GO) or **Promote** (the production GO) on a freeze card or in
 view; the daemon posts a release request to the project's `release_peer` box. Production is
 handed to the deploy agent (`releases.deploy_agent`) as one prompt. Staging does the same
 unless `releases.staging_command` is set, in which case the deploy box runs that argv and
-streams progress onto the release record. The requester mirrors `release.*`, so `/release`
+streams progress onto the release record. A hands-free pipeline
+(`projects.<name>.pipeline`, every switch default off) can freeze, queue one full gate,
+assign a reviewer, and request staging with `requested_by: auto`. It never sends a
+production request. Staging is one lane at a time until Ready for prod or the pin expires.
+The requester mirrors `release.*`, so `/release`
 shows what is on staging and in production per lane. The STAGE control becomes a live phase
 chip (queued → lock → fetch → build → verify → pin) and, on success, "On staging".
 

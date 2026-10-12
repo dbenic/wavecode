@@ -11,6 +11,7 @@ import { listFreezes, refreshProject, type ReleaseFreeze } from './release-freez
 import { listReleases } from './releases.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { deliverSystemLine } from './wire-lines.js';
+import { latestPipelineNote } from './lane-pipeline.js';
 import logger from './logger.js';
 import {
   DEFAULT_BEFORE_FREEZE_TIP, behindMainLine, fullFailFlag, laneStatusLine, needsGreenQuick, promoteBlockReason,
@@ -222,6 +223,7 @@ export function listDevLanes(): DevLane[] {
         freeze: freeze ? { sha: freeze.sha, verdict: freeze.verdict, issues: issuesFor(freeze), gate: freezeGate } : null,
         gate: viewed.gate, quick: viewed.quick, full: viewed.full, fullRunLabel: fullLabel,
         behindMain: behind, protectedPath, hasMigration, overlap, onStaging,
+        autoNote: latestPipelineNote(project, lane),
       });
       const sha8 = cardSha.slice(0, 8);
       const fullGreen = viewed.full === 'green';

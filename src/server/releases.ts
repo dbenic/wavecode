@@ -31,6 +31,7 @@ import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
+import { fireStagingDeployed, fireStagingVerified } from './pipeline-hooks.js';
 
 /** Returned to non-admins on every production-send path. */
 export const PRODUCTION_RELEASE_ADMIN_ONLY = 'Forbidden: only an admin can send a production release';
@@ -315,7 +316,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     run_id: opts.runId ?? null,
     version: null,
     deployed_sha: null,
-    report: null,
+    report: opts.note ?? null,
   };
 
   if (project.release_peer) {
@@ -700,6 +701,7 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     deploy_agent_id: report.byAgentId ?? done.deploy_agent_id, requested_by: done.requested_by,
   }, null);
   if (done.origin === 'local') announce(done);
+  if (done.target === 'staging' && done.status === 'deployed') fireStagingDeployed(done.id);
   return { ok: true, data: done };
 }
 
@@ -721,13 +723,14 @@ export function verifyStaging(id: string, by: { name: string }, note: string | n
   if (r.status !== 'deployed') return { ok: false, error: `Staging ${r.sha.slice(0, 8)} is ${r.status}, not deployed — nothing to verify yet` };
   const v = verifySha(r.sha, r.project, by, note);
   if (!v.ok) return v;
+  fireStagingVerified(r.project);
   return { ok: true, data: getRelease(id)! };
 }
 
 export interface AuditEntry {
   at: string;
   who: string;
-  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage';
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto';
   target: ReleaseTarget | null;
   sha: string | null;
   project: string | null;
@@ -742,7 +745,7 @@ export function auditTrail(limit = 200): AuditEntry[] {
   const out: AuditEntry[] = [];
   for (const r of listReleases({ limit })) {
     const who = r.requested_by ?? 'unknown';
-    out.push({ at: r.created_at, who, action: who === 'overlord' ? 'auto-stage' : r.target === 'production' ? 'promote' : 'stage', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.lane ? `lane ${r.lane}` : null, release_id: r.id, run_id: r.run_id });
+    out.push({ at: r.created_at, who, action: who === 'overlord' || who === 'auto' ? 'auto-stage' : r.target === 'production' ? 'promote' : 'stage', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.lane ? `lane ${r.lane}` : r.report, release_id: r.id, run_id: r.run_id });
     if (r.reported_at && (r.status === 'deployed' || r.status === 'failed' || r.status === 'rejected')) {
       out.push({ at: r.reported_at, who: r.deploy_agent_id ? `deployer (${r.deploy_agent_id.slice(-6)})` : (r.peer ? `deployer via ${r.peer}` : 'deployer'), action: r.status === 'deployed' ? 'deployed' : 'failed', target: r.target, sha: r.sha, project: r.project, desk: r.desk, detail: r.status === 'deployed' ? (r.version ? `v${r.version}` : r.report) : (r.error ?? r.report), release_id: r.id, run_id: r.run_id });
     }
@@ -767,6 +770,19 @@ export function auditTrail(limit = 200): AuditEntry[] {
     const fz = p.freeze && typeof p.freeze === 'object' ? p.freeze as Record<string, unknown> : null;
     if (!fz) continue; // only release freezes belong to this trail
     out.push({ at: e.created_at, who: e.user_name ?? 'owner', action: 'reject', target: null, sha: typeof fz.sha === 'string' ? fz.sha : null, project: typeof fz.project === 'string' ? fz.project : null, desk: fz.desk != null ? String(fz.desk) : null, detail: typeof p.reason === 'string' ? p.reason : null, release_id: null, run_id: e.run_id });
+  }
+  const autos = getDb().prepare(
+    `SELECT created_at, payload_json FROM events WHERE type = 'pipeline.action' ORDER BY id DESC LIMIT ?`,
+  ).all(limit) as Array<{ created_at: string; payload_json: string | null }>;
+  for (const e of autos) {
+    let payload: { action?: string; sha?: string; project?: string; lane?: string; note?: string } = {};
+    try { payload = e.payload_json ? JSON.parse(e.payload_json) as typeof payload : {}; } catch { /* ignore */ }
+    const stage = payload.action === 'stage' || payload.action === 'dump';
+    out.push({
+      at: e.created_at, who: 'auto', action: stage ? 'auto-stage' : 'auto', target: stage ? 'staging' : null,
+      sha: payload.sha ?? null, project: payload.project ?? null, desk: null,
+      detail: payload.note ?? null, release_id: null, run_id: null,
+    });
   }
   return out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, limit);
 }
