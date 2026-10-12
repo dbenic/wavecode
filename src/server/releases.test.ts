@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -252,6 +253,67 @@ describe('releases.ts', () => {
       expect(box.state.posts[0]).toMatchObject({ target: 'production', sha: tip, lane: 'fable/rc-0443-2', requested_by: 'owner', requester_role: 'admin', note: `contains: Desk #91 ${laneSha.slice(0, 8)}` });
       expect(rel.auditTrail().map((e) => e.action).sort()).toEqual(['promote', 'verify']);
       expect((await app.fetch(new Request('http://x/api/releases/candidates/nope/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }) }))).status).toBe(404);
+      rfz.setFetchDisabledForTest(false);
+      rel.stopReleasePollers();
+    });
+
+    it('refuses staging and production when the SHA does not contain main, including a candidate and an overlord auto-stage', async () => {
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-q', '-m', 'base');
+      git('checkout', '-q', '-b', 'rc');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'c');
+      git('add', '.');
+      git('commit', '-q', '-m', 'candidate');
+      const behind = git('rev-parse', 'HEAD');
+      git('checkout', '-q', 'main');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-q', '-m', 'main moved');
+      const mainSha = git('rev-parse', 'HEAD');
+      git('update-ref', 'refs/remotes/origin/main', mainSha);
+      git('update-ref', 'refs/remotes/origin/fable/rc-0443-2', behind);
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable', repo, candidate_refs: 'fable/rc-*' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const rfz = await import('./release-freezes.js');
+      rfz.setFetchDisabledForTest(true);
+
+      const staging = await rel.requestRelease({ project: 'wavepulse', sha: behind, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+      expect(staging.ok).toBe(false);
+      if (staging.ok) return;
+      expect(staging.error).toMatch(/^behind main by \d+ — merge latest main$/);
+      const production = await rel.requestRelease({ project: 'wavepulse', sha: behind, target: 'production', actorName: 'denis', actorIsAdmin: true });
+      expect(production.ok).toBe(false);
+      if (!production.ok) expect(production.error).toBe(staging.error);
+      expect(rel.listReleases({ sha: behind })).toEqual([]);
+
+      const current = await rel.requestRelease({ project: 'wavepulse', sha: mainSha, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+      expect(current.ok).toBe(true);
+
+      const stage = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/stage', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(stage.status).toBe(400);
+      expect(await stage.json()).toMatchObject({ error: staging.error });
+      const promote = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/promote', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }),
+      }));
+      expect(promote.status).toBe(400);
+      expect(box.state.posts.every((p) => p.sha !== behind)).toBe(true);
+
+      const ol = await import('./overlord.js');
+      const staged = await ol.autoStage({
+        lanes: [{ status: 'open', verdict: 'pass', candidate: null, staging: null, project: 'wavepulse', sha: behind, lane: 'wc-ales', desk: null, reviewer: 'codex3', gate: null, run_id: null }],
+      } as never);
+      expect(staged).toBe(0);
+      expect(rel.listReleases({ sha: behind })).toEqual([]);
       rfz.setFetchDisabledForTest(false);
       rel.stopReleasePollers();
     });

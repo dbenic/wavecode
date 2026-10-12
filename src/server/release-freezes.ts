@@ -770,6 +770,25 @@ export function behindMainBlock(freeze: ReleaseFreeze): string | null {
   return null;
 }
 
+/**
+ * The SHA must contain the project's current main before a staging or
+ * production request is created. A missing freeze row (a composed candidate,
+ * or a freeze table that cannot be read) still uses git. Null ancestry does
+ * not block: a box with no repo keeps today's behavior.
+ */
+export function releaseBehindMain(project: string, sha: string): string | null {
+  try {
+    const freeze = getFreeze(sha);
+    if (freeze) {
+      const blocked = behindMainBlock(freeze);
+      if (blocked) return blocked;
+    }
+  } catch { /* freeze table unavailable: the sha check below still runs */ }
+  const n = commitsBehind(project, sha);
+  if (n != null && n > 0) return behindMainLine(n);
+  return null;
+}
+
 export function checkPromotable(freeze: ReleaseFreeze, opts: { overrideReason?: string | null } = {}): Result<ReleaseFreeze> {
   const short = freeze.sha.slice(0, 8);
   if (freeze.status === 'promoted') return { ok: false, error: `Freeze ${short} was already promoted` };

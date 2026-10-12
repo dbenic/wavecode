@@ -26,7 +26,7 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { peerGetJson, peerPostJson } from './peers.js';
-import { getFreeze, staleStageBlock } from './release-freezes.js';
+import { getFreeze, releaseBehindMain, staleStageBlock } from './release-freezes.js';
 import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
@@ -283,6 +283,8 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   if (!SHA_RE.test(opts.sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(opts.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
   if (opts.target === 'production' && opts.actorIsAdmin !== true) return { ok: false, error: PRODUCTION_RELEASE_ADMIN_ONLY };
+  const behind = releaseBehindMain(opts.project, opts.sha);
+  if (behind) return { ok: false, error: behind };
   try {
     const freeze = getFreeze(opts.sha);
     if (freeze && opts.target === 'staging') {
