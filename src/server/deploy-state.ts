@@ -9,7 +9,9 @@
  * The staging tip is `resolveStagingTip`: the release peer when this project
  * forwards releases, otherwise the health command, then the local deployed row.
  * A failed peer ask stays unknown and is not replaced by the local row.
- * `stage_block` is the same behind / forward / gate sentence the lane card uses.
+ * `stage_block` is behind main, forward-only, or the gate for this SHA, plus a
+ * closed, merged, superseded, or already-contained refusal. It does not
+ * depend on the lane being configured.
  */
 
 import fs from 'node:fs';
@@ -19,7 +21,6 @@ import { emit } from './event-bus.js';
 import { gitAncestor, gitText } from './git-memo.js';
 import logger from './logger.js';
 import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef } from './lane-main.js';
-import { behindMainLine } from './lane-status.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { getConfig } from './config.js';
@@ -41,6 +42,7 @@ import {
   verificationFor,
   resolveStagingTip,
 } from './releases.js';
+import { shaStageBlock, stageRefusal } from './sha-stage-block.js';
 import { readProdHealth, stagingForwardBlock, type StagingTip } from './staging-forward.js';
 import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
@@ -431,19 +433,28 @@ async function tipsFor(project: string): Promise<ProjectTips> {
   return out;
 }
 
-/** The lane card's stage reason: behind main, then the forward check against the resolved tip, then the gate. */
+/** The card's stage reason, from this SHA: closed or contained, behind main, forward-only, then the gate. */
 async function stageBlockFor(freeze: ReleaseFreeze, facts: DeriveFacts, pair: ProjectTips): Promise<string | null> {
-  if (facts.behindMain === true) return behindMainLine(1);
+  let forward: string | null = null;
   try {
     if (pair.stagingKnown && freeze.project && pair.staging.sha) {
       const tip: StagingTip = { sha: pair.staging.sha, version: pair.staging.version, lane: pair.staging.lane };
-      const forward = await stagingForwardBlock(freeze.project, freeze.sha, tip);
-      if (forward) return forward;
+      forward = await stagingForwardBlock(freeze.project, freeze.sha, tip);
     }
-    return stageGateBlock(freeze);
-  } catch {
-    return null;
-  }
+  } catch { forward = null; }
+  const refusal = stageRefusal({
+    sha: freeze.sha,
+    status: freeze.status,
+    lane: freeze.lane,
+    supersededBy: freeze.superseded_by,
+    onMain: facts.mergedToMain === true,
+    behind: facts.behindMain === true,
+    inStaging: facts.containedInStaging === true,
+    inProd: facts.containedInProd === true,
+    forward,
+  });
+  if (refusal) return refusal;
+  try { return stageGateBlock(freeze); } catch { return null; }
 }
 
 async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<string, ProjectTips>): Promise<DeriveFacts> {
@@ -974,9 +985,8 @@ function quickCheck(lane: DevLane | undefined, sha: string): { running: boolean;
   return { running: true, etaMin };
 }
 
-function factFor(freeze: ReleaseFreeze, lane: DevLane | undefined, user: { name: string; role: string }): LaneFreezeFact {
+function factFor(freeze: ReleaseFreeze, lane: DevLane | undefined, user: { name: string; role: string }, stageBlock: string | null): LaneFreezeFact {
   const row = readRow(freeze.sha);
-  const stageBlock = row ? row.stage_block : (lane?.stage_block ?? null);
   const view = row
     ? toView(row, user, freeze.project, stageBlock, lane?.promote_block ?? null, !!freeze.run_id)
     : { ...NOT_RECONCILED, run_backed: !!freeze.run_id };
@@ -1039,8 +1049,16 @@ function deployTips(): { prod: { version: string | null; sha: string | null }; s
   return out;
 }
 
-/** The Reviews page. Reads the last reconcile; it does not run git. */
-export function reviewBoard(user: { name: string; role: string }, lanes: DevLane[], token: string | null = null): ReviewBoard {
+async function blockForCard(freeze: ReleaseFreeze, lane: DevLane | undefined): Promise<string | null> {
+  const row = readRow(freeze.sha);
+  if (row?.stage_block) return row.stage_block;
+  // A lane row describes its current tip. An older SHA must not inherit that sentence.
+  if (lane?.freeze_sha === freeze.sha && lane.stage_block) return lane.stage_block;
+  try { return await shaStageBlock(freeze); } catch { return null; }
+}
+
+/** The Reviews page. A missing stored block is filled from the freeze SHA. */
+export async function reviewBoard(user: { name: string; role: string }, lanes: DevLane[], token: string | null = null): Promise<ReviewBoard> {
   try { ensureDeployStateTable(); } catch { /* the board still renders from the lane list */ }
   const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
   const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
@@ -1055,7 +1073,7 @@ export function reviewBoard(user: { name: string; role: string }, lanes: DevLane
     seen.add(item.run.id);
     const lane = bySha.get(freeze.sha) ?? (freeze.lane ? byLane.get(`${freeze.project}:${freeze.lane}`) : undefined);
     const merged = overlay(item, lane);
-    const stageBlock = row ? row.stage_block : (merged.stage_block ?? null);
+    const stageBlock = await blockForCard(freeze, lane);
     const deploy = row
       ? toView(row, user, freeze.project, stageBlock, merged.promote_block ?? null, runBacked)
       : { ...NOT_RECONCILED, title: null, run_backed: runBacked, show_reject: runBacked };
@@ -1087,7 +1105,7 @@ export function reviewBoard(user: { name: string; role: string }, lanes: DevLane
     for (const freeze of freezes) {
       if (!freeze.lane) continue;
       const lane = bySha.get(freeze.sha) ?? byLane.get(`${freeze.project}:${freeze.lane}`);
-      facts.push(factFor(freeze, lane, user));
+      facts.push(factFor(freeze, lane, user, await blockForCard(freeze, lane)));
     }
     const working: WorkingLaneFact[] = [];
     for (const lane of lanes) {

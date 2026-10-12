@@ -12,6 +12,7 @@ import { canMutate, isAdmin } from '../users.js';
 import * as freezes from '../release-freezes.js';
 import * as devLanes from '../dev-lanes.js';
 import * as deployState from '../deploy-state.js';
+import { shaStageBlock } from '../sha-stage-block.js';
 import logger from '../logger.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
@@ -112,7 +113,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
       logger.warn({ error: (e as Error).message }, 'Lane list failed');
     }
     const token = resolveRequestToken(c.req.path, c.req.raw.headers, c.req.query('access_token'));
-    return c.json(deployState.reviewBoard({ name: user.name, role: user.role }, lanes, token));
+    return c.json(await deployState.reviewBoard({ name: user.name, role: user.role }, lanes, token));
   });
 
   app.get('/api/reviews', async (c) => {
@@ -123,10 +124,16 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     }
     const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
     const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
-    return c.json(items.map((item) => {
+    return c.json(await Promise.all(items.map(async (item) => {
       const lane = (item.freeze && bySha.get(item.freeze.sha))
         || (item.freeze?.lane ? byLane.get(`${item.freeze.project}:${item.freeze.lane}`) : undefined);
-      const stage_block = lane?.stage_block ?? null;
+      // The lane row is the current tip. An older SHA, or a lane that is not
+      // configured, still gets behind-main and forward-only from its own SHA.
+      let stage_block: string | null = null;
+      if (item.freeze) {
+        try { stage_block = await shaStageBlock(item.freeze); } catch { stage_block = null; }
+      }
+      if (!stage_block && lane?.freeze_sha && item.freeze?.sha === lane.freeze_sha) stage_block = lane.stage_block;
       if (!lane) return { ...item, stage_block };
       return {
         ...item,
@@ -141,13 +148,17 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
         delta_review: lane.delta_review,
         reviewers: lane.reviewers,
       };
-    }));
+    })));
   });
 
-  app.get('/api/reviews/:runId', (c) => {
+  app.get('/api/reviews/:runId', async (c) => {
     const result = reviewQueue.getReview(c.req.param('runId'));
     if (!result.ok) return c.json({ error: result.error }, 404);
-    return c.json(result.data);
+    let stage_block: string | null = null;
+    if (result.data.freeze) {
+      try { stage_block = await shaStageBlock(result.data.freeze); } catch { stage_block = null; }
+    }
+    return c.json({ ...result.data, stage_block });
   });
 
   app.post('/api/reviews/:runId/promote', async (c) => {

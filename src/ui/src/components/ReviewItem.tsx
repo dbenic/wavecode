@@ -122,7 +122,7 @@ export default function ReviewItem({
   const cardLane = deploy ? deploy.lane : freeze?.lane ?? null;
   const durationLabel = formatDuration(item.duration);
   const lockReason = deploy && deploy.action_lock && !(isAdmin && deploy.admin_bypass) ? deploy.action_lock : null;
-  const deployLocked = !!deploy && (lockReason != null || !deploy.run_backed);
+  const deployLocked = !!deploy && (lockReason != null || !deploy.run_backed || !!item.stage_block);
   const stagingView = !staging || (deploy?.hide_errors && staging.status === 'failed')
     ? null
     : deploy?.hide_errors
@@ -132,6 +132,15 @@ export default function ReviewItem({
   const staleTitle = freeze
     ? `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on; freeze the new SHA`
     : '';
+  const settledTitle = !freeze
+    ? null
+    : freeze.status === 'merged'
+      ? `Freeze ${freeze.sha.slice(0, 8)} is already on main`
+      : freeze.status === 'rejected'
+        ? `Freeze ${freeze.sha.slice(0, 8)} was rejected`
+        : freeze.status === 'promoted'
+          ? `Freeze ${freeze.sha.slice(0, 8)} was already promoted`
+          : null;
   // A freeze card promotes only on an independent PASS on the exact SHA, and only once the full gate is green. A stale SHA never.
   const passOk = !freeze || (freeze.verdict === 'pass' && !freezeStale);
   const promoteReason = freezeStale
@@ -142,14 +151,16 @@ export default function ReviewItem({
   const canPromote = passOk && !item.promote_block;
   // Stage needs that same PASS. Admins may stage without it. Staleness blocks everyone, admins included.
   const stageNeedsPass = !!freeze && freeze.verdict !== 'pass' && !isAdmin;
-  const stageLocked = !!freeze && (freezeStale || stageNeedsPass || !!item.stage_block);
+  const stageLocked = !!freeze && (freezeStale || stageNeedsPass || !!item.stage_block || !!settledTitle);
   const stageTitle = freezeStale
     ? staleTitle
     : item.stage_block
       ? item.stage_block
-      : stageNeedsPass
-        ? "Stage needs the reviewer's PASS on this exact SHA"
-        : 'Automated deploy to staging through the release pipeline, no GO';
+      : settledTitle
+        ? settledTitle
+        : stageNeedsPass
+          ? "Stage needs the reviewer's PASS on this exact SHA"
+          : 'Automated deploy to staging through the release pipeline, no GO';
   const latestAi = aiReviews.find((r) => r.status === 'done') ?? aiReviews[0] ?? null;
   const chipVerdict = latestAi?.verdict ?? item.latestReview?.verdict ?? freeze?.verdict ?? null;
   const chipIssues = latestAi?.issues_found ?? item.latestReview?.issues_found ?? 0;
@@ -329,6 +340,9 @@ export default function ReviewItem({
               {lockReason && (
                 <span className="text-[10px] text-amber-200/90" data-testid="action-lock">{lockReason}</span>
               )}
+              {!lockReason && (item.stage_block || settledTitle) && (
+                <span className="text-[10px] text-amber-200/90" data-testid="stage-lock">{item.stage_block || settledTitle}</span>
+              )}
               {deploy.show_reject && (
                 <button
                   onClick={reject}
@@ -362,6 +376,9 @@ export default function ReviewItem({
             >
               {acting === 'stage' ? '...' : 'STAGE'}
             </button>
+          )}
+          {(item.stage_block || settledTitle) && (
+            <span className="text-[10px] text-amber-200/90" data-testid="stage-lock">{item.stage_block || settledTitle}</span>
           )}
           {freeze && !passOk && (
             <span className="text-[10px] text-slate-500" title={promoteReason ?? undefined}>

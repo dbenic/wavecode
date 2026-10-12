@@ -252,7 +252,7 @@ describe('deploy reconciler review status and behind-main pings', () => {
     expect(row.in_staging).toBe(0);
     expect(row.state).toBe('ready_to_stage');
     expect(row.stage_block).toMatch(/would roll staging back/);
-    const board = reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
     expect(board.release.staging.sha).toBe(stagingSha);
     const card = board.cards.find((item) => item.lane === 'wc-forward');
     expect(card?.button).toBeNull();
@@ -266,6 +266,6 @@ describe('deploy reconciler review status and behind-main pings', () => {
     };
     expect(failed.in_staging).toBeNull();
     expect(failed.state).toBe('unknown');
-    expect(reviewBoard({ name: 'antonio', role: 'developer' }, []).release.staging.sha).toBeNull();
+    expect((await reviewBoard({ name: 'antonio', role: 'developer' }, [])).release.staging.sha).toBeNull();
   });
 });
