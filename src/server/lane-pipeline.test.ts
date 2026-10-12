@@ -23,7 +23,7 @@ import { notify } from './notifications.js';
 import { commitsBehind } from './lane-main.js';
 import { laneStatusLine } from './lane-status.js';
 import {
-  considerAutoStage, drainStagingQueue, latestPipelineNote, onAuthorDone, onMainAdvanced, setPipelineExecForTest,
+  considerAutoStage, drainStagingQueue, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, setPipelineExecForTest,
 } from './lane-pipeline.js';
 import { getFreeze, ingestFreezeFile } from './release-freezes.js';
 import { auditTrail, listReleases, reportRelease, verifyStaging } from './releases.js';
@@ -439,6 +439,28 @@ describe('hands-free lane pipeline', () => {
     expect(text).toContain('/reviews/prev.md');
     expect(messages(author.id).join('\n')).toMatch(/Merged latest main into wc-ales/);
     expect(messages(author.id).join('\n')).not.toMatch(/behind main/);
+    expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  it('does not auto-merge or ping a review_deny agent', () => {
+    const sha = branch('wc-codex1', 'codex.txt', 'lane');
+    const seat = agent('chatgpt-countix', repo);
+    db.updateAgentIdentity(seat.id, { alias: 'codex1' });
+    moveMain('main.txt', 'later');
+    git(repo, 'checkout', '-q', 'wc-codex1');
+    pipe.auto_merge_main = true;
+    pipe.auto_freeze = true;
+    onMainAdvanced('wave');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
+    expect(git(repo, 'status', '--porcelain')).toBe('');
+    expect(fs.existsSync(path.join(repo, '.git', 'MERGE_HEAD'))).toBe(false);
+    expect(mergeMainClean(repo, 'origin/main')).toMatchObject({ ok: false, skipped: true });
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
+    expect(messages(seat.id).join('\n')).not.toMatch(/behind main|Merged latest main/);
+    expect(latestPipelineNote('wave', 'wc-codex1')).toBeNull();
+    const written = fs.existsSync(freezeDir) ? fs.readdirSync(freezeDir).filter((name) => name.includes('auto-freeze')) : [];
+    expect(written).toEqual([]);
+    expect(calls.filter((argv) => argv[0] === 'push-lane')).toEqual([]);
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 

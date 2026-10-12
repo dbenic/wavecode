@@ -333,17 +333,31 @@ function stillUnreviewed(project: string | null, lane: string, mainSha: string):
   return true;
 }
 
-function authorForLane(lane: string, authorAgentId: string | null, authorName: string | null): Agent | null {
+/** Name or alias listed in `projects.<p>.pipeline.review_deny`. Those seats are outside lane automation. */
+export function laneAutomationDenied(project: string | null, agent: { name: string; alias?: string | null }): boolean {
+  const list = project ? getConfig().projects?.[project]?.pipeline?.review_deny : undefined;
+  if (!list?.length) return false;
+  const deny = new Set(list.map((handle) => handle.toLowerCase()));
+  if (deny.has(agent.name.toLowerCase())) return true;
+  return !!agent.alias && deny.has(agent.alias.toLowerCase());
+}
+
+function authorForLane(lane: string, authorAgentId: string | null, authorName: string | null, project: string | null): Agent | null {
+  let agent: Agent | null = null;
   if (authorAgentId) {
-    const a = getAgent(authorAgentId);
-    if (a.ok) return a.data;
+    const found = getAgent(authorAgentId);
+    if (found.ok) agent = found.data;
   }
-  if (authorName) {
-    const a = resolveAgent(authorName);
-    if (a.ok) return a.data;
+  if (!agent && authorName) {
+    const found = resolveAgent(authorName);
+    if (found.ok) agent = found.data;
   }
-  const bare = lane.replace(/^wc-/, '');
-  return listAgents().find((a) => a.tmux_session === lane || a.name === bare || a.name === lane || a.alias === bare) ?? null;
+  if (!agent) {
+    const bare = lane.replace(/^wc-/, '');
+    agent = listAgents().find((a) => a.tmux_session === lane || a.name === bare || a.name === lane || a.alias === bare) ?? null;
+  }
+  if (agent && laneAutomationDenied(project, agent)) return null;
+  return agent;
 }
 
 /**
@@ -352,7 +366,7 @@ function authorForLane(lane: string, authorAgentId: string | null, authorName: s
  * A second send inside 30 minutes is dropped. After 30 minutes it is sent
  * again only while the lane is still behind and still has no PASS on a SHA
  * that contains this main. `merged` is the auto-merge sentence and shares
- * the same dedupe key.
+ * the same dedupe key. An agent in `review_deny` (name or alias) is not delivered to.
  */
 export function pingLaneAboutMain(opts: {
   lane: string;
@@ -369,8 +383,8 @@ export function pingLaneAboutMain(opts: {
     if (nowMs() - latest.at < REPEAT_MS) return false;
     if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) return false;
   }
-  const agent = authorForLane(opts.lane, opts.authorAgentId ?? null, opts.authorName ?? null);
-  if (!agent) return false;
+  const agent = authorForLane(opts.lane, opts.authorAgentId ?? null, opts.authorName ?? null, opts.project);
+  if (!agent || laneAutomationDenied(opts.project, agent)) return false;
   const text = opts.kind === 'merged' ? mergedMainAlert(opts.lane) : behindMainAlert(opts.lane);
   deliverSystemLine(agent, text, { kind: 'info', source: 'main' });
   emit(MAIN_PING, 'lane', pingKey(opts.lane, opts.mainSha), {

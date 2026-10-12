@@ -141,6 +141,7 @@ export interface ProjectConfig {
     gate_command?: string[];
     /** Author name → reviewer name. The author and `review_deny` are never chosen. */
     review_routes?: Record<string, string>;
+    /** Agent name or alias. Never a reviewer, and excluded from lane pings and auto-merge. */
     review_deny?: string[];
     /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
     freeze_dir?: string;
