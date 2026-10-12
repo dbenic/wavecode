@@ -485,11 +485,20 @@ function queuedCount(peer: string): number {
   return (getDb().prepare(`SELECT count(*) c FROM peer_questions WHERE peer = ? AND status = 'queued'`).get(peer) as { c: number }).c;
 }
 
+function databaseGone(err: unknown): boolean {
+  return /Database not initialized/.test((err as Error)?.message ?? '');
+}
+
 export function ensurePoller(peer: string): void {
   if (pollers.has(peer)) return;
   const state = { stop: false };
   pollers.set(peer, state);
-  void pollLoop(peer, state).finally(() => pollers.delete(peer));
+  void pollLoop(peer, state)
+    .catch((err) => {
+      if (state.stop || databaseGone(err)) return;
+      logger.warn({ peer, error: (err as Error).message }, 'Peer poll ended');
+    })
+    .finally(() => { if (pollers.get(peer) === state) pollers.delete(peer); });
 }
 
 interface RemoteEvent { id: number; type: string; entity_id: string; payload: Record<string, unknown> | null }
@@ -500,12 +509,26 @@ async function pollLoop(peerName: string, state: { stop: boolean }): Promise<voi
   if (!peer) return;
   let cursor: number | null = null;
   while (!state.stop) {
-    const open = openQuestions(peerName);
+    let open: PeerQuestion[];
+    try {
+      open = openQuestions(peerName);
+    } catch (err) {
+      if (state.stop || databaseGone(err)) return;
+      throw err;
+    }
+    if (state.stop) return;
     if (open.length === 0) {
-      if (queuedCount(peerName) === 0) return;
+      let queued = 0;
+      try { queued = queuedCount(peerName); } catch (err) {
+        if (state.stop || databaseGone(err)) return;
+        throw err;
+      }
+      if (queued === 0) return;
       // queued but nothing sent (e.g. after a restart): send the next one
       const next = getDb().prepare(`SELECT * FROM peer_questions WHERE peer = ? AND status = 'queued' ORDER BY created_at ASC LIMIT 1`).get(peerName) as PeerQuestion | undefined;
+      if (state.stop) return;
       if (next) await sendNextQueued(peerName, next.remote_agent_id);
+      if (state.stop) return;
       await sleep(pollIdleMs);
       continue;
     }
@@ -524,6 +547,7 @@ async function pollLoop(peerName: string, state: { stop: boolean }): Promise<voi
     const res: Result<{ events: RemoteEvent[]; last_id: number }> = await peerApi(
       peer, 'GET', `/events/log?since=${cursor}&wait_ms=${POLL_WAIT_MS}&types=message.created`,
     );
+    if (state.stop) return;
     if (!res.ok) {
       logger.warn({ peer: peerName, error: res.error }, 'Peer poll failed; retrying');
       await sleep(POLL_RETRY_MS);

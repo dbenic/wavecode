@@ -8,6 +8,7 @@ import {
   listAgents,
   deleteAgent,
   updateAgentStatus,
+  updateAgentSocket,
   isEffortLevel,
   type Agent,
   type EffortLevel,
@@ -27,6 +28,7 @@ import {
   stopFileRunsForAgent,
 } from './file-runner.js';
 import * as tmux from './tmux.js';
+import { emit } from './event-bus.js';
 
 export interface TmuxSession {
   name: string;
@@ -43,9 +45,53 @@ function bindAgent(agent: Pick<Agent, 'tmux_session' | 'tmux_socket'>): void {
   }
 }
 
+type PaneClassifier = (output: string, runtime: string) => Agent['status'];
+let paneClassifier: PaneClassifier | null = null;
+
+/** output-watcher registers this so a reachable pane can be idle or working. */
+export function registerPaneClassifier(fn: PaneClassifier): void {
+  paneClassifier = fn;
+}
+
+/**
+ * The session is reachable again (socket bound, adopt, or rebind). An `error`
+ * row becomes idle, or working when the pane shows the runtime is busy.
+ * A dead session is left as it is.
+ */
+export function reprobeAgent(agent: Agent): Agent {
+  try {
+    if (isFileRunnerSeat(agent)) return agent;
+    bindAgent(agent);
+    const loaded = getAgent(agent.id);
+    const row = loaded && loaded.ok ? loaded.data : agent;
+    if (row.status !== 'error') return row;
+    if (!tmux.hasSession(row.tmux_session)) return row;
+    let next: Agent['status'] = 'idle';
+    let pane: { ok: boolean; data?: string } | null = null;
+    try {
+      if (typeof tmux.capturePane === 'function') pane = tmux.capturePane(row.tmux_session, 30);
+    } catch { pane = null; }
+    if (pane?.ok && pane.data && paneClassifier) {
+      const detected = paneClassifier(pane.data, row.runtime);
+      if (detected === 'working') next = 'working';
+    }
+    const updated = updateAgentStatus(row.id, next);
+    if (!updated.ok) return row;
+    try {
+      emit('agent.status_changed', 'agent', row.id, { status: next, name: row.name });
+    } catch { /* status is already stored; the response still carries it */ }
+    return updated.data;
+  } catch {
+    return agent;
+  }
+}
+
 /** Fill the session→socket map from the agents table. Called at startup and before capture. */
 export function rebindAgentSockets(): void {
-  for (const agent of listAgents()) bindAgent(agent);
+  for (const agent of listAgents()) {
+    bindAgent(agent);
+    reprobeAgent(agent);
+  }
 }
 
 function bindSession(session: string): void {
@@ -77,10 +123,15 @@ export function adopt(
     return { ok: false, error: `tmux session '${sessionName}' not found` };
   }
 
-  // Check not already adopted
+  // Already adopted: rebind the socket and re-probe. A wrong socket had left the row in error.
   const existing = listAgents().find((a) => a.tmux_session === sessionName);
   if (existing) {
-    return { ok: false, error: `Session '${sessionName}' already adopted as agent '${existing.name}'` };
+    if ((existing.tmux_socket ?? null) !== socket) {
+      const updated = updateAgentSocket(existing.id, socket);
+      if (!updated.ok) return updated;
+      return { ok: true, data: reprobeAgent(updated.data) };
+    }
+    return { ok: true, data: reprobeAgent(existing) };
   }
   if (agentNameShadowsIdentity(name ?? sessionName)) {
     return { ok: false, error: `Agent name '${name ?? sessionName}' collides with another agent's id or alias` };
@@ -95,8 +146,8 @@ export function adopt(
     status: 'idle',
     tmux_socket: socket,
   });
-  if (inserted.ok) bindAgent(inserted.data);
-  return inserted;
+  if (!inserted.ok) return inserted;
+  return { ok: true, data: reprobeAgent(inserted.data) };
 }
 
 export interface SpawnOptions {

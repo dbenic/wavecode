@@ -41,6 +41,7 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
 import { behindMainLine } from './lane-status.js';
+import { gitText } from './git-memo.js';
 import { commitsBehind, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 
@@ -567,6 +568,23 @@ function refreshMain(repo: string, now: number): void {
 export function refreshProject(project: string, now = Date.now()): void {
   const repo = getConfig().projects?.[project]?.repo;
   if (repo) refreshMain(repo, now);
+}
+
+/** One fetch per repo per TTL, without blocking the event loop. The review board uses this. */
+export async function refreshProjectAsync(project: string, now = Date.now()): Promise<void> {
+  const repo = getConfig().projects?.[project]?.repo;
+  if (!repo) return;
+  const last = fetchedAt.get(repo) ?? 0;
+  if (now - last < FETCH_TTL_MS) return;
+  fetchedAt.set(repo, now);
+  if (!fetchDisabled) {
+    try {
+      await gitText(repo, ['fetch', '--quiet', '--prune', 'origin'], 30_000);
+    } catch (e) {
+      logger.debug({ repo, error: (e as Error).message }, 'Base clone fetch skipped');
+    }
+  }
+  try { observeRepo(repo); } catch (e) { logger.debug({ repo, error: (e as Error).message }, 'Main tip not observed'); }
 }
 
 /** Test hook: a repo may be probed without fetching (no remote). */

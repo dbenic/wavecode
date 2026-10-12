@@ -3,14 +3,13 @@
  * Reuses freezes, the test runner, and the reviewer ladder. Not a second queue.
  */
 
-import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
+import { gitAncestor, gitText } from './git-memo.js';
 import { getDb, getRun, listAgents, type Agent } from './db.js';
 import { getLatestCompletedReview } from './code-review.js';
-import { listFreezes, refreshProject, type ReleaseFreeze } from './release-freezes.js';
+import { listFreezes, refreshProjectAsync, type ReleaseFreeze } from './release-freezes.js';
 import { currentStagingTip, listReleases } from './releases.js';
 import { prereqStatusNote } from './prereqs.js';
-import { isMissingAncestor } from './staging-forward.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { latestPipelineNote } from './lane-pipeline.js';
@@ -20,7 +19,7 @@ import {
   QUICK_CHECK_RUNNING, type CheckState, type GateView,
 } from './lane-status.js';
 import {
-  changedFiles, commitsBehind, isMergeOnlyDelta, mainSpec, projectRepo, reconcileBehindFreezes, resolveMainRef,
+  changedFilesAsync, commitsBehindAsync, isMergeOnlyDeltaAsync, mainSpec, projectRepo, reconcileBehindFreezes, resolveMainRef,
 } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import {
@@ -58,28 +57,20 @@ export interface DevLane {
   delta_review: DeltaReview | null;
 }
 
-function git(repo: string, args: string[]): string | null {
-  try {
-    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000, maxBuffer: 4 * 1024 * 1024 }).trim();
-  } catch {
-    return null;
-  }
-}
-
 function globToRe(glob: string): RegExp {
   return new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
 }
 
-function tipOf(repo: string, remote: string, lane: string): string | null {
+async function tipOf(repo: string, remote: string, lane: string): Promise<string | null> {
   for (const ref of [`refs/remotes/${remote}/${lane}`, lane]) {
-    const sha = git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    const sha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
     if (sha && /^[0-9a-f]{40}$/i.test(sha)) return sha;
   }
   return null;
 }
 
-function ahead(repo: string, mainRef: string, sha: string): boolean {
-  const n = git(repo, ['rev-list', '--count', `${mainRef}..${sha}`]);
+async function ahead(repo: string, mainSha: string, sha: string): Promise<boolean> {
+  const n = await gitText(repo, ['rev-list', '--count', `${mainSha}..${sha}`]);
   return !!n && /^\d+$/.test(n) && Number(n) > 0;
 }
 
@@ -128,12 +119,12 @@ function issuesFor(freeze: ReleaseFreeze | null): number {
   return getLatestCompletedReview(freeze.run_id)?.issues_found ?? 0;
 }
 
-function deltaFor(repo: string, mainRef: string, lane: string, head: string, freezes: ReleaseFreeze[]): DeltaReview | null {
+async function deltaFor(repo: string, mainSha: string, lane: string, head: string, freezes: ReleaseFreeze[]): Promise<DeltaReview | null> {
   const previous = freezes
     .filter((f) => f.lane === lane && f.verdict === 'pass' && f.sha !== head)
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
   if (!previous) return null;
-  if (!isMergeOnlyDelta(repo, previous.sha, head, mainRef)) return null;
+  if (!await isMergeOnlyDeltaAsync(repo, previous.sha, head, mainSha)) return null;
   return { label: 'delta review: merge only', previous_sha: previous.sha, verdict_path: previous.verdict_path };
 }
 
@@ -148,25 +139,49 @@ export function beforeFreezeTip(project: string): string {
   return typeof custom === 'string' && custom.trim() ? custom.trim() : DEFAULT_BEFORE_FREEZE_TIP;
 }
 
-export function listDevLanes(): DevLane[] {
+const LANE_REFRESH_MS = 15_000;
+/** A cold board waits at most this long. A warm board returns immediately. */
+export const LANE_REQUEST_BUDGET_MS = 1_500;
+
+let laneSnapshot: DevLane[] = [];
+let laneSnapshotAt = 0;
+let laneRefresh: Promise<DevLane[]> | null = null;
+let laneTimer: ReturnType<typeof setInterval> | null = null;
+let laneEpoch = 0;
+
+function yieldTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Build the lane board off the request path. Fetch runs at most once per repo
+ * per refresh. Git facts are cached by (lane tip, main tip).
+ */
+export async function loadDevLanes(): Promise<DevLane[]> {
+  const freezes = (() => { try { return listFreezes(); } catch { return [] as ReleaseFreeze[]; } })();
+  for (const freeze of freezes) {
+    if (!freeze.sha) continue;
+    try { await commitsBehindAsync(freeze.project, freeze.sha); } catch { /* repo missing */ }
+  }
   try { reconcileBehindFreezes(); } catch (e) { logger.debug({ error: (e as Error).message }, 'behind-main reconcile skipped'); }
   const cfg = getConfig();
   const agents = listAgents();
-  const freezes = (() => { try { return listFreezes(); } catch { return [] as ReleaseFreeze[]; } })();
   const out: DevLane[] = [];
   const watched: Array<{ project: string; lane: string; sha: string }> = [];
   const allRuns: TestRun[] = [];
 
   for (const [project, pc] of Object.entries(cfg.projects ?? {})) {
     if (!pc.repo) continue;
-    try { refreshProject(project); } catch { /* offline */ }
+    try { await refreshProjectAsync(project); } catch { /* offline */ }
     const repo = pc.repo;
     const spec = mainSpec(project);
-    const mainRef = resolveMainRef(repo, project);
-    if (!mainRef) continue;
+    const mainResolved = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${spec.ref}^{commit}`])
+      ?? await gitText(repo, ['rev-parse', '--verify', '--quiet', `${spec.branch}^{commit}`]);
+    if (!mainResolved || !/^[0-9a-f]{40}$/i.test(mainResolved)) continue;
+    const mainSha = mainResolved;
     const re = globToRe(pc.lane_glob || 'wc-*');
     const names = new Set<string>();
-    const listed = git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes']);
+    const listed = await gitText(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes']);
     for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
       const name = short.startsWith(`${spec.remote}/`) ? short.slice(spec.remote.length + 1) : short;
       if (name === 'HEAD' || name === spec.branch || name.startsWith(spec.branch + '/')) continue;
@@ -176,10 +191,10 @@ export function listDevLanes(): DevLane[] {
     for (const f of freezes) if (f.project === project && f.lane && (f.status === 'open' || f.status === 'behind-main')) names.add(f.lane);
 
     const fileCache = new Map<string, string[]>();
-    const filesOf = (lane: string, sha: string) => {
+    const filesOf = async (lane: string, sha: string) => {
       const hit = fileCache.get(lane);
       if (hit) return hit;
-      const files = changedFiles(repo, sha, mainRef);
+      const files = await changedFilesAsync(repo, sha, mainSha);
       fileCache.set(lane, files);
       return files;
     };
@@ -189,14 +204,15 @@ export function listDevLanes(): DevLane[] {
     const stagingNow = (() => { try { return currentStagingTip(project); } catch { return null; } })();
 
     for (const lane of [...names].sort()) {
-      const sha = tipOf(repo, spec.remote, lane);
-      if (!sha || !ahead(repo, mainRef, sha)) continue;
+      await yieldTurn();
+      const sha = await tipOf(repo, spec.remote, lane);
+      if (!sha || !await ahead(repo, mainSha, sha)) continue;
       const laneFreezes = freezes.filter((f) => f.project === project && f.lane === lane && f.status !== 'merged');
       const current = laneFreezes.find((f) => f.sha === sha && (f.status === 'open' || f.status === 'behind-main'))
         ?? laneFreezes.find((f) => f.status === 'open' || f.status === 'behind-main')
         ?? null;
       const freeze = current && current.sha === sha ? current : null;
-      const behind = commitsBehind(project, sha) ?? 0;
+      const behind = await commitsBehindAsync(project, sha) ?? 0;
       const report = readLaneReport(project, lane, sha);
       allRuns.push(...report.runs);
       watched.push({ project, lane, sha });
@@ -205,15 +221,15 @@ export function listDevLanes(): DevLane[] {
       if (viewed.full === 'green') {
         try { pingReviewersForGreenSha(freeze?.sha ?? sha); } catch { /* table missing */ }
       }
-      const files = filesOf(lane, sha);
+      const files = await filesOf(lane, sha);
       const protectedPath = touches(files, pc.protected_paths ?? []);
       const hasMigration = !!pc.migrations_dir && files.some((f) => f === pc.migrations_dir || f.startsWith(`${pc.migrations_dir}/`));
       let overlap: { lane: string; files: number } | null = null;
       for (const rel of deployed) {
         if (!rel.lane || rel.lane === lane) continue;
-        const otherSha = tipOf(repo, spec.remote, rel.lane);
+        const otherSha = await tipOf(repo, spec.remote, rel.lane);
         if (!otherSha) continue;
-        const otherFiles = new Set(filesOf(rel.lane, otherSha));
+        const otherFiles = new Set(await filesOf(rel.lane, otherSha));
         const n = files.filter((f) => otherFiles.has(f)).length;
         if (n > 0 && (!overlap || n > overlap.files)) overlap = { lane: rel.lane, files: n };
       }
@@ -221,7 +237,8 @@ export function listDevLanes(): DevLane[] {
       const onStaging = deployed.some((r) => (r.lane === lane || r.sha === cardSha) && r.sha === cardSha);
       const author = authorFor(lane, agents, freeze ?? current);
       const fullLabel = fullRunPhrase(viewed.fullRun);
-      const behindStaging = !!(repo && stagingNow?.sha && isMissingAncestor(repo, stagingNow.sha, sha));
+      const stagingContains = stagingNow?.sha ? await gitAncestor(repo, stagingNow.sha, sha) : null;
+      const behindStaging = stagingContains === false;
       let prereqNote: string | null = null;
       try { prereqNote = prereqStatusNote(project, cardSha); } catch { prereqNote = null; }
       const status_line = laneStatusLine({
@@ -257,7 +274,7 @@ export function listDevLanes(): DevLane[] {
         test_errors: report.errors,
         test_log: hasLogCommand(project),
         reviewers: reviewerChoices(author.id),
-        delta_review: freeze ? deltaFor(repo, mainRef, lane, sha, freezes) : null,
+        delta_review: freeze ? await deltaFor(repo, mainSha, lane, sha, freezes) : null,
       });
     }
   }
@@ -265,7 +282,65 @@ export function listDevLanes(): DevLane[] {
   return out;
 }
 
-export function requestLaneReview(opts: { project: string; lane: string; reviewer: string }): Result<{ reviewer: string; delta: boolean }> {
+/** Recompute the board. Overlapping callers share one refresh. */
+export function refreshLaneBoard(): Promise<DevLane[]> {
+  if (laneRefresh) return laneRefresh;
+  const epoch = laneEpoch;
+  laneRefresh = loadDevLanes()
+    .then((lanes) => {
+      if (epoch === laneEpoch) {
+        laneSnapshot = lanes;
+        laneSnapshotAt = Date.now();
+      }
+      return lanes;
+    })
+    .finally(() => { if (epoch === laneEpoch) laneRefresh = null; });
+  return laneRefresh;
+}
+
+/**
+ * What GET /api/reviews reads. A warm snapshot returns immediately.
+ * A cold one waits up to {@link LANE_REQUEST_BUDGET_MS}, then returns whatever is ready.
+ */
+export async function lanesForRequest(): Promise<DevLane[]> {
+  const fresh = laneSnapshotAt !== 0 && Date.now() - laneSnapshotAt <= LANE_REFRESH_MS;
+  if (fresh) return laneSnapshot;
+  const job = refreshLaneBoard().catch((e) => {
+    logger.warn({ error: (e as Error).message }, 'Lane board refresh failed');
+    return laneSnapshot;
+  });
+  if (laneSnapshotAt === 0) {
+    await Promise.race([
+      job,
+      new Promise((resolve) => setTimeout(resolve, LANE_REQUEST_BUDGET_MS)),
+    ]);
+  }
+  return laneSnapshot;
+}
+
+export function startLaneBoard(): void {
+  void refreshLaneBoard().catch((e) => logger.warn({ error: (e as Error).message }, 'Lane board refresh failed'));
+  if (laneTimer) return;
+  laneTimer = setInterval(() => {
+    void refreshLaneBoard().catch((e) => logger.warn({ error: (e as Error).message }, 'Lane board refresh failed'));
+  }, LANE_REFRESH_MS);
+  laneTimer.unref?.();
+}
+
+export function stopLaneBoard(): void {
+  if (laneTimer) clearInterval(laneTimer);
+  laneTimer = null;
+}
+
+export function resetLaneBoardForTest(): void {
+  laneEpoch++;
+  stopLaneBoard();
+  laneSnapshot = [];
+  laneSnapshotAt = 0;
+  laneRefresh = null;
+}
+
+export async function requestLaneReview(opts: { project: string; lane: string; reviewer: string }): Promise<Result<{ reviewer: string; delta: boolean }>> {
   const project = opts.project?.trim();
   const lane = opts.lane?.trim();
   const reviewer = opts.reviewer?.trim();
@@ -291,7 +366,7 @@ export function requestLaneReview(opts: { project: string; lane: string; reviewe
   if (!picked.ok) return { ok: false, error: picked.reason };
   const repo = projectRepo(project);
   const mainRef = repo ? resolveMainRef(repo, project) : null;
-  const delta = repo && mainRef ? deltaFor(repo, mainRef, lane, freeze.sha, listFreezes()) : null;
+  const delta = repo && mainRef ? await deltaFor(repo, mainRef, lane, freeze.sha, listFreezes()) : null;
   const sha8 = freeze.sha.slice(0, 8);
   const text = delta
     ? `[from WaveCode] delta review: merge only. Previous verdict: ${delta.verdict_path ?? delta.previous_sha}. New SHA ${sha8} on ${lane} only brings in main. Quick check, one full gate, and a re-verdict.`

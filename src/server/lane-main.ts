@@ -6,6 +6,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
+import { gitAncestor, gitText } from './git-memo.js';
 import { getAgent, getDb, listAgents, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
@@ -35,6 +36,49 @@ function git(repo: string, args: string[]): string | null {
   }
 }
 
+/** Keyed by the main tip SHA and the lane tip SHA. A repeat review refresh does not re-diff. */
+const behindCache = new Map<string, number | null>();
+const filesCache = new Map<string, string[]>();
+const deltaCache = new Map<string, boolean>();
+
+function pairKey(mainSha: string, sha: string): string {
+  return `${mainSha}:${sha}`;
+}
+
+export function resetLaneGitCacheForTest(): void {
+  behindCache.clear();
+  filesCache.clear();
+  deltaCache.clear();
+}
+
+export function rememberBehind(mainSha: string, sha: string, n: number | null): void {
+  if (/^[0-9a-f]{40}$/i.test(mainSha) && /^[0-9a-f]{40}$/i.test(sha)) behindCache.set(pairKey(mainSha, sha), n);
+}
+
+export function recallBehind(mainSha: string, sha: string): number | null | undefined {
+  const key = pairKey(mainSha, sha);
+  return behindCache.has(key) ? behindCache.get(key) : undefined;
+}
+
+export function rememberFiles(mainSha: string, sha: string, files: string[]): void {
+  if (/^[0-9a-f]{40}$/i.test(mainSha) && /^[0-9a-f]{40}$/i.test(sha)) filesCache.set(pairKey(mainSha, sha), files);
+}
+
+export function recallFiles(mainSha: string, sha: string): string[] | undefined {
+  return filesCache.get(pairKey(mainSha, sha));
+}
+
+export function rememberDelta(mainSha: string, oldSha: string, newSha: string, value: boolean): void {
+  if ([mainSha, oldSha, newSha].every((sha) => /^[0-9a-f]{40}$/i.test(sha))) {
+    deltaCache.set(`${mainSha}:${oldSha}:${newSha}`, value);
+  }
+}
+
+export function recallDelta(mainSha: string, oldSha: string, newSha: string): boolean | undefined {
+  const key = `${mainSha}:${oldSha}:${newSha}`;
+  return deltaCache.has(key) ? deltaCache.get(key) : undefined;
+}
+
 export function projectRepo(project: string | null): string | null {
   if (!project) return null;
   return getConfig().projects?.[project]?.repo ?? null;
@@ -60,18 +104,33 @@ function isAncestor(repo: string, ancestor: string, descendant: string): boolean
   }
 }
 
+function mainTipSha(repo: string, ref: string): string | null {
+  const sha = git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+}
+
 /** How many commits on main this SHA does not contain. Null when git cannot tell. */
 export function commitsBehind(project: string | null, sha: string): number | null {
   const repo = projectRepo(project);
   if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return null;
   const main = resolveMainRef(repo, project);
   if (!main) return null;
-  const contains = isAncestor(repo, main, sha);
+  const mainSha = mainTipSha(repo, main);
+  if (mainSha) {
+    const hit = recallBehind(mainSha, sha);
+    if (hit !== undefined) return hit;
+  }
+  const contains = isAncestor(repo, mainSha ?? main, sha);
   if (contains === null) return null;
-  if (contains) return 0;
-  const n = git(repo, ['rev-list', '--count', `${sha}..${main}`]);
+  if (contains) {
+    if (mainSha) rememberBehind(mainSha, sha, 0);
+    return 0;
+  }
+  const n = git(repo, ['rev-list', '--count', `${sha}..${mainSha ?? main}`]);
   if (n == null || !/^\d+$/.test(n)) return null;
-  return Number(n);
+  const value = Number(n);
+  if (mainSha) rememberBehind(mainSha, sha, value);
+  return value;
 }
 
 export function mainTip(repo: string, project: string | null): { sha: string; subject: string; ref: string } | null {
@@ -102,18 +161,98 @@ export function laneOnlyDiff(repo: string, sha: string, mainRef: string): string
  * A clean merge of main does not change the lane's own patch.
  */
 export function isMergeOnlyDelta(repo: string, oldSha: string, newSha: string, mainRef: string): boolean {
-  if (isAncestor(repo, mainRef, newSha) !== true) return false;
-  const before = laneOnlyDiff(repo, oldSha, mainRef);
-  const after = laneOnlyDiff(repo, newSha, mainRef);
+  const mainSha = /^[0-9a-f]{40}$/i.test(mainRef) ? mainRef : mainTipSha(repo, mainRef);
+  if (mainSha) {
+    const hit = recallDelta(mainSha, oldSha, newSha);
+    if (hit !== undefined) return hit;
+  }
+  if (isAncestor(repo, mainSha ?? mainRef, newSha) !== true) {
+    if (mainSha) rememberDelta(mainSha, oldSha, newSha, false);
+    return false;
+  }
+  const before = laneOnlyDiff(repo, oldSha, mainSha ?? mainRef);
+  const after = laneOnlyDiff(repo, newSha, mainSha ?? mainRef);
   if (before == null || after == null) return false;
-  return before === after;
+  const value = before === after;
+  if (mainSha) rememberDelta(mainSha, oldSha, newSha, value);
+  return value;
 }
 
 export function changedFiles(repo: string, ref: string, mainRef: string): string[] {
-  const base = git(repo, ['merge-base', mainRef, ref]);
+  const mainSha = /^[0-9a-f]{40}$/i.test(mainRef) ? mainRef : null;
+  const refSha = /^[0-9a-f]{40}$/i.test(ref) ? ref : null;
+  if (mainSha && refSha) {
+    const hit = recallFiles(mainSha, refSha);
+    if (hit) return hit;
+  }
+  const base = git(repo, ['merge-base', mainSha ?? mainRef, refSha ?? ref]);
   if (!base) return [];
-  const out = git(repo, ['diff', '--name-only', base, ref]);
-  return out ? out.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+  const out = git(repo, ['diff', '--name-only', base, refSha ?? ref]);
+  const files = out ? out.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+  if (mainSha && refSha) rememberFiles(mainSha, refSha, files);
+  return files;
+}
+
+async function resolveMainSha(repo: string, project: string | null): Promise<{ ref: string; sha: string } | null> {
+  const spec = mainSpec(project);
+  for (const ref of [spec.ref, spec.branch]) {
+    const sha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    if (sha && /^[0-9a-f]{40}$/i.test(sha)) return { ref, sha };
+  }
+  return null;
+}
+
+/** Same answer as `commitsBehind`, computed without blocking the event loop. */
+export async function commitsBehindAsync(project: string | null, sha: string): Promise<number | null> {
+  const repo = projectRepo(project);
+  if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return null;
+  const main = await resolveMainSha(repo, project);
+  if (!main) return null;
+  const hit = recallBehind(main.sha, sha);
+  if (hit !== undefined) return hit;
+  const contains = await gitAncestor(repo, main.sha, sha);
+  if (contains === null) return null;
+  if (contains) {
+    rememberBehind(main.sha, sha, 0);
+    return 0;
+  }
+  const n = await gitText(repo, ['rev-list', '--count', `${sha}..${main.sha}`]);
+  if (n == null || !/^\d+$/.test(n)) return null;
+  const value = Number(n);
+  rememberBehind(main.sha, sha, value);
+  return value;
+}
+
+export async function changedFilesAsync(repo: string, sha: string, mainSha: string): Promise<string[]> {
+  const hit = recallFiles(mainSha, sha);
+  if (hit) return hit;
+  const base = await gitText(repo, ['merge-base', mainSha, sha]);
+  if (!base) return [];
+  const out = await gitText(repo, ['diff', '--name-only', base, sha]);
+  const files = out ? out.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+  rememberFiles(mainSha, sha, files);
+  return files;
+}
+
+async function laneOnlyDiffAsync(repo: string, sha: string, mainSha: string): Promise<string | null> {
+  const base = await gitText(repo, ['merge-base', mainSha, sha]);
+  if (!base) return null;
+  return gitText(repo, ['diff', '--no-color', '--find-renames', base, sha]);
+}
+
+export async function isMergeOnlyDeltaAsync(repo: string, oldSha: string, newSha: string, mainSha: string): Promise<boolean> {
+  const hit = recallDelta(mainSha, oldSha, newSha);
+  if (hit !== undefined) return hit;
+  if (await gitAncestor(repo, mainSha, newSha) !== true) {
+    rememberDelta(mainSha, oldSha, newSha, false);
+    return false;
+  }
+  const before = await laneOnlyDiffAsync(repo, oldSha, mainSha);
+  const after = await laneOnlyDiffAsync(repo, newSha, mainSha);
+  if (before == null || after == null) return false;
+  const value = before === after;
+  rememberDelta(mainSha, oldSha, newSha, value);
+  return value;
 }
 
 function pingKey(lane: string, mainSha: string): string {
