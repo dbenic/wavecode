@@ -446,6 +446,7 @@ export function observeRepo(repo: string): void {
     const prev = kvGet(key);
     try { kvSet(key, tip.sha); } catch (e) { logger.debug({ error: (e as Error).message }, 'main tip not stored'); continue; }
     if (!prev || prev === tip.sha) continue;
+    void import('./deploy-state.js').then((m) => m.scheduleReconcile('push')).catch(() => {});
     const switches = (project as { pipeline?: { auto_merge_main?: boolean } }).pipeline;
     if (switches?.auto_merge_main === true) fireMainAdvanced(name, tip.sha);
     else notifyBehindLanes(name, repo, tip.sha, tip.subject, project.lane_glob || 'wc-*');

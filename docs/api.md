@@ -598,6 +598,11 @@ staging_url, rollback_status, rollback_to, created_at, updated_at, reported_at`.
 ### `GET /api/reviews`
 List review queue items.
 
+### `GET /api/reviews/board`
+The Reviews page. `{ last_reconciled_at, stale, items }`. Each freeze item carries `deploy`: one derived state (`needs_fixes`, `awaiting_review`, `awaiting_tests`, `ready_to_stage`, `on_staging`, `awaiting_prod_go`, `live_on_prod`, `superseded`, `stale`, or `unknown`), the release version, a `staging` or `prod` badge, and the quick or full test on that exact SHA with its time. Title, one-line summary and desk come from the freeze note. A composition or multi-desk note has no single desk number. Filler words (`is`, `from`, `remains`, `update`) are not lane names.
+
+A reconciler rewrites `deploy_card_states` every 90 seconds and on main push, main merge and deploy. Containment is `git merge-base --is-ancestor` in `projects.<p>.repo` against `origin/main`, the staging tip (`staging_health_command`, or the peer staging-tip when this box has no health command) and the prod tip (`prod_health_command`, else the newest deployed production record). A missing tip or an unreadable probe is `unknown`. `stale` is true when `last_reconciled_at` is missing or older than 5 minutes; that also notifies.
+
 ### `GET /api/reviews/:runId`
 Get one review queue item.
 

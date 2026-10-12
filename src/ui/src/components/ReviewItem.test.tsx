@@ -160,6 +160,80 @@ describe('ReviewItem freeze card', () => {
     expect(screen.getByRole('button', { name: 'STAGE' })).toBeTruthy();
   });
 
+  it('hides a zero-second timer', () => {
+    const it = item({});
+    it.duration = 0;
+    renderItem(it);
+    expect(screen.queryByText('0s')).toBeNull();
+  });
+
+  it('a reconciled card shows the note summary, version, badge and a locked reason', () => {
+    const it = item({});
+    it.deploy = {
+      state: 'awaiting_tests',
+      version: '0.442.10',
+      badge: 'staging',
+      test_kind: 'quick',
+      test_at: '2026-10-12T12:00:00.000Z',
+      test_word: 'pending',
+      title: 'Desk #91 freeze note — issued credit notes',
+      summary: 'issued credit notes',
+      desk: 91,
+      lane: 'wc-claude2',
+      verdict: 'pass',
+      unknown_reason: null,
+      action: 'stage',
+      action_lock: 'Waiting for quick or full tests on this exact SHA',
+      admin_bypass: false,
+      hide_errors: true,
+      show_reject: true,
+      run_backed: true,
+      last_reconciled_at: '2026-10-12T12:04:00.000Z',
+    };
+    it.test_errors = [{ host: 'runner', msg: 'down' }];
+    renderItem(it);
+    expect(screen.getByText('Desk #91 freeze note — issued credit notes')).toBeTruthy();
+    expect(screen.getByTestId('freeze-summary').textContent).toBe('issued credit notes');
+    expect(screen.getByTestId('release-version').textContent).toBe('v0.442.10');
+    expect(screen.getByTestId('deploy-badge').textContent).toBe('STAGING');
+    expect(screen.getByTestId('test-kind').textContent).toMatch(/quick pending/);
+    const stage = screen.getByRole('button', { name: 'STAGE' });
+    expect((stage as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('action-lock').textContent).toMatch(/Waiting for quick or full tests/);
+    expect(screen.queryByTestId('host-unreachable')).toBeNull();
+    expect(screen.queryByText('PROMOTE')).toBeNull();
+  });
+
+  it('a composition card shows no desk number, and a superseded card has no stage button', () => {
+    const it = item({ desk: 91 });
+    it.deploy = {
+      state: 'superseded',
+      version: null,
+      badge: null,
+      test_kind: 'full',
+      test_at: null,
+      test_word: 'green',
+      title: 'Composition release — wavepulse 0.442.0',
+      summary: 'wavepulse 0.442.0',
+      desk: null,
+      lane: 'wc-codex2-wavenetic-04420-composition',
+      verdict: 'pass',
+      unknown_reason: null,
+      action: 'none',
+      action_lock: null,
+      admin_bypass: false,
+      hide_errors: true,
+      show_reject: false,
+      run_backed: true,
+      last_reconciled_at: '2026-10-12T12:04:00.000Z',
+    };
+    renderItem(it);
+    expect(screen.getByTestId('freeze-card').textContent).not.toMatch(/Desk #/);
+    expect(screen.getByTestId('freeze-card').textContent).toContain('wc-codex2-wavenetic-04420-composition');
+    expect(screen.queryByRole('button', { name: 'STAGE' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'PROMOTE' })).toBeNull();
+  });
+
   it('a normal run card is unchanged: no freeze block, retry and hand-off present', () => {
     renderItem(item(null));
     expect(screen.queryByTestId('freeze-card')).toBeNull();

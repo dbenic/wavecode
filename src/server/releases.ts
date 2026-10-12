@@ -219,6 +219,15 @@ function withTable<T>(fn: () => T): T {
   }
 }
 
+/** Drop a stale error string once the SHA is superseded or already on staging or prod. The release row stays. */
+export function clearSettledReleaseErrors(sha: string): number {
+  const clean = sha.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(clean)) return 0;
+  return withTable(() => getDb().prepare(
+    `UPDATE release_requests SET error = NULL, updated_at = datetime('now') WHERE lower(sha) = ? AND error IS NOT NULL`,
+  ).run(clean).changes);
+}
+
 export function getRelease(id: string): ReleaseRequest | null {
   return withTable(() => (getDb().prepare('SELECT * FROM release_requests WHERE id = ?').get(id) as ReleaseRequest | undefined) ?? null);
 }

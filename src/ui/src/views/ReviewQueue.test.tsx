@@ -37,11 +37,12 @@ describe('ReviewQueue', () => {
 
     let reviewFetchCount = 0;
     vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
-      if (path === '/reviews') {
+      if (path === '/reviews/board') {
         reviewFetchCount += 1;
-        return (reviewFetchCount === 1
-          ? [makeReviewItem('Initial review item')]
-          : [makeReviewItem('Updated review item')]) as never;
+        const item = reviewFetchCount === 1
+          ? makeReviewItem('Initial review item')
+          : makeReviewItem('Updated review item');
+        return { last_reconciled_at: '2026-10-12T18:00:00.000Z', stale: false, items: [item] } as never;
       }
 
       if (path === '/agents') {

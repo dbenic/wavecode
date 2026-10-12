@@ -20,6 +20,7 @@ import { pruneOldArtifacts } from './artifact-manager.js';
 import { reconcileStartupState, type StartupReconcileResult } from './startup-reconcile.js';
 import { rebindAgentSockets } from './session-manager.js';
 import { startLaneBoard, stopLaneBoard } from './dev-lanes.js';
+import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import logger from './logger.js';
 
 /** Pick up out-of-band pending inserts (CLI fallback, scripts) that skipped HTTP. */
@@ -51,6 +52,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
 
   rebindAgentSockets();
   startLaneBoard();
+  startDeployReconciler();
 
   const startupReconciliation = await reconcileStartupState();
 
@@ -81,6 +83,7 @@ export function shutdownApplication(): void {
   productDesk.stopDeskRefresh();
   usageProbe.stopUsageProbe();
   stopLaneBoard();
+  stopDeployReconciler();
   outputWatcher.stopAll();
   teamManager.stopAllCommsWatchers();
 

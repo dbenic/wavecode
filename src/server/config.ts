@@ -304,6 +304,13 @@ export interface WaveConfig {
      * Off unless set. `{project}` is optional.
      */
     staging_health_command?: string[];
+    /**
+     * Optional argv that prints the SHA (and version) actually on production.
+     * When it returns a SHA it wins over the latest deployed production record.
+     * Off unless set. `{project}` is optional. A missing SHA is unknown — the
+     * reconciler does not assume the commit is absent.
+     */
+    prod_health_command?: string[];
   };
   /**
    * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
@@ -526,6 +533,7 @@ export function validateConfig(cfg: WaveConfig): void {
   validateArgvTemplate('releases.staging_command', cfg.releases?.staging_command, '{sha}');
   validateArgvTemplate('releases.staging_watch_command', cfg.releases?.staging_watch_command, '{deploy_id}');
   validateArgvList('releases.staging_health_command', cfg.releases?.staging_health_command);
+  validateArgvList('releases.prod_health_command', cfg.releases?.prod_health_command);
   if (cfg.artifacts.fixture_inbox !== undefined) {
     if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
       throw new Error('artifacts.fixture_inbox must be a list of directory paths');

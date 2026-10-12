@@ -6,11 +6,19 @@ import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 import StageChip, { type StageProgress } from './StageChip';
 import TestChip from './TestChip';
 
-function formatDuration(seconds: number | null): string {
+function formatDuration(seconds: number | null): string | null {
   if (seconds === null) return '--:--';
+  if (seconds <= 0) return null;
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function formatWhen(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function verdictChip(verdict: string | null | undefined, issues: number): { text: string; className: string } {
@@ -108,6 +116,18 @@ export default function ReviewItem({
 
   const verdict = item.latestReview?.verdict ?? aiReviews.find((r) => r.status === 'done')?.verdict ?? null;
   const freeze = item.freeze;
+  const deploy = item.deploy ?? null;
+  const cardTitle = deploy?.title || item.task.prompt;
+  const cardDesk = deploy ? deploy.desk : freeze?.desk ?? null;
+  const cardLane = deploy ? deploy.lane : freeze?.lane ?? null;
+  const durationLabel = formatDuration(item.duration);
+  const lockReason = deploy && deploy.action_lock && !(isAdmin && deploy.admin_bypass) ? deploy.action_lock : null;
+  const deployLocked = !!deploy && (lockReason != null || !deploy.run_backed);
+  const stagingView = !staging || (deploy?.hide_errors && staging.status === 'failed')
+    ? null
+    : deploy?.hide_errors
+      ? { ...staging, error: null }
+      : staging;
   const freezeStale = freeze?.status === 'stale';
   const staleTitle = freeze
     ? `Freeze ${freeze.sha.slice(0, 8)} is stale — lane ${freeze.lane ?? '?'} moved on; freeze the new SHA`
@@ -156,7 +176,7 @@ export default function ReviewItem({
         {/* Header: task prompt + attempt badge */}
         <div className="flex items-start justify-between gap-3">
           <p className="text-[12px] text-slate-200 font-mono leading-relaxed line-clamp-2 flex-1">
-            {item.task.prompt}
+            {cardTitle}
           </p>
           <div className="flex-shrink-0 flex items-center gap-1.5">
             {verdict && (
@@ -182,8 +202,25 @@ export default function ReviewItem({
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-bold tracking-wider text-violet-300">RELEASE FREEZE</span>
               {freeze.project && <span className="text-slate-300">{freeze.project}</span>}
-              {freeze.desk && <span className="text-slate-300">Desk #{freeze.desk}</span>}
-              {freeze.lane && <span className="font-mono text-slate-400">{freeze.lane}</span>}
+              {cardDesk != null && <span className="text-slate-300">Desk #{cardDesk}</span>}
+              {cardLane && <span className="font-mono text-slate-400">{cardLane}</span>}
+              {deploy?.version && <span className="text-slate-200" data-testid="release-version">v{deploy.version.replace(/^v/, '')}</span>}
+              {deploy?.badge && (
+                <span
+                  data-testid="deploy-badge"
+                  className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${deploy.badge === 'prod' ? 'text-emerald-300 border-emerald-500/40' : 'text-sky-300 border-sky-500/40'}`}
+                >
+                  {deploy.badge === 'prod' ? 'PROD' : 'STAGING'}
+                </span>
+              )}
+              {deploy?.test_kind && (
+                <span
+                  data-testid="test-kind"
+                  className={`text-[9px] font-semibold ${deploy.test_word === 'red' ? 'text-red-300' : deploy.test_word === 'green' ? 'text-emerald-300' : 'text-slate-400'}`}
+                >
+                  {deploy.test_kind}{deploy.test_word ? ` ${deploy.test_word}` : ''}{formatWhen(deploy.test_at) ? ` · ${formatWhen(deploy.test_at)}` : ''}
+                </span>
+              )}
               {freezeStale && (
                 <span className="text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border text-slate-400 border-slate-600 bg-slate-900" title={freeze.superseded_by ? `Lane moved on to ${freeze.superseded_by.slice(0, 8)}` : 'A newer commit landed on this lane'}>
                   STALE{freeze.superseded_by ? ` → ${freeze.superseded_by.slice(0, 8)}` : ''}
@@ -206,10 +243,13 @@ export default function ReviewItem({
                 <a href={fileViewHref(freeze.verdict_path)} onClick={openFile} className="text-sky-300 hover:text-sky-200 underline underline-offset-2">verdict</a>
               )}
             </div>
+            {deploy?.summary && (
+              <p className="text-[11px] text-slate-300" data-testid="freeze-summary">{deploy.summary}</p>
+            )}
             {item.status_line && (
               <p className="text-[11px] text-slate-200" data-testid="status-line">{item.status_line}</p>
             )}
-            {item.full_fail_flag && (
+            {item.full_fail_flag && !(deploy?.hide_errors && (deploy.state === 'superseded' || deploy.state === 'live_on_prod')) && (
               <p className="text-[11px] font-semibold text-red-300" data-testid="full-fail-flag">{item.full_fail_flag}</p>
             )}
             {item.delta_review && (
@@ -219,7 +259,7 @@ export default function ReviewItem({
             )}
             <div className="flex flex-wrap items-center gap-2">
               {item.test_run && <TestChip run={item.test_run} project={freeze?.project} canLog={item.test_log} />}
-              {item.test_errors && item.test_errors.length > 0 && (
+              {item.test_errors && item.test_errors.length > 0 && !deploy?.hide_errors && (
                 <span className="text-[10px] text-amber-300" data-testid="host-unreachable">test host unreachable</span>
               )}
             </div>
@@ -231,9 +271,11 @@ export default function ReviewItem({
           <span className="px-2 py-0.5 rounded border border-cyan-500/20 bg-cyan-500/5 text-cyan-400 font-semibold tracking-wider uppercase">
             {item.agentName}
           </span>
-          <span className="text-slate-500 font-mono tracking-wider">
-            {formatDuration(item.duration)}
-          </span>
+          {durationLabel && (
+            <span className="text-slate-500 font-mono tracking-wider">
+              {durationLabel}
+            </span>
+          )}
           {item.artifacts.length > 0 && (
             <span className="text-slate-600">
               {item.artifacts.length} artifact{item.artifacts.length > 1 ? 's' : ''}
@@ -242,7 +284,62 @@ export default function ReviewItem({
         </div>
 
         {/* Action buttons */}
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex items-center gap-2 pt-1 flex-wrap">
+          {deploy && freeze ? (
+            <>
+              {deploy.action === 'stage' && stagingView && (stagingView.status === 'sent' || stagingView.status === 'requested' || stagingView.status === 'deployed' || stagingView.status === 'failed') && (
+                <StageChip releaseId={stagingView.id} progress={stagingView} />
+              )}
+              {deploy.action === 'stage' && stagingView?.status !== 'sent' && stagingView?.status !== 'requested' && stagingView?.status !== 'deployed' && (
+                <button
+                  onClick={() => { if (!deployLocked) void act('stage'); }}
+                  disabled={acting !== null || deployLocked}
+                  className="px-2.5 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 hover:border-sky-500/50 transition-all active:scale-95 disabled:opacity-40"
+                >
+                  {acting === 'stage' ? '...' : 'STAGE'}
+                </button>
+              )}
+              {deploy.action === 'promote' && (
+                <button
+                  onClick={() => { if (!deployLocked) void promote(); }}
+                  disabled={acting !== null || deployLocked}
+                  className="px-2.5 py-1 rounded border border-emerald-500/30 text-[10px] font-semibold tracking-wider text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-500/50 transition-all active:scale-95 disabled:opacity-40"
+                >
+                  {acting === 'promote' ? '...' : 'PROMOTE'}
+                </button>
+              )}
+              {deploy.action === 'ready' && (
+                <button
+                  onClick={() => {
+                    if (deployLocked || !freeze) return;
+                    const note = window.prompt(`Ready for prod — what did you check for ${freeze.sha.slice(0, 8)}? (optional note)`);
+                    if (note === null) return;
+                    setActing('ready');
+                    apiPost('/releases/verify', { sha: freeze.sha, project: freeze.project, note: note.trim() })
+                      .then(() => onAction())
+                      .catch(() => {})
+                      .finally(() => setActing(null));
+                  }}
+                  disabled={acting !== null || deployLocked}
+                  className="px-2.5 py-1 rounded border border-violet-500/40 text-[10px] font-semibold tracking-wider text-violet-200 hover:bg-violet-500/10 transition-all active:scale-95 disabled:opacity-40"
+                >
+                  {acting === 'ready' ? '...' : 'READY FOR PROD'}
+                </button>
+              )}
+              {lockReason && (
+                <span className="text-[10px] text-amber-200/90" data-testid="action-lock">{lockReason}</span>
+              )}
+              {deploy.show_reject && (
+                <button
+                  onClick={reject}
+                  disabled={acting !== null}
+                  className="px-2.5 py-1 rounded border border-red-500/30 text-[10px] font-semibold tracking-wider text-red-400 hover:bg-red-500/10 hover:border-red-500/50 transition-all active:scale-95 disabled:opacity-40 ml-auto"
+                >
+                  {acting === 'reject' ? '...' : 'REJECT'}
+                </button>
+              )}
+            </>
+          ) : (<>
           {passOk && (
             <button
               onClick={promote}
@@ -253,10 +350,10 @@ export default function ReviewItem({
               {acting === 'promote' ? '...' : 'PROMOTE'}
             </button>
           )}
-          {staging && (staging.status === 'sent' || staging.status === 'requested' || staging.status === 'deployed' || staging.status === 'failed') && (
-            <StageChip releaseId={staging.id} progress={staging} />
+          {stagingView && (stagingView.status === 'sent' || stagingView.status === 'requested' || stagingView.status === 'deployed' || stagingView.status === 'failed') && (
+            <StageChip releaseId={stagingView.id} progress={stagingView} />
           )}
-          {freeze && staging?.status !== 'sent' && staging?.status !== 'requested' && staging?.status !== 'deployed' && (
+          {freeze && stagingView?.status !== 'sent' && stagingView?.status !== 'requested' && stagingView?.status !== 'deployed' && (
             <button
               onClick={() => { if (!stageLocked) void act('stage'); }}
               disabled={acting !== null || stageLocked}
@@ -296,6 +393,7 @@ export default function ReviewItem({
           >
             {acting === 'reject' ? '...' : 'REJECT'}
           </button>
+          </>)}
         </div>
 
         {/* Hand-off agent selector */}

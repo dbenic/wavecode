@@ -11,6 +11,7 @@ import * as leases from '../leases.js';
 import { canMutate, isAdmin } from '../users.js';
 import * as freezes from '../release-freezes.js';
 import * as devLanes from '../dev-lanes.js';
+import * as deployState from '../deploy-state.js';
 import logger from '../logger.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
@@ -102,6 +103,15 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const result = devLanes.laneTestLog(project, id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
+  });
+
+  app.get('/api/reviews/board', async (c) => {
+    const user = getActingUser(c);
+    let lanes: devLanes.DevLane[] = [];
+    try { lanes = await devLanes.lanesForRequest(); } catch (e) {
+      logger.warn({ error: (e as Error).message }, 'Lane list failed');
+    }
+    return c.json(deployState.reviewBoard({ name: user.name, role: user.role }, lanes));
   });
 
   app.get('/api/reviews', async (c) => {

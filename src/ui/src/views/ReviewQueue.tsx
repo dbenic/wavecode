@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, DevLane, ReleaseRequest, ReviewItem as ReviewItemType, User } from '../types';
+import type { Agent, DeployCardState, DevLane, ReleaseRequest, ReviewBoard, ReviewItem as ReviewItemType, User } from '../types';
 import type { StageProgress } from '../components/StageChip';
 import { isReviewEventType } from '../sse-events';
 import ReviewItemCard from '../components/ReviewItem';
@@ -84,6 +84,37 @@ function indexStaging(rows: ReleaseRequest[]): Map<string, StageProgress & { id?
   return out;
 }
 
+const ACTIONABLE: DeployCardState[] = [
+  'needs_fixes', 'awaiting_review', 'awaiting_tests', 'ready_to_stage', 'on_staging', 'awaiting_prod_go', 'unknown',
+];
+const HISTORY: DeployCardState[] = ['live_on_prod', 'superseded', 'stale'];
+const COLUMN_LABEL: Record<DeployCardState, string> = {
+  needs_fixes: 'Needs fixes',
+  awaiting_review: 'Awaiting review',
+  awaiting_tests: 'Awaiting tests',
+  ready_to_stage: 'Ready to stage',
+  on_staging: 'On staging',
+  awaiting_prod_go: 'Awaiting prod GO',
+  live_on_prod: 'Live on prod',
+  superseded: 'Superseded',
+  stale: 'Stale',
+  unknown: 'Unknown',
+};
+
+function columnOf(item: ReviewItemType): DeployCardState {
+  if (item.deploy?.state) return item.deploy.state;
+  const verdict = item.latestReview?.verdict ?? item.freeze?.verdict ?? null;
+  if (verdict === 'needs-fixes' || verdict === 'reject') return 'needs_fixes';
+  return 'awaiting_review';
+}
+
+function reconciledLabel(iso: string | null): string {
+  if (!iso) return 'Not reconciled yet';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 export default function ReviewQueue() {
   const navigate = useNavigate();
   const [reviews, setReviews] = useState<ReviewItemType[]>([]);
@@ -93,16 +124,21 @@ export default function ReviewQueue() {
   const [proposalsVersion, setProposalsVersion] = useState(0);
   const [stagingBySha, setStagingBySha] = useState<Map<string, StageProgress & { id?: string }>>(new Map());
   const [lanes, setLanes] = useState<DevLane[]>([]);
+  const [reconciledAt, setReconciledAt] = useState<string | null>(null);
+  const [reconcileStale, setReconcileStale] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
 
   const fetchData = useCallback(() => {
     Promise.all([
-      apiGet<ReviewItemType[]>('/reviews'),
+      apiGet<ReviewBoard>('/reviews/board'),
       apiGet<Agent[]>('/agents'),
       apiGet<User>('/me').catch(() => null),
       apiGet<ReleaseRequest[]>('/releases?target=staging&limit=200').catch(() => [] as ReleaseRequest[]),
       apiGet<DevLane[]>('/reviews/lanes').catch(() => [] as DevLane[]),
-    ]).then(([r, a, me, releases, laneRows]) => {
-      setReviews(r);
+    ]).then(([board, a, me, releases, laneRows]) => {
+      setReviews(Array.isArray(board?.items) ? board.items : []);
+      setReconciledAt(board?.last_reconciled_at ?? null);
+      setReconcileStale(board?.stale === true);
       setAgents(a);
       setIsAdmin(me?.role === 'admin');
       setStagingBySha(indexStaging(releases));
@@ -114,13 +150,24 @@ export default function ReviewQueue() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSSE = useCallback((event: SSEEvent) => {
-    if (isReviewEventType(event.type) || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.') || event.type.startsWith('pipeline.')) {
+    if (isReviewEventType(event.type) || event.type === 'deploy.reconciled' || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.') || event.type.startsWith('pipeline.')) {
       fetchData();
     }
     if (event.type.startsWith('room.proposal_')) setProposalsVersion((v) => v + 1);
   }, [fetchData]);
 
   useSSE(handleSSE);
+
+  const grouped = new Map<DeployCardState, ReviewItemType[]>();
+  for (const item of reviews) {
+    const col = columnOf(item);
+    const list = grouped.get(col) ?? [];
+    list.push(item);
+    grouped.set(col, list);
+  }
+  const visibleColumns = (showHistory ? [...ACTIONABLE, ...HISTORY] : ACTIONABLE).filter((col) => (grouped.get(col)?.length ?? 0) > 0);
+  const historyCount = HISTORY.reduce((n, col) => n + (grouped.get(col)?.length ?? 0), 0);
+  const actionableCount = reviews.length - historyCount;
 
   return (
     <div className="min-h-screen bg-slate-950 relative">
@@ -135,25 +182,37 @@ export default function ReviewQueue() {
 
       {/* Header */}
       <header className="sticky top-0 z-40 border-b border-slate-800/60 bg-slate-950/90 backdrop-blur-xl">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <button onClick={() => navigate('/')} className="text-slate-500 hover:text-slate-300 transition-colors text-sm">
               &larr;
             </button>
-            <div>
+            <div className="min-w-0">
               <h1 className="text-sm font-bold tracking-[0.15em] text-slate-100 uppercase">
-                Review Queue
+                Reviews
               </h1>
-              <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">
-                {reviews.length} pending &middot; Quality Gate
+              <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase truncate">
+                {actionableCount} to act on
                 {lanes.length > 0 && <> &middot; <a href="#lanes" className="text-sky-400/80 hover:text-sky-300">Lanes</a></>}
+              </p>
+              <p className={`text-[10px] mt-0.5 ${reconcileStale ? 'text-amber-300' : 'text-slate-500'}`} data-testid="last-reconciled">
+                Last reconciled {reconciledLabel(reconciledAt)}
+                {reconcileStale && <span data-testid="reconcile-stale"> · stale — more than 5 minutes</span>}
               </p>
             </div>
           </div>
+          <button
+            type="button"
+            data-testid="history-toggle"
+            onClick={() => setShowHistory((v) => !v)}
+            className="shrink-0 px-2 py-1 rounded border border-slate-700 text-[10px] font-semibold tracking-wider text-slate-300 hover:border-slate-500"
+          >
+            {showHistory ? 'Hide history' : `History${historyCount ? ` (${historyCount})` : ''}`}
+          </button>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-6">
+      <main className="max-w-6xl mx-auto px-4 py-6">
         <RoomProposals version={proposalsVersion} />
         {!loaded ? (
           <div className="flex items-center justify-center py-20">
@@ -163,7 +222,7 @@ export default function ReviewQueue() {
           </div>
         ) : (
           <div className="space-y-3">
-            {reviews.length === 0 && lanes.length === 0 && (
+            {actionableCount === 0 && !showHistory && lanes.length === 0 && (
               <div className="flex flex-col items-center justify-center py-20 gap-4">
                 <div className="w-16 h-16 rounded-lg border border-dashed border-slate-800 flex items-center justify-center">
                   <span className="text-2xl text-slate-700">&#10003;</span>
@@ -171,22 +230,31 @@ export default function ReviewQueue() {
                 <div className="text-center">
                   <p className="text-sm text-slate-500">Queue clear</p>
                   <p className="text-[11px] text-slate-600 mt-1">
-                    All runs reviewed. Check back when agents complete tasks.
+                    Nothing to act on. History holds live, superseded and stale cards.
                   </p>
                 </div>
               </div>
             )}
-            {reviews.map((item, i) => (
-              <ReviewItemCard
-                key={item.run.id}
-                item={item}
-                agents={agents}
-                onAction={fetchData}
-                index={i}
-                isAdmin={isAdmin}
-                staging={item.freeze ? stagingBySha.get(item.freeze.sha) ?? null : null}
-              />
-            ))}
+            <div className="flex gap-3 overflow-x-auto pb-2" data-testid="review-columns">
+              {visibleColumns.map((col) => (
+                <section key={col} className="w-72 shrink-0 space-y-2" data-testid={`column-${col}`}>
+                  <h2 className="text-[10px] font-bold tracking-[0.18em] text-slate-500 uppercase">
+                    {COLUMN_LABEL[col]} · {grouped.get(col)?.length ?? 0}
+                  </h2>
+                  {(grouped.get(col) ?? []).map((item, i) => (
+                    <ReviewItemCard
+                      key={item.run.id}
+                      item={item}
+                      agents={agents}
+                      onAction={fetchData}
+                      index={i}
+                      isAdmin={isAdmin}
+                      staging={item.freeze ? stagingBySha.get(item.freeze.sha) ?? null : null}
+                    />
+                  ))}
+                </section>
+              ))}
+            </div>
             <LaneSection lanes={lanes.filter((l) => !reviews.some((r) => r.run.id === l.run_id || (l.freeze_sha && r.freeze?.sha === l.freeze_sha)))} onSent={fetchData} />
           </div>
         )}

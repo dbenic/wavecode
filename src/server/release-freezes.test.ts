@@ -176,6 +176,35 @@ describe('release-freezes.ts', () => {
     it('ignores files that are neither', () => {
       expect(rf.parseFreezeFile('# Proposal\n\nsome text', 'proposal-testing-host.md')).toBeNull();
     });
+
+    it('does not treat is, from, remains or update as a lane name', () => {
+      const quoted = `# Desk #7 freeze note\n\nProject: wavepulse\n- The lane is \`wc-claude2\`\n- Freeze SHA: \`${SHA_A}\`\n`;
+      expect(rf.parseFreezeFile(quoted, 'desk7-freeze.md')?.lane).toBe('wc-claude2');
+      const from = `# Freeze note\n\n- Branch from \`wc-codex2\`\n- Exact SHA: \`${SHA_A}\`\n`;
+      expect(rf.parseFreezeFile(from, 'freeze.md')?.lane).toBe('wc-codex2');
+      const bare = `# Freeze note\n\nLane is wc-claude2\n- Exact SHA: \`${SHA_A}\`\n`;
+      expect(rf.parseFreezeFile(bare, 'freeze.md')?.lane).toBe('wc-claude2');
+      const junk = `# Freeze note\n\nThe lane remains update from the last push.\n- Exact SHA: \`${SHA_A}\`\n`;
+      expect(rf.parseFreezeFile(junk, 'freeze.md')?.lane).toBeNull();
+      expect(rf.isFillerLane('remains')).toBe(true);
+      expect(rf.isFillerLane('wc-claude2')).toBe(false);
+    });
+
+    it('a composition release is not labelled with one desk number', () => {
+      const note = `# Composition release — wavepulse 0.442.0\n\nProject: wavepulse · Author: codex2\n- Lane: \`wc-codex2-wavenetic-04420-composition\`\n- Freeze SHA: \`${SHA_C}\`\n\nBundles Desk #91 with the SI AOP work.\n`;
+      const p = rf.parseFreezeFile(note, `composition-freeze-${SHA_C.slice(0, 8)}.md`);
+      expect(p?.lane).toBe('wc-codex2-wavenetic-04420-composition');
+      expect(p?.desk).toBeNull();
+      expect(rf.freezeNoteSummary(p?.title ?? '')).toBe('wavepulse 0.442.0');
+    });
+
+    it('two desk numbers are not collapsed into one', () => {
+      const note = `# Freeze note — paired desks\n\nProject: wavepulse\nDesk #91 and Desk #108\n- Lane: \`wc-claude2\`\n- Exact SHA: \`${SHA_A}\`\n`;
+      const p = rf.parseFreezeFile(note, 'freeze.md');
+      expect(p?.desk).toBeNull();
+      expect(p?.lane).toBe('wc-claude2');
+      expect(rf.freezeNoteSummary(p?.title ?? '')).toBe('paired desks');
+    });
   });
 
   describe('ingest', () => {

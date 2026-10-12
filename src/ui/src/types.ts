@@ -226,6 +226,48 @@ export interface ReviewItem {
   delta_review?: { label: string; previous_sha: string; verdict_path: string | null } | null;
   reviewers?: Array<{ id: string; name: string; alias: string | null }>;
   before_freeze_tip?: string | null;
+  /** Derived deploy state from the reconciler. Absent on a plain run card. */
+  deploy?: DeployCardView | null;
+}
+
+export type DeployCardState =
+  | 'needs_fixes'
+  | 'awaiting_review'
+  | 'awaiting_tests'
+  | 'ready_to_stage'
+  | 'on_staging'
+  | 'awaiting_prod_go'
+  | 'live_on_prod'
+  | 'superseded'
+  | 'stale'
+  | 'unknown';
+
+export interface DeployCardView {
+  state: DeployCardState;
+  version: string | null;
+  badge: 'staging' | 'prod' | null;
+  test_kind: 'quick' | 'full' | null;
+  test_at: string | null;
+  test_word: string | null;
+  title: string | null;
+  summary: string | null;
+  desk: number | null;
+  lane: string | null;
+  verdict: string | null;
+  unknown_reason: string | null;
+  action: 'stage' | 'ready' | 'promote' | 'none';
+  action_lock: string | null;
+  admin_bypass: boolean;
+  hide_errors: boolean;
+  show_reject: boolean;
+  run_backed: boolean;
+  last_reconciled_at: string | null;
+}
+
+export interface ReviewBoard {
+  last_reconciled_at: string | null;
+  stale: boolean;
+  items: ReviewItem[];
 }
 
 /** A row from the test-status JSON, already parsed by the server. */
