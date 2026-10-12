@@ -302,6 +302,18 @@ Do you want to proceed?
     expect(maybeDismissFirstRunDialog('agent-4', 'Press Enter to continue…\n' + Array(10).fill('working on src/a.ts').join('\n') + '\n❯ ', 1_000_000)).toBe(false);
   });
 
+  it('Codex: trusts the worktree (Enter) and skips the update prompt (Down, Enter) rather than updating the CLI', () => {
+    const trust = '  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.\n› 1. Trust and continue\n  2. Back to Agent Command Center\n  enter continue · esc back';
+    expect(maybeDismissFirstRunDialog('cx-1', trust, 1_000_000)).toBe(true);
+    expect(sendRawKeys).toHaveBeenCalledTimes(1);
+    expect(sendRawKeys).toHaveBeenCalledWith('cx-1', 'Enter');
+    vi.mocked(sendRawKeys).mockClear();
+    const update = '  Release notes: https://github.com/openai/codex/releases/latest\n› 1. Update now (runs `npm install -g @openai/codex`)\n  2. Skip\n  3. Skip until next version\n  enter continue · esc skip';
+    expect(maybeDismissFirstRunDialog('cx-2', update, 1_000_000)).toBe(true);
+    expect(sendRawKeys).toHaveBeenNthCalledWith(1, 'cx-2', 'Down');
+    expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'cx-2', 'Enter');
+  });
+
   it('does not send keys for unrelated pane text', () => {
     expect(maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.')).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

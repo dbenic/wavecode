@@ -47,10 +47,25 @@ export function isPressEnterToContinueScreen(output: string): boolean {
   return /Press Enter to continue/i.test(tail);
 }
 
-/** Which keys clear a Claude first-run screen, or null when none is showing (exported for tests). */
+/** Codex's trust check: "› 1. Trust and continue" is preselected. */
+export function isCodexTrustFolderDialog(output: string): boolean {
+  return /Trust this folder\?/i.test(output) && /›\s*1\.\s*Trust and continue/i.test(output);
+}
+
+/**
+ * Codex's update prompt ("1. Update now … 2. Skip"). Never update from inside an
+ * agent (it would change the CLI under every other Codex agent on the box): pick Skip.
+ */
+export function isCodexUpdatePrompt(output: string): boolean {
+  return /›\s*1\.\s*Update now/i.test(output) && /2\.\s*Skip/i.test(output);
+}
+
+/** Which keys clear a CLI first-run screen, or null when none is showing (exported for tests). */
 export function firstRunDialogKeys(output: string): { keys: string[]; what: string } | null {
   if (isClaudeBypassAcceptDialog(output)) return { keys: ['Down', 'Enter'], what: 'Bypass Permissions dialog' };
   if (isClaudeTrustFolderDialog(output)) return { keys: ['Down', 'Enter'], what: 'trust-folder dialog' };
+  if (isCodexUpdatePrompt(output)) return { keys: ['Down', 'Enter'], what: 'Codex update prompt (skipped)' };
+  if (isCodexTrustFolderDialog(output)) return { keys: ['Enter'], what: 'Codex trust-folder dialog' };
   if (isPressEnterToContinueScreen(output)) return { keys: ['Enter'], what: 'press-Enter screen' };
   return null;
 }
