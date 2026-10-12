@@ -8,6 +8,7 @@
 
 import { execFileSync } from 'node:child_process';
 import type { Result } from './db.js';
+import logger from './logger.js';
 
 const TMUX_TIMEOUT = 5000;
 
@@ -210,12 +211,13 @@ export type SendMode = 'paste' | 'type';
 export interface SendOptions {
   /**
    * 'paste' (default): the whole text goes in as one bracketed paste
-   * (load-buffer + paste-buffer -p), Enter follows after ~1 s, and the pane is
-   * checked ~1 s later — if the input line still holds the text, Enter is sent
-   * once more. Claude Code / Codex sometimes swallow an Enter that arrives
-   * right behind typed chunks, leaving the message unsent in the box.
-   * 'type': the old behaviour (150-char send-keys -l chunks, Enter after
-   * 300 ms) — for shell prompts, where a launch command is typed.
+   * (load-buffer + paste-buffer -p). Enter is a separate send-keys after ~1 s.
+   * The pane is then captured; if the input line still holds the text, Enter
+   * is pressed again, up to 2 retries. A line that is still sitting there is
+   * logged. Claude Code / Codex sometimes swallow an Enter that arrives right
+   * behind the paste, leaving the message unsent in the box.
+   * 'type': 150-char send-keys -l chunks, then Enter as its own send-keys
+   * after 300 ms, with the same capture-and-retry. For shell prompts.
    */
   mode?: SendMode;
 }
@@ -223,29 +225,33 @@ export interface SendOptions {
 const PASTE_ENTER_DELAY_MS = 1000;
 const PASTE_CONFIRM_DELAY_MS = 900;
 const TYPE_ENTER_DELAY_MS = 300;
+/** Extra Enters after the first one, when the input line still shows the text. */
+const MAX_ENTER_RETRIES = 2;
 /** Pending send per session so two messages never interleave inside one input box. */
 const sendChains = new Map<string, Promise<void>>();
 
 /** Exported for tests: timers are real setTimeouts, tests use fake timers. */
 export function sendTextAndEnter(sessionName: string, text: string, opts: SendOptions = {}): void {
   const mode = opts.mode ?? 'paste';
-  if (mode === 'type') {
-    sendLiteralText(sessionName, text);
-    sleepSync(TYPE_ENTER_DELAY_MS);
-    tmuxExec(['send-keys', '-t', sessionName, 'C-m']);
-    return;
-  }
-  // The paste itself happens now (callers expect the text to be in the pane on return);
-  // only the Enter + confirm are deferred. A send that arrives while a previous one is
-  // still waiting for its Enter is chained behind it so the two never share an input box.
+  // A send that arrives while a previous one is still waiting for its Enter is
+  // chained behind it so the two never share an input box.
   const prev = sendChains.get(sessionName);
-  const next = prev ? prev.catch(() => undefined).then(() => pasteAndSubmit(sessionName, text)) : pasteAndSubmit(sessionName, text);
+  const run = () => (mode === 'type' ? typeAndSubmit(sessionName, text) : pasteAndSubmit(sessionName, text));
+  const next = prev ? prev.catch(() => undefined).then(run) : run();
   sendChains.set(sessionName, next);
   void next.finally(() => { if (sendChains.get(sessionName) === next) sendChains.delete(sessionName); });
 }
 
+function typeAndSubmit(sessionName: string, text: string): Promise<void> {
+  sendLiteralText(sessionName, text);
+  sleepSync(TYPE_ENTER_DELAY_MS);
+  tmuxExec(['send-keys', '-t', sessionName, 'C-m']);
+  return new Promise((resolve) => confirmOrRetry(sessionName, text, 0, resolve));
+}
+
 function pasteAndSubmit(sessionName: string, text: string): Promise<void> {
-  // Clear whatever is in the input box, then one atomic bracketed paste
+  // Clear whatever is in the input box, then one atomic bracketed paste.
+  // Enter is never in this argv: it is a later send-keys, after the TUI has the text.
   tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
   const buf = `wc-${process.pid}-${Date.now()}`;
   execFileSync('tmux', [...socketPrefix(sessionName), 'load-buffer', '-b', buf, '-'], { input: text, timeout: TMUX_TIMEOUT, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -253,12 +259,29 @@ function pasteAndSubmit(sessionName: string, text: string): Promise<void> {
   return new Promise<void>((resolve) => {
     setTimeout(() => {
       tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
-      setTimeout(() => {
-        if (inputStillHolds(sessionName, text)) tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
-        resolve();
-      }, PASTE_CONFIRM_DELAY_MS);
+      confirmOrRetry(sessionName, text, 0, resolve);
     }, PASTE_ENTER_DELAY_MS);
   });
+}
+
+/** Capture the pane. If the text is still on the input line, press Enter again (up to 2 retries). */
+function confirmOrRetry(sessionName: string, text: string, retriesUsed: number, resolve: () => void): void {
+  setTimeout(() => {
+    if (!inputStillHolds(sessionName, text)) {
+      resolve();
+      return;
+    }
+    if (retriesUsed < MAX_ENTER_RETRIES) {
+      tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
+      confirmOrRetry(sessionName, text, retriesUsed + 1, resolve);
+      return;
+    }
+    logger.error(
+      { session: sessionName, preview: text.slice(0, 80) },
+      'typed notification still on the input line after Enter retries',
+    );
+    resolve();
+  }, PASTE_CONFIRM_DELAY_MS);
 }
 
 /** The TUI's input line (❯ / ›) still shows the start of the text → the Enter was swallowed. */
