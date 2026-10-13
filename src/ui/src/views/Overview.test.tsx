@@ -63,6 +63,28 @@ describe('Overview', () => {
     expect(boardEventReloads('overview.board')).toBe(true);
   });
 
+  it('lists in-progress Product Desk requests with idle, split, review, and close flags', async () => {
+    const api = await import('../hooks/useApi');
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p.startsWith('/overview/chat') ? [] : {
+      ...RESPONSE,
+      board: {
+        ...RESPONSE.board,
+        desk_tracking: [{
+          id: 108, status: 'implementing', title: 'outgoing line VAT', updated_at: null,
+          builders: ['codex2', 'claude1'], flags: ['two_builders', 'idle_24h', 'suggest_close'], note: 'idle more than 24 h',
+        }],
+      },
+    }));
+    render(<MemoryRouter><Overview /></MemoryRouter>);
+    const panel = await screen.findByTestId('desk-tracking');
+    expect(panel.textContent).toContain('Desk #108');
+    expect(panel.textContent).toContain('outgoing line VAT');
+    expect(panel.textContent).toContain('idle > 24h');
+    expect(panel.textContent).toContain('two builders, no split');
+    expect(panel.textContent).toContain('suggest closing');
+    expect(panel.textContent).toContain('codex2, claude1');
+  });
+
   it('the chat comes first, with history; asking posts the message', async () => {
     const api = await import('../hooks/useApi');
     render(<MemoryRouter><Overview /></MemoryRouter>);

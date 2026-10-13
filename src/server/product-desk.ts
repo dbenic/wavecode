@@ -16,8 +16,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfig } from './config.js';
-import { getDb, type Result, type Task } from './db.js';
-import { listFreezes } from './release-freezes.js';
+import { type Result } from './db.js';
+import { linksFromIndex, loadDeskWork, type DeskLinks } from './desk-tracking.js';
 import logger from './logger.js';
 
 export type DeskStatus = 'new' | 'accepted' | 'implementing' | 'waiting_on_requester' | 'in_review' | 'shipped' | 'merged' | 'deferred' | 'rejected' | string;
@@ -40,10 +40,7 @@ export interface DeskItem {
   merged_into_id: number | null;
 }
 
-export interface DeskLink {
-  lanes: Array<{ sha: string; verdict: string | null; status: string; lane: string | null; author: string | null }>;
-  tasks: Array<{ id: string; num: number | null; status: Task['status']; agent_id: string | null; agent_name: string | null }>;
-}
+export type DeskLink = DeskLinks;
 
 export interface DeskItemLinked extends DeskItem {
   links: DeskLink;
@@ -192,26 +189,17 @@ export function deskTaskMarker(id: number): string {
   return `[desk ${id}]`;
 }
 
-const DESK_TASK_RE = (id: number) => new RegExp(`\\[desk ${id}\\]|\\bPD[- ]?${id}\\b|\\bDesk\\s*#?${id}\\b`, 'i');
-
+/** Lanes, tasks, and the runs and reviews that inherit this desk number from a task. */
 export function linksFor(id: number): DeskLink {
-  const lanes = listFreezes()
-    .filter((f) => f.desk === id)
-    .map((f) => ({ sha: f.sha, verdict: f.verdict, status: f.status, lane: f.lane, author: f.author_name }));
-  const rows = getDb().prepare(
-    `SELECT t.id, t.num, t.status, t.agent_id, t.prompt, a.name AS agent_name FROM tasks t LEFT JOIN agents a ON a.id = t.agent_id
-     WHERE t.prompt LIKE ? OR t.prompt LIKE ? OR t.prompt LIKE ? ORDER BY t.created_at DESC LIMIT 20`,
-  ).all(`%[desk ${id}]%`, `%PD-${id}%`, `%Desk #${id}%`) as Array<{ id: string; num: number | null; status: Task['status']; agent_id: string | null; prompt: string; agent_name: string | null }>;
-  const re = DESK_TASK_RE(id);
-  const tasks = rows.filter((t) => re.test(t.prompt)).map(({ prompt: _p, ...t }) => { void _p; return t; });
-  return { lanes, tasks };
+  return linksFromIndex(loadDeskWork(), id);
 }
 
 export async function listDesk(opts: { all?: boolean; force?: boolean } = {}): Promise<Result<DeskItemLinked[]>> {
   const r = await fetchBoard(opts.force === true);
   if (!r.ok) return r;
+  const work = loadDeskWork();
   const items = (opts.all ? r.data : r.data.filter((i) => OPEN_STATUSES.has(i.status)))
-    .map((i) => ({ ...i, links: linksFor(i.id) }));
+    .map((i) => ({ ...i, links: linksFromIndex(work, i.id) }));
   return { ok: true, data: items };
 }
 

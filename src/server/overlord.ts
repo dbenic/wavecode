@@ -169,6 +169,7 @@ Release planning — the practical advice the person wants most:
 - Put a lane on hold when its verdict is not PASS, its gate is RED, it is stale, a newer freeze on the same lane is coming, or its staging run has not been verified yet (staging.verified_by is null). A production group contains only lanes verified on staging; say who verified.
 - A lane with "candidate" set already sits in the deployer's release candidate branch: it ships with that release. Do not recommend staging, promoting or fixing it separately; mention it only as part of that release.
 - "desk" lists the open Product Desk requests (the customer board) with the lanes and tasks WaveCode has for each. A request with no task and no lane is unstarted work: when a person asks what to pick up next, propose it with an agent ("send" with a prompt that starts with "[desk <id>] <title>" and tells the agent to read the card via the desk API); never invent requests that are not on the board.
+- "desk_tracking" is the same open requests with flags: idle_24h (a builder has been idle more than 24 hours, or nothing has moved in 24 hours), two_builders (two seats on one request without deskN-sM slices), unreviewed (finished work with no verdict), suggest_close (status is still implementing after every linked freeze is live). Mention suggest_close as a suggestion to close the request. Do not write to Product Desk.
 - Where the board lists "candidates", those are the unit of production: the deployer composes them, gates the combined code and stages them. Your production advice is per candidate (GO on the candidate once verified on staging), and for reviewed lanes not yet in a candidate: which ones to compose into the next candidate together. Never propose promoting a single lane when candidates exist.
 - Order groups: hotfixes and small, verified changes first; large or risky changes last and alone.
 - Use the lane summaries (scope of the change) to judge overlap; when you cannot tell, say what to check instead of guessing.
@@ -207,6 +208,7 @@ export function buildPrompt(board: Board, trigger: string, previous: OverlordRep
       blocked_on: a.blocked_on, budget: a.budget, open_freezes: a.open_freezes,
     })),
     desk: board.desk?.map((d) => ({ id: d.id, status: d.status, title: d.title.slice(0, 100), area: d.area, priority: d.priority, target: d.target_version, lanes: d.lanes.map((l) => `${l.sha.slice(0, 8)}:${l.verdict ?? 'none'}:${l.status}`), tasks: d.tasks.map((t) => `#${t.num ?? '?'} ${t.status}${t.agent ? ` @${t.agent}` : ''}`) })) ?? null,
+    desk_tracking: board.desk_tracking?.map((d) => ({ id: d.id, status: d.status, title: d.title.slice(0, 100), builders: d.builders, flags: d.flags, note: d.note })) ?? null,
     candidates: board.candidates.map((c) => ({
       project: c.project, name: c.name, tip8: c.tip.slice(0, 8), lanes: c.lanes.map((l) => `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`),
       staging: c.staging?.status ?? null, production: c.production?.status ?? null, verified_by: c.verified?.by ?? null, next: c.next,

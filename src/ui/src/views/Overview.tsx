@@ -378,6 +378,27 @@ export default function Overview() {
               </section>
             )}
 
+            {board.desk_tracking && board.desk_tracking.length > 0 && (
+              <section className="rounded-lg border border-slate-800/60 p-3" data-testid="desk-tracking">
+                <p className="text-[10px] font-semibold tracking-wider text-slate-400 mb-1.5">PRODUCT DESK</p>
+                <ul className="space-y-1.5 text-[11px] text-slate-300">
+                  {board.desk_tracking.map((row) => (
+                    <li key={row.id} data-testid={`desk-track-${row.id}`} className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-slate-200">Desk #{row.id}</span>
+                      <span className="text-slate-400 truncate">{row.title}</span>
+                      <span className="text-[9px] uppercase tracking-wider text-slate-500">{row.status.replace(/_/g, ' ')}</span>
+                      {row.builders.length > 0 && <span className="text-slate-500">{row.builders.join(', ')}</span>}
+                      {row.flags.map((flag) => (
+                        <span key={flag} className={`text-[9px] font-semibold tracking-wider rounded px-1.5 py-0.5 border ${flag === 'suggest_close' ? 'text-emerald-300 border-emerald-500/40' : 'text-amber-200 border-amber-500/40'}`}>
+                          {flag === 'idle_24h' ? 'idle > 24h' : flag === 'two_builders' ? 'two builders, no split' : flag === 'unreviewed' ? 'unreviewed' : 'suggest closing'}
+                        </span>
+                      ))}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
             {/* 4. Attention — one page, grouped, with the full count of each kind */}
             {(board.attention_total ?? board.attention.length) > 0 && (
               <section className="rounded-lg border border-amber-500/25 bg-amber-950/10 p-3" data-testid="attention">
