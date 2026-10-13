@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import type { DevLane } from './dev-lanes.js';
 import { getDb } from './db.js';
 import { emit } from './event-bus.js';
-import { gitAncestor, gitText } from './git-memo.js';
+import { gitAncestor, gitRun, gitText } from './git-memo.js';
 import logger from './logger.js';
 import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef } from './lane-main.js';
 import { notify } from './notifications.js';
@@ -33,11 +33,13 @@ import {
   applyNoteLabels,
   freezeOnReviews,
   getFreeze,
+  isInvalidLane,
   listFreezes,
+  syncAttributedLane,
   viewShaChecks,
   type ReleaseFreeze,
 } from './release-freezes.js';
-import { getReview, listPendingReviews, type ReviewItem } from './review-queue.js';
+import { type ReviewItem } from './review-queue.js';
 import {
   PRODUCTION_RELEASE_ADMIN_ONLY,
   PRODUCTION_RELEASE_NOT_APPROVER,
@@ -48,7 +50,7 @@ import {
 } from './releases.js';
 import { stageEligibility } from './sha-stage-block.js';
 import { readProdHealth } from './staging-forward.js';
-import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
+import { reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
 import {
   buildLaneCards, buildReleaseView, conflictFilesFromNote,
@@ -358,13 +360,32 @@ function storedTips(): Map<string, ProjectTips> {
   return reconciledTips;
 }
 
+/** True when the object is in the repo, false when it is missing, null on a timeout. */
+async function objectPresent(repo: string | null, sha: string): Promise<Tri> {
+  if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return null;
+  try {
+    const result = await gitRun(repo, ['cat-file', '-e', sha.toLowerCase()], 5000);
+    if (result.status === 0) return true;
+    if (result.status === 1 || result.status === 128) return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function containedIn(repo: string | null, sha: string, tip: string | null): Promise<Tri> {
-  if (!tip || !/^[0-9a-f]{40}$/i.test(tip)) return null;
+  if (!tip || !/^[0-9a-f]{40}$/i.test(tip)) return false;
   const want = sha.toLowerCase();
   const have = tip.toLowerCase();
   if (want === have) return true;
   if (!repo) return null;
-  try { return await gitAncestor(repo, want, have); } catch { return null; }
+  try {
+    const ans = await gitAncestor(repo, want, have);
+    if (ans !== null) return ans;
+    const present = await objectPresent(repo, want);
+    if (present === false) return false;
+    return null;
+  } catch { return null; }
 }
 
 async function mergedToMain(project: string | null, sha: string): Promise<Tri> {
@@ -374,7 +395,13 @@ async function mergedToMain(project: string | null, sha: string): Promise<Tri> {
   if (!ref) return null;
   const mainSha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
   if (!mainSha || !/^[0-9a-f]{40}$/i.test(mainSha)) return null;
-  try { return await gitAncestor(repo, sha.toLowerCase(), mainSha.toLowerCase()); } catch { return null; }
+  try {
+    const ans = await gitAncestor(repo, sha.toLowerCase(), mainSha.toLowerCase());
+    if (ans !== null) return ans;
+    const present = await objectPresent(repo, sha);
+    if (present === false) return false;
+    return null;
+  } catch { return null; }
 }
 
 function newerInLane(freeze: ReleaseFreeze, all: ReleaseFreeze[]): boolean {
@@ -476,7 +503,10 @@ async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<s
   let behind: Tri = null;
   try {
     const n = commitsBehind(project, freeze.sha);
-    behind = n == null ? null : n > 0;
+    if (n == null) {
+      const present = await objectPresent(repo, freeze.sha);
+      behind = present === false ? false : null;
+    } else behind = n > 0;
   } catch { behind = null; }
   let ready: boolean | null = false;
   try { ready = verificationFor(freeze.sha) != null; } catch { ready = null; }
@@ -581,9 +611,13 @@ export async function reconcileDeployStates(now = new Date(), opts?: { freshTip?
   const labelsBySha = new Map<string, ReturnType<typeof applyNoteLabels>>();
   for (const freeze of freezes) {
     const text = noteText(freeze);
-    if (!text || !freeze.freeze_path) continue;
-    try { labelsBySha.set(freeze.sha, applyNoteLabels(freeze.sha, text, freeze.freeze_path)); } catch (e) {
-      logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Freeze label revise skipped');
+    if (text && freeze.freeze_path) {
+      try { labelsBySha.set(freeze.sha, applyNoteLabels(freeze.sha, text, freeze.freeze_path)); } catch (e) {
+        logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Freeze label revise skipped');
+      }
+    }
+    try { syncAttributedLane(getFreeze(freeze.sha) ?? freeze, text); } catch (e) {
+      logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Lane attribution skipped');
     }
   }
   try { freezes = listFreezes(); } catch { /* keep the first list */ }
@@ -917,11 +951,9 @@ function syntheticItem(freeze: ReleaseFreeze, title: string | null): ReviewItem 
 }
 
 function itemFor(freeze: ReleaseFreeze, title: string | null): { item: ReviewItem; runBacked: boolean } {
-  if (freeze.run_id) {
-    const got = getReview(freeze.run_id);
-    if (got.ok) return { item: got.data, runBacked: true };
-  }
-  return { item: syntheticItem(freeze, title), runBacked: false };
+  // The snapshot already names the run. Loading the run, task, artifacts and
+  // review (six queries per freeze) is what made the board slow.
+  return { item: syntheticItem(freeze, title), runBacked: !!freeze.run_id };
 }
 
 function overlay(item: ReviewItem, lane: DevLane | undefined): BoardItem {
@@ -1024,7 +1056,6 @@ function factFor(
   const behind = !!row && row.behind_main === 1 && row.superseded !== 1 && row.in_staging !== 1 && row.in_prod !== 1
     && row.state !== 'superseded' && row.state !== 'live_on_prod';
   const quick = quickCheck(lane, freeze.sha);
-  const since = assignmentFacts(freeze.sha);
   return {
     sha: freeze.sha,
     project: freeze.project,
@@ -1052,7 +1083,7 @@ function factFor(
     conflict_files: behind ? conflictFilesFromNote(pipelineNote(freeze.project, freeze.lane)) : [],
     auto_merge_main: pipelineFlag(freeze.project, 'auto_merge_main'),
     auto_stage: pipelineFlag(freeze.project, 'auto_stage'),
-    reviewing_since: since ? new Date(since.at).toISOString() : freeze.created_at,
+    reviewing_since: freeze.created_at,
     unknown_reason: view.unknown_reason,
     live_at: row?.last_reconciled_at ?? freeze.updated_at,
     same_owner_pool: sameOwnerOnCard(freeze),
@@ -1135,10 +1166,6 @@ export async function reviewBoard(user: { name: string; role: string }, lanes: D
     }
     items.push({ ...merged, deploy: row.deploy });
   }
-  for (const pending of listPendingReviews()) {
-    if (pending.freeze || seen.has(pending.run.id)) continue;
-    items.push({ ...pending, deploy: null });
-  }
   let reviewers: ReviewerLoadView[] = [];
   try { reviewers = reviewerLoads(); } catch { reviewers = []; }
   let cards: LaneCard[] = [];
@@ -1152,7 +1179,8 @@ export async function reviewBoard(user: { name: string; role: string }, lanes: D
     const facts: LaneFreezeFact[] = [];
     const opens = openStagingLocks();
     for (const row of prepared) {
-      const laneName = row.row?.lane ?? row.freeze.lane;
+      const storedLane = row.row?.lane ?? row.freeze.lane;
+      const laneName = storedLane && !isInvalidLane(storedLane) ? storedLane : null;
       if (!laneName) continue;
       const fact = factFor({ ...row.freeze, lane: laneName }, row.lane, row.deploy, row.row);
       const open = fact.project ? opens.get(fact.project) : undefined;

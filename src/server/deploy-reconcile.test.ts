@@ -19,12 +19,18 @@ vi.mock('./config.js', () => ({
   })),
 }));
 
+import { Hono } from 'hono';
 import * as db from './db.js';
 import { ensureDeployStateTable, lastReconciledAt, reconcileDeployStates, resetDeployReconcilerForTest, reviewBoard, scheduleReconcile, startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import * as gitMemo from './git-memo.js';
 import { behindMainAlert, MAIN_PING } from './lane-main.js';
 import { setPeerFetchForTest } from './peers.js';
+import * as freezes from './release-freezes.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
+import * as reviewQueue from './review-queue.js';
+import { registerReviewRoutes } from './routes/reviews.js';
+import * as testRuns from './test-runs.js';
+import * as releasesApi from './releases.js';
 import { ensureReleaseTables, reportRelease, requestRelease, resetStagingTipCacheForTest, resolveStagingTip, stopReleasePollers } from './releases.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -268,8 +274,8 @@ describe('deploy reconciler review status and behind-main pings', () => {
     const failed = db.getDb().prepare('SELECT in_staging, state FROM deploy_card_states WHERE sha = ?').get(forwardSha) as {
       in_staging: number | null; state: string;
     };
-    expect(failed.in_staging).toBeNull();
-    expect(failed.state).toBe('unknown');
+    expect(failed.in_staging).toBe(0);
+    expect(failed.state).not.toBe('unknown');
     expect((await reviewBoard({ name: 'antonio', role: 'developer' }, [])).release.staging.sha).toBeNull();
   });
 
@@ -463,6 +469,120 @@ describe('deploy reconciler review status and behind-main pings', () => {
     } finally {
       stopDeployReconciler();
       resetDeployReconcilerForTest();
+    }
+  });
+
+  it('GET /api/reviews/board reads the snapshot and does not call git, the peer, or the gate', async () => {
+    const runId = pendingRun(alesId);
+    const sha = 'ab'.repeat(20);
+    insertFreeze(sha, { runId, verdict: 'pass', lane: 'wc-canary-v4' });
+    const note = path.join(tmp, 'freeze.md');
+    fs.writeFileSync(note, `# Freeze\n\nLane: \`wc-canary-v4\`\n- Exact SHA: \`${sha}\`\n`);
+    db.getDb().prepare('UPDATE release_freezes SET freeze_path = ? WHERE sha = ?').run(note, sha);
+    ensureDeployStateTable();
+    db.getDb().prepare(
+      `INSERT INTO deploy_card_states (
+         sha, state, merged_main, in_staging, in_prod, behind_main, superseded, verdict, lane, stage_block, last_reconciled_at
+       ) VALUES (?, 'ready_to_stage', 1, 0, 0, 0, 0, 'pass', 'wc-canary-v4', NULL, '2026-10-13T00:00:00.000Z')`,
+    ).run(sha);
+    projects.wave.release_peer = 'wavecode-countix/fable';
+    peers['wavecode-countix'] = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+    (projects.wave as { tests?: { status_command: string[] } }).tests = { status_command: ['test-status', '{sha}'] };
+
+    const gitText = vi.spyOn(gitMemo, 'gitText');
+    const gitAncestor = vi.spyOn(gitMemo, 'gitAncestor');
+    const peerTip = vi.spyOn(releasesApi, 'resolveStagingTip');
+    const gate = vi.spyOn(testRuns, 'readLaneTests');
+    const checks = vi.spyOn(freezes, 'viewShaChecks');
+    const read = vi.spyOn(fs, 'readFileSync');
+    const runs = vi.spyOn(reviewQueue, 'getReview');
+    const app = new Hono();
+    registerReviewRoutes(app);
+    const res = await app.fetch(new Request('http://x/api/reviews/board'));
+    expect(res.status).toBe(200);
+    const board = await res.json() as { cards: Array<{ sha: string | null; status: string; button: { kind: string } | null }> };
+    expect(gitText).not.toHaveBeenCalled();
+    expect(gitAncestor).not.toHaveBeenCalled();
+    expect(peerTip).not.toHaveBeenCalled();
+    expect(gate).not.toHaveBeenCalled();
+    expect(checks).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(runs).not.toHaveBeenCalled();
+    const card = board.cards.find((row) => row.sha === sha);
+    expect(card).toMatchObject({ status: 'Ready to stage' });
+    expect(card?.button).toMatchObject({ kind: 'stage' });
+    gitText.mockRestore();
+    gitAncestor.mockRestore();
+    peerTip.mockRestore();
+    gate.mockRestore();
+    checks.mockRestore();
+    read.mockRestore();
+    runs.mockRestore();
+  });
+
+  it('a missing SHA is not Unknown after reconcile, and filler or hex lanes are dropped', async () => {
+    const missing = 'cd'.repeat(20);
+    insertFreeze(missing, { verdict: 'pass', lane: 'wc-absent', authorName: 'antonio' });
+    const filler = ['changes', 'source', 'separately', 'test-path', 'also', 'commits', '6ed9192e'];
+    filler.forEach((lane, i) => {
+      insertFreeze(`${String(i).padStart(2, '0')}${'ab'.repeat(19)}`, { verdict: null, lane, createdAt: '2026-01-01 00:00:00' });
+    });
+    await reconcileDeployStates();
+    expect(stateOf(missing)).not.toBe('unknown');
+    const stored = db.getDb().prepare('SELECT lane FROM release_freezes').all() as { lane: string | null }[];
+    for (const lane of filler) expect(stored.some((row) => row.lane === lane)).toBe(false);
+    const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    expect(board.cards.some((card) => card.status === 'Unknown')).toBe(false);
+    for (const lane of filler) expect(board.cards.some((card) => card.lane === lane)).toBe(false);
+    const card = board.cards.find((row) => row.sha === missing);
+    expect(card?.status).not.toBe('Unknown');
+  });
+
+  it('Branch: canary-e2e-stage-v5 is the lane for the board and for Stage, not wc-codex3', async () => {
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'checkout', '-q', '-b', 'canary-e2e-stage-v5');
+    fs.writeFileSync(path.join(repo, 'canary.txt'), 'canary');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'canary');
+    const canary = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', '-b', 'wc-codex3', laneSha);
+    fs.writeFileSync(path.join(repo, 'other.txt'), 'other');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'codex tip');
+    const codexTip = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'canary-e2e-stage-v5');
+    releases.staging_health_command = ['printf', '%s', mainSha];
+    const runId = pendingRun(alesId);
+    const note = path.join(tmp, 'canary-freeze.md');
+    fs.writeFileSync(note, [
+      '# Freeze',
+      'Project: wave · Author: antonio',
+      'Reviewed with wc-codex3.',
+      'Branch: canary-e2e-stage-v5',
+      `- Exact SHA: \`${canary}\``,
+      '',
+    ].join('\n'));
+    insertFreeze(canary, { runId, verdict: 'pass', lane: 'wc-codex3', authorName: 'antonio', status: 'stale', createdAt: '2026-01-04 00:00:00' });
+    db.getDb().prepare(`UPDATE release_freezes SET freeze_path = ?, superseded_by = ? WHERE sha = ?`).run(note, codexTip, canary);
+    await reconcileDeployStates();
+    const row = db.getDb().prepare('SELECT lane, stage_block, state FROM deploy_card_states WHERE sha = ?').get(canary) as {
+      lane: string; stage_block: string | null; state: string;
+    };
+    const freeze = db.getDb().prepare('SELECT lane, status FROM release_freezes WHERE sha = ?').get(canary) as { lane: string; status: string };
+    expect(freeze.lane).toBe('canary-e2e-stage-v5');
+    expect(freeze.status).toBe('open');
+    expect(row.state).toBe('ready_to_stage');
+    expect(row.stage_block).toBeNull();
+    const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    const card = board.cards.find((item) => item.sha === canary);
+    expect(card).toMatchObject({ lane: 'canary-e2e-stage-v5', status: 'Ready to stage', owner: 'developer', needs_you: true });
+    expect(card?.owner_label).not.toBe('system');
+    expect(card?.button).toMatchObject({ kind: 'stage', label: 'Stage' });
+    const staged = await reviewQueue.stage(runId);
+    expect(staged.ok).toBe(false);
+    if (!staged.ok) {
+      expect(staged.error).not.toMatch(/wc-codex3/);
+      expect(staged.error).not.toMatch(/stale/);
     }
   });
 });

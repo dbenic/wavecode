@@ -394,6 +394,46 @@ describe('release-freezes.ts', () => {
       expect(rf.getFreeze(recorded)?.lane).toBe('wc-codex2-record');
     });
 
+    it('uses Branch: when there is no Lane:, and a Fable run instead of a seat named in prose', () => {
+      const canary = '336a5008' + 'aa'.repeat(16);
+      const note = `# Freeze\n\nProject: wavepulse · Author: codex2\nReviewed next to wc-codex3.\nBranch: canary-e2e-stage-v5\n- Exact SHA: \`${canary}\`\n`;
+      expect(rf.laneFromLines(note.split('\n'))).toBe('canary-e2e-stage-v5');
+      expect(rf.ingestFreezeText(note, '336a5008-freeze.md').ok).toBe(true);
+      expect(rf.getFreeze(canary)?.lane).toBe('canary-e2e-stage-v5');
+      expect(rf.isShaLane('6ed9192e')).toBe(true);
+      expect(rf.laneFromLines(['Lane: `6ed9192e`'])).toBeNull();
+
+      const fableDir = path.join(os.tmpdir(), `wc-fable-${process.pid}`);
+      fs.rmSync(fableDir, { recursive: true, force: true });
+      fs.mkdirSync(fableDir);
+      const git = (...args: string[]) => execFileSync('git', ['-C', fableDir, ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+      }).trim();
+      git('init', '-q', '-b', 'wc-fable');
+      const fable = db.insertAgent({
+        name: 'fable', runtime: 'claude-code', tmux_session: 'wc-fable', workspace: fableDir, mode: 'spawned', status: 'idle',
+      });
+      const ales = db.insertAgent({
+        name: 'ales-claude1', runtime: 'claude-code', tmux_session: 'wc-ales-claude1', workspace: null, mode: 'spawned', status: 'idle',
+      });
+      if (!fable.ok || !ales.ok) throw new Error('seed');
+      const task = db.insertTask({ agent_id: fable.data.id, prompt: 'fable release' });
+      if (!task.ok) throw new Error(task.error);
+      const run = db.insertRun({ task_id: task.data.id, agent_id: fable.data.id });
+      if (!run.ok) throw new Error(run.error);
+      const stolen = 'cab9ffe2' + 'cd'.repeat(16);
+      const prose = `# Freeze note\n\nProject: wavepulse · Author: ales-claude1\nThe changes were reviewed with wc-ales-claude1, held separately.\nLane: \`changes\`\n- Exact SHA: \`${stolen}\`\n`;
+      expect(rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md').ok).toBe(true);
+      db.getDb().prepare(
+        `UPDATE release_freezes SET lane = ?, author_agent_id = ?, run_id = ? WHERE sha = ?`,
+      ).run('wc-ales-claude1', ales.data.id, run.data.id, stolen);
+      expect(rf.attributedLane(rf.getFreeze(stolen)!)).toBe('wc-fable');
+      expect(rf.applyNoteLabels(stolen, prose, 'cab9ffe2-freeze.md').lane).toBe('wc-fable');
+      expect(rf.getFreeze(stolen)?.lane).toBe('wc-fable');
+      fs.rmSync(fableDir, { recursive: true, force: true });
+    });
+
     it('a re-delivered file is idempotent: one card, one review row, no second event', () => {
       const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
       expect(rf.ingestFreezeFile(file).ok).toBe(true);

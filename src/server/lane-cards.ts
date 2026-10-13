@@ -216,7 +216,9 @@ function ownerName(lane: string | null, owners: Array<{ name: string; lanes: str
     if (hit) return hit.name;
   }
   const name = author?.replace(/^@/, '').trim();
-  return name || 'developer';
+  if (!name) return 'developer';
+  const byAuthor = owners.find((owner) => owner.name.toLowerCase() === name.toLowerCase());
+  return byAuthor?.name ?? name;
 }
 
 function steps(current: PipeStepId, blocked: { id: PipeStepId; reason: string } | null): PipeStep[] {
@@ -316,8 +318,8 @@ function present(fact: LaneFreezeFact, who: string): Presented {
       return {
         status: 'Behind main',
         action: 'Merging main automatically…',
-        owner: 'system',
-        owner_label: 'system',
+        owner: 'developer',
+        owner_label: who,
         history: false,
         button: null,
         pipeline: steps('freeze', { id: 'freeze', reason: 'Merging main' }),
@@ -487,6 +489,11 @@ function present(fact: LaneFreezeFact, who: string): Presented {
   };
 }
 
+function samePerson(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.replace(/^@/, '').trim().toLowerCase() === b.trim().toLowerCase();
+}
+
 function finish(fact: LaneFreezeFact, presented: Presented, older: LaneOlder[], viewer: LaneViewer | null, owners: Array<{ name: string; lanes: string[] }>): LaneCard {
   const who = ownerName(fact.lane, owners, fact.author_name);
   const shown = presented.owner === 'developer' || presented.owner_label.endsWith("'s agent")
@@ -505,7 +512,7 @@ function finish(fact: LaneFreezeFact, presented: Presented, older: LaneOlder[], 
     owner: shown.owner,
     owner_label: shown.owner_label,
     needs_you: !shown.history && (shown.owner === 'developer' || button?.kind === 'promote'),
-    mine: viewer?.name ? laneMatches(viewer.lanes, fact.lane) : false,
+    mine: viewer?.name ? laneMatches(viewer.lanes, fact.lane) || samePerson(fact.author_name, viewer.name) : false,
     history: shown.history,
     button,
     pipeline: shown.pipeline,

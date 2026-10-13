@@ -271,10 +271,11 @@ function coveredByDeployedCandidate(freeze: { project: string | null; sha: strin
  * An admin may stage without it. A stale SHA may not be staged.
  */
 export async function stage(runId: string, opts: { actorIsAdmin?: boolean } = {}): Promise<Result<releases.ReleaseRequest>> {
-  const freeze = freezes.getFreezeByRun(runId);
+  let freeze = freezes.getFreezeByRun(runId);
   if (!freeze) return { ok: false, error: 'Only a release freeze can be staged (the card must carry an exact SHA)' };
   const stale = freezes.staleStageBlock(freeze);
   if (stale) return { ok: false, error: stale };
+  freeze = freezes.getFreezeByRun(runId) ?? freeze;
   const behind = freezes.behindMainBlock(freeze);
   if (behind) return { ok: false, error: behind };
   // Behind main, rollback, nothing new, superseded, rejected, and the gate.

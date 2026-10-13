@@ -219,6 +219,17 @@ export function isFillerLane(lane: string | null | undefined): boolean {
   return LANE_FILLER.has(lane.trim().toLowerCase());
 }
 
+/** A raw commit id is not a lane. `6ed9192e` used to be stored as one. */
+export function isShaLane(lane: string | null | undefined): boolean {
+  if (!lane) return false;
+  return /^[0-9a-f]{7,40}$/i.test(lane.trim());
+}
+
+/** Filler words and hex SHAs are not lanes, including rows written before that rule. */
+export function isInvalidLane(lane: string | null | undefined): boolean {
+  return isFillerLane(lane) || isShaLane(lane);
+}
+
 function cleanToken(raw: string): string {
   return raw.replace(/^[`*'"]+|[`*'".),:;]+$/g, '').trim();
 }
@@ -272,20 +283,57 @@ export function isRealLaneId(lane: string | null | undefined): boolean {
   }
 }
 
-/** Lane or branch named as a field in the head of a freeze note. */
-export function laneFromLines(lines: string[]): string | null {
-  for (const line of lines) {
-    if (!isLaneField(line)) continue;
-    const kw = line.search(/\b(?:lane|branch)\b/i);
-    const rest = line.slice(kw).replace(/^\**\s*(?:lane|branch)\b\**\s*[:：]?\**\s*/i, '');
-    const quoted = [...rest.matchAll(/`([^`]+)`/g)].map((m) => acceptLane(m[1])).find((v): v is string => !!v && isRealLaneId(v));
-    if (quoted) return quoted;
-    for (const word of rest.split(/[\s,;]+/)) {
-      const lane = acceptLane(word);
-      if (lane && isRealLaneId(lane)) return lane;
-    }
+function fieldKind(line: string): 'lane' | 'branch' | null {
+  if (!isLaneField(line)) return null;
+  const laneAt = line.search(/\blane\b/i);
+  const branchAt = line.search(/\bbranch\b/i);
+  if (laneAt >= 0 && (branchAt < 0 || laneAt <= branchAt)) return 'lane';
+  if (branchAt >= 0) return 'branch';
+  return null;
+}
+
+function fieldToken(line: string): string | null {
+  const kw = line.search(/\b(?:lane|branch)\b/i);
+  const head = line.slice(kw);
+  const rest = head.replace(/^\**\s*(?:lane|branch)\b\**\s*[:：]?\**\s*/i, '');
+  // A colon or a `wc-*` / known id. Prose ("the lane remains update…") is not a name.
+  const labelled = /[:：]/.test(head);
+  const take = (token: string | null): string | null => {
+    if (!token) return null;
+    if (labelled || isRealLaneId(token)) return token;
+    return null;
+  };
+  const quoted = [...rest.matchAll(/`([^`]+)`/g)].map((m) => take(acceptLane(m[1]))).find((v): v is string => !!v);
+  if (quoted) return quoted;
+  for (const word of rest.split(/[\s,;]+/)) {
+    const lane = take(acceptLane(word));
+    if (lane) return lane;
   }
   return null;
+}
+
+/**
+ * `Lane:` and `Branch:` fields in the head of a freeze note.
+ * A branch name does not have to be `wc-*`. Filler and a hex SHA are not lanes.
+ */
+export function noteLanes(lines: string[]): { lane: string | null; branch: string | null } {
+  let lane: string | null = null;
+  let branch: string | null = null;
+  for (const line of lines) {
+    const kind = fieldKind(line);
+    if (!kind) continue;
+    const token = fieldToken(line);
+    if (!token) continue;
+    if (kind === 'lane' && !lane) lane = token;
+    if (kind === 'branch' && !branch) branch = token;
+  }
+  return { lane, branch };
+}
+
+/** Lane line, else the branch line. The same order as {@link attributedLane}. */
+export function laneFromLines(lines: string[]): string | null {
+  const notes = noteLanes(lines);
+  return notes.lane ?? notes.branch;
 }
 
 function seatForLane(lane: string): { id: string } | null {
@@ -345,33 +393,66 @@ function releaseRequestLane(sha: string): string | null {
   }
 }
 
-/**
- * The lane recorded for this SHA: the author's checkout, else the release
- * request for this SHA. A seat name found in prose is not a record.
- */
-export function laneFromRunRecord(row: { sha: string; author_agent_id: string | null; run_id?: string | null }): string | null {
-  let authorId = row.author_agent_id;
-  if (!authorId && row.run_id) {
+interface LaneSource {
+  sha: string;
+  lane: string | null;
+  author_agent_id: string | null;
+  run_id?: string | null;
+  freeze_path?: string | null;
+}
+
+/** The run's agent when this freeze has a run, else the freeze author. */
+function runAgentId(row: { run_id?: string | null; author_agent_id: string | null } | null | undefined): string | null {
+  if (!row) return null;
+  if (row.run_id) {
     try {
       const run = getRun(row.run_id);
-      if (run.ok) authorId = run.data.agent_id;
+      if (run.ok) return run.data.agent_id;
     } catch { /* run table missing */ }
   }
-  const branch = workspaceBranch(authorId);
-  if (branch && !namesOtherSeat(branch, authorId)) return branch;
+  return row.author_agent_id;
+}
+
+/**
+ * The lane recorded for this SHA: the run's checkout, else the author's, else
+ * the release request for this SHA. A seat name found in prose is not a record.
+ */
+export function laneFromRunRecord(row: { sha: string; author_agent_id: string | null; run_id?: string | null }): string | null {
+  const agentId = runAgentId(row);
+  const branch = workspaceBranch(agentId);
+  if (branch && !namesOtherSeat(branch, agentId)) return branch;
   const requested = releaseRequestLane(row.sha);
-  if (requested && !namesOtherSeat(requested, authorId)) return requested;
+  if (requested && !namesOtherSeat(requested, agentId)) return requested;
   return null;
 }
 
-function chooseLane(
-  noteLane: string | null,
-  row: { sha: string; lane: string | null; author_agent_id: string | null; run_id?: string | null },
-): string | null {
-  const explicit = noteLane && isRealLaneId(noteLane) && !namesOtherSeat(noteLane, row.author_agent_id) ? noteLane : null;
-  if (explicit) return explicit;
-  if (row.lane && isRealLaneId(row.lane) && !isFillerLane(row.lane) && !namesOtherSeat(row.lane, row.author_agent_id)) return row.lane;
-  return laneFromRunRecord(row);
+function chooseLane(noteLane: string | null, noteBranch: string | null, row: LaneSource): string | null {
+  const agentId = runAgentId(row);
+  if (noteLane && !namesOtherSeat(noteLane, agentId)) return noteLane;
+  if (noteBranch && !namesOtherSeat(noteBranch, agentId)) return noteBranch;
+  const recorded = laneFromRunRecord(row);
+  if (recorded) return recorded;
+  // A lane already stored stays, unless it is filler, a hex SHA, or another seat.
+  const stored = row.lane;
+  if (stored && !isInvalidLane(stored) && !namesOtherSeat(stored, agentId)) return stored;
+  return null;
+}
+
+/**
+ * One lane for the board, the stale check, and Stage.
+ * The freeze `Lane:` line, else `Branch:`, else the run's lane, else a stored
+ * lane that is still a real name. A filler word, a hex SHA, and another seat's
+ * name are not a lane.
+ * Pass `noteText` to avoid a second read; pass null when there is no note.
+ */
+export function attributedLane(row: LaneSource, noteText?: string | null): string | null {
+  let text = noteText;
+  if (text === undefined && row.freeze_path) {
+    try { text = fs.readFileSync(row.freeze_path, 'utf8'); } catch { text = null; }
+  }
+  const lines = (text ?? '').replace(/\r/g, '').split('\n').slice(0, 40);
+  const notes = noteLanes(lines);
+  return chooseLane(notes.lane, notes.branch, row);
 }
 
 function deskNumbers(text: string, filename: string): number[] {
@@ -426,7 +507,7 @@ export function applyNoteLabels(sha: string, text: string, filename: string): Fr
   const labels = labelsFromFreezeNote(text, filename);
   const row = getFreeze(sha);
   if (!row) return labels;
-  const lane = chooseLane(labels.lane, row);
+  const lane = attributedLane(row, text);
   const desk = labels.bundle ? null : (labels.desk ?? row.desk);
   const fields: Partial<ReleaseFreeze> = {};
   if (lane !== row.lane) fields.lane = lane;
@@ -743,11 +824,13 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   const project = projectFor(parsed, text);
   const authorLabel = author ?? (parsed.authorCandidates[0] ? { name: parsed.authorCandidates[0] } : null);
   const existingEarly = getFreeze(sha);
-  const lane = chooseLane(parsed.lane, {
+  const notes = noteLanes(text.replace(/\r/g, '').split('\n').slice(0, 40));
+  const lane = chooseLane(notes.lane, notes.branch, {
     sha,
     lane: existingEarly?.lane ?? null,
     author_agent_id: author?.id ?? existingEarly?.author_agent_id ?? null,
     run_id: existingEarly?.run_id ?? null,
+    freeze_path: filePath,
   });
   if (laneAutomationDenied(project, authorLabel, lane)) {
     return { ok: false, error: `${path.basename(filePath)}: denied lane or agent` };
@@ -1179,13 +1262,35 @@ export function staleStageMessage(freeze: { sha: string; lane: string | null }, 
  * Stage and Promote both refuse a stale SHA, including one whose lane tip has
  * moved since the freeze was written. Marks the row stale. Admins are not exempt.
  */
+/**
+ * Write the attributed lane onto the row. A stale mark that blamed a different
+ * lane is cleared when this lane's tip is still the freeze SHA.
+ */
+export function syncAttributedLane(freeze: ReleaseFreeze, noteText?: string | null): ReleaseFreeze {
+  const lane = attributedLane(freeze, noteText);
+  let next = freeze;
+  if (lane !== freeze.lane) {
+    patch(freeze.sha, { lane });
+    next = { ...next, lane };
+  }
+  if (next.status === 'stale') {
+    const head = laneHead(next);
+    if (head && head === next.sha) {
+      patch(next.sha, { status: 'open', superseded_by: null });
+      next = { ...next, status: 'open', superseded_by: null };
+    }
+  }
+  return next;
+}
+
 export function staleStageBlock(freeze: ReleaseFreeze): string | null {
-  if (freeze.status === 'stale') return staleStageMessage(freeze, freeze.superseded_by);
-  const head = laneHead(freeze);
-  if (head && head !== freeze.sha) {
-    patch(freeze.sha, { status: 'stale', superseded_by: head });
-    if (freeze.run_id) emit('review.superseded', 'run', freeze.run_id, { sha: freeze.sha, superseded_by: head, lane: freeze.lane }, null);
-    return staleStageMessage(freeze, head);
+  const judged = syncAttributedLane(freeze);
+  if (judged.status === 'stale') return staleStageMessage(judged, judged.superseded_by);
+  const head = laneHead(judged);
+  if (head && head !== judged.sha) {
+    patch(judged.sha, { status: 'stale', superseded_by: head });
+    if (judged.run_id) emit('review.superseded', 'run', judged.run_id, { sha: judged.sha, superseded_by: head, lane: judged.lane }, null);
+    return staleStageMessage(judged, head);
   }
   return null;
 }

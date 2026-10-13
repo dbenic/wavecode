@@ -685,6 +685,12 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   const resolvedProject = resolveReleaseProject(opts.project, opts.sha);
   if (!resolvedProject.ok) return resolvedProject;
   opts = { ...opts, project: resolvedProject.project };
+  // A forwarding box does not judge a rollback. Say so before stale or behind-main
+  // can mark the freeze or answer with those errors.
+  if (opts.target === 'staging' && opts.forceRollback === true) {
+    const dest = releaseForwardTarget(opts.project);
+    if (dest) return { ok: false, error: rollbackOnDeployBox(dest.peer) };
+  }
   const behind = releaseBehindMain(opts.project, opts.sha);
   if (behind) return { ok: false, error: behind };
   let stepsJson: string | null = null;
