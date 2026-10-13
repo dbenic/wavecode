@@ -624,6 +624,119 @@ describe('releases.ts', () => {
       expect(ready.status).toBe(200);
       expect(rel.auditTrail().find((e) => e.action === 'verify')).toMatchObject({ who: 'antonio', detail: expect.stringMatching(/Ready for prod/) });
     });
+
+    it('an in-flight peer tip fetch does not repopulate the cache after invalidation', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      let releaseStale: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { releaseStale = resolve; });
+      let fetches = 0;
+      peers.setPeerFetchForTest(async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith('/staging-tip')) {
+          fetches += 1;
+          if (fetches === 1) {
+            await gate;
+            return Response.json({ sha: SHA, version: '1.0.0', lane: 'wc-old' });
+          }
+          return Response.json({ sha: SHA_B, version: '1.1.0', lane: 'wc-new' });
+        }
+        return Response.json({ events: [], last_id: 0 });
+      });
+      const inFlight = rel.resolveStagingTip('wavepulse');
+      for (let i = 0; i < 20 && fetches < 1; i++) await flush(5);
+      expect(fetches).toBe(1);
+      rel.invalidateStagingTipCache('wavepulse');
+      releaseStale();
+      const stale = await inFlight;
+      expect(stale.tip?.sha).toBe(SHA);
+      const next = await rel.resolveStagingTip('wavepulse');
+      expect(next.tip?.sha).toBe(SHA_B);
+      expect(fetches).toBe(2);
+    });
+
+    it('a crashed requested row expires on startup and Stage works again', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      peers.setPeerFetchForTest(fakeDeployBox().fetchImpl);
+      const stuck = '01CRASHEDREQUESTSTUCK00001';
+      const young = '01CRASHEDREQUESTYOUNG00001';
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, project, sha, target, origin, status, peer_request_id, created_at, updated_at)
+         VALUES (?, 'wavepulse', ?, 'staging', 'local', 'requested', NULL, datetime('now', '-3 minutes'), datetime('now', '-3 minutes'))`,
+      ).run(stuck, SHA);
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, project, sha, target, origin, status, peer_request_id, created_at, updated_at)
+         VALUES (?, 'other', ?, 'staging', 'local', 'requested', NULL, datetime('now', '-30 seconds'), datetime('now', '-30 seconds'))`,
+      ).run(young, SHA_B);
+      rel.startReleasePollers();
+      expect(rel.getRelease(stuck)).toMatchObject({ status: 'failed', error: 'expired' });
+      expect(rel.getRelease(young)?.status).toBe('requested');
+      const again = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
+      expect(again.ok).toBe(true);
+    });
+
+    it('the poller expires a sent staging row with no progress and keeps one that is moving', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      peers.setPeerFetchForTest(async () => Response.json({ events: [], last_id: 0 }));
+      const stuck = '01SENTSTUCKNOLINE000000001';
+      const moving = '01SENTMOVINGBUILD000000001';
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, project, sha, target, origin, peer, status, peer_request_id, created_at, updated_at)
+         VALUES (?, 'wavepulse', ?, 'staging', 'local', 'deploy', 'sent', 'Rstuck', datetime('now', '-16 minutes'), datetime('now', '-16 minutes'))`,
+      ).run(stuck, SHA);
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, project, sha, target, origin, peer, status, peer_request_id, progress_phase, progress_status, created_at, updated_at)
+         VALUES (?, 'wavepulse', ?, 'staging', 'local', 'deploy', 'sent', 'Rmove', 'build', 'ok', datetime('now', '-16 minutes'), datetime('now', '-16 minutes'))`,
+      ).run(moving, SHA_B);
+      rel.ensureReleasePoller('deploy');
+      for (let i = 0; i < 20 && rel.getRelease(stuck)?.status !== 'failed'; i++) await flush(10);
+      expect(rel.getRelease(stuck)).toMatchObject({ status: 'failed', error: 'expired' });
+      expect(rel.getRelease(moving)?.status).toBe('sent');
+      const stage = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
+      expect(stage.ok).toBe(false);
+      if (!stage.ok) expect(stage.error).toMatch(new RegExp(`already open \\(${moving}\\)`));
+    });
+
+    it('two overlapping Stage calls insert one staging request', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      const box = fakeDeployBox();
+      let releaseTips: () => void = () => {};
+      const tipGate = new Promise<void>((resolve) => { releaseTips = resolve; });
+      let tipWaits = 0;
+      let releasePost: () => void = () => {};
+      const postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+      let posts = 0;
+      peers.setPeerFetchForTest(async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === '/api/releases/staging-tip') {
+          tipWaits += 1;
+          await tipGate;
+        }
+        if (url.pathname === '/api/releases' && init?.method === 'POST') {
+          posts += 1;
+          if (posts === 1) await postGate;
+        }
+        return box.fetchImpl(input, init);
+      });
+      const first = rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
+      const second = rel.requestRelease({ project: 'wavepulse', sha: SHA_B, target: 'staging', actorName: 'denis' });
+      for (let i = 0; i < 40 && tipWaits < 2; i++) await flush(5);
+      expect(tipWaits).toBe(2);
+      releaseTips();
+      for (let i = 0; i < 40 && posts < 1; i++) await flush(5);
+      const count = () => (db.getDb().prepare('SELECT COUNT(*) AS n FROM release_requests').get() as { n: number }).n;
+      expect(count()).toBe(1);
+      releasePost();
+      const [a, b] = await Promise.all([first, second]);
+      expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+      expect(count()).toBe(1);
+      const refused = a.ok ? b : a;
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toMatch(/already open/);
+    });
   });
 
   describe('deploy side (the box with the deploy agent)', () => {

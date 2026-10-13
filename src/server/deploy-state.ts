@@ -413,10 +413,10 @@ function blankTips(): ProjectTips {
   return { staging: emptyTip(), prod: emptyTip(), stagingKnown: false, source: 'local' };
 }
 
-async function tipsFor(project: string): Promise<ProjectTips> {
+async function tipsFor(project: string, freshTip = false): Promise<ProjectTips> {
   const out = blankTips();
   try {
-    const resolved = await resolveStagingTip(project);
+    const resolved = await resolveStagingTip(project, freshTip ? { fresh: true } : undefined);
     out.source = resolved.source;
     if (resolved.state === 'unknown') {
       out.stagingKnown = false;
@@ -456,14 +456,14 @@ async function stageBlockFor(freeze: ReleaseFreeze, _facts: DeriveFacts, pair: P
   } catch { return null; }
 }
 
-async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<string, ProjectTips>): Promise<DeriveFacts> {
+async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<string, ProjectTips>, freshTip = false): Promise<DeriveFacts> {
   const project = freeze.project;
   let pair = blankTips();
   if (project) {
     const hit = tips.get(project);
     if (hit) pair = hit;
     else {
-      pair = await tipsFor(project);
+      pair = await tipsFor(project, freshTip);
       tips.set(project, pair);
     }
   }
@@ -573,7 +573,8 @@ function pingBehindMain(freeze: ReleaseFreeze, facts: DeriveFacts): void {
 }
 
 /** Recompute every freeze. Returns the number of cards written. */
-export async function reconcileDeployStates(now = new Date()): Promise<number> {
+export async function reconcileDeployStates(now = new Date(), opts?: { freshTip?: boolean }): Promise<number> {
+  const freshTip = opts?.freshTip === true;
   ensureDeployStateTable();
   let freezes: ReleaseFreeze[] = [];
   try { freezes = listFreezes(); } catch { freezes = []; }
@@ -592,9 +593,9 @@ export async function reconcileDeployStates(now = new Date()): Promise<number> {
   for (const freeze of freezes) {
     seen.add(freeze.sha);
     const project = freeze.project;
-    if (project && !tips.has(project)) tips.set(project, await tipsFor(project));
+    if (project && !tips.has(project)) tips.set(project, await tipsFor(project, freshTip));
     const pair = project ? tips.get(project)! : blankTips();
-    const facts = await factsFor(freeze, freezes, tips);
+    const facts = await factsFor(freeze, freezes, tips, freshTip);
     const state = deriveDeployState(facts);
     backfillRunReviewStatus(freeze);
     pingBehindMain(freeze, facts);
@@ -648,7 +649,7 @@ export async function reconcileDeployStates(now = new Date()): Promise<number> {
   }
   try {
     for (const project of Object.keys(getConfig().projects ?? {})) {
-      if (!tips.has(project)) tips.set(project, await tipsFor(project));
+      if (!tips.has(project)) tips.set(project, await tipsFor(project, freshTip));
     }
   } catch { /* config unavailable: keep the tips already resolved for these freezes */ }
   rememberTips(tips);
@@ -684,18 +685,26 @@ function maybeAlertStale(now = Date.now()): void {
 
 let running = false;
 let again = false;
+/** A deploy or stage reason arrived. The next pass must not read the cached tip. */
+let freshArmed = false;
 let debounce: ReturnType<typeof setTimeout> | null = null;
 let interval: ReturnType<typeof setInterval> | null = null;
 let hooked = false;
 let started = false;
 
+function armFresh(reason: string): void {
+  if (reason === 'deploy' || reason === 'stage') freshArmed = true;
+}
+
 async function runOnce(reason: string): Promise<void> {
-  if (running) { again = true; return; }
+  if (running) { again = true; armFresh(reason); return; }
   running = true;
+  const freshTip = freshArmed || reason === 'deploy' || reason === 'stage';
+  freshArmed = false;
   try {
     maybeAlertStale();
     try {
-      await reconcileDeployStates();
+      await reconcileDeployStates(new Date(), { freshTip });
     } catch (e) {
       logger.warn({ reason, error: (e as Error).message }, 'Deploy reconcile failed');
       maybeAlertStale();
@@ -723,6 +732,7 @@ async function runOnce(reason: string): Promise<void> {
  */
 export function scheduleReconcile(reason: string): void {
   if (!started) return;
+  armFresh(reason);
   if (running || debounce) {
     again = true;
     return;
@@ -780,6 +790,7 @@ export function resetDeployReconcilerForTest(): void {
   hooked = false;
   running = false;
   again = false;
+  freshArmed = false;
   alertedThisGap = false;
   reconciledTips = new Map();
 }

@@ -20,7 +20,7 @@ vi.mock('./config.js', () => ({
 }));
 
 import * as db from './db.js';
-import { ensureDeployStateTable, reconcileDeployStates, resetDeployReconcilerForTest, reviewBoard, scheduleReconcile, startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
+import { ensureDeployStateTable, lastReconciledAt, reconcileDeployStates, resetDeployReconcilerForTest, reviewBoard, scheduleReconcile, startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import * as gitMemo from './git-memo.js';
 import { behindMainAlert, MAIN_PING } from './lane-main.js';
 import { setPeerFetchForTest } from './peers.js';
@@ -430,6 +430,36 @@ describe('deploy reconciler review status and behind-main pings', () => {
       scheduleReconcile('deploy');
       for (let i = 0; i < 40 && count() < base + 2; i++) await new Promise((r) => setTimeout(r, 50));
       expect(count()).toBeGreaterThanOrEqual(base + 2);
+    } finally {
+      stopDeployReconciler();
+      resetDeployReconcilerForTest();
+    }
+  });
+
+  it('a deploy reconcile reads a fresh peer tip instead of the cache', async () => {
+    projects.wave.release_peer = 'deploy/fable';
+    peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+    let tip = mainSha;
+    let fetches = 0;
+    setPeerFetchForTest(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/staging-tip')) {
+        fetches += 1;
+        return Response.json({ sha: tip, version: '1.4.0', lane: 'wc-tip' });
+      }
+      return Response.json({ events: [], last_id: 0 });
+    });
+    expect((await resolveStagingTip('wave')).tip?.sha).toBe(mainSha);
+    tip = laneSha;
+    try {
+      startDeployReconciler();
+      for (let i = 0; i < 40 && !lastReconciledAt(); i++) await new Promise((r) => setTimeout(r, 25));
+      const afterStartup = fetches;
+      scheduleReconcile('deploy');
+      for (let i = 0; i < 40 && fetches <= afterStartup; i++) await new Promise((r) => setTimeout(r, 50));
+      const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
+      expect(fetches).toBeGreaterThan(afterStartup);
+      expect(board.release.staging.sha).toBe(laneSha);
     } finally {
       stopDeployReconciler();
       resetDeployReconcilerForTest();
