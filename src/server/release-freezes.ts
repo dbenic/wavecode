@@ -23,7 +23,6 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
-import { globToRe } from './developers.js';
 import {
   finishRun,
   getAgent,
