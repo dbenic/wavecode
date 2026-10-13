@@ -22,7 +22,7 @@ function isFullSha(text: string): boolean {
 }
 
 function isShaRange(text: string): boolean {
-  const parts = text.split('..');
+  const parts = text.split(/\.{2,3}/);
   return parts.length === 2 && parts.every((part) => isFullSha(part));
 }
 

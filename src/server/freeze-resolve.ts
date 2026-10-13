@@ -16,6 +16,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { getDb } from './db.js';
+import { gitAncestorSync, gitText as gitTextAsync } from './git-memo.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { mainSpec, projectRepo } from './lane-main.js';
@@ -49,12 +50,28 @@ function gitText(repo: string, args: string[]): string | null {
   }
 }
 
-/** True when `sha` is an ancestor of `ref`. Null when git cannot say. A commit contains itself. */
+/**
+ * True when `sha` is an ancestor of `ref`. Null when git cannot say. A commit
+ * contains itself. Two full SHAs are answered from the shared ancestry memo
+ * (an immutable fact); a ref name is asked every time.
+ */
 function containedIn(repo: string, sha: string, ref: string): boolean | null {
+  if (/^[0-9a-f]{40}$/i.test(sha) && /^[0-9a-f]{40}$/i.test(ref)) return gitAncestorSync(repo, sha, ref);
   return gitOk(repo, ['merge-base', '--is-ancestor', sha, ref]);
 }
 
-function onMain(repo: string, sha: string): boolean | null {
+/** The upstream main as a ref and its SHA, resolved once per pass so every row shares a memoisable pair. */
+interface Upstream { ref: 'origin/main' | 'main'; sha: string }
+
+function resolveUpstream(repo: string): Upstream | null {
+  const ref = upstreamRef(repo);
+  if (!ref) return null;
+  const sha = gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  return sha && /^[0-9a-f]{40}$/i.test(sha) ? { ref, sha: sha.toLowerCase() } : null;
+}
+
+function onMain(repo: string, sha: string, upstream: Upstream | null): boolean | null {
+  if (upstream) return containedIn(repo, sha, upstream.sha);
   for (const ref of ['origin/main', 'main']) {
     const hit = containedIn(repo, sha, ref);
     if (hit === true) return true;
@@ -72,20 +89,18 @@ function upstreamRef(repo: string): 'origin/main' | 'main' | null {
   return null;
 }
 
-/**
- * Main commits that carry the same patch as `sha`.
- * Empty when `git cherry` still shows a `+` (work that is not on main).
- * Null when git cannot say — callers leave the freeze open.
- */
-function mainEquivalents(repo: string, sha: string): string[] | null {
-  const upstream = upstreamRef(repo);
-  if (!upstream) return null;
-  const out = gitText(repo, ['cherry', upstream, sha]);
-  if (out == null) return null;
+/** (upstream SHA, lane SHA) → main commits with the same patch. Both are SHAs, so the answer never changes. */
+const equivalentsMemo = new Map<string, string[] | null>();
+
+export function resetEquivalentsMemoForTest(): void {
+  equivalentsMemo.clear();
+}
+
+function parseCherry(out: string, sha: string, repo: string, upstream: Upstream, marked: string | null): string[] | null {
   const lines = out.split('\n').map((line) => line.trim()).filter(Boolean);
   if (lines.some((line) => line.startsWith('+'))) return [];
   if (lines.length === 0) {
-    const hit = containedIn(repo, sha, upstream);
+    const hit = containedIn(repo, sha, upstream.sha);
     if (hit === true) return [sha.toLowerCase()];
     return hit === false ? [] : null;
   }
@@ -95,19 +110,42 @@ function mainEquivalents(repo: string, sha: string): string[] | null {
     if (!match?.[1]) return null;
     laneShas.push(match[1].toLowerCase());
   }
-  const marked = gitText(repo, ['rev-list', '--cherry-mark', `${upstream}...${sha}`]);
   if (marked == null) return null;
-  const onMain: string[] = [];
+  const onMainIds: string[] = [];
   for (const line of marked.split('\n').map((item) => item.trim()).filter(Boolean)) {
     if (!line.startsWith('=')) continue;
     const id = line.slice(1).toLowerCase();
     if (!/^[0-9a-f]{40}$/.test(id) || laneShas.includes(id)) continue;
-    const hit = containedIn(repo, id, upstream);
+    const hit = containedIn(repo, id, upstream.sha);
     if (hit === null) return null;
-    if (hit) onMain.push(id);
+    if (hit) onMainIds.push(id);
   }
-  if (onMain.length !== laneShas.length) return null;
-  return onMain;
+  if (onMainIds.length !== laneShas.length) return null;
+  return onMainIds;
+}
+
+/**
+ * Main commits that carry the same patch as `sha`, computed off the event
+ * loop (`git cherry` walks history) and remembered per (upstream SHA, SHA).
+ * Empty when `git cherry` still shows a `+` (work that is not on main).
+ * Null when git cannot say — callers leave the freeze open.
+ */
+async function mainEquivalentsAsync(repo: string, sha: string, upstream: Upstream): Promise<string[] | null> {
+  const key = `${repo}\0${upstream.sha}\0${sha.toLowerCase()}`;
+  if (equivalentsMemo.has(key)) return equivalentsMemo.get(key) ?? null;
+  const out = await gitTextAsync(repo, ['cherry', upstream.sha, sha.toLowerCase()]);
+  if (out == null) return null;
+  const needsMarks = out.split('\n').some((line) => line.trim().startsWith('-'));
+  const marked = needsMarks ? await gitTextAsync(repo, ['rev-list', '--cherry-mark', `${upstream.sha}...${sha.toLowerCase()}`]) : null;
+  const result = parseCherry(out, sha, repo, upstream, marked);
+  if (result !== null) equivalentsMemo.set(key, result);
+  return result;
+}
+
+/** What the last reconcile pass learned for this pair; null until a pass asked (callers then stay conservative). */
+function mainEquivalentsCached(repo: string, sha: string, upstream: Upstream | null): string[] | null {
+  if (!upstream) return null;
+  return equivalentsMemo.get(`${repo}\0${upstream.sha}\0${sha.toLowerCase()}`) ?? null;
 }
 
 /**
@@ -147,7 +185,7 @@ export function isMergedNotDeployed(project: string | null, sha: string, tip: De
   if (tip.state !== 'known' || !tip.sha) return false;
   const repo = projectRepo(project);
   if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return false;
-  const equivalents = mainEquivalents(repo, sha);
+  const equivalents = mainEquivalentsCached(repo, sha, resolveUpstream(repo));
   if (!equivalents || equivalents.length === 0) return false;
   const hits = equivalents.map((id) => containedIn(repo, id, tip.sha!));
   if (hits.some((hit) => hit == null)) return false;
@@ -191,6 +229,7 @@ export async function autoResolveObsoleteFreezes(): Promise<number> {
     return 0;
   }
   const tips = await deployTipsForProjects(rows.map((freeze) => freeze.project));
+  const upstreams = new Map<string, Upstream | null>();
   let n = 0;
   for (const freeze of rows) {
     const repo = projectRepo(freeze.project);
@@ -199,13 +238,15 @@ export async function autoResolveObsoleteFreezes(): Promise<number> {
     const tipSha = tip?.state === 'known' ? tip.sha : null;
     // Missing or unreadable tip: fail closed. Never close, and never use a local row in place of the peer.
     if (!tipSha) continue;
-    const shipped = onMain(repo, freeze.sha) === true && containedIn(repo, freeze.sha, tipSha) === true;
+    if (!upstreams.has(repo)) upstreams.set(repo, resolveUpstream(repo));
+    const upstream = upstreams.get(repo) ?? null;
+    const shipped = onMain(repo, freeze.sha, upstream) === true && containedIn(repo, freeze.sha, tipSha) === true;
     if (shipped) {
       closeFreeze(freeze, 'merged', 'shipped');
       n++;
       continue;
     }
-    const equivalents = mainEquivalents(repo, freeze.sha);
+    const equivalents = upstream ? await mainEquivalentsAsync(repo, freeze.sha, upstream) : null;
     const deployed = !!equivalents?.length && equivalents.every((id) => containedIn(repo, id, tipSha) === true);
     if (deployed && equivalents) {
       closeFreeze(freeze, 'merged', equivalents[0] ?? 'shipped');

@@ -43,8 +43,19 @@ function isAncestor(repo: string, ancestor: string, descendant: string): boolean
   return gitAncestorSync(repo, ancestor, descendant);
 }
 
-/** Best-effort refresh. A missing remote or a failed fetch leaves the refs we already have. */
-function fetchOrigin(repo: string): void {
+/** One fetch per repo per minute: a reconcile pass asks about every freeze, not every freeze about origin. */
+const FETCH_MEMO_MS = 60_000;
+const lastFetchAt = new Map<string, number>();
+
+export function resetFetchMemoForTest(): void {
+  lastFetchAt.clear();
+}
+
+/** Best-effort refresh. A missing remote or a failed fetch leaves the refs we already have. Exported for tests. */
+export function fetchOrigin(repo: string): void {
+  const at = lastFetchAt.get(repo);
+  if (at !== undefined && Date.now() - at < FETCH_MEMO_MS) return;
+  lastFetchAt.set(repo, Date.now());
   try {
     execFileSync('git', ['-C', repo, 'fetch', '--no-tags', 'origin'], { timeout: 4000, stdio: 'ignore' });
   } catch { /* offline or no remote */ }

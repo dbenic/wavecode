@@ -14,6 +14,7 @@ import { pickReviewer } from './reviewer-ladder.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { latestPipelineNote } from './lane-pipeline.js';
 import logger from './logger.js';
+import { recordJob } from './perf-monitor.js';
 import {
   DEFAULT_BEFORE_FREEZE_TIP, behindMainLine, fullFailFlag, laneStatusLine, needsGreenQuick, promoteBlockReason,
   QUICK_CHECK_RUNNING, type CheckState, type GateView,
@@ -161,7 +162,12 @@ function yieldTurn(): Promise<void> {
  * per refresh. Git facts are cached by (lane tip, main tip).
  */
 export async function loadDevLanes(): Promise<DevLane[]> {
-  return withRefMemoAsync(loadDevLanesPass);
+  const started = Date.now();
+  try {
+    return await withRefMemoAsync(loadDevLanesPass);
+  } finally {
+    recordJob('lane_board', Date.now() - started);
+  }
 }
 
 async function loadDevLanesPass(): Promise<DevLane[]> {

@@ -25,7 +25,8 @@ import { getDb } from './db.js';
 import { emit } from './event-bus.js';
 import { gitAncestor, gitRun, gitText } from './git-memo.js';
 import logger from './logger.js';
-import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef } from './lane-main.js';
+import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef, withRefMemoAsync } from './lane-main.js';
+import { recordJob } from './perf-monitor.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { getConfig } from './config.js';
@@ -616,6 +617,16 @@ function pingBehindMain(freeze: ReleaseFreeze, facts: DeriveFacts): void {
 
 /** Recompute every freeze. Returns the number of cards written. */
 export async function reconcileDeployStates(now = new Date(), opts?: { freshTip?: boolean }): Promise<number> {
+  // one pass, one main lookup per repo: every row asks commitsBehind, which resolves origin/main
+  const started = Date.now();
+  try {
+    return await withRefMemoAsync(() => reconcileDeployStatesPass(now, opts));
+  } finally {
+    recordJob('deploy_reconcile', Date.now() - started);
+  }
+}
+
+async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean }): Promise<number> {
   const freshTip = opts?.freshTip === true;
   ensureDeployStateTable();
   let freezes: ReleaseFreeze[] = [];
@@ -767,7 +778,9 @@ async function runOnce(reason: string): Promise<void> {
     }
     try {
       const overview = await import('./overview.js');
+      const t0 = Date.now();
       await overview.reconcileOverview();
+      recordJob('overview_reconcile', Date.now() - t0);
     } catch (e) {
       logger.warn({ reason, error: (e as Error).message }, 'Overview reconcile skipped');
     }

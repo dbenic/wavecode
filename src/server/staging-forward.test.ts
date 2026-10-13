@@ -209,3 +209,32 @@ describe('forward-only staging', () => {
     expect(listReleases({ sha: newer, target: 'production', limit: 5 })).toHaveLength(0);
   });
 });
+
+describe('fetchOrigin memo', () => {
+  it('fetches a repo at most once a minute, so a pass over many freezes asks origin once', async () => {
+    const mod = await import('./staging-forward.js');
+    mod.resetFetchMemoForTest();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-fetchmemo-'));
+    const upstream = path.join(base, 'upstream');
+    const clone = path.join(base, 'clone');
+    try {
+      fs.mkdirSync(upstream);
+      git(upstream, 'init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(upstream, 'a'), '1');
+      git(upstream, 'add', '.'); git(upstream, 'commit', '-q', '-m', 'one');
+      execFileSync('git', ['clone', '-q', upstream, clone], { env });
+      const first = git(upstream, 'rev-parse', 'HEAD');
+      mod.fetchOrigin(clone);
+      fs.writeFileSync(path.join(upstream, 'a'), '2');
+      git(upstream, 'commit', '-q', '-am', 'two');
+      const second = git(upstream, 'rev-parse', 'HEAD');
+      mod.fetchOrigin(clone); // within the minute: no fetch
+      expect(git(clone, 'rev-parse', 'origin/main')).toBe(first);
+      mod.resetFetchMemoForTest();
+      mod.fetchOrigin(clone); // a new minute: fetched
+      expect(git(clone, 'rev-parse', 'origin/main')).toBe(second);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
