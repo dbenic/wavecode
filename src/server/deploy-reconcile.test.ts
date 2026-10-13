@@ -20,11 +20,12 @@ vi.mock('./config.js', () => ({
 }));
 
 import * as db from './db.js';
-import { reconcileDeployStates, reviewBoard } from './deploy-state.js';
+import { ensureDeployStateTable, reconcileDeployStates, reviewBoard } from './deploy-state.js';
+import * as gitMemo from './git-memo.js';
 import { behindMainAlert, MAIN_PING } from './lane-main.js';
 import { setPeerFetchForTest } from './peers.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
-import { resetStagingTipCacheForTest } from './releases.js';
+import { ensureReleaseTables, resetStagingTipCacheForTest } from './releases.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 
@@ -267,5 +268,86 @@ describe('deploy reconciler review status and behind-main pings', () => {
     expect(failed.in_staging).toBeNull();
     expect(failed.state).toBe('unknown');
     expect((await reviewBoard({ name: 'antonio', role: 'developer' }, [])).release.staging.sha).toBeNull();
+  });
+
+  it('marks only the current staging tip on_staging and supersedes an older contained SHA', async () => {
+    ensureReleaseTables();
+    git(repo, 'checkout', '-q', '-b', 'wc-old');
+    fs.writeFileSync(path.join(repo, 'old.txt'), 'old');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'old');
+    const oldSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', '-b', 'wc-tip');
+    fs.writeFileSync(path.join(repo, 'tip.txt'), 'tip');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'tip');
+    const tipSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'main');
+    releases.staging_health_command = ['printf', '%s', tipSha];
+    releases.prod_health_command = ['printf', '%s', mainSha];
+    insertFreeze(oldSha, { verdict: 'pass', lane: 'wc-old', createdAt: '2026-01-01 00:00:00' });
+    insertFreeze(tipSha, { verdict: 'pass', lane: 'wc-tip', createdAt: '2026-01-02 00:00:00' });
+
+    await reconcileDeployStates();
+
+    expect(stateOf(tipSha)).toBe('on_staging');
+    expect(stateOf(oldSha)).toBe('superseded');
+    const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    const tip = board.cards.find((card) => card.sha === tipSha);
+    const old = board.cards.find((card) => card.sha === oldSha);
+    expect(tip).toMatchObject({ status: 'On staging', history: true, needs_you: false });
+    expect(old).toMatchObject({ status: 'Superseded', history: true, needs_you: false });
+  });
+
+  it('serves the card from the stored item state and does not scan git', async () => {
+    ensureDeployStateTable();
+    const readySha = 'a'.repeat(40);
+    const lockedSha = 'b'.repeat(40);
+    const unknownSha = 'c'.repeat(40);
+    const readyRun = pendingRun(alesId);
+    const lockedRun = pendingRun(alesId);
+    const unknownRun = pendingRun(alesId);
+    insertFreeze(readySha, { runId: readyRun, verdict: 'pass', lane: 'wc-canary-v4' });
+    insertFreeze(lockedSha, { runId: lockedRun, verdict: 'pass', lane: 'wc-canary-locked' });
+    insertFreeze(unknownSha, { runId: unknownRun, verdict: 'pass', lane: 'wc-canary-unknown' });
+    const write = (sha: string, state: string, stageBlock: string | null, lane: string) => {
+      db.getDb().prepare(
+        `INSERT INTO deploy_card_states (
+           sha, state, merged_main, in_staging, in_prod, behind_main, superseded, verdict, lane, stage_block, last_reconciled_at
+         ) VALUES (?, ?, 1, 0, 0, 0, 0, 'pass', ?, ?, '2026-10-13T00:00:00.000Z')`,
+      ).run(sha, state, lane, stageBlock);
+    };
+    write(readySha, 'ready_to_stage', null, 'wc-canary-v4');
+    write(lockedSha, 'ready_to_stage', 'would roll staging back', 'wc-canary-locked');
+
+    const ancestor = vi.spyOn(gitMemo, 'gitAncestor');
+    const text = vi.spyOn(gitMemo, 'gitText');
+    const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    expect(ancestor).not.toHaveBeenCalled();
+    expect(text).not.toHaveBeenCalled();
+    ancestor.mockRestore();
+    text.mockRestore();
+
+    const readyItem = board.items.find((item) => item.freeze?.sha === readySha);
+    const readyCard = board.cards.find((card) => card.sha === readySha);
+    expect(readyItem?.deploy?.state).toBe('ready_to_stage');
+    expect(readyItem?.deploy?.action).toBe('stage');
+    expect(readyItem?.deploy?.action_lock).toBeNull();
+    expect(readyCard).toMatchObject({ status: 'Ready to stage', history: false });
+    expect(readyCard?.button).toMatchObject({ kind: 'stage', label: 'Stage' });
+
+    const lockedItem = board.items.find((item) => item.freeze?.sha === lockedSha);
+    const lockedCard = board.cards.find((card) => card.sha === lockedSha);
+    expect(lockedItem?.deploy?.state).toBe('ready_to_stage');
+    expect(lockedItem?.stage_block).toMatch(/would roll staging back/);
+    expect(lockedCard?.status).toBe('Ready to stage');
+    expect(lockedCard?.button).toBeNull();
+
+    const unknownItem = board.items.find((item) => item.freeze?.sha === unknownSha);
+    const unknownCard = board.cards.find((card) => card.sha === unknownSha);
+    expect(unknownItem?.deploy).toMatchObject({ state: 'unknown', unknown_reason: 'Not reconciled yet' });
+    expect(unknownCard).toMatchObject({ status: 'Unknown', action: 'Not reconciled yet' });
+    expect(unknownCard?.button).toBeNull();
+    expect(board.cards.some((card) => card.status === 'Working')).toBe(false);
   });
 });

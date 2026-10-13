@@ -607,6 +607,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     emit('release.requested', 'release', id, { target: opts.target, sha: opts.sha, project: opts.project, lane: opts.lane ?? null, desk: opts.desk ?? null, peer: peerName, peer_request_id: remote.data.id, requested_by: opts.actorName, run_id: opts.runId ?? null });
     if (rollbackReason) recordRollback(sent, opts.actorName, rollbackReason);
     ensureReleasePoller(peerName);
+    if (opts.target === 'staging') reconcileAfterDeploy();
     return { ok: true, data: sent };
   }
 
@@ -615,6 +616,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const row = insert({ ...base, origin: 'local', peer: null, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
     const handed = handToDeployAgent(row);
     if (handed.ok && rollbackReason) recordRollback(handed.data, opts.actorName, rollbackReason);
+    if (handed.ok && opts.target === 'staging') reconcileAfterDeploy();
     return handed;
   }
   return { ok: false, error: `Project '${opts.project}' has no release_peer and this box has no releases.deploy_agent` };
@@ -1035,8 +1037,14 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     rejectStaleStaging(done.project);
     try { alertLanesPastStaging(done.project, done.deployed_sha || done.sha); } catch { /* alert is best-effort */ }
     fireStagingDeployed(done.id);
+    reconcileAfterDeploy();
   }
   return { ok: true, data: done };
+}
+
+/** The board must not wait for the 90s pass after a stage or deploy finishes. */
+function reconcileAfterDeploy(): void {
+  void import('./deploy-state.js').then((m) => m.scheduleReconcile('deploy')).catch(() => {});
 }
 
 function announce(r: ReleaseRequest): void {
@@ -1274,6 +1282,10 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
     version: done.version, note: done.report, error: done.error, origin: 'local', peer, peer_request_id: r.peer_request_id, requested_by: done.requested_by, run_id: done.run_id,
   }, null);
   announce(done);
+  if (done.target === 'staging' && done.status === 'deployed') {
+    fireStagingDeployed(done.id);
+    reconcileAfterDeploy();
+  }
   logger.info({ releaseId: done.id, peer, status: done.status, version: done.version }, 'Release outcome mirrored from peer');
 }
 

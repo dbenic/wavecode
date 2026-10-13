@@ -23,12 +23,15 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
+import { globToRe } from './developers.js';
 import {
   finishRun,
   getAgent,
   getDb,
+  getRun,
   insertRun,
   insertTask,
+  listAgents,
   resolveAgent,
   updateRunSummary,
   updateTaskStatus,
@@ -209,6 +212,7 @@ const LANE_FILLER = new Set([
   'is', 'from', 'remains', 'remain', 'update', 'updated', 'the', 'a', 'an', 'and', 'or',
   'of', 'to', 'for', 'on', 'in', 'at', 'by', 'with', 'still', 'now', 'currently',
   'was', 'were', 'be', 'been', 'this', 'that', 'it', 'its', 'not', 'no', 'yes', 'as', 'into', 'onto',
+  'changes', 'source', 'separately', 'held', 'also', 'commits', 'test-path',
 ]);
 
 export function isFillerLane(lane: string | null | undefined): boolean {
@@ -224,28 +228,151 @@ function acceptLane(token: string): string | null {
   const t = cleanToken(token);
   if (!t || t.length > 80) return null;
   if (LANE_FILLER.has(t.toLowerCase())) return null;
-  if (/^(origin\/main|main)$/i.test(t)) return null;
+  if (/^(origin\/main|main|head)$/i.test(t)) return null;
   if (/^[0-9a-f]{7,40}$/i.test(t)) return null;
   if (!/^[\w./~+-]+$/.test(t)) return null;
   return t;
 }
 
-/** Lane or branch named in the head of a freeze note. Filler words are not lanes. */
+/** A lane field, not a sentence that happens to contain the word. */
+function isLaneField(line: string): boolean {
+  return /^\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:the\s+)?(?:lane|branch)\b/i.test(line);
+}
+
+/**
+ * `wc-*`, or a lane the config or a registered seat already names.
+ * Filler words and prose tokens are not lanes.
+ */
+export function isRealLaneId(lane: string | null | undefined): boolean {
+  if (!lane) return false;
+  const t = lane.trim();
+  if (!t || t.length > 80 || isFillerLane(t)) return false;
+  if (/^(origin\/main|main|head)$/i.test(t)) return false;
+  if (/^wc-/i.test(t)) return true;
+  const want = t.toLowerCase();
+  try {
+    const cfg = getConfig();
+    for (const project of Object.values(cfg.projects ?? {})) {
+      const glob = project.lane_glob || 'wc-*';
+      try { if (globToRe(glob).test(t)) return true; } catch { /* bad glob */ }
+    }
+    for (const dev of cfg.developers ?? []) {
+      for (const glob of dev.lanes ?? []) {
+        try { if (globToRe(glob).test(t)) return true; } catch { /* bad glob */ }
+      }
+    }
+  } catch { /* config not loaded */ }
+  try {
+    return listAgents().some((agent) =>
+      agent.tmux_session.toLowerCase() === want
+      || agent.name.toLowerCase() === want
+      || agent.alias?.toLowerCase() === want,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Lane or branch named as a field in the head of a freeze note. */
 export function laneFromLines(lines: string[]): string | null {
   for (const line of lines) {
+    if (!isLaneField(line)) continue;
     const kw = line.search(/\b(?:lane|branch)\b/i);
-    if (kw < 0) continue;
     const rest = line.slice(kw).replace(/^\**\s*(?:lane|branch)\b\**\s*[:：]?\**\s*/i, '');
-    const quoted = [...rest.matchAll(/`([^`]+)`/g)].map((m) => acceptLane(m[1])).find((v): v is string => !!v);
+    const quoted = [...rest.matchAll(/`([^`]+)`/g)].map((m) => acceptLane(m[1])).find((v): v is string => !!v && isRealLaneId(v));
     if (quoted) return quoted;
-    const labelled = /(?:lane|branch)\b\**\s*[:：]/i.test(line.slice(kw));
     for (const word of rest.split(/[\s,;]+/)) {
       const lane = acceptLane(word);
-      if (!lane) continue;
-      if (/^wc-/i.test(lane) || lane.includes('/') || labelled) return lane;
+      if (lane && isRealLaneId(lane)) return lane;
     }
   }
   return null;
+}
+
+function seatForLane(lane: string): { id: string } | null {
+  const bare = lane.replace(/^wc-/i, '');
+  try {
+    const agent = listAgents().find((a) =>
+      a.tmux_session.toLowerCase() === lane.toLowerCase()
+      || a.name.toLowerCase() === lane.toLowerCase()
+      || a.name.toLowerCase() === bare.toLowerCase()
+      || a.alias?.toLowerCase() === bare.toLowerCase()
+      || a.alias?.toLowerCase() === lane.toLowerCase(),
+    );
+    return agent ? { id: agent.id } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The lane string is some other seat's tmux or name, not this author. */
+function namesOtherSeat(lane: string, authorId: string | null): boolean {
+  const seat = seatForLane(lane);
+  if (!seat) return false;
+  return seat.id !== authorId;
+}
+
+/** A branch the run actually has checked out, or a lane already stored on a release. Not a note token. */
+function isRecordLane(name: string): boolean {
+  const t = name.trim();
+  if (!t || t.length > 80 || isFillerLane(t)) return false;
+  if (/^(origin\/main|main|head)$/i.test(t)) return false;
+  if (/^[0-9a-f]{7,40}$/i.test(t)) return false;
+  return /^[\w./~+-]+$/.test(t);
+}
+
+function workspaceBranch(agentId: string | null): string | null {
+  if (!agentId) return null;
+  const agent = getAgent(agentId);
+  if (!agent.ok || !agent.data.workspace || !fs.existsSync(agent.data.workspace)) return null;
+  try {
+    const name = execFileSync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], {
+      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return name && isRecordLane(name) ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+function releaseRequestLane(sha: string): string | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT lane FROM release_requests WHERE lower(sha) = ? AND lane IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
+    ).get(sha.toLowerCase()) as { lane: string } | undefined;
+    return row?.lane && isRecordLane(row.lane) ? row.lane : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The lane recorded for this SHA: the author's checkout, else the release
+ * request for this SHA. A seat name found in prose is not a record.
+ */
+export function laneFromRunRecord(row: { sha: string; author_agent_id: string | null; run_id?: string | null }): string | null {
+  let authorId = row.author_agent_id;
+  if (!authorId && row.run_id) {
+    try {
+      const run = getRun(row.run_id);
+      if (run.ok) authorId = run.data.agent_id;
+    } catch { /* run table missing */ }
+  }
+  const branch = workspaceBranch(authorId);
+  if (branch && !namesOtherSeat(branch, authorId)) return branch;
+  const requested = releaseRequestLane(row.sha);
+  if (requested && !namesOtherSeat(requested, authorId)) return requested;
+  return null;
+}
+
+function chooseLane(
+  noteLane: string | null,
+  row: { sha: string; lane: string | null; author_agent_id: string | null; run_id?: string | null },
+): string | null {
+  const explicit = noteLane && isRealLaneId(noteLane) && !namesOtherSeat(noteLane, row.author_agent_id) ? noteLane : null;
+  if (explicit) return explicit;
+  if (row.lane && isRealLaneId(row.lane) && !isFillerLane(row.lane) && !namesOtherSeat(row.lane, row.author_agent_id)) return row.lane;
+  return laneFromRunRecord(row);
 }
 
 function deskNumbers(text: string, filename: string): number[] {
@@ -300,7 +427,7 @@ export function applyNoteLabels(sha: string, text: string, filename: string): Fr
   const labels = labelsFromFreezeNote(text, filename);
   const row = getFreeze(sha);
   if (!row) return labels;
-  const lane = labels.lane ?? (isFillerLane(row.lane) ? null : row.lane);
+  const lane = chooseLane(labels.lane, row);
   const desk = labels.bundle ? null : (labels.desk ?? row.desk);
   const fields: Partial<ReleaseFreeze> = {};
   if (lane !== row.lane) fields.lane = lane;
@@ -616,7 +743,14 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   const reviewerName = reviewer?.name ?? parsed.reviewerCandidates[0] ?? null;
   const project = projectFor(parsed, text);
   const authorLabel = author ?? (parsed.authorCandidates[0] ? { name: parsed.authorCandidates[0] } : null);
-  if (laneAutomationDenied(project, authorLabel, parsed.lane)) {
+  const existingEarly = getFreeze(sha);
+  const lane = chooseLane(parsed.lane, {
+    sha,
+    lane: existingEarly?.lane ?? null,
+    author_agent_id: author?.id ?? existingEarly?.author_agent_id ?? null,
+    run_id: existingEarly?.run_id ?? null,
+  });
+  if (laneAutomationDenied(project, authorLabel, lane)) {
     return { ok: false, error: `${path.basename(filePath)}: denied lane or agent` };
   }
 
@@ -643,7 +777,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     }
   }
 
-  const existing = getFreeze(sha);
+  const existing = existingEarly;
   const enrich: Partial<ReleaseFreeze> = {};
   if (parsed.kind === 'freeze') {
     enrich.freeze_path = filePath;
@@ -653,7 +787,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   }
   if (project && !existing?.project) enrich.project = project;
   if (parsed.desk && !existing?.desk) enrich.desk = parsed.desk;
-  if (parsed.lane && !existing?.lane) enrich.lane = parsed.lane;
+  if ((existing?.lane ?? null) !== lane) enrich.lane = lane;
   const gateToStore = parsed.kind === 'freeze' ? storedFreezeGate(sha, parsed.gate) : parsed.gate;
   if (parsed.kind === 'freeze') enrich.gate = gateToStore;
   else if (parsed.gate && !existing?.gate) enrich.gate = parsed.gate;
@@ -673,9 +807,9 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     if (!existing) {
       getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, freeze_path, verdict_path, gate, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
-        .run(sha, project, parsed.desk, parsed.lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
+        .run(sha, project, parsed.desk, lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
           parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
-      supersedeOlder(sha, project, parsed.lane, parsed.desk);
+      supersedeOlder(sha, project, lane, parsed.desk);
       settleBehind(sha, project);
       return { ok: true, data: { sha, effect: 'stored', run_id: null } };
     }
@@ -705,7 +839,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     }
     getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, freeze_path, verdict_path, gate, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
-      .run(sha, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName,
+      .run(sha, project, parsed.desk, lane, authorId, authorName, reviewer?.id ?? null, reviewerName,
         parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
     settleBehind(sha, project);
     return { ok: true, data: { sha, effect: 'stored', run_id: null } };
@@ -724,7 +858,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
           project ? `${project}` : null,
           (parsed.desk ?? existing?.desk) ? `Desk #${parsed.desk ?? existing?.desk}` : null,
           `@ ${sha.slice(0, 8)}`,
-          (parsed.lane ?? existing?.lane) ? `(lane ${parsed.lane ?? existing?.lane})` : null,
+          (lane ?? existing?.lane) ? `(lane ${lane ?? existing?.lane})` : null,
           `— author @${authorAgent.data.alias ?? authorAgent.data.name}, reviewed by @${reviewerName ?? '?'}`,
         ].filter(Boolean).join(' ');
         const task = insertTask({ agent_id: authorId, prompt: label, created_by: null, room: project ?? null });
@@ -742,7 +876,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
       if (!existing) {
         getDb().prepare(`INSERT INTO release_freezes (sha, run_id, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, verdict, freeze_path, verdict_path, gate, status)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
-          .run(sha, runId, project, parsed.desk, parsed.lane, authorId, authorName, reviewer?.id ?? null, reviewerName, verdict,
+          .run(sha, runId, project, parsed.desk, lane, authorId, authorName, reviewer?.id ?? null, reviewerName, verdict,
             parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       } else {
         patch(sha, { ...enrich, run_id: runId, author_agent_id: authorId, author_name: authorName, reviewer_agent_id: reviewer?.id ?? null, reviewer_name: reviewerName, verdict });
@@ -760,13 +894,13 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         fix_round: 0,
         reviewer_agent: reviewerName,
         reviewer_agent_id: reviewer?.id ?? null,
-        freeze: { sha, project, desk: parsed.desk ?? existing?.desk ?? null, lane: parsed.lane ?? existing?.lane ?? null, file: filePath, archive: archivedPath },
+        freeze: { sha, project, desk: parsed.desk ?? existing?.desk ?? null, lane: lane ?? existing?.lane ?? null, file: filePath, archive: archivedPath },
       }, null);
     })();
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
-  supersedeOlder(sha, project ?? existing?.project ?? null, parsed.lane ?? existing?.lane ?? null, parsed.desk ?? existing?.desk ?? null);
+  supersedeOlder(sha, project ?? existing?.project ?? null, lane ?? existing?.lane ?? null, parsed.desk ?? existing?.desk ?? null);
   logger.info({ sha, runId, verdict, reviewer: reviewerName, author: authorName, file: filePath }, 'Release freeze ingested');
   settleBehind(sha, project ?? existing?.project ?? null);
   if (verdict === 'needs-fixes' && (parsed.gate ?? existing?.gate) === 'GREEN') {

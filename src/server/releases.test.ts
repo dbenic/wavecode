@@ -132,6 +132,8 @@ describe('releases.ts', () => {
 
   describe('requester side (dev box)', () => {
     it('Stage / Promote become release records forwarded to the release peer, and the peer outcome is mirrored back', async () => {
+      const deployState = await import('./deploy-state.js');
+      const reconcile = vi.spyOn(deployState, 'scheduleReconcile').mockImplementation(() => {});
       cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
       cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
       const box = fakeDeployBox();
@@ -149,6 +151,9 @@ describe('releases.ts', () => {
       // a second request for the same SHA + target while one is open is refused
       const again = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
       expect(again.ok).toBe(false);
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
+      reconcile.mockClear();
 
       box.deployed(r.data.peer_request_id!, '0.442.10');
       for (let i = 0; i < 40 && rel.getRelease(r.data.id)!.status !== 'deployed'; i++) await flush(25);
@@ -158,6 +163,8 @@ describe('releases.ts', () => {
       expect(vi.mocked(notify)).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^Staging deployed: wavepulse 2431f684 v0\.442\.10/) }));
       expect(rel.releaseStateFor(SHA).staging?.status).toBe('deployed');
       expect(rel.releaseStateFor(SHA).production).toBeNull();
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
     });
 
     it('mirrors staging progress from the peer while the request is still open', async () => {
@@ -655,6 +662,20 @@ describe('releases.ts', () => {
       // final: a second report is a no-op
       expect(rel.reportRelease(r.id, { status: 'failed', note: 'late' }).ok).toBe(true);
       expect(rel.getRelease(r.id)!.status).toBe('deployed');
+    });
+
+    it('schedules a reconcile when the staging deploy is reported', async () => {
+      const deployState = await import('./deploy-state.js');
+      const reconcile = vi.spyOn(deployState, 'scheduleReconcile').mockImplementation(() => {});
+      const fable = agent('fable');
+      cfg.releases = { deploy_agent: 'fable' };
+      const accepted = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse', requested_by: 'antonio' }, { userName: 'antonio', fromPeer: false });
+      expect(accepted.ok).toBe(true);
+      if (!accepted.ok) return;
+      const reported = rel.reportRelease(accepted.data.id, { status: 'deployed', version: '1.2.3' });
+      expect(reported.ok).toBe(true);
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
     });
 
     it('a staging request carries the automated header, and a production request from a local non-admin is refused', async () => {

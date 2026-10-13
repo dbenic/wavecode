@@ -2,9 +2,14 @@
  * Derived deploy state for each freeze card.
  *
  * A pass every 90 seconds, and again on push (main tip moved), merge
- * (`pipelineHooks.onMain`) and deploy (`pipelineHooks.onDeployed`).
+ * (`pipelineHooks.onMain`), and as soon as a stage or deploy finishes
+ * (`pipelineHooks.onDeployed`, including a deploy mirrored from the peer).
  * Anything git or a health probe cannot prove stays unknown — the board
  * never treats a missing tip as "not deployed".
+ *
+ * `GET /api/reviews/board` reads this snapshot only. It does not run git
+ * or the gate. Only the current staging tip is `on_staging`; an older SHA
+ * that is merely contained in that tip is superseded.
  *
  * The staging tip is `resolveStagingTip`: the release peer when this project
  * forwards releases, otherwise the health command, then the local deployed row.
@@ -41,13 +46,13 @@ import {
   verificationFor,
   resolveStagingTip,
 } from './releases.js';
-import { shaStageBlock, stageEligibility } from './sha-stage-block.js';
+import { stageEligibility } from './sha-stage-block.js';
 import { readProdHealth } from './staging-forward.js';
 import { assignmentFacts, reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
 import {
   buildLaneCards, buildReleaseView, conflictFilesFromNote,
-  type LaneCard, type LaneFreezeFact, type ReleaseView, type WorkingLaneFact,
+  type LaneCard, type LaneFreezeFact, type ReleaseView,
 } from './lane-cards.js';
 import { readLaneTests, shaChecks, suiteNames, type TestRun } from './test-runs.js';
 
@@ -87,6 +92,8 @@ export interface DeriveFacts {
   full: TestWord;
   /** Developer marked Ready for prod. Null when the verification table cannot be read. */
   readyForProd: boolean | null;
+  /** This SHA is the current staging tip. An ancestor of the tip is not. */
+  isStagingTip: boolean;
 }
 
 /**
@@ -106,6 +113,7 @@ export function deriveDeployState(facts: DeriveFacts): DeployState {
     || facts.mergedToMain === null
   ) return 'unknown';
   if (facts.containedInStaging) {
+    if (!facts.isStagingTip) return 'superseded';
     if (facts.readyForProd === null) return 'unknown';
     return facts.readyForProd ? 'awaiting_prod_go' : 'on_staging';
   }
@@ -495,6 +503,7 @@ async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<s
     quick,
     full,
     readyForProd: ready,
+    isStagingTip: inStaging === true && !!pair.staging.sha && pair.staging.sha.toLowerCase() === freeze.sha.toLowerCase(),
   };
 }
 
@@ -976,11 +985,12 @@ function quickCheck(lane: DevLane | undefined, sha: string): { running: boolean;
   return { running: true, etaMin };
 }
 
-function factFor(freeze: ReleaseFreeze, lane: DevLane | undefined, user: { name: string; role: string }, stageBlock: string | null): LaneFreezeFact {
-  const row = readRow(freeze.sha);
-  const view = row
-    ? toView(row, user, freeze.project, stageBlock, lane?.promote_block ?? null, !!freeze.run_id)
-    : { ...NOT_RECONCILED, run_backed: !!freeze.run_id };
+function factFor(
+  freeze: ReleaseFreeze,
+  lane: DevLane | undefined,
+  view: DeployView,
+  row: DeployRow | null,
+): LaneFreezeFact {
   const behind = !!row && row.behind_main === 1 && row.superseded !== 1 && row.in_staging !== 1 && row.in_prod !== 1
     && row.state !== 'superseded' && row.state !== 'live_on_prod';
   const quick = quickCheck(lane, freeze.sha);
@@ -1040,43 +1050,60 @@ function deployTips(): { prod: { version: string | null; sha: string | null }; s
   return out;
 }
 
-async function blockForCard(freeze: ReleaseFreeze, lane: DevLane | undefined): Promise<string | null> {
-  const row = readRow(freeze.sha);
-  if (row?.stage_block) return row.stage_block;
-  // A lane row describes its current tip. An older SHA must not inherit that sentence.
-  if (lane?.freeze_sha === freeze.sha && lane.stage_block) return lane.stage_block;
-  try { return await shaStageBlock(freeze); } catch { return null; }
+interface PreparedFreeze {
+  freeze: ReleaseFreeze;
+  row: DeployRow | null;
+  stageBlock: string | null;
+  item: ReviewItem;
+  runBacked: boolean;
+  lane: DevLane | undefined;
+  deploy: DeployView;
 }
 
-/** The Reviews page. A missing stored block is filled from the freeze SHA. */
+/** One read of the stored row. The lane card and the item share this view. */
+function prepareFreeze(freeze: ReleaseFreeze, user: { name: string; role: string }, bySha: Map<string, DevLane>, byLane: Map<string, DevLane>): PreparedFreeze {
+  const row = readRow(freeze.sha);
+  const stageBlock = row?.stage_block ?? null;
+  const { item, runBacked } = itemFor(freeze, row?.title ?? null);
+  const lane = bySha.get(freeze.sha) ?? (freeze.lane ? byLane.get(`${freeze.project}:${freeze.lane}`) : undefined);
+  const deploy = row
+    ? toView(row, user, freeze.project, stageBlock, lane?.promote_block ?? null, runBacked)
+    : { ...NOT_RECONCILED, run_backed: runBacked, show_reject: runBacked };
+  return { freeze, row, stageBlock, item, runBacked, lane, deploy };
+}
+
+/**
+ * The Reviews page, from the last reconcile. `lanes` may overlay test chips
+ * already in memory. This function does not scan git or the gate, and it does
+ * not add Working lanes — those are not part of the action set.
+ */
 export async function reviewBoard(user: { name: string; role: string }, lanes: DevLane[], token: string | null = null): Promise<ReviewBoard> {
   try { ensureDeployStateTable(); } catch { /* the board still renders from the lane list */ }
   const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
   const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
   let freezes: ReleaseFreeze[] = [];
   try { freezes = listFreezes().filter(freezeOnReviews); } catch { freezes = []; }
+  const prepared = freezes.map((freeze) => prepareFreeze(freeze, user, bySha, byLane));
   const items: BoardItem[] = [];
   const seen = new Set<string>();
-  for (const freeze of freezes) {
-    const row = readRow(freeze.sha);
-    const { item, runBacked } = itemFor(freeze, row?.title ?? null);
-    if (seen.has(item.run.id)) continue;
-    seen.add(item.run.id);
-    const lane = bySha.get(freeze.sha) ?? (freeze.lane ? byLane.get(`${freeze.project}:${freeze.lane}`) : undefined);
-    const merged = overlay(item, lane);
-    const stageBlock = await blockForCard(freeze, lane);
-    const deploy = row
-      ? toView(row, user, freeze.project, stageBlock, merged.promote_block ?? null, runBacked)
-      : { ...NOT_RECONCILED, title: null, run_backed: runBacked, show_reject: runBacked };
-    merged.stage_block = stageBlock;
-    if (deploy.hide_errors) {
+  for (const row of prepared) {
+    if (seen.has(row.item.run.id)) continue;
+    seen.add(row.item.run.id);
+    const merged = overlay(row.item, row.lane);
+    merged.stage_block = row.stageBlock;
+    if (row.deploy.hide_errors) {
       merged.test_errors = [];
-      if (deploy.state === 'superseded' || deploy.state === 'live_on_prod') merged.full_fail_flag = null;
+      if (row.deploy.state === 'superseded' || row.deploy.state === 'live_on_prod') merged.full_fail_flag = null;
     }
-    if (merged.freeze && row) {
-      merged.freeze = { ...merged.freeze, desk: row.desk, lane: row.lane, verdict: (row.verdict as ReleaseFreeze['verdict']) ?? merged.freeze.verdict };
+    if (merged.freeze && row.row) {
+      merged.freeze = {
+        ...merged.freeze,
+        desk: row.row.desk,
+        lane: row.row.lane,
+        verdict: (row.row.verdict as ReleaseFreeze['verdict']) ?? merged.freeze.verdict,
+      };
     }
-    items.push({ ...merged, deploy });
+    items.push({ ...merged, deploy: row.deploy });
   }
   for (const pending of listPendingReviews()) {
     if (pending.freeze || seen.has(pending.run.id)) continue;
@@ -1093,25 +1120,13 @@ export async function reviewBoard(user: { name: string; role: string }, lanes: D
     const viewer = viewerDev ? { name: viewerDev.name, lanes: viewerDev.lanes } : null;
     const owners = developerRoster();
     const facts: LaneFreezeFact[] = [];
-    for (const freeze of freezes) {
-      if (!freeze.lane) continue;
-      const lane = bySha.get(freeze.sha) ?? byLane.get(`${freeze.project}:${freeze.lane}`);
-      facts.push(factFor(freeze, lane, user, await blockForCard(freeze, lane)));
+    for (const row of prepared) {
+      const laneName = row.row?.lane ?? row.freeze.lane;
+      if (!laneName) continue;
+      facts.push(factFor({ ...row.freeze, lane: laneName }, row.lane, row.deploy, row.row));
     }
-    const working: WorkingLaneFact[] = [];
-    for (const lane of lanes) {
-      if (lane.freeze_sha) continue;
-      if (laneAutomationDenied(lane.project, lane.author_name ? { name: lane.author_name } : null, lane.lane)) continue;
-      working.push({
-        project: lane.project,
-        lane: lane.lane,
-        sha: lane.sha,
-        author_name: lane.author_name,
-        title: null,
-        desk: null,
-      });
-    }
-    cards = buildLaneCards(facts, working, viewer, owners);
+    // Working lanes and live (on staging / prod) cards stay out of the action set.
+    cards = buildLaneCards(facts, [], viewer, owners);
     release = buildReleaseView(cards, deployTips());
   } catch (e) {
     logger.debug({ error: (e as Error).message }, 'Lane cards skipped');

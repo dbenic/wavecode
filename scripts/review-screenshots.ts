@@ -19,7 +19,7 @@ const OUT = path.resolve('docs/screenshots');
 const PORT = 4178;
 
 const OWNERS = [
-  { name: 'Antonio', lanes: ['wc-s3-*', 'wc-eba-*', 'wc-canary', 'wc-pd111*'] },
+  { name: 'Antonio', lanes: ['wc-s3-*', 'wc-eba-*', 'wc-canary*', 'wc-pd111*'] },
   { name: 'Aleš', lanes: ['wc-ales-*', 'wc-recognition-*'] },
 ];
 
@@ -83,6 +83,11 @@ const freezes: LaneFreezeFact[] = [
   fact({
     sha: sha('7b2bccd8', 'd'), lane: 'wc-canary', title: 'Canary', author_name: 'antonio',
     state: 'awaiting_prod_go', version: '0.443.4', created_at: '2026-10-12T15:00:00.000Z',
+  }),
+  fact({
+    sha: sha('c4a1a4e4', '4'), lane: 'wc-canary-v4', title: 'Canary v4', author_name: 'antonio',
+    state: 'ready_to_stage', action: 'stage', action_lock: null, run_id: 'run-canary-v4', run_backed: true,
+    created_at: '2026-10-12T20:10:00.000Z',
   }),
   fact({
     sha: sha('56f6a55d', 'f'), lane: 'wc-recognition-timeout', title: 'Recognition timeout', author_name: 'ales',

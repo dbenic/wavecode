@@ -29,6 +29,7 @@ import {
   type Run,
 } from './db.js';
 import { isProfileCompatible, lookupActor } from './profiles.js';
+import { reviewerDenied } from './reviewer-assign.js';
 
 export type ReviewerRung = 'explicit' | 'task' | 'default' | 'tag' | 'pool';
 
@@ -68,7 +69,8 @@ export function pickReviewer(
   const task = getTask(run.task_id);
   const actor = lookupActor(task.ok ? task.data.created_by : null);
 
-  const eligible = (a: Agent): boolean => a.id !== authorId && a.role !== 'orchestrator' && a.mode !== 'file';
+  const eligible = (a: Agent): boolean =>
+    a.id !== authorId && a.role !== 'orchestrator' && a.mode !== 'file' && !reviewerDenied(a);
   const free = (a: Agent): boolean =>
     eligible(a) && a.status === 'idle' && !a.owner_id && !hasOpenRun(a.id) && isProfileCompatible(a.profile, actor, cfg);
   const otherVendorFirst = (a: Agent, b: Agent): number =>
@@ -85,13 +87,16 @@ export function pickReviewer(
     if (r.data.id === authorId) {
       return { ok: false, reason: `${r.data.alias ?? r.data.name} wrote this run and cannot review it`, candidates: candidates() };
     }
+    if (reviewerDenied(r.data)) {
+      return { ok: false, reason: `${r.data.alias ?? r.data.name} is excluded from review`, candidates: candidates() };
+    }
     return { ok: true, agent: r.data, rung: 'explicit', reason: 'named by you', alternatives: [] };
   }
 
   // 2. task
   if (task.ok && task.data.reviewer) {
     const r = getAgent(task.data.reviewer);
-    if (r.ok && r.data.id !== authorId) {
+    if (r.ok && r.data.id !== authorId && !reviewerDenied(r.data)) {
       return { ok: true, agent: r.data, rung: 'task', reason: 'set on the task', alternatives: [] };
     }
   }
@@ -99,7 +104,7 @@ export function pickReviewer(
   // 3. config default (name, then runtime — prefer a free one of that runtime)
   const wanted = cfg.review.default_reviewer;
   if (wanted) {
-    const byName = agents.find((a) => a.name === wanted && a.id !== authorId);
+    const byName = agents.find((a) => a.name === wanted && a.id !== authorId && !reviewerDenied(a));
     if (byName) return { ok: true, agent: byName, rung: 'default', reason: 'config default_reviewer', alternatives: [] };
     const byRuntime = agents.filter((a) => a.runtime === wanted && eligible(a));
     if (byRuntime.length) {

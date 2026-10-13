@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -188,6 +189,13 @@ describe('release-freezes.ts', () => {
       expect(rf.parseFreezeFile(junk, 'freeze.md')?.lane).toBeNull();
       expect(rf.isFillerLane('remains')).toBe(true);
       expect(rf.isFillerLane('wc-claude2')).toBe(false);
+      for (const word of ['changes', 'source', 'separately', 'held', 'also', 'commits', 'test-path']) {
+        const named = `# Freeze note\n\nLane: \`${word}\`\n- Exact SHA: \`${SHA_A}\`\n`;
+        expect(rf.parseFreezeFile(named, 'freeze.md')?.lane).toBeNull();
+        expect(rf.isFillerLane(word)).toBe(true);
+      }
+      const prose = `# Freeze note\n\nThe changes were reviewed with wc-ales-claude1, held separately.\n- Exact SHA: \`${SHA_A}\`\n`;
+      expect(rf.parseFreezeFile(prose, 'freeze.md')?.lane).toBeNull();
     });
 
     it('a composition release is not labelled with one desk number', () => {
@@ -339,6 +347,51 @@ describe('release-freezes.ts', () => {
       expect(r.ok && r.data.effect).toBe('card');
       const [item] = rq.listPendingReviews();
       expect(item.freeze).toMatchObject({ sha: SHA_C, verdict: 'pass', freeze_path: note, verdict_path: verdict, lane: 'wc-codex2-wavenetic-04420-composition', author_name: 'codex2', reviewer_name: 'claude1' });
+    });
+
+    it('attributes a SHA from the author checkout or release record, not from prose or another seat', async () => {
+      const ales = db.insertAgent({
+        name: 'ales-claude1', runtime: 'claude-code', tmux_session: 'wc-ales-claude1', workspace: null, mode: 'spawned', status: 'idle',
+      });
+      if (!ales.ok) throw new Error(ales.error);
+      const codex2 = db.listAgents().find((a) => a.name === 'codex2');
+      if (!codex2?.workspace) throw new Error('codex2');
+      fs.mkdirSync(codex2.workspace, { recursive: true });
+      const git = (...args: string[]) => execFileSync('git', ['-C', codex2.workspace!, ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+      }).trim();
+      git('init', '-q', '-b', 'wc-codex2-desk');
+
+      const stolen = 'cab9ffe2' + 'ab'.repeat(16);
+      const prose = `# Freeze note\n\nProject: wavepulse · Author: codex2\nThe changes were reviewed with wc-ales-claude1, held separately.\nLane: \`changes\`\n- Exact SHA: \`${stolen}\`\n`;
+      expect(rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md').ok).toBe(true);
+      expect(rf.getFreeze(stolen)?.lane).toBe('wc-codex2-desk');
+      expect(rf.laneFromRunRecord({ sha: stolen, author_agent_id: codex2.id, run_id: null })).toBe('wc-codex2-desk');
+
+      db.getDb().prepare('UPDATE release_freezes SET lane = ? WHERE sha = ?').run('wc-ales-claude1', stolen);
+      expect(rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md').ok).toBe(true);
+      expect(rf.getFreeze(stolen)?.lane).toBe('wc-codex2-desk');
+
+      const feature = 'f00dcafe' + 'cd'.repeat(16);
+      const explicit = `# Freeze note\n\nProject: wavepulse · Author: codex2\nLane: \`wc-feature\`\nAlso mentioned wc-ales-claude1.\n- Exact SHA: \`${feature}\`\n`;
+      expect(rf.ingestFreezeText(explicit, 'feature-freeze.md').ok).toBe(true);
+      expect(rf.getFreeze(feature)?.lane).toBe('wc-feature');
+
+      const other = `# Freeze note\n\nProject: wavepulse · Author: codex2\nLane: \`wc-ales-claude1\`\n- Exact SHA: \`${stolen}\`\n`;
+      expect(rf.ingestFreezeText(other, 'other-seat-freeze.md').ok).toBe(true);
+      expect(rf.getFreeze(stolen)?.lane).toBe('wc-codex2-desk');
+
+      const recorded = 'a1b2c3d4' + 'ef'.repeat(16);
+      git('checkout', '-q', '-b', 'main');
+      const rel = await import('./releases.js');
+      rel.ensureReleaseTables();
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, sha, lane, target, origin, status) VALUES ('rel-1', ?, 'wc-codex2-record', 'staging', 'local', 'sent')`,
+      ).run(recorded);
+      const fromRecord = `# Freeze note\n\nProject: wavepulse · Author: codex2\nSource of the commits is held separately.\n- Exact SHA: \`${recorded}\`\n`;
+      expect(rf.ingestFreezeText(fromRecord, 'record-freeze.md').ok).toBe(true);
+      expect(rf.getFreeze(recorded)?.lane).toBe('wc-codex2-record');
     });
 
     it('a re-delivered file is idempotent: one card, one review row, no second event', () => {

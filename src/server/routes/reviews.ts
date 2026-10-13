@@ -108,12 +108,9 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   app.get('/api/reviews/board', async (c) => {
     const user = getActingUser(c);
-    let lanes: devLanes.DevLane[] = [];
-    try { lanes = await devLanes.lanesForRequest(); } catch (e) {
-      logger.warn({ error: (e as Error).message }, 'Lane list failed');
-    }
     const token = resolveRequestToken(c.req.path, c.req.raw.headers, c.req.query('access_token'));
-    return c.json(await deployState.reviewBoard({ name: user.name, role: user.role }, lanes, token));
+    // The reconciler's snapshot. A request must not scan git or the gate.
+    return c.json(await deployState.reviewBoard({ name: user.name, role: user.role }, [], token));
   });
 
   app.get('/api/reviews', async (c) => {

@@ -364,7 +364,7 @@ function present(fact: LaneFreezeFact, who: string): Presented {
       action: locked ? fact.action_lock! : 'Check it on staging, then press Ready for prod',
       owner: locked ? 'system' : 'developer',
       owner_label: locked ? 'system' : who,
-      history: false,
+      history: true,
       button: locked ? null : buttonFor(fact, 'ready', 'Ready for prod'),
       pipeline: locked
         ? steps('ready', { id: 'ready', reason: fact.action_lock! })
@@ -504,9 +504,9 @@ function workingCard(fact: WorkingLaneFact, viewer: LaneViewer | null, owners: A
     action: 'Nothing frozen yet',
     owner: 'developer',
     owner_label: who,
-    needs_you: true,
+    needs_you: false,
     mine: viewer?.name ? laneMatches(viewer.lanes, fact.lane) : false,
-    history: false,
+    history: true,
     button: null,
     pipeline: steps('freeze', null),
     older,

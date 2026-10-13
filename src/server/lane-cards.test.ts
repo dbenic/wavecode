@@ -102,7 +102,8 @@ describe('lane cards', () => {
     ], [], ANTONIO, OWNERS)[0];
     expect(staging.action).toBe('Check it on staging, then press Ready for prod');
     expect(staging.button).toEqual(expect.objectContaining({ kind: 'ready', label: 'Ready for prod' }));
-    expect(staging.needs_you).toBe(true);
+    expect(staging.needs_you).toBe(false);
+    expect(staging.history).toBe(true);
     expect(staging.pipeline.find((step) => step.id === 'ready')?.mark).toBe('current');
 
     const waiting = buildLaneCards([
@@ -186,7 +187,8 @@ describe('lane cards', () => {
     expect(pd?.action).toBe('Nothing frozen yet');
     expect(pd?.owner_label).toBe('Antonio');
     expect(pd?.mine).toBe(true);
-    expect(pd?.needs_you).toBe(true);
+    expect(pd?.needs_you).toBe(false);
+    expect(pd?.history).toBe(true);
     expect(cards.find((card) => card.lane === 'wc-recognition-timeout')?.mine).toBe(false);
 
     const ales = buildLaneCards(cards.length ? [

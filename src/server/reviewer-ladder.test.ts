@@ -11,12 +11,14 @@ vi.mock('./event-bus.js', () => ({ emit: vi.fn() }));
 
 const review = { auto_review: true, default_reviewer: '', self_review: false, max_fix_loops: 2, require_pass_to_promote: false, gate_dependents_on_approval: false, auto_pick: true };
 const profiles: Record<string, { shared?: boolean }> = {};
-vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ review, profiles, profiles_root: '/tmp/p' })) }));
+const projects: Record<string, { pipeline?: { review_deny?: string[]; agent_deny?: string[] } }> = {};
+vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ review, profiles, profiles_root: '/tmp/p', projects })) }));
 
 import * as db from './db.js';
 import { reserveAgent } from './leases.js';
 import { createUser } from './users.js';
 import { pickReviewer } from './reviewer-ladder.js';
+import { reviewerLoads } from './reviewer-assign.js';
 
 let tmp: string;
 beforeEach(() => {
@@ -25,6 +27,7 @@ beforeEach(() => {
   review.default_reviewer = '';
   review.auto_pick = true;
   for (const k of Object.keys(profiles)) delete profiles[k];
+  for (const k of Object.keys(projects)) delete projects[k];
 });
 afterEach(() => {
   db.resetDbForTest();
@@ -137,5 +140,26 @@ describe('pickReviewer', () => {
     const off = pickReviewer(run);
     expect(off).toMatchObject({ ok: false });
     expect((off as { reason: string }).reason).toMatch(/auto-pick is off/);
+  });
+
+  it('drops review_deny and agent_deny from the ladder and the reviewer list', () => {
+    projects.wave = { pipeline: { review_deny: ['codex1'], agent_deny: ['chatgpt-countix'] } };
+    const author = agent('claude2', { runtime: 'claude-code' });
+    agent('codex1');
+    agent('chatgpt-countix', { runtime: 'chatgpt' });
+    const kept = agent('codex3');
+    const run = runBy(author);
+    expect(pickReviewer(run)).toMatchObject({ ok: true, agent: { id: kept.id } });
+    const named = pickReviewer(run, { explicit: 'codex1' });
+    expect(named.ok).toBe(false);
+    if (!named.ok) expect(named.reason).toMatch(/excluded from review/);
+    const chatgpt = db.listAgents().find((a) => a.name === 'chatgpt-countix');
+    const onTask = runBy(author, { reviewer: chatgpt?.id });
+    const taskPick = pickReviewer(onTask);
+    expect(taskPick).toMatchObject({ ok: true, agent: { id: kept.id } });
+    const names = reviewerLoads().map((r) => r.name);
+    expect(names).not.toContain('codex1');
+    expect(names).not.toContain('chatgpt-countix');
+    expect(names).toContain('codex3');
   });
 });
