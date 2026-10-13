@@ -93,7 +93,7 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     const name = decodeURIComponent(c.req.param('name'));
     const cand = listCandidates(project).find((x) => x.name === name);
     if (!cand) return c.json({ error: `No unreleased candidate '${name}' in project '${project}'` }, 404);
-    const lanes = buildBoard().lanes.filter((l) => l.candidate === name);
+    const lanes = (await buildBoard()).lanes.filter((l) => l.candidate === name);
     if (action === 'stage' && !isAdmin(user)) {
       const deployed = releases.listReleases({ sha: cand.tip, target: 'staging', limit: 10 }).some((r) => r.status === 'deployed');
       if (!deployed && lanes.some((l) => l.verdict !== 'pass')) {

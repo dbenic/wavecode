@@ -53,7 +53,7 @@ export function registerOverviewRoutes(app: Hono<NodeAppEnv>): void {
       const status = made.status === 403 || made.status === 404 || made.status === 409 ? made.status : 400;
       return c.json({ error: made.error }, status);
     }
-    try { reconcileOverview(); } catch { /* the assignment is stored; the next reconcile fills the snapshot */ }
+    void reconcileOverview().catch(() => { /* the assignment is stored; the next reconcile fills the snapshot */ });
     return c.json({ task: made.task, sha: made.sha, agent: made.agent }, 201);
   });
 

@@ -767,7 +767,7 @@ async function runOnce(reason: string): Promise<void> {
     }
     try {
       const overview = await import('./overview.js');
-      overview.reconcileOverview();
+      await overview.reconcileOverview();
     } catch (e) {
       logger.warn({ reason, error: (e as Error).message }, 'Overview reconcile skipped');
     }

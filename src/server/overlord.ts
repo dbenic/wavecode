@@ -374,7 +374,7 @@ export async function chat(message: string, user: { id: string | null; name: str
   const cfg = overlordConfig();
   const history = listChat(12);
   withTable(() => getDb().prepare('INSERT INTO overlord_chat (id, role, user_id, user_name, text) VALUES (?, ?, ?, ?, ?)').run(ulid(), 'user', user.id, user.name, text));
-  const board = buildBoard();
+  const board = await buildBoard();
   const previous = getLatestReport();
   const userMessage = JSON.stringify({
     board: JSON.parse(buildPrompt(board, 'chat', previous)) as unknown,
@@ -422,10 +422,10 @@ export async function wake(trigger: string, opts: { force?: boolean; now?: numbe
   if (inFlight) return inFlight;
   inFlight = (async () => {
     wakeTimes.push(now);
-    let board = buildBoard(now);
+    let board = await buildBoard(now);
     if (cfg.autoStage) {
       const staged = await autoStage(board);
-      if (staged > 0) board = buildBoard(now);
+      if (staged > 0) board = await buildBoard(now);
     }
     const previous = getLatestReport();
     const res = await completeText({ model: cfg.model, systemPrompt: SYSTEM_PROMPT, userMessage: buildPrompt(board, trigger, previous), maxTokens: 4096 });

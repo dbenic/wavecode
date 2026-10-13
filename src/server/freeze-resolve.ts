@@ -5,8 +5,13 @@
  * Shipped: the SHA, or the main commit with the same patch, is contained in
  * a deploy tip we could read. An empty `git cherry` or a `-` line (cherry-pick
  * or squash) is not enough — the equivalent commit has to be in that tip.
- * When the tip cannot be read, nothing closes.
- * Superseded: a rejected freeze whose lane tip has moved far ahead.
+ * A missing, null, or unreadable tip closes nothing and is not "merged, not yet
+ * deployed". The tip is resolveStagingTip: the release peer when this project
+ * forwards, otherwise the health command, then the local deployed row. A failed
+ * health command and an unreadable peer stay unknown. The local row never
+ * stands in for a forwarding peer.
+ * Superseded: a rejected freeze whose lane tip has moved far ahead, and only
+ * when that tip was readable.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -15,7 +20,7 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { mainSpec, projectRepo } from './lane-main.js';
 import { ensureReleaseFreezeTable, type ReleaseFreeze } from './release-freezes.js';
-import { currentStagingTip, ensureReleaseTables, listReleases } from './releases.js';
+import { ensureReleaseTables, resolveStagingTip } from './releases.js';
 
 /** Commits the lane tip must be ahead of a rejected freeze before it is closed. */
 export const FAR_AHEAD_COMMITS = 20;
@@ -105,37 +110,45 @@ function mainEquivalents(repo: string, sha: string): string[] | null {
   return onMain;
 }
 
-function deployTip(project: string | null): DeployTipRead {
+/**
+ * The staging tip from resolveStagingTip.
+ * Unknown when the peer cannot be asked, the health command returns nothing,
+ * the tip is missing, or the SHA cannot be read. Never the local row of a
+ * forwarding project.
+ */
+async function deployTip(project: string | null): Promise<DeployTipRead> {
   if (!project) return { state: 'unknown' };
   try {
     ensureReleaseTables();
-    const staging = currentStagingTip(project)?.sha ?? null;
-    if (staging) {
-      if (!/^[0-9a-f]{40}$/i.test(staging)) return { state: 'unknown' };
-      return { state: 'known', sha: staging.toLowerCase() };
-    }
-    const prod = listReleases({ project, target: 'production', status: 'deployed', limit: 1 })[0];
-    const sha = prod?.deployed_sha || prod?.sha || null;
-    if (!sha) return { state: 'known', sha: null };
-    if (!/^[0-9a-f]{40}$/i.test(sha)) return { state: 'unknown' };
+    const resolved = await resolveStagingTip(project);
+    if (resolved.state === 'unknown') return { state: 'unknown' };
+    const sha = resolved.tip?.sha ?? null;
+    if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) return { state: 'unknown' };
     return { state: 'known', sha: sha.toLowerCase() };
   } catch {
     return { state: 'unknown' };
   }
 }
 
+export async function deployTipsForProjects(projects: Array<string | null>): Promise<Map<string, DeployTipRead>> {
+  const tips = new Map<string, DeployTipRead>();
+  for (const project of projects) {
+    if (!project || tips.has(project)) continue;
+    tips.set(project, await deployTip(project));
+  }
+  return tips;
+}
+
 /**
  * The patch is already on main, and a readable deploy tip does not contain it.
- * Unknown tip or unknown git result stays false so the row remains a decision.
+ * A missing or unknown tip stays false so the row remains a decision.
  */
-export function isMergedNotDeployed(project: string | null, sha: string): boolean {
+export function isMergedNotDeployed(project: string | null, sha: string, tip: DeployTipRead): boolean {
+  if (tip.state !== 'known' || !tip.sha) return false;
   const repo = projectRepo(project);
   if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return false;
-  const tip = deployTip(project);
-  if (tip.state !== 'known') return false;
   const equivalents = mainEquivalents(repo, sha);
   if (!equivalents || equivalents.length === 0) return false;
-  if (!tip.sha) return true;
   const hits = equivalents.map((id) => containedIn(repo, id, tip.sha!));
   if (hits.some((hit) => hit == null)) return false;
   return hits.some((hit) => hit === false);
@@ -167,7 +180,7 @@ function closeFreeze(freeze: ReleaseFreeze, status: 'merged' | 'stale', supersed
  * Close obsolete freezes so the overview never lists them as promotable or unassigned fixes.
  * Returns how many rows changed.
  */
-export function autoResolveObsoleteFreezes(): number {
+export async function autoResolveObsoleteFreezes(): Promise<number> {
   let rows: ReleaseFreeze[] = [];
   try {
     ensureReleaseFreezeTable();
@@ -177,27 +190,27 @@ export function autoResolveObsoleteFreezes(): number {
   } catch {
     return 0;
   }
+  const tips = await deployTipsForProjects(rows.map((freeze) => freeze.project));
   let n = 0;
   for (const freeze of rows) {
     const repo = projectRepo(freeze.project);
     if (!repo || !/^[0-9a-f]{40}$/i.test(freeze.sha)) continue;
-    const tip = deployTip(freeze.project);
-    // Unreadable tip: fail closed. Never close, including a cherry `-` we cannot prove is deployed.
-    if (tip.state === 'unknown') continue;
-    if (tip.sha) {
-      const shipped = onMain(repo, freeze.sha) === true && containedIn(repo, freeze.sha, tip.sha) === true;
-      if (shipped) {
-        closeFreeze(freeze, 'merged', 'shipped');
-        n++;
-        continue;
-      }
-      const equivalents = mainEquivalents(repo, freeze.sha);
-      const deployed = !!equivalents?.length && equivalents.every((id) => containedIn(repo, id, tip.sha!) === true);
-      if (deployed && equivalents) {
-        closeFreeze(freeze, 'merged', equivalents[0] ?? 'shipped');
-        n++;
-        continue;
-      }
+    const tip = freeze.project ? tips.get(freeze.project) : undefined;
+    const tipSha = tip?.state === 'known' ? tip.sha : null;
+    // Missing or unreadable tip: fail closed. Never close, and never use a local row in place of the peer.
+    if (!tipSha) continue;
+    const shipped = onMain(repo, freeze.sha) === true && containedIn(repo, freeze.sha, tipSha) === true;
+    if (shipped) {
+      closeFreeze(freeze, 'merged', 'shipped');
+      n++;
+      continue;
+    }
+    const equivalents = mainEquivalents(repo, freeze.sha);
+    const deployed = !!equivalents?.length && equivalents.every((id) => containedIn(repo, id, tipSha) === true);
+    if (deployed && equivalents) {
+      closeFreeze(freeze, 'merged', equivalents[0] ?? 'shipped');
+      n++;
+      continue;
     }
     if (freeze.status === 'rejected' && freeze.lane) {
       const head = laneTip(repo, freeze.project, freeze.lane);

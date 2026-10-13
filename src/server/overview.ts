@@ -9,7 +9,7 @@ import { getAgent, getDb, getRun, insertTask, listAgents, resolveAgent, type Age
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
 import { candidateFor, ensureReleaseFreezeTable, getFreezeByRun, listCandidates, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
-import { autoResolveObsoleteFreezes, isMergedNotDeployed } from './freeze-resolve.js';
+import { autoResolveObsoleteFreezes, deployTipsForProjects, isMergedNotDeployed, type DeployTipRead } from './freeze-resolve.js';
 import { commitsBehind, isMergeOnlyDelta, laneAutomationDenied, projectRepo, resolveMainRef, withRefMemo } from './lane-main.js';
 import { behindMainLine, fullFailFlag, needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { emit } from './event-bus.js';
@@ -556,10 +556,10 @@ function writeOverviewSnapshot(board: Board): void {
  * Rebuild the snapshot. Git and per-freeze work happen here, in the
  * background reconciler, not on the overview route.
  */
-export function reconcileOverview(now = Date.now()): Board {
+export async function reconcileOverview(now = Date.now()): Promise<Board> {
   try { reconcileMerged(now); } catch { /* git unavailable: the board still builds */ }
-  try { autoResolveObsoleteFreezes(); } catch { /* same */ }
-  const board = buildBoard(now);
+  try { await autoResolveObsoleteFreezes(); } catch { /* same */ }
+  const board = await buildBoard(now);
   try { writeOverviewSnapshot(board); } catch { /* table missing in a partial test db */ }
   emit('overview.board', 'overview', 'board', { at: board.at, attention: board.attention.length }, null);
   return board;
@@ -570,11 +570,18 @@ export function resetBoardCacheForTest(): void {
   /* snapshot lives in kv_settings; tests get a fresh database */
 }
 
-export function buildBoard(now = Date.now()): Board {
-  return withRefMemo(() => buildBoardPass(now));
+export async function buildBoard(now = Date.now()): Promise<Board> {
+  let projects: Array<string | null> = [];
+  try {
+    projects = (getDb().prepare(
+      "SELECT DISTINCT project FROM release_freezes WHERE project IS NOT NULL",
+    ).all() as { project: string }[]).map((row) => row.project);
+  } catch { /* table missing */ }
+  const tips = await deployTipsForProjects(projects);
+  return withRefMemo(() => buildBoardPass(now, tips));
 }
 
-function buildBoardPass(now: number): Board {
+function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Board {
   const cfg = getConfig();
   const atIso = new Date(now).toISOString();
   const openQuestions = listPeerQuestions({ limit: 200 }).filter((q) => q.status === 'sent' || q.status === 'queued');
@@ -645,7 +652,7 @@ function buildBoardPass(now: number): Board {
     const key = `${project ?? ''}\0${sha}`;
     const cached = awaitingDeploy.get(key);
     if (cached !== undefined) return cached;
-    const value = isMergedNotDeployed(project, sha);
+    const value = isMergedNotDeployed(project, sha, (project ? tips.get(project) : undefined) ?? { state: 'unknown' });
     awaitingDeploy.set(key, value);
     return value;
   };
