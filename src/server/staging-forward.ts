@@ -3,8 +3,8 @@
  * `force_rollback` skips the staging-ancestor check only, and only for an
  * admin who gives a reason. It does not skip the main check.
  *
- * With no deployed staging tip and no way to know main ancestry, the request
- * is allowed — that is how a box without a git repo stages today.
+ * An unknown staging version, or a SHA git cannot compare with main, is refused.
+ * A resolved tip that is simply empty (nothing deployed yet) is not unknown.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -50,6 +50,12 @@ function fetchOrigin(repo: string): void {
   } catch { /* offline or no remote */ }
 }
 
+/** Stage and the snapshot both refuse with this when the peer tip could not be read. */
+export const STAGING_VERSION_UNKNOWN = 'staging version unknown, try again';
+
+/** Stage and the snapshot both refuse with this when the SHA cannot be compared with main. */
+export const CANNOT_VERIFY_MAIN = 'cannot verify against main';
+
 export function rollbackRefusal(requestedSha: string, missing: number, version: string | null, lane: string | null): string {
   const labels = [version ? `v${version.replace(/^v/, '')}` : null, lane].filter(Boolean).join(', ');
   return `would roll staging back: ${requestedSha.slice(0, 8)} is missing ${missing} commits now on staging (${labels || 'staging'})`;
@@ -89,6 +95,8 @@ export function evaluateForward(opts: {
   project: string;
   requestedSha: string;
   staging: StagingTip | null;
+  /** The caller could not read a staging version. Distinct from an empty tip. */
+  tipUnknown?: boolean;
   forceRollback?: boolean;
   forceReason?: string | null;
   actorIsAdmin?: boolean;
@@ -96,7 +104,11 @@ export function evaluateForward(opts: {
   const repo = projectRepo(opts.project);
   if (repo) fetchOrigin(repo);
   const behind = commitsBehind(opts.project, opts.requestedSha);
+  // No repo keeps the old allow (a box that does not have the git checkout).
+  // A repo that does not contain the SHA, or cannot compare it with main, refuses.
+  if (repo && behind == null) return { ok: false, error: CANNOT_VERIFY_MAIN };
   if (behind != null && behind > 0) return { ok: false, error: behindMainLine(behind) };
+  if (opts.tipUnknown) return { ok: false, error: STAGING_VERSION_UNKNOWN };
 
   const staging = opts.staging;
   if (!staging?.sha) return { ok: true, rollback: false, reason: null };

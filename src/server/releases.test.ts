@@ -1139,6 +1139,56 @@ describe('releases.ts', () => {
       expect(typedInto(fable.id)).toEqual([]);
     });
 
+    it('a forwarding-box force_rollback is refused before stale and behind-main', async () => {
+      const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+      const repo = path.join(tmp, 'rollback-forward');
+      fs.mkdirSync(repo);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-q', '-m', 'base');
+      git('checkout', '-q', '-b', 'lane');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-q', '-m', 'frozen');
+      const frozen = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'c');
+      git('add', '.');
+      git('commit', '-q', '-m', 'lane moved');
+      git('checkout', '-q', 'main');
+      fs.writeFileSync(path.join(repo, 'm.txt'), 'm');
+      git('add', '.');
+      git('commit', '-q', '-m', 'main moved');
+      git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD'));
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo, release_peer: 'wavecode-countix/fable' };
+      cfg.peers['wavecode-countix'] = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      const box = fakeDeployBox();
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const rfz = await import('./release-freezes.js');
+      rfz.setFetchDisabledForTest(true);
+      const author = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'adopted', status: 'idle' });
+      if (!author.ok) throw new Error(author.error);
+      db.insertAgent({ name: 'codex3', runtime: 'claude-code', tmux_session: 'wc-codex3', workspace: repo, mode: 'adopted', status: 'idle' });
+      const note = path.join(tmp, `rollback-freeze-${frozen.slice(0, 8)}.md`);
+      fs.writeFileSync(note, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${frozen}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
+      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      // Ingest may already record behind-main. The forwarding refusal must not
+      // depend on that, and must not run the stale or behind-main checks.
+      db.getDb().prepare(`UPDATE release_freezes SET status = 'open', superseded_by = NULL WHERE sha = ?`).run(frozen);
+      expect(rf.getFreeze(frozen)?.status).toBe('open');
+      const forwarded = await rel.requestRelease({
+        project: 'wavepulse', sha: frozen, lane: 'lane', target: 'staging',
+        actorName: 'denis', actorIsAdmin: true, forceRollback: true, forceReason: 'staging was bad',
+      });
+      expect(forwarded.ok).toBe(false);
+      if (!forwarded.ok) expect(forwarded.error).toBe(rel.rollbackOnDeployBox('wavecode-countix'));
+      expect(rf.getFreeze(frozen)?.status).toBe('open');
+      expect(box.state.posts).toEqual([]);
+      rfz.setFetchDisabledForTest(false);
+    });
+
     it('GET /api/releases/staging-tip returns the deployed staging tip', async () => {
       cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
       cfg.releases = { deploy_agent: 'fable' };

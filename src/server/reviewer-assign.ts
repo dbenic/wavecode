@@ -257,12 +257,12 @@ export function reviewStatusForVerdict(verdict: string | null | undefined): 'pen
   return 'pending';
 }
 
-export function loadFor(agent: Agent): ReviewerLoad {
+export function loadFor(agent: Agent, events?: ReviewEvent[]): ReviewerLoad {
   return {
     busy: agent.status === 'working' || agent.status === 'error',
     openReviews: openReviews(agent.id),
     runningTasks: runningTasks(agent.id),
-    lastAssignedAt: lastAssignedAt(agent.id),
+    lastAssignedAt: lastAssignedAt(agent.id, events),
   };
 }
 
@@ -344,9 +344,9 @@ export function assignmentFacts(sha: string): { at: number; reviewerId: string; 
   return { at: last.at, reviewerId: last.reviewerId, reassigns: rows.filter((row) => row.reassigned).length };
 }
 
-function lastAssignedAt(agentId: string): number {
+function lastAssignedAt(agentId: string, events = reviewEvents()): number {
   let latest = 0;
-  for (const row of reviewEvents()) {
+  for (const row of events) {
     if (row.reviewerId === agentId && row.at > latest) latest = row.at;
   }
   return latest;
@@ -356,10 +356,11 @@ function lastAssignedAt(agentId: string): number {
 export function reviewerLoads(): ReviewerLoadView[] {
   let agents: Agent[] = [];
   try { agents = listAgents(); } catch { agents = []; }
+  const events = reviewEvents();
   return agents
     .filter((agent) => agent.mode !== 'file' && agent.role !== 'orchestrator' && !reviewerDenied(agent))
     .map((agent) => {
-      const load = loadFor(agent);
+      const load = loadFor(agent, events);
       return { id: agent.id, name: agent.name, alias: agent.alias ?? null, busy: load.busy, queue: load.openReviews };
     })
     .sort((a, b) => b.queue - a.queue || a.name.localeCompare(b.name));

@@ -80,8 +80,9 @@ describe('lane cards', () => {
 
     const auto = buildLaneCards([{ ...base, auto_merge_main: true }], [], ALES, OWNERS)[0];
     expect(auto.action).toBe('Merging main automatically…');
-    expect(auto.owner).toBe('system');
-    expect(auto.needs_you).toBe(false);
+    expect(auto.owner).toBe('developer');
+    expect(auto.needs_you).toBe(true);
+    expect(auto.mine).toBe(true);
 
     const conflict = buildLaneCards([{ ...base, conflict_files: ['invoice.ts', 'tax.ts'] }], [], ALES, OWNERS)[0];
     expect(conflict.action).toBe('Resolve conflict in invoice.ts, tax.ts');
@@ -165,6 +166,32 @@ describe('lane cards', () => {
     const hidden = buildLaneCards([{ ...open, can_clear: false }], [], ANTONIO, OWNERS)[0];
     expect(hidden.action).toBe('Staging request open since 06:04');
     expect(hidden.button).toBeNull();
+  });
+
+  it('a behind-main branch is the author to-do, and Ready to stage names that author', () => {
+    const behind = buildLaneCards([
+      fact({
+        sha: '336a5008' + 'a'.repeat(32), lane: 'canary-e2e-stage-v5', author_name: 'antonio',
+        behind_main: true, state: 'ready_to_stage',
+      }),
+    ], [], ANTONIO, OWNERS)[0];
+    expect(behind.status).toBe('Behind main');
+    expect(behind.needs_you).toBe(true);
+    expect(behind.mine).toBe(true);
+    expect(behind.owner).toBe('developer');
+    expect(behind.owner_label).toBe('Antonio');
+
+    const ready = buildLaneCards([
+      fact({
+        sha: 'cab9ffe2' + 'b'.repeat(32), lane: 'wc-fable', author_name: 'fable',
+        state: 'ready_to_stage', action: 'stage', run_backed: true, run_id: 'run-fable',
+      }),
+    ], [], null, OWNERS)[0];
+    expect(ready.status).toBe('Ready to stage');
+    expect(ready.button).toMatchObject({ kind: 'stage', label: 'Stage' });
+    expect(ready.owner).toBe('developer');
+    expect(ready.owner_label).toBe('fable');
+    expect(ready.needs_you).toBe(true);
   });
 
   it('offers Stage only when it is manual, and locks it in words with no button', () => {

@@ -685,6 +685,12 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   const resolvedProject = resolveReleaseProject(opts.project, opts.sha);
   if (!resolvedProject.ok) return resolvedProject;
   opts = { ...opts, project: resolvedProject.project };
+  // A forwarding box does not judge a rollback. Say so before stale or behind-main
+  // can mark the freeze or answer with those errors.
+  if (opts.target === 'staging' && opts.forceRollback === true) {
+    const dest = releaseForwardTarget(opts.project);
+    if (dest) return { ok: false, error: rollbackOnDeployBox(dest.peer) };
+  }
   const behind = releaseBehindMain(opts.project, opts.sha);
   if (behind) return { ok: false, error: behind };
   let stepsJson: string | null = null;
@@ -696,11 +702,13 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   }
   if (opts.target === 'staging') {
     const resolvedTip = await resolveStagingTip(opts.project, { fresh: true });
-    const staging = resolvedTip.state === 'unknown' ? null : resolvedTip.tip;
-    if (resolvedTip.state !== 'unknown') rejectStaleStaging(opts.project, staging);
+    const tipUnknown = resolvedTip.state === 'unknown';
+    const staging = tipUnknown ? null : resolvedTip.tip;
+    if (!tipUnknown) rejectStaleStaging(opts.project, staging);
     const { stageEligibility } = await import('./sha-stage-block.js');
     const eligible = await stageEligibility(opts.sha, opts.project, {
       tipResolved: true,
+      tipUnknown,
       tip: staging,
       forceRollback: opts.forceRollback,
       forceReason: opts.forceReason,
