@@ -1064,7 +1064,7 @@ describe('releases.ts', () => {
       expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
     });
 
-    it('an admin force_rollback deploy becomes the tip locally and through the peer mirror', async () => {
+    it('an admin force_rollback deploy becomes the tip locally, and the forwarding box refuses it', async () => {
       const repo = path.join(tmp, 'repo');
       fs.mkdirSync(repo);
       const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -1105,8 +1105,8 @@ describe('releases.ts', () => {
       db.getDb().prepare('DELETE FROM release_requests').run();
       tip(child);
       cfg.releases = {};
-      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo, release_peer: 'deploy/fable' };
-      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo, release_peer: 'wavecode-countix/fable' };
+      cfg.peers['wavecode-countix'] = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
       const box = fakeDeployBox();
       box.state.stagingTip = { sha: child, version: '1.1.0', lane: 'wc-lane' };
       peers.setPeerFetchForTest(box.fetchImpl);
@@ -1114,14 +1114,29 @@ describe('releases.ts', () => {
         project: 'wavepulse', sha: parent, lane: 'wc-old', target: 'staging',
         actorName: 'denis', actorIsAdmin: true, forceRollback: true, forceReason: 'staging was bad',
       });
-      expect(forwarded.ok).toBe(true);
-      if (!forwarded.ok) return;
-      expect(forwarded.data).toMatchObject({ force_rollback: 1, rollback_reason: 'staging was bad', rollback_by: 'denis', status: 'sent' });
-      expect(box.state.posts[0]).toMatchObject({ force_rollback: true, force_reason: 'staging was bad', rollback_by: 'denis', sha: parent });
-      box.deployed(forwarded.data.peer_request_id!, '0.9.0');
-      for (let i = 0; i < 40 && rel.getRelease(forwarded.data.id)?.status !== 'deployed'; i++) await flush(25);
-      expect(rel.getRelease(forwarded.data.id)).toMatchObject({ status: 'deployed', deployed_sha: parent });
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(parent);
+      expect(forwarded.ok).toBe(false);
+      if (!forwarded.ok) expect(forwarded.error).toBe(rel.rollbackOnDeployBox('wavecode-countix'));
+      expect(box.state.posts).toEqual([]);
+      expect(rel.listReleases({ sha: parent, target: 'staging' })).toEqual([]);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(child);
+    });
+
+    it('a peer token cannot authorize a rollback by claiming to be an admin', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
+      cfg.releases = { deploy_agent: 'fable' };
+      const fable = agent('fable');
+      acting.user = { id: 'u-peer', name: 'peer-countix-dev', role: 'developer', allowed_agents: '["fable"]' };
+      const res = await app.fetch(new Request('http://x/api/releases', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sha: SHA, target: 'staging', project: 'wavepulse', requested_by: 'denis',
+          requester_is_admin: true, force_rollback: true, force_reason: 'staging was bad', rollback_by: 'denis',
+        }),
+      }));
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(rel.PEER_ROLLBACK_FORBIDDEN);
+      expect(rel.listReleases({ sha: SHA, target: 'staging' })).toEqual([]);
+      expect(typedInto(fable.id)).toEqual([]);
     });
 
     it('GET /api/releases/staging-tip returns the deployed staging tip', async () => {

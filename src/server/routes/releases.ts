@@ -53,9 +53,13 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
         return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})` }, 403);
       }
     }
+    if (fromPeer) {
+      const rollback = releases.peerRollbackRefusal(body);
+      if (rollback) return c.json({ error: rollback }, 403);
+    }
     const r = await releases.acceptRelease(
       { ...body, requested_by: fromPeer ? body.requested_by : user.name },
-      { userName: user.name, fromPeer, actorIsAdmin: fromPeer ? body.requester_is_admin === true : isAdmin(user) },
+      { userName: user.name, fromPeer, actorIsAdmin: isAdmin(user) && !fromPeer },
     );
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 201);

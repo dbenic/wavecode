@@ -712,6 +712,8 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
       return { ok: false, error: eligible.error };
     }
     if (eligible.rollbackReason) rollbackReason = eligible.rollbackReason;
+    const dest = releaseForwardTarget(opts.project);
+    if (rollbackReason && dest) return { ok: false, error: rollbackOnDeployBox(dest.peer) };
   }
   try {
     const freeze = getFreeze(opts.sha);
@@ -746,13 +748,11 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const peerName = forward.peer;
     const claimed = claimRelease({ ...base, origin: 'local', peer: peerName, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null }, 'request');
     if (!claimed.ok) return { ok: false, error: claimed.error };
-    if (rollbackReason) rememberForceRollback(claimed.data.id, rollbackReason, opts.actorName);
     const remote = await peerPostJson<{ id: string; status: string }>(peerName, '/releases', {
       sha: opts.sha, lane: opts.lane ?? null, target: opts.target, project: opts.project, desk: opts.desk ?? null,
       reviewer: opts.reviewer ?? null, requested_by: opts.actorName, requester_is_admin: opts.actorIsAdmin === true,
       // Production forwards the originating user. Staging bodies stay as they were.
       ...(opts.target === 'production' ? { requester_role: opts.actorRole ?? null, steps: stepsJson } : {}),
-      ...(rollbackReason ? { force_rollback: true, force_reason: rollbackReason, rollback_by: opts.actorName } : {}),
       origin_id: id, origin_box: os.hostname(), note: opts.note ?? null,
     });
     if (!remote.ok || !remote.data?.id) {
@@ -764,7 +764,6 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     patch(id, { status: 'sent', peer_request_id: remote.data.id });
     const sent = getRelease(id)!;
     emit('release.requested', 'release', id, { target: opts.target, sha: opts.sha, project: opts.project, lane: opts.lane ?? null, desk: opts.desk ?? null, peer: peerName, peer_request_id: remote.data.id, requested_by: opts.actorName, run_id: opts.runId ?? null });
-    if (rollbackReason) recordRollback(sent, opts.actorName, rollbackReason);
     ensureReleasePoller(peerName);
     if (opts.target === 'staging') {
       invalidateStagingTipCache(opts.project);
@@ -822,11 +821,31 @@ function laneAlert(error: string): boolean {
   return /^(behind main|would roll staging back|cannot prove|force_rollback)/.test(error);
 }
 
+/** A peer token cannot authorize a rewind. The words are the HTTP 403 body. */
+export const PEER_ROLLBACK_FORBIDDEN = 'rollback must be requested by an admin on the deploy box';
+
+export function rollbackOnDeployBox(peer: string): string {
+  return `Run the rollback on the deploy box (${peer}) directly`;
+}
+
+function asksForceRollback(v: unknown): boolean {
+  return v === true || v === 1 || v === 'true' || v === '1';
+}
+
+/** Set when a peer body carries force_rollback. Null when it does not. */
+export function peerRollbackRefusal(body: IncomingRelease): string | null {
+  return asksForceRollback(body.force_rollback) ? PEER_ROLLBACK_FORBIDDEN : null;
+}
+
 /** A request from a peer box (or a local caller): store it and hand it to the deploy agent. */
 export async function acceptRelease(body: IncomingRelease, via: { userName: string; fromPeer: boolean; actorIsAdmin?: boolean }): Promise<Result<ReleaseRequest>> {
   const sha = typeof body.sha === 'string' ? body.sha.trim().toLowerCase() : '';
   if (!SHA_RE.test(sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(body.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
+  if (via.fromPeer) {
+    const refused = peerRollbackRefusal(body);
+    if (refused) return { ok: false, error: refused };
+  }
   // Before the idempotent open-request lookup, so a retry that drops the originating
   // user cannot fetch or refresh a production GO.
   if (body.target === 'production' && via.fromPeer) {
@@ -858,9 +877,9 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
     const { stageEligibility } = await import('./sha-stage-block.js');
     const eligible = await stageEligibility(sha, projectName, {
       localTip: true,
-      forceRollback: body.force_rollback === true,
+      forceRollback: !via.fromPeer && body.force_rollback === true,
       forceReason: typeof body.force_reason === 'string' ? body.force_reason : null,
-      actorIsAdmin: via.actorIsAdmin === true,
+      actorIsAdmin: !via.fromPeer && via.actorIsAdmin === true,
       markStale: true,
     });
     if (eligible.error) {
