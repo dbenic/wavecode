@@ -702,11 +702,13 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   }
   if (opts.target === 'staging') {
     const resolvedTip = await resolveStagingTip(opts.project, { fresh: true });
-    const staging = resolvedTip.state === 'unknown' ? null : resolvedTip.tip;
-    if (resolvedTip.state !== 'unknown') rejectStaleStaging(opts.project, staging);
+    const tipUnknown = resolvedTip.state === 'unknown';
+    const staging = tipUnknown ? null : resolvedTip.tip;
+    if (!tipUnknown) rejectStaleStaging(opts.project, staging);
     const { stageEligibility } = await import('./sha-stage-block.js');
     const eligible = await stageEligibility(opts.sha, opts.project, {
       tipResolved: true,
+      tipUnknown,
       tip: staging,
       forceRollback: opts.forceRollback,
       forceReason: opts.forceReason,

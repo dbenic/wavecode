@@ -28,6 +28,7 @@ import { setPeerFetchForTest } from './peers.js';
 import * as freezes from './release-freezes.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 import * as reviewQueue from './review-queue.js';
+import { registerReleaseRoutes } from './routes/releases.js';
 import { registerReviewRoutes } from './routes/reviews.js';
 import * as testRuns from './test-runs.js';
 import * as releasesApi from './releases.js';
@@ -253,7 +254,8 @@ describe('deploy reconciler review status and behind-main pings', () => {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
-    insertFreeze(forwardSha, { verdict: 'pass', lane: 'wc-forward' });
+    const runId = pendingRun(alesId);
+    insertFreeze(forwardSha, { verdict: 'pass', lane: 'wc-forward', runId });
 
     await reconcileDeployStates();
     const row = db.getDb().prepare('SELECT in_staging, stage_block, state FROM deploy_card_states WHERE sha = ?').get(forwardSha) as {
@@ -271,12 +273,24 @@ describe('deploy reconciler review status and behind-main pings', () => {
     resetStagingTipCacheForTest();
     setPeerFetchForTest(async () => new Response(JSON.stringify({ error: 'down' }), { status: 500 }));
     await reconcileDeployStates();
-    const failed = db.getDb().prepare('SELECT in_staging, state FROM deploy_card_states WHERE sha = ?').get(forwardSha) as {
-      in_staging: number | null; state: string;
+    const failed = db.getDb().prepare('SELECT in_staging, stage_block, state FROM deploy_card_states WHERE sha = ?').get(forwardSha) as {
+      in_staging: number | null; stage_block: string | null; state: string;
     };
-    expect(failed.in_staging).toBe(0);
-    expect(failed.state).not.toBe('unknown');
-    expect((await reviewBoard({ name: 'antonio', role: 'developer' }, [])).release.staging.sha).toBeNull();
+    expect(failed.in_staging).toBeNull();
+    expect(failed.stage_block).toBe('Stage locked: staging version unreadable');
+    const lockedBoard = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    expect(lockedBoard.release.staging.sha).toBeNull();
+    const locked = lockedBoard.cards.find((item) => item.lane === 'wc-forward');
+    expect(locked?.status).toBe('Stage locked');
+    expect(locked?.status).not.toBe('Unknown');
+    expect(locked?.button).toBeNull();
+    expect(locked?.action).toBe('Stage locked: staging version unreadable');
+    const app = new Hono();
+    registerReleaseRoutes(app as never);
+    const click = await app.fetch(new Request(`http://x/api/reviews/${runId}/stage`, { method: 'POST' }));
+    expect(click.status).toBeGreaterThanOrEqual(400);
+    expect(click.status).toBeLessThan(500);
+    expect(((await click.json()) as { error: string }).error).toBe('staging version unknown, try again');
   });
 
   it('marks only the current staging tip on_staging and supersedes an older contained SHA', async () => {
@@ -520,22 +534,34 @@ describe('deploy reconciler review status and behind-main pings', () => {
     runs.mockRestore();
   });
 
-  it('a missing SHA is not Unknown after reconcile, and filler or hex lanes are dropped', async () => {
+  it('a missing SHA is locked, not Unknown, and Stage refuses the click', async () => {
     const missing = 'cd'.repeat(20);
-    insertFreeze(missing, { verdict: 'pass', lane: 'wc-absent', authorName: 'antonio' });
+    const runId = pendingRun(alesId);
+    insertFreeze(missing, { runId, verdict: 'pass', lane: 'wc-absent', authorName: 'antonio' });
     const filler = ['changes', 'source', 'separately', 'test-path', 'also', 'commits', '6ed9192e'];
     filler.forEach((lane, i) => {
       insertFreeze(`${String(i).padStart(2, '0')}${'ab'.repeat(19)}`, { verdict: null, lane, createdAt: '2026-01-01 00:00:00' });
     });
     await reconcileDeployStates();
-    expect(stateOf(missing)).not.toBe('unknown');
+    const row = db.getDb().prepare('SELECT stage_block, state FROM deploy_card_states WHERE sha = ?').get(missing) as {
+      stage_block: string | null; state: string;
+    };
+    expect(row.stage_block).toBe('Stage locked: commit not fetched on this box');
     const stored = db.getDb().prepare('SELECT lane FROM release_freezes').all() as { lane: string | null }[];
-    for (const lane of filler) expect(stored.some((row) => row.lane === lane)).toBe(false);
+    for (const lane of filler) expect(stored.some((entry) => entry.lane === lane)).toBe(false);
     const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
     expect(board.cards.some((card) => card.status === 'Unknown')).toBe(false);
     for (const lane of filler) expect(board.cards.some((card) => card.lane === lane)).toBe(false);
-    const card = board.cards.find((row) => row.sha === missing);
-    expect(card?.status).not.toBe('Unknown');
+    const card = board.cards.find((entry) => entry.sha === missing);
+    expect(card?.status).toBe('Stage locked');
+    expect(card?.button).toBeNull();
+    expect(card?.action).toBe('Stage locked: commit not fetched on this box');
+    const app = new Hono();
+    registerReleaseRoutes(app as never);
+    const click = await app.fetch(new Request(`http://x/api/reviews/${runId}/stage`, { method: 'POST' }));
+    expect(click.status).toBeGreaterThanOrEqual(400);
+    expect(click.status).toBeLessThan(500);
+    expect(((await click.json()) as { error: string }).error).toBe('cannot verify against main');
   });
 
   it('Branch: canary-e2e-stage-v5 is the lane for the board and for Stage, not wc-codex3', async () => {

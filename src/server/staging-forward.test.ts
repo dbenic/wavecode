@@ -148,7 +148,7 @@ describe('forward-only staging', () => {
     projects.demo.repo = repo;
     const missingObject = await requestRelease({ project: 'demo', sha: 'ab'.repeat(20), target: 'staging', actorName: 'denis' });
     expect(missingObject.ok).toBe(false);
-    if (!missingObject.ok) expect(missingObject.error).toMatch(/^cannot prove /);
+    if (!missingObject.ok) expect(missingObject.error).toBe('cannot verify against main');
   });
 
   it('rejects an open row that is behind main, and does not resume it', async () => {

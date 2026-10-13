@@ -360,7 +360,7 @@ function storedTips(): Map<string, ProjectTips> {
   return reconciledTips;
 }
 
-/** True when the object is in the repo, false when it is missing, null on a timeout. */
+/** True when the object is in the repo, false when it is missing, null when git cannot say. */
 async function objectPresent(repo: string | null, sha: string): Promise<Tri> {
   if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return null;
   try {
@@ -373,8 +373,14 @@ async function objectPresent(repo: string | null, sha: string): Promise<Tri> {
   }
 }
 
+/** Shown instead of Unknown when the snapshot cannot prove the SHA is stageable. */
+export const STAGE_LOCKED_STAGING = 'Stage locked: staging version unreadable';
+export const STAGE_LOCKED_COMMIT = 'Stage locked: commit not fetched on this box';
+
 async function containedIn(repo: string | null, sha: string, tip: string | null): Promise<Tri> {
-  if (!tip || !/^[0-9a-f]{40}$/i.test(tip)) return false;
+  // A missing tip or a short SHA is unknown. Callers that resolved an empty tip
+  // pass false themselves; they do not call this.
+  if (!tip || !/^[0-9a-f]{40}$/i.test(tip)) return null;
   const want = sha.toLowerCase();
   const have = tip.toLowerCase();
   if (want === have) return true;
@@ -382,8 +388,6 @@ async function containedIn(repo: string | null, sha: string, tip: string | null)
   try {
     const ans = await gitAncestor(repo, want, have);
     if (ans !== null) return ans;
-    const present = await objectPresent(repo, want);
-    if (present === false) return false;
     return null;
   } catch { return null; }
 }
@@ -398,8 +402,6 @@ async function mergedToMain(project: string | null, sha: string): Promise<Tri> {
   try {
     const ans = await gitAncestor(repo, sha.toLowerCase(), mainSha.toLowerCase());
     if (ans !== null) return ans;
-    const present = await objectPresent(repo, sha);
-    if (present === false) return false;
     return null;
   } catch { return null; }
 }
@@ -433,6 +435,13 @@ function versionFor(sha: string, project: string | null, staging: Tip, prod: Tip
       if (any?.version) return any.version;
     }
   } catch { /* release table missing */ }
+  return null;
+}
+
+/** A missing object, or ancestry git cannot compute, locks the card. An unread staging version does too. */
+function closureLock(present: Tri, stagingKnown: boolean, behind: Tri, hasRepo: boolean): string | null {
+  if (present === false || (hasRepo && behind === null)) return STAGE_LOCKED_COMMIT;
+  if (!stagingKnown) return STAGE_LOCKED_STAGING;
   return null;
 }
 
@@ -476,7 +485,8 @@ async function stageBlockFor(freeze: ReleaseFreeze, _facts: DeriveFacts, pair: P
     const eligible = await stageEligibility(freeze.sha, freeze.project, {
       includeGate: true,
       markStale: false,
-      tipResolved: pair.stagingKnown,
+      tipResolved: true,
+      tipUnknown: !pair.stagingKnown,
       tip,
     });
     return eligible.error;
@@ -497,16 +507,18 @@ async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<s
   const repo = projectRepo(project);
   const [merged, inStaging, inProd] = await Promise.all([
     mergedToMain(project, freeze.sha),
-    containedIn(repo, freeze.sha, pair.staging.sha),
-    containedIn(repo, freeze.sha, pair.prod.sha),
+    // An unresolved staging version is unknown. A resolved empty tip is not deployed.
+    !pair.stagingKnown
+      ? Promise.resolve<Tri>(null)
+      : pair.staging.sha
+        ? containedIn(repo, freeze.sha, pair.staging.sha)
+        : Promise.resolve<Tri>(false),
+    pair.prod.sha ? containedIn(repo, freeze.sha, pair.prod.sha) : Promise.resolve<Tri>(false),
   ]);
   let behind: Tri = null;
   try {
     const n = commitsBehind(project, freeze.sha);
-    if (n == null) {
-      const present = await objectPresent(repo, freeze.sha);
-      behind = present === false ? false : null;
-    } else behind = n > 0;
+    behind = n == null ? null : n > 0;
   } catch { behind = null; }
   let ready: boolean | null = false;
   try { ready = verificationFor(freeze.sha) != null; } catch { ready = null; }
@@ -652,6 +664,10 @@ export async function reconcileDeployStates(now = new Date(), opts?: { freshTip?
     const labels = labelsBySha.get(freeze.sha) ?? null;
     const fresh = getFreeze(freeze.sha) ?? freeze;
     const badge = facts.containedInProd === true ? 'prod' : facts.containedInStaging === true ? 'staging' : null;
+    const repo = projectRepo(project);
+    const present = await objectPresent(repo, freeze.sha);
+    const lock = state === 'unknown' ? closureLock(present, pair.stagingKnown, facts.behindMain, !!repo) : null;
+    const block = await stageBlockFor(fresh, facts, pair);
     upsert({
       sha: freeze.sha,
       state,
@@ -672,8 +688,8 @@ export async function reconcileDeployStates(now = new Date(), opts?: { freshTip?
       summary: labels?.summary ?? null,
       desk: labels ? labels.desk : fresh.desk,
       lane: labels ? labels.lane : fresh.lane,
-      unknown_reason: unknownReason(facts),
-      stage_block: await stageBlockFor(fresh, facts, pair),
+      unknown_reason: lock ?? unknownReason(facts),
+      stage_block: lock ?? block,
       last_reconciled_at: at,
     });
   }

@@ -60,6 +60,8 @@ export interface StageEligibilityOpts {
   localTip?: boolean;
   /** Caller already resolved the tip. `null` means there is no known tip. */
   tipResolved?: boolean;
+  /** The resolve failed. Not the same as a resolved tip that is empty. */
+  tipUnknown?: boolean;
   tip?: StagingTip | null;
   forceRollback?: boolean;
   forceReason?: string | null;
@@ -150,19 +152,22 @@ export async function stageEligibility(sha: string, project: string | null, opts
   if (behind) return refused(behind);
 
   let tip: StagingTip | null = null;
+  let tipUnknown = opts.tipUnknown === true;
   if (opts.localTip) tip = currentStagingTip(project);
   else if (opts.tipResolved) tip = opts.tip ?? null;
   else {
     try {
       const resolved = await resolveStagingTip(project, { fresh: true });
-      tip = resolved.state === 'unknown' ? null : resolved.tip;
-    } catch { tip = null; }
+      if (resolved.state === 'unknown') tipUnknown = true;
+      else tip = resolved.tip;
+    } catch { tipUnknown = true; }
   }
 
   const forward = evaluateForward({
     project,
     requestedSha: sha,
     staging: tip,
+    tipUnknown,
     forceRollback: opts.forceRollback,
     forceReason: opts.forceReason,
     actorIsAdmin: opts.actorIsAdmin,

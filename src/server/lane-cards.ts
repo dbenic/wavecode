@@ -450,7 +450,19 @@ function present(fact: LaneFreezeFact, who: string): Presented {
     };
   }
   if (fact.state === 'unknown') {
-    const reason = oneLine(fact.unknown_reason, 'Deploy state is unknown');
+    const reason = oneLine(fact.action_lock || fact.unknown_reason, 'Deploy state is unknown');
+    if (reason.startsWith('Stage locked:')) {
+      return {
+        status: 'Stage locked',
+        action: reason,
+        owner: 'system',
+        owner_label: 'system',
+        history: false,
+        button: null,
+        pipeline: steps('staging', { id: 'staging', reason }),
+        link: null,
+      };
+    }
     return {
       status: 'Unknown',
       action: reason,
