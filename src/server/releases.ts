@@ -97,6 +97,11 @@ export interface ReleaseRequest {
   steps_json: string | null;
   /** The step the deploy agent reported as the one that failed. */
   failed_step: string | null;
+  /** 1 when an admin authorized this staging request to move the tip backwards. */
+  force_rollback: number | null;
+  rollback_reason: string | null;
+  /** Admin who authorized the rollback. */
+  rollback_by: string | null;
   created_at: string;
   updated_at: string;
   reported_at: string | null;
@@ -142,6 +147,7 @@ export function ensureReleaseTables(): void {
     'deploy_id TEXT', 'progress_phase TEXT', 'progress_status TEXT',
     'pin_until TEXT', 'staging_url TEXT', 'rollback_status TEXT', 'rollback_to TEXT',
     'steps_json TEXT', 'failed_step TEXT',
+    'force_rollback INTEGER', 'rollback_reason TEXT', 'rollback_by TEXT',
   ]) {
     try { getDb().exec(`ALTER TABLE release_requests ADD COLUMN ${col}`); } catch { /* exists */ }
   }
@@ -260,12 +266,21 @@ function patch(id: string, fields: Partial<ReleaseRequest>): void {
     .run(...keys.map((k) => fields[k] ?? null), id);
 }
 
-function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note' | 'deploy_id' | 'progress_phase' | 'progress_status' | 'pin_until' | 'staging_url' | 'rollback_status' | 'rollback_to' | 'steps_json' | 'failed_step'> & { steps_json?: string | null }): ReleaseRequest {
+function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note' | 'deploy_id' | 'progress_phase' | 'progress_status' | 'pin_until' | 'staging_url' | 'rollback_status' | 'rollback_to' | 'steps_json' | 'failed_step' | 'force_rollback' | 'rollback_reason' | 'rollback_by'> & { steps_json?: string | null }): ReleaseRequest {
   ensureReleaseTables();
   withTable(() => getDb().prepare(`INSERT INTO release_requests (id, project, sha, lane, target, desk, reviewer, requested_by, origin, peer, peer_request_id, origin_id, run_id, deploy_agent_id, status, version, deployed_sha, report, error, steps_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(row.id, row.project, row.sha, row.lane, row.target, row.desk, row.reviewer, row.requested_by, row.origin, row.peer, row.peer_request_id, row.origin_id, row.run_id, row.deploy_agent_id, row.status, row.version, row.deployed_sha, row.report, row.error, row.steps_json ?? null));
   return getRelease(row.id)!;
+}
+
+/** The accepted admin rollback. Written before the deploy starts, so the report can see it. */
+function rememberForceRollback(id: string, reason: string, by: string | null): void {
+  patch(id, {
+    force_rollback: 1,
+    rollback_reason: reason.trim().slice(0, 1000),
+    rollback_by: by?.trim().slice(0, 64) || null,
+  });
 }
 
 function isTarget(t: unknown): t is ReleaseTarget {
@@ -731,12 +746,13 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const peerName = forward.peer;
     const claimed = claimRelease({ ...base, origin: 'local', peer: peerName, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null }, 'request');
     if (!claimed.ok) return { ok: false, error: claimed.error };
+    if (rollbackReason) rememberForceRollback(claimed.data.id, rollbackReason, opts.actorName);
     const remote = await peerPostJson<{ id: string; status: string }>(peerName, '/releases', {
       sha: opts.sha, lane: opts.lane ?? null, target: opts.target, project: opts.project, desk: opts.desk ?? null,
       reviewer: opts.reviewer ?? null, requested_by: opts.actorName, requester_is_admin: opts.actorIsAdmin === true,
       // Production forwards the originating user. Staging bodies stay as they were.
       ...(opts.target === 'production' ? { requester_role: opts.actorRole ?? null, steps: stepsJson } : {}),
-      ...(opts.forceRollback ? { force_rollback: true, force_reason: opts.forceReason ?? null } : {}),
+      ...(rollbackReason ? { force_rollback: true, force_reason: rollbackReason, rollback_by: opts.actorName } : {}),
       origin_id: id, origin_box: os.hostname(), note: opts.note ?? null,
     });
     if (!remote.ok || !remote.data?.id) {
@@ -761,7 +777,8 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     // this box deploys itself
     const claimed = claimRelease({ ...base, origin: 'local', peer: null, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null }, 'request');
     if (!claimed.ok) return { ok: false, error: claimed.error };
-    const row = claimed.data;
+    if (rollbackReason) rememberForceRollback(claimed.data.id, rollbackReason, opts.actorName);
+    const row = getRelease(claimed.data.id)!;
     const handed = handToDeployAgent(row);
     if (handed.ok && rollbackReason) recordRollback(handed.data, opts.actorName, rollbackReason);
     if (handed.ok && opts.target === 'staging') {
@@ -778,7 +795,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
 export interface IncomingRelease {
   sha?: unknown; lane?: unknown; target?: unknown; project?: unknown; desk?: unknown; reviewer?: unknown;
   requested_by?: unknown; requester_role?: unknown; requester_is_admin?: unknown; origin_id?: unknown; origin_box?: unknown; note?: unknown;
-  force_rollback?: unknown; force_reason?: unknown; steps?: unknown;
+  force_rollback?: unknown; force_reason?: unknown; rollback_by?: unknown; steps?: unknown;
 }
 
 function forwardedUser(body: IncomingRelease): { name: string | null; role: string | null } {
@@ -880,8 +897,10 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
     return { ok: false, error: claimed.error };
   }
   const row = claimed.data;
-  const handed = handToDeployAgent(row);
-  if (handed.ok && rollbackReason) recordRollback(handed.data, str(body.requested_by, 64) ?? via.userName, rollbackReason);
+  const rollbackBy = str(body.rollback_by, 64) ?? str(body.requested_by, 64) ?? via.userName;
+  if (rollbackReason) rememberForceRollback(row.id, rollbackReason, rollbackBy);
+  const handed = handToDeployAgent(getRelease(row.id) ?? row);
+  if (handed.ok && rollbackReason) recordRollback(handed.data, rollbackBy, rollbackReason);
   return handed;
 }
 
@@ -1182,7 +1201,7 @@ function noteLateResult(row: ReleaseRequest, sha: string | null | undefined): vo
  * current tip and not a descendant of it is refused. No tip, or no repo,
  * leaves the report alone — a box without git still records its first deploys.
  */
-function stagingRewindRefusal(project: string | null, sha: string): string | null {
+function stagingRewindRefusal(project: string | null, sha: string, row?: ReleaseRequest | null): string | null {
   if (!project) return null;
   const tip = currentStagingTip(project);
   if (!tip?.sha) return null;
@@ -1192,6 +1211,10 @@ function stagingRewindRefusal(project: string | null, sha: string): string | nul
   const repo = projectRepo(project);
   if (!repo) return null;
   if (!isMissingAncestor(repo, tipSha, next)) return null;
+  if (row?.force_rollback === 1) {
+    logger.info({ project, sha: next, tip: tipSha, by: row.rollback_by, reason: row.rollback_reason }, 'Authorized staging rollback');
+    return null;
+  }
   const error = `refusing to move staging backwards: ${next.slice(0, 8)} is not a descendant of ${tipSha.slice(0, 8)}`;
   logger.warn({ project, sha: next, tip: tipSha }, error);
   return error;
@@ -1212,7 +1235,7 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     return { ok: false, error: `Reported SHA ${deployedSha.slice(0, 8)} is not the requested ${r.sha.slice(0, 8)}; report a failure instead` };
   }
   if (report.status === 'deployed' && r.target === 'staging') {
-    const rewind = stagingRewindRefusal(r.project, r.sha);
+    const rewind = stagingRewindRefusal(r.project, r.sha, r);
     if (rewind) return { ok: false, error: rewind };
   }
   patch(id, {
@@ -1479,7 +1502,7 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   const fresh = getRelease(r.id) ?? local;
   if (s === 'deployed' && fresh.target === 'staging') {
     const tipSha = remote.data.deployed_sha || fresh.sha;
-    const rewind = stagingRewindRefusal(fresh.project, tipSha);
+    const rewind = stagingRewindRefusal(fresh.project, tipSha, fresh);
     if (rewind) return;
   }
   patch(r.id, {

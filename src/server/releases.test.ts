@@ -1064,6 +1064,66 @@ describe('releases.ts', () => {
       expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
     });
 
+    it('an admin force_rollback deploy becomes the tip locally and through the peer mirror', async () => {
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: gitEnv }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-q', '-m', 'parent');
+      const parent = git('rev-parse', 'HEAD');
+      git('update-ref', 'refs/remotes/origin/main', parent);
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-q', '-m', 'child');
+      const child = git('rev-parse', 'HEAD');
+      git('update-ref', 'refs/heads/main', parent);
+      const tip = (sha: string) => {
+        db.getDb().prepare(
+          `INSERT INTO release_requests (id, project, sha, lane, target, origin, status, deployed_sha, version, created_at, updated_at)
+           VALUES ('01CHILDTIP000000000000001', 'wavepulse', ?, 'wc-lane', 'staging', 'local', 'deployed', ?, '1.1.0', datetime('now', '-5 minutes'), datetime('now', '-5 minutes'))`,
+        ).run(sha, sha);
+      };
+
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo };
+      cfg.releases = { deploy_agent: 'fable' };
+      agent('fable');
+      tip(child);
+      const accepted = await rel.acceptRelease({
+        sha: parent, target: 'staging', project: 'wavepulse', lane: 'wc-old',
+        requested_by: 'denis', force_rollback: true, force_reason: 'staging was bad', rollback_by: 'denis',
+      }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
+      expect(accepted.ok).toBe(true);
+      if (!accepted.ok) return;
+      expect(accepted.data).toMatchObject({ status: 'sent', force_rollback: 1, rollback_reason: 'staging was bad', rollback_by: 'denis' });
+      const reported = rel.reportRelease(accepted.data.id, { status: 'deployed', sha: parent, version: '0.9.0' });
+      expect(reported.ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(parent);
+
+      db.getDb().prepare('DELETE FROM release_requests').run();
+      tip(child);
+      cfg.releases = {};
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo, release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      const box = fakeDeployBox();
+      box.state.stagingTip = { sha: child, version: '1.1.0', lane: 'wc-lane' };
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const forwarded = await rel.requestRelease({
+        project: 'wavepulse', sha: parent, lane: 'wc-old', target: 'staging',
+        actorName: 'denis', actorIsAdmin: true, forceRollback: true, forceReason: 'staging was bad',
+      });
+      expect(forwarded.ok).toBe(true);
+      if (!forwarded.ok) return;
+      expect(forwarded.data).toMatchObject({ force_rollback: 1, rollback_reason: 'staging was bad', rollback_by: 'denis', status: 'sent' });
+      expect(box.state.posts[0]).toMatchObject({ force_rollback: true, force_reason: 'staging was bad', rollback_by: 'denis', sha: parent });
+      box.deployed(forwarded.data.peer_request_id!, '0.9.0');
+      for (let i = 0; i < 40 && rel.getRelease(forwarded.data.id)?.status !== 'deployed'; i++) await flush(25);
+      expect(rel.getRelease(forwarded.data.id)).toMatchObject({ status: 'deployed', deployed_sha: parent });
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(parent);
+    });
+
     it('GET /api/releases/staging-tip returns the deployed staging tip', async () => {
       cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
       cfg.releases = { deploy_agent: 'fable' };

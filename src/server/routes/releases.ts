@@ -55,7 +55,7 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     }
     const r = await releases.acceptRelease(
       { ...body, requested_by: fromPeer ? body.requested_by : user.name },
-      { userName: user.name, fromPeer, actorIsAdmin: isAdmin(user) && !fromPeer },
+      { userName: user.name, fromPeer, actorIsAdmin: fromPeer ? body.requester_is_admin === true : isAdmin(user) },
     );
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 201);
