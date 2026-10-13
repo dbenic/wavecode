@@ -119,7 +119,14 @@ describe('forward-only staging', () => {
     expect(queued.ok).toBe(true);
     if (!queued.ok) return;
     expect(queued.data.status === 'sent' || queued.data.status === 'requested').toBe(true);
-    await deploy(newer, '1.5.0');
+    const blocked = await requestRelease({ project: 'demo', sha: newer, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.error).toMatch(/already open/);
+    db.getDb().prepare(
+      `INSERT INTO release_requests (id, project, sha, lane, target, origin, status) VALUES ('rel-newer', 'demo', ?, 'wc-ales', 'staging', 'local', 'sent')`,
+    ).run(newer);
+    const reported = reportRelease('rel-newer', { status: 'deployed', sha: newer, version: '1.5.0', note: 'up' });
+    expect(reported.ok).toBe(true);
     const stale = listReleases({ sha: older, target: 'staging', limit: 5 })[0];
     expect(stale?.status).toBe('rejected');
     expect(stale?.error).toContain('would roll staging back:');
@@ -149,15 +156,18 @@ describe('forward-only staging', () => {
     expect(sent.ok).toBe(true);
     if (!sent.ok) return;
     const child = await requestRelease({ project: 'demo', sha: newer, lane: 'wc-ales', target: 'staging', actorName: 'denis' });
-    expect(child.ok).toBe(true);
-    if (!child.ok) return;
+    expect(child.ok).toBe(false);
+    if (!child.ok) expect(child.error).toMatch(/already open/);
+    db.getDb().prepare(
+      `INSERT INTO release_requests (id, project, sha, lane, target, origin, status) VALUES ('rel-newer', 'demo', ?, 'wc-ales', 'staging', 'local', 'sent')`,
+    ).run(newer);
     git(repo, 'checkout', '-q', newer);
     fs.writeFileSync(path.join(repo, 'd.txt'), 'd');
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'main past staging');
     const past = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', past);
-    const reported = reportRelease(child.data.id, { status: 'deployed', sha: newer, version: '1.6.0', note: 'up' });
+    const reported = reportRelease('rel-newer', { status: 'deployed', sha: newer, version: '1.6.0', note: 'up' });
     expect(reported.ok).toBe(true);
     const stale = listReleases({ sha: older, target: 'staging', limit: 5 })[0];
     expect(stale?.status).toBe('rejected');

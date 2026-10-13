@@ -28,6 +28,7 @@ import { presentFileRun, readCliLog, readFileRunStatus } from '../file-runner.js
 import { presentRunResult } from '../run-result.js';
 import logger from '../logger.js';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
+import { reviewerDenied } from '../reviewer-assign.js';
 import * as leases from '../leases.js';
 import { isTemplateKind, resolveTaskRoom, TEMPLATE_KINDS } from '../rooms.js';
 
@@ -287,6 +288,9 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       if (!reviewerResult.ok) return c.json({ error: `Reviewer not found: ${body.reviewer}` }, 400);
       if (reviewerResult.data.id === taskResult.data.agent_id) {
         return c.json({ error: 'The reviewer cannot be the agent doing the task' }, 400);
+      }
+      if (reviewerDenied(reviewerResult.data)) {
+        return c.json({ error: `${reviewerResult.data.alias ?? reviewerResult.data.name} is excluded from review` }, 400);
       }
       reviewerId = reviewerResult.data.id;
     }

@@ -272,6 +272,11 @@ function isTarget(t: unknown): t is ReleaseTarget {
   return t === 'staging' || t === 'production';
 }
 
+function openStagingRequest(project: string | null): ReleaseRequest | null {
+  if (!project) return null;
+  return listReleases({ project, target: 'staging', limit: 50 }).find((r) => r.status === 'requested' || r.status === 'sent') ?? null;
+}
+
 const STAGING_TIP_TTL_MS = 15_000;
 const STAGING_TIP_FAILURE_TTL_MS = 5_000;
 const STAGING_TIP_PEER_TIMEOUT_MS = 4_000;
@@ -323,21 +328,31 @@ export function releaseForwardTarget(project: string): { peer: string; agent: st
   return { peer, agent: agent ?? '' };
 }
 
+/** Drop a cached peer tip. A stage send and a deploy finish both move the tip the cache was holding. */
+export function invalidateStagingTipCache(project?: string | null): void {
+  if (project) peerTipCache.delete(project);
+  else peerTipCache.clear();
+}
+
 /**
  * Whenever this project's releases are forwarded, the staging tip comes from
  * that same peer. The local release row is not authoritative, and a local
  * health command does not override the peer. Otherwise the health command
  * wins, then the newest deployed staging record. A peer answer is cached 15s.
  * A failed ask stays `unknown`, is cached 5s, and does not fall back to the local row.
+ * `fresh` skips the cache: a Stage mutation and the reconcile after a deploy
+ * must not decide from the tip that was true at send time.
  * The outbound ask sets `local=1` so the peer answers from its own health command
  * or deployed row and does not proxy again.
  */
-export async function resolveStagingTip(project: string, opts?: { localOnly?: boolean }): Promise<ResolvedStagingTip> {
+export async function resolveStagingTip(project: string, opts?: { localOnly?: boolean; fresh?: boolean }): Promise<ResolvedStagingTip> {
   const forward = opts?.localOnly ? null : releaseForwardTarget(project);
   if (forward) {
-    const hit = peerTipCache.get(project);
-    const ttl = hit?.value.state === 'unknown' ? STAGING_TIP_FAILURE_TTL_MS : STAGING_TIP_TTL_MS;
-    if (hit && Date.now() - hit.at < ttl) return hit.value;
+    if (!opts?.fresh) {
+      const hit = peerTipCache.get(project);
+      const ttl = hit?.value.state === 'unknown' ? STAGING_TIP_FAILURE_TTL_MS : STAGING_TIP_TTL_MS;
+      if (hit && Date.now() - hit.at < ttl) return hit.value;
+    }
     const res = await peerGetJson<unknown>(
       forward.peer,
       `/releases/staging-tip?project=${encodeURIComponent(project)}&local=1`,
@@ -536,7 +551,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     stepsJson = gate.steps ? JSON.stringify(gate.steps) : null;
   }
   if (opts.target === 'staging') {
-    const resolvedTip = await resolveStagingTip(opts.project);
+    const resolvedTip = await resolveStagingTip(opts.project, { fresh: true });
     const staging = resolvedTip.state === 'unknown' ? null : resolvedTip.tip;
     if (resolvedTip.state !== 'unknown') rejectStaleStaging(opts.project, staging);
     const { stageEligibility } = await import('./sha-stage-block.js');
@@ -564,6 +579,10 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   const cfg = getConfig();
   const project = cfg.projects?.[opts.project];
   if (!project) return { ok: false, error: `Unknown project '${opts.project}'` };
+  if (opts.target === 'staging') {
+    const pending = openStagingRequest(opts.project);
+    if (pending) return { ok: false, error: `A staging request for ${opts.project} is already open (${pending.id})` };
+  }
   const open = listReleases({ sha: opts.sha, target: opts.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
   if (open) return { ok: false, error: `A ${opts.target} request for ${opts.sha.slice(0, 8)} is already open (${open.id})` };
 
@@ -607,7 +626,10 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     emit('release.requested', 'release', id, { target: opts.target, sha: opts.sha, project: opts.project, lane: opts.lane ?? null, desk: opts.desk ?? null, peer: peerName, peer_request_id: remote.data.id, requested_by: opts.actorName, run_id: opts.runId ?? null });
     if (rollbackReason) recordRollback(sent, opts.actorName, rollbackReason);
     ensureReleasePoller(peerName);
-    if (opts.target === 'staging') reconcileAfterDeploy();
+    if (opts.target === 'staging') {
+      invalidateStagingTipCache(opts.project);
+      reconcileAfterDeploy();
+    }
     return { ok: true, data: sent };
   }
 
@@ -616,7 +638,10 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const row = insert({ ...base, origin: 'local', peer: null, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
     const handed = handToDeployAgent(row);
     if (handed.ok && rollbackReason) recordRollback(handed.data, opts.actorName, rollbackReason);
-    if (handed.ok && opts.target === 'staging') reconcileAfterDeploy();
+    if (handed.ok && opts.target === 'staging') {
+      invalidateStagingTipCache(opts.project);
+      reconcileAfterDeploy();
+    }
     return handed;
   }
   return { ok: false, error: `Project '${opts.project}' has no release_peer and this box has no releases.deploy_agent` };
@@ -704,6 +729,10 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
   }
   const open = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
   if (open) return { ok: true, data: open }; // idempotent: a retried request is the same request
+  if (body.target === 'staging') {
+    const pending = openStagingRequest(projectName);
+    if (pending) return { ok: false, error: `A staging request for ${projectName} is already open (${pending.id})` };
+  }
   const row = insert({
     id: ulid(),
     project: projectName,
@@ -1037,6 +1066,7 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     rejectStaleStaging(done.project);
     try { alertLanesPastStaging(done.project, done.deployed_sha || done.sha); } catch { /* alert is best-effort */ }
     fireStagingDeployed(done.id);
+    invalidateStagingTipCache(done.project);
     reconcileAfterDeploy();
   }
   return { ok: true, data: done };
@@ -1284,6 +1314,7 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   announce(done);
   if (done.target === 'staging' && done.status === 'deployed') {
     fireStagingDeployed(done.id);
+    invalidateStagingTipCache(done.project);
     reconcileAfterDeploy();
   }
   logger.info({ releaseId: done.id, peer, status: done.status, version: done.version }, 'Release outcome mirrored from peer');

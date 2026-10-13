@@ -715,11 +715,18 @@ async function runOnce(reason: string): Promise<void> {
   }
 }
 
-/** Coalesce a burst of push / merge / deploy hooks into one pass. Idle until the reconciler is started. */
+/**
+ * Coalesce a burst of push / merge / deploy hooks into one pass.
+ * A reason that arrives while a pass is waiting or running arms another pass,
+ * so a deploy finish is not dropped behind the reconcile scheduled at send time.
+ * Idle until the reconciler is started.
+ */
 export function scheduleReconcile(reason: string): void {
   if (!started) return;
-  if (running) { again = true; return; }
-  if (debounce) return;
+  if (running || debounce) {
+    again = true;
+    return;
+  }
   debounce = setTimeout(() => {
     debounce = null;
     void runOnce(reason);

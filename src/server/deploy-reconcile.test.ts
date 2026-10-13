@@ -20,12 +20,12 @@ vi.mock('./config.js', () => ({
 }));
 
 import * as db from './db.js';
-import { ensureDeployStateTable, reconcileDeployStates, reviewBoard } from './deploy-state.js';
+import { ensureDeployStateTable, reconcileDeployStates, resetDeployReconcilerForTest, reviewBoard, scheduleReconcile, startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import * as gitMemo from './git-memo.js';
 import { behindMainAlert, MAIN_PING } from './lane-main.js';
 import { setPeerFetchForTest } from './peers.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
-import { ensureReleaseTables, resetStagingTipCacheForTest } from './releases.js';
+import { ensureReleaseTables, reportRelease, requestRelease, resetStagingTipCacheForTest, resolveStagingTip, stopReleasePollers } from './releases.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 
@@ -84,6 +84,9 @@ describe('deploy reconciler review status and behind-main pings', () => {
   });
 
   afterEach(() => {
+    stopDeployReconciler();
+    resetDeployReconcilerForTest();
+    stopReleasePollers();
     setPeerFetchForTest(null);
     resetStagingTipCacheForTest();
     for (const name of Object.keys(peers)) delete peers[name];
@@ -349,5 +352,87 @@ describe('deploy reconciler review status and behind-main pings', () => {
     expect(unknownCard).toMatchObject({ status: 'Unknown', action: 'Not reconciled yet' });
     expect(unknownCard?.button).toBeNull();
     expect(board.cards.some((card) => card.status === 'Working')).toBe(false);
+  });
+
+  it('a deploy finish replaces the cached peer tip, and a second Stage is refused', async () => {
+    ensureReleaseTables();
+    git(repo, 'checkout', '-q', '-b', 'wc-old');
+    fs.writeFileSync(path.join(repo, 'old.txt'), 'old');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'old');
+    const oldSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', '-b', 'wc-tip');
+    fs.writeFileSync(path.join(repo, 'tip.txt'), 'tip');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'tip');
+    const newSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', '-b', 'wc-next');
+    fs.writeFileSync(path.join(repo, 'next.txt'), 'next');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'next');
+    const childSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'main');
+
+    releases.prod_health_command = ['printf', '%s', mainSha];
+    projects.wave.release_peer = 'deploy/fable';
+    peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+    let tip = oldSha;
+    setPeerFetchForTest(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/staging-tip')) return Response.json({ sha: tip, version: '1.4.0', lane: 'wc-tip' });
+      if (url.pathname.endsWith('/events/log')) return Response.json({ events: [], last_id: 0 });
+      if (init?.method === 'POST') return Response.json({ id: 'R1', status: 'sent' }, { status: 201 });
+      return Response.json({ id: 'R1', status: 'sent', sha: newSha, target: 'staging' });
+    });
+    insertFreeze(oldSha, { verdict: 'pass', lane: 'wc-old', createdAt: '2026-01-01 00:00:00' });
+    insertFreeze(newSha, { verdict: 'pass', lane: 'wc-tip', createdAt: '2026-01-02 00:00:00' });
+
+    expect((await resolveStagingTip('wave')).tip?.sha).toBe(oldSha);
+    tip = newSha;
+    const againstStaleCache = await requestRelease({ project: 'wave', sha: newSha, lane: 'wc-tip', target: 'staging', actorName: 'denis' });
+    expect(againstStaleCache.ok).toBe(false);
+    if (!againstStaleCache.ok) expect(againstStaleCache.error).toMatch(/already on staging/);
+
+    tip = oldSha;
+    resetStagingTipCacheForTest();
+    const first = await requestRelease({ project: 'wave', sha: newSha, lane: 'wc-tip', target: 'staging', actorName: 'denis' });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = await requestRelease({ project: 'wave', sha: childSha, lane: 'wc-next', target: 'staging', actorName: 'denis' });
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.error).toMatch(new RegExp(`A staging request for wave is already open \\(${first.data.id}\\)`));
+    stopReleasePollers();
+
+    tip = oldSha;
+    expect((await resolveStagingTip('wave')).tip?.sha).toBe(oldSha);
+    tip = newSha;
+    const reported = reportRelease(first.data.id, { status: 'deployed', version: '1.4.0', sha: newSha });
+    expect(reported.ok).toBe(true);
+    await reconcileDeployStates();
+    const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);
+    expect(board.release.staging.sha).toBe(newSha);
+    expect(board.cards.find((card) => card.sha === newSha)).toMatchObject({ status: 'On staging', history: true });
+    expect(board.cards.find((card) => card.sha === oldSha)).toMatchObject({ status: 'Superseded', history: true });
+
+    const repeat = await requestRelease({ project: 'wave', sha: newSha, lane: 'wc-tip', target: 'staging', actorName: 'denis' });
+    expect(repeat.ok).toBe(false);
+    if (!repeat.ok) expect(repeat.error).toMatch(/already on staging/);
+  });
+
+  it('a deploy finish during the debounce still reconciles', async () => {
+    const count = () => (db.getDb().prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'deploy.reconciled'").get() as { n: number }).n;
+    try {
+      startDeployReconciler();
+      for (let i = 0; i < 40 && count() < 1; i++) await new Promise((r) => setTimeout(r, 25));
+      await new Promise((r) => setTimeout(r, 50));
+      const base = count();
+      scheduleReconcile('stage');
+      scheduleReconcile('deploy');
+      for (let i = 0; i < 40 && count() < base + 2; i++) await new Promise((r) => setTimeout(r, 50));
+      expect(count()).toBeGreaterThanOrEqual(base + 2);
+    } finally {
+      stopDeployReconciler();
+      resetDeployReconcilerForTest();
+    }
   });
 });

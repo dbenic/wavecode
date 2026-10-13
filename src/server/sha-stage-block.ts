@@ -154,7 +154,7 @@ export async function stageEligibility(sha: string, project: string | null, opts
   else if (opts.tipResolved) tip = opts.tip ?? null;
   else {
     try {
-      const resolved = await resolveStagingTip(project);
+      const resolved = await resolveStagingTip(project, { fresh: true });
       tip = resolved.state === 'unknown' ? null : resolved.tip;
     } catch { tip = null; }
   }
