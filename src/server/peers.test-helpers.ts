@@ -20,6 +20,7 @@ export function fakePeer() {
       return Response.json({ events, last_id: events.length ? events[events.length - 1].id : since });
     }
     if (url.pathname === '/api/messages') return Response.json(state.messages);
+    if (url.pathname === '/api/releases/staging-tip') return Response.json({ sha: null, version: null, lane: null });
     // releases as records (releases.ts): the deploy box accepts a request and serves its state
     if (url.pathname === '/api/releases' && init?.method === 'POST') {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
