@@ -1003,6 +1003,18 @@ function quickCheck(lane: DevLane | undefined, sha: string): { running: boolean;
   return { running: true, etaMin };
 }
 
+/** The open staging lock for each project, newest first. A sent row stays a lock until it finishes or an admin clears it. */
+function openStagingLocks(): Map<string, { id: string; sha: string; created_at: string }> {
+  const out = new Map<string, { id: string; sha: string; created_at: string }>();
+  try {
+    for (const row of listReleases({ target: 'staging', limit: 100 })) {
+      if ((row.status !== 'requested' && row.status !== 'sent') || !row.project || out.has(row.project)) continue;
+      out.set(row.project, { id: row.id, sha: row.sha, created_at: row.created_at });
+    }
+  } catch { /* release table missing */ }
+  return out;
+}
+
 function factFor(
   freeze: ReleaseFreeze,
   lane: DevLane | undefined,
@@ -1138,10 +1150,18 @@ export async function reviewBoard(user: { name: string; role: string }, lanes: D
     const viewer = viewerDev ? { name: viewerDev.name, lanes: viewerDev.lanes } : null;
     const owners = developerRoster();
     const facts: LaneFreezeFact[] = [];
+    const opens = openStagingLocks();
     for (const row of prepared) {
       const laneName = row.row?.lane ?? row.freeze.lane;
       if (!laneName) continue;
-      facts.push(factFor({ ...row.freeze, lane: laneName }, row.lane, row.deploy, row.row));
+      const fact = factFor({ ...row.freeze, lane: laneName }, row.lane, row.deploy, row.row);
+      const open = fact.project ? opens.get(fact.project) : undefined;
+      if (open && (open.sha === fact.sha || fact.action === 'stage')) {
+        fact.open_request_id = open.id;
+        fact.open_request_at = open.created_at;
+        fact.can_clear = user.role === 'admin';
+      }
+      facts.push(fact);
     }
     // Working lanes and live (on staging / prod) cards stay out of the action set.
     cards = buildLaneCards(facts, [], viewer, owners);

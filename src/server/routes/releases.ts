@@ -120,6 +120,17 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(r.data);
   });
 
+  // An admin ends a stuck staging lock. A reason is required and is written to the audit.
+  app.post('/api/releases/:id/clear', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin can clear a stuck staging request' }, 403);
+    const body = await c.req.json<{ reason?: unknown }>().catch(() => ({} as { reason?: unknown }));
+    const reason = typeof body.reason === 'string' ? body.reason : '';
+    const r = releases.clearStuckRelease(c.req.param('id'), { name: user.name, id: user.id }, reason);
+    if (!r.ok) return c.json({ error: r.error }, r.error.includes('not found') ? 404 : 400);
+    return c.json(r.data);
+  });
+
   // The deploy agent's outcome (report_release MCP tool, or any mutating token)
   app.post('/api/releases/:id/report', async (c) => {
     const user = getActingUser(c);

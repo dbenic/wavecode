@@ -277,31 +277,20 @@ function openStagingRequest(project: string | null): ReleaseRequest | null {
   return listReleases({ project, target: 'staging', limit: 50 }).find((r) => r.status === 'requested' || r.status === 'sent') ?? null;
 }
 
-/** A requested row that never reached the peer, or a sent row that never reported progress. */
+/** A `requested` row that never received a peer id. A `sent` row may still be deploying. */
 const STAGING_REQUESTED_TTL = '-2 minutes';
-const STAGING_SENT_TTL = '-15 minutes';
 
 /**
- * Drop staging locks that can no longer make progress. A `requested` row with no
- * peer id older than 2 minutes crashed before the send. A `sent` row with no
- * progress older than 15 minutes is stuck. Both become `failed` / `expired`
- * and stop blocking the next Stage. Called from the poller, from startup, and
- * inside the claim transaction.
+ * A send that never reached the peer. `sent` rows are left alone: a deploy-agent
+ * handoff and a staging command both sit in `sent` before the first progress line.
+ * Called from the poller, from startup, and inside the claim transaction.
  */
 function expireStuckReleases(): number {
   const rows = withTable(() => getDb().prepare(
     `SELECT * FROM release_requests
-     WHERE target = 'staging' AND (
-       (status = 'requested' AND peer_request_id IS NULL AND created_at <= datetime('now', ?))
-       OR (
-         status = 'sent'
-         AND progress_phase IS NULL
-         AND progress_status IS NULL
-         AND deploy_id IS NULL
-         AND created_at <= datetime('now', ?)
-       )
-     )`,
-  ).all(STAGING_REQUESTED_TTL, STAGING_SENT_TTL) as ReleaseRequest[]);
+     WHERE target = 'staging' AND status = 'requested' AND peer_request_id IS NULL
+       AND created_at <= datetime('now', ?)`,
+  ).all(STAGING_REQUESTED_TTL) as ReleaseRequest[]);
   for (const row of rows) {
     patch(row.id, { status: 'failed', error: 'expired' });
     emit('release.reported', 'release', row.id, {
@@ -309,6 +298,34 @@ function expireStuckReleases(): number {
     }, null);
   }
   return rows.length;
+}
+
+/** Failed only because the send expired or an admin cleared it. A later deploy is still the truth. */
+function releaseWithdrawn(row: ReleaseRequest): boolean {
+  return row.status === 'failed' && (row.error === 'expired' || row.error === 'cleared');
+}
+
+/** An admin ends a stuck staging lock. The reason is required and written to the audit. */
+export function clearStuckRelease(id: string, by: { name: string; id?: string | null }, reason: string): Result<ReleaseRequest> {
+  const why = reason.trim();
+  if (!why) return { ok: false, error: 'a reason is required' };
+  const row = getRelease(id);
+  if (!row) return { ok: false, error: `Release ${id} not found` };
+  if (row.target !== 'staging' || (row.status !== 'sent' && row.status !== 'requested')) {
+    return { ok: false, error: `Release ${id} is not an open staging request` };
+  }
+  patch(id, {
+    status: 'failed',
+    error: 'cleared',
+    report: why.slice(0, 1000),
+    reported_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+  });
+  const done = getRelease(id)!;
+  emit('release.cleared', 'release', id, {
+    reason: why, who: by.name, sha: done.sha, project: done.project, lane: done.lane, target: done.target,
+  }, by.id ?? null);
+  logger.info({ releaseId: id, by: by.name, reason: why }, 'Stuck staging request cleared');
+  return { ok: true, data: done };
 }
 
 type ReleaseInsert = Parameters<typeof insert>[0];
@@ -928,8 +945,11 @@ function applyProgress(id: string, raw: string): boolean {
   if (!line) return false;
   const row = getRelease(id);
   if (!row) return false;
-  if (row.status === 'deployed' || row.status === 'failed' || row.status === 'rejected') {
+  if (row.status === 'deployed' || row.status === 'rejected') {
     return line.phase === 'done' || line.phase === 'failed';
+  }
+  if (row.status === 'failed') {
+    if (!(releaseWithdrawn(row) && line.phase === 'done')) return line.phase === 'done' || line.phase === 'failed';
   }
   // Keep the phase that failed (build, verify, …) so the chip can name it.
   // Later rollback / failed lines still update pin, url, version and rollback.
@@ -1113,7 +1133,9 @@ export interface ReleaseReport {
 export function reportRelease(id: string, report: ReleaseReport): Result<ReleaseRequest> {
   const r = getRelease(id);
   if (!r) return { ok: false, error: `Release ${id} not found` };
-  if (r.status === 'deployed' || r.status === 'failed' || r.status === 'rejected') return { ok: true, data: r }; // final: a repeat is a no-op
+  if (r.status === 'deployed' || r.status === 'rejected') return { ok: true, data: r }; // final: a repeat is a no-op
+  // A real failure stays final. Expiry and an admin clear do not, once the deploy actually lands.
+  if (r.status === 'failed' && !(report.status === 'deployed' && releaseWithdrawn(r))) return { ok: true, data: r };
   if (!['deployed', 'failed', 'rejected'].includes(report.status)) return { ok: false, error: "status must be 'deployed', 'failed' or 'rejected'" };
   const deployedSha = report.sha ? report.sha.trim().toLowerCase() : null;
   if (report.status === 'deployed' && deployedSha && deployedSha !== r.sha && !r.sha.startsWith(deployedSha)) {
@@ -1175,7 +1197,7 @@ export function verifyStaging(id: string, by: { name: string }, note: string | n
 export interface AuditEntry {
   at: string;
   who: string;
-  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq';
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq' | 'clear';
   target: ReleaseTarget | null;
   sha: string | null;
   project: string | null;
@@ -1218,14 +1240,15 @@ export function auditTrail(limit = 200): AuditEntry[] {
     out.push({ at: e.created_at, who: e.user_name ?? 'owner', action: 'reject', target: null, sha: typeof fz.sha === 'string' ? fz.sha : null, project: typeof fz.project === 'string' ? fz.project : null, desk: fz.desk != null ? String(fz.desk) : null, detail: typeof p.reason === 'string' ? p.reason : null, release_id: null, run_id: e.run_id });
   }
   const extras = getDb().prepare(
-    `SELECT created_at, type, payload_json FROM events WHERE type IN ('release.rollback', 'release.prereq') ORDER BY id DESC LIMIT ?`,
+    `SELECT created_at, type, payload_json FROM events WHERE type IN ('release.rollback', 'release.prereq', 'release.cleared') ORDER BY id DESC LIMIT ?`,
   ).all(limit) as Array<{ created_at: string; type: string; payload_json: string | null }>;
   for (const e of extras) {
     let payload: { who?: string; sha?: string; project?: string; reason?: string; error?: string; id?: string; output?: string; lane?: string } = {};
     try { payload = e.payload_json ? JSON.parse(e.payload_json) as typeof payload : {}; } catch { /* ignore */ }
     const prereq = e.type === 'release.prereq';
+    const cleared = e.type === 'release.cleared';
     out.push({
-      at: e.created_at, who: payload.who ?? 'unknown', action: prereq ? 'prereq' : 'rollback',
+      at: e.created_at, who: payload.who ?? 'unknown', action: cleared ? 'clear' : prereq ? 'prereq' : 'rollback',
       target: prereq ? 'production' : 'staging', sha: payload.sha ?? null, project: payload.project ?? null, desk: null,
       detail: prereq ? (payload.error ?? payload.id ?? null) : (payload.reason ?? null),
       release_id: null, run_id: null,
@@ -1295,7 +1318,11 @@ export function resetReleaseLinesForTest(): void {
 const pollers = new Map<string, { stop: boolean }>();
 
 function openForwarded(peer: string): ReleaseRequest[] {
-  return withTable(() => getDb().prepare("SELECT * FROM release_requests WHERE origin = 'local' AND peer = ? AND status = 'sent' AND peer_request_id IS NOT NULL").all(peer) as ReleaseRequest[]);
+  return withTable(() => getDb().prepare(
+    `SELECT * FROM release_requests
+     WHERE origin = 'local' AND peer = ? AND peer_request_id IS NOT NULL
+       AND (status = 'sent' OR (status = 'failed' AND error IN ('expired', 'cleared')))`,
+  ).all(peer) as ReleaseRequest[]);
 }
 
 export function ensureReleasePoller(peer: string): void {
@@ -1367,7 +1394,11 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   if (!remote.ok || !remote.data) return;
   if (!pollers.has(peer)) return; // stopped while the request was in flight
   const local = getRelease(r.id) ?? r;
-  mirrorProgress(local, remote.data);
+  if (releaseWithdrawn(local)) {
+    if (remote.data.status !== 'deployed') return;
+  } else {
+    mirrorProgress(local, remote.data);
+  }
   const s = remote.data.status;
   if (s !== 'deployed' && s !== 'failed' && s !== 'rejected') return;
   const fresh = getRelease(r.id) ?? local;

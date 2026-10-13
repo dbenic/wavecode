@@ -676,27 +676,48 @@ describe('releases.ts', () => {
       expect(again.ok).toBe(true);
     });
 
-    it('the poller expires a sent staging row with no progress and keeps one that is moving', async () => {
-      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
-      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
-      peers.setPeerFetchForTest(async () => Response.json({ events: [], last_id: 0 }));
-      const stuck = '01SENTSTUCKNOLINE000000001';
-      const moving = '01SENTMOVINGBUILD000000001';
+    it('a 30-minute sent handoff stays a lock until an admin clears it, and a late RELEASED still deploys', async () => {
+      const fable = agent('fable');
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
+      cfg.releases = { deploy_agent: 'fable' };
+      const id = '01SENTHANDOFF30MIN00000001';
       db.getDb().prepare(
-        `INSERT INTO release_requests (id, project, sha, target, origin, peer, status, peer_request_id, created_at, updated_at)
-         VALUES (?, 'wavepulse', ?, 'staging', 'local', 'deploy', 'sent', 'Rstuck', datetime('now', '-16 minutes'), datetime('now', '-16 minutes'))`,
-      ).run(stuck, SHA);
-      db.getDb().prepare(
-        `INSERT INTO release_requests (id, project, sha, target, origin, peer, status, peer_request_id, progress_phase, progress_status, created_at, updated_at)
-         VALUES (?, 'wavepulse', ?, 'staging', 'local', 'deploy', 'sent', 'Rmove', 'build', 'ok', datetime('now', '-16 minutes'), datetime('now', '-16 minutes'))`,
-      ).run(moving, SHA_B);
-      rel.ensureReleasePoller('deploy');
-      for (let i = 0; i < 20 && rel.getRelease(stuck)?.status !== 'failed'; i++) await flush(10);
-      expect(rel.getRelease(stuck)).toMatchObject({ status: 'failed', error: 'expired' });
-      expect(rel.getRelease(moving)?.status).toBe('sent');
-      const stage = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
-      expect(stage.ok).toBe(false);
-      if (!stage.ok) expect(stage.error).toMatch(new RegExp(`already open \\(${moving}\\)`));
+        `INSERT INTO release_requests (id, project, sha, lane, target, origin, status, deploy_agent_id, created_at, updated_at)
+         VALUES (?, 'wavepulse', ?, 'wc-old', 'staging', 'local', 'sent', ?, datetime('now', '-30 minutes'), datetime('now', '-30 minutes'))`,
+      ).run(id, SHA, fable.id);
+      rel.startReleasePollers();
+      expect(rel.getRelease(id)).toMatchObject({ status: 'sent', deploy_agent_id: fable.id });
+      const blocked = await rel.requestRelease({ project: 'wavepulse', sha: SHA_B, lane: 'wc-next', target: 'staging', actorName: 'denis' });
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.error).toMatch(new RegExp(`already open \\(${id}\\)`));
+      expect(rel.getRelease(id)?.status).toBe('sent');
+
+      acting.user = { id: 'u-dev', name: 'antonio', role: 'developer', allowed_agents: null };
+      const denied = await app.fetch(new Request(`http://x/api/releases/${id}/clear`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'stuck' }),
+      }));
+      expect(denied.status).toBe(403);
+      expect(rel.getRelease(id)?.status).toBe('sent');
+
+      acting.user = { id: 'u-admin', name: 'denis', role: 'admin', allowed_agents: null };
+      const missing = await app.fetch(new Request(`http://x/api/releases/${id}/clear`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: '   ' }),
+      }));
+      expect(missing.status).toBe(400);
+      expect(rel.getRelease(id)?.status).toBe('sent');
+
+      const cleared = await app.fetch(new Request(`http://x/api/releases/${id}/clear`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'agent never started' }),
+      }));
+      expect(cleared.status).toBe(200);
+      expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared', report: 'agent never started' });
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.cleared', 'release', id, expect.objectContaining({ reason: 'agent never started', who: 'denis', sha: SHA }), 'u-admin');
+      const next = await rel.requestRelease({ project: 'wavepulse', sha: SHA_B, lane: 'wc-next', target: 'staging', actorName: 'denis' });
+      expect(next.ok).toBe(true);
+
+      expect(rel.detectReleaseLines(fable.id, `RELEASED ${id}: deployed ${SHA} version 1.4.0 to staging`)).toBe(1);
+      expect(rel.getRelease(id)).toMatchObject({ status: 'deployed', version: '1.4.0', deployed_sha: SHA });
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(SHA);
     });
 
     it('two overlapping Stage calls insert one staging request', async () => {

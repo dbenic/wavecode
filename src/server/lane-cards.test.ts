@@ -153,6 +153,20 @@ describe('lane cards', () => {
     expect(card.button).toBeNull();
   });
 
+  it('says a staging request is open, and only an admin gets Clear stuck request', () => {
+    const sha = 'a'.repeat(40);
+    const open = fact({
+      sha, lane: 'wc-s3-104', state: 'ready_to_stage', action: 'stage',
+      open_request_id: 'REL1', open_request_at: '2026-10-13 06:04:00', can_clear: true,
+    });
+    const card = buildLaneCards([open], [], ANTONIO, OWNERS)[0];
+    expect(card.action).toBe('Staging request open since 06:04');
+    expect(card.button).toMatchObject({ kind: 'clear', label: 'Clear stuck request', release_id: 'REL1' });
+    const hidden = buildLaneCards([{ ...open, can_clear: false }], [], ANTONIO, OWNERS)[0];
+    expect(hidden.action).toBe('Staging request open since 06:04');
+    expect(hidden.button).toBeNull();
+  });
+
   it('offers Stage only when it is manual, and locks it in words with no button', () => {
     const open = buildLaneCards([
       fact({ sha: 'a'.repeat(40), lane: 'wc-s3-104', state: 'ready_to_stage', action: 'stage', auto_stage: false }),
