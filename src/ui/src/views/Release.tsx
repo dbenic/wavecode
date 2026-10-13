@@ -159,9 +159,15 @@ export default function Release() {
   const staleOrMerged = hidden.filter((l) => !(l.candidate && l.status === 'open'));
 
   const LaneRow = ({ l }: { l: LaneBoardRow }) => {
-    const card = cards.get(l.sha)?.freeze ?? null;
+    const review = cards.get(l.sha);
+    const card = review?.freeze ?? null;
+    const stageBlock = review?.stage_block ?? null;
     const st = cellLabel(l.staging);
     const openReq = !!l.staging && (l.staging.status === 'sent' || l.staging.status === 'requested');
+    const closed = l.status === 'merged' || l.status === 'rejected' || l.status === 'promoted';
+    const closedTitle = l.status === 'rejected'
+      ? `Freeze ${l.sha.slice(0, 8)} was rejected`
+      : null;
     const verified = l.staging?.verified_by ?? null;
     return (
       <tr className={l.status !== 'open' ? 'opacity-60' : ''} data-testid={`lane-${l.sha.slice(0, 8)}`}>
@@ -197,16 +203,23 @@ export default function Release() {
             <>
               <button
                 onClick={() => laneStage(l)}
-                disabled={acting !== null || openReq || !l.run_id || l.status === 'stale' || (l.verdict !== 'pass' && !isAdmin)}
-                title={l.status === 'stale'
-                  ? `Freeze ${l.sha.slice(0, 8)} is stale — lane ${l.lane ?? '?'} moved on; freeze the new SHA`
-                  : l.verdict !== 'pass' && !isAdmin
-                    ? "Stage needs the reviewer's PASS on this exact SHA"
-                    : 'Automated staging of this lane alone, no GO'}
+                disabled={acting !== null || openReq || !l.run_id || l.status === 'stale' || closed || !!stageBlock || (l.verdict !== 'pass' && !isAdmin)}
+                title={stageBlock
+                  ? stageBlock
+                  : l.status === 'stale'
+                    ? `Freeze ${l.sha.slice(0, 8)} is stale — lane ${l.lane ?? '?'} moved on; freeze the new SHA`
+                    : closedTitle
+                      ? closedTitle
+                      : l.verdict !== 'pass' && !isAdmin
+                        ? "Stage needs the reviewer's PASS on this exact SHA"
+                        : 'Automated staging of this lane alone, no GO'}
                 className="px-2 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 disabled:opacity-40"
               >
                 {busy(`stage:${l.sha}`) ? '...' : 'STAGE'}
               </button>
+              {(stageBlock || closedTitle) && (
+                <div className="mt-1 text-[10px] text-amber-200" data-testid="stage-lock">{stageBlock || closedTitle}</div>
+              )}
               {l.status === 'open' && l.staging?.status === 'deployed' && !verified && (
                 <button
                   onClick={() => verify(l.sha, l.project, `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`)}

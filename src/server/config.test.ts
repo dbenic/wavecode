@@ -90,12 +90,25 @@ projects:
       auto_freeze: false
       push_command: [git, '-C', '{workspace}', 'push', 'origin', 'HEAD:{lane}']
       review_deny: [codex1]
+      lane_deny: ['wc-codex1', 'wc-codex*']
+      agent_deny: [codex1]
+      reviewer_prefer:
+        claude: [codex2, codex3]
+        codex: [claude1, claude2]
+      reviewer_pool_by_author_glob:
+        'ales-*': [ales-codex1]
+      review_reassign_minutes: 15
 `, 'utf8');
     const { loadConfig } = await import('./config.js');
     const loaded = loadConfig(configPath);
     expect(loaded.projects?.demo.pipeline?.auto_freeze).toBe(false);
     expect(loaded.projects?.demo.pipeline?.auto_stage).toBeUndefined();
     expect(loaded.projects?.demo.pipeline?.review_deny).toEqual(['codex1']);
+    expect(loaded.projects?.demo.pipeline?.lane_deny).toEqual(['wc-codex1', 'wc-codex*']);
+    expect(loaded.projects?.demo.pipeline?.agent_deny).toEqual(['codex1']);
+    expect(loaded.projects?.demo.pipeline?.reviewer_prefer).toEqual({ claude: ['codex2', 'codex3'], codex: ['claude1', 'claude2'] });
+    expect(loaded.projects?.demo.pipeline?.reviewer_pool_by_author_glob).toEqual({ 'ales-*': ['ales-codex1'] });
+    expect(loaded.projects?.demo.pipeline?.review_reassign_minutes).toBe(15);
 
     fs.writeFileSync(configPath, 'projects:\n  demo:\n    pipeline:\n      push_command: [git, push]\n', 'utf8');
     vi.resetModules();
@@ -112,6 +125,13 @@ projects:
     await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [sh, -c, "git push origin {lane}"]\n', /must not pass \{lane\} through a shell/);
     await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [bash, -lc, "git push origin HEAD:{lane}"]\n', /must not pass \{lane\} through a shell/);
     await refuse('projects:\n  demo:\n    pipeline:\n      push_command: [git, push, origin, "refs/heads/{lane}"]\n', /its own argument or as a HEAD:\{lane\} refspec/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      agent_deny: ["not a name"]\n', /agent_deny must be a list of agent names/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      lane_deny: [""]\n', /lane_deny must be a list of globs/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      reviewer_prefer:\n        claude: ["not a name"]\n', /reviewer_prefer values must be lists of agent names/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      reviewer_prefer:\n        "not a vendor": [codex2]\n', /reviewer_prefer keys must be vendor names/);
+    await refuse("projects:\n  demo:\n    pipeline:\n      reviewer_pool_by_author_glob:\n        '..': [ales-codex1]\n", /reviewer_pool_by_author_glob keys must be author globs/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      review_reassign_minutes: -1\n', /review_reassign_minutes must be a number of minutes/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      review_reassign_minutes: 1441\n', /review_reassign_minutes must be a number of minutes/);
   });
 
   it('loads a per-project referee profile from yaml', async () => {

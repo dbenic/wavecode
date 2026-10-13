@@ -60,9 +60,7 @@ export function isMissingAncestor(repo: string, ancestor: string, descendant: st
   return isAncestor(repo, ancestor, descendant) === false;
 }
 
-/** Optional health probe. A printed 40-character SHA wins over the release record. */
-export function readStagingHealth(project: string): { sha: string; version: string | null } | null {
-  const argv = getConfig().releases?.staging_health_command;
+function readHealthCommand(argv: string[] | undefined, project: string): { sha: string; version: string | null } | null {
   if (!argv?.length) return null;
   const filled = argv.map((part) => part.replaceAll('{project}', project));
   let out = '';
@@ -75,6 +73,16 @@ export function readStagingHealth(project: string): { sha: string; version: stri
   if (!sha) return null;
   const version = out.match(/\bv?(\d+\.\d+\.\d+(?:[-.][\w.]+)?)\b/)?.[1] ?? null;
   return { sha, version };
+}
+
+/** Optional staging probe. A printed 40-character SHA wins over the release record. */
+export function readStagingHealth(project: string): { sha: string; version: string | null } | null {
+  return readHealthCommand(getConfig().releases?.staging_health_command, project);
+}
+
+/** Optional production probe. A printed 40-character SHA wins over the release record. */
+export function readProdHealth(project: string): { sha: string; version: string | null } | null {
+  return readHealthCommand(getConfig().releases?.prod_health_command, project);
 }
 
 export function evaluateForward(opts: {

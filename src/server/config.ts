@@ -139,10 +139,37 @@ export interface ProjectConfig {
     quick_check_command?: string[];
     push_command?: string[];
     gate_command?: string[];
-    /** Author name → reviewer name. The author and `review_deny` are never chosen. */
+    /** Author name → reviewer name. The author, `review_deny`, and `agent_deny` are never chosen. */
     review_routes?: Record<string, string>;
     /** Agent name or alias. Never a reviewer, and excluded from lane pings and auto-merge. */
     review_deny?: string[];
+    /**
+     * Globs over lane branch names that get no Countix automation
+     * (no merge, ping, freeze, or Reviews card).
+     */
+    lane_deny?: string[];
+    /**
+     * Agent names or aliases that get no Countix automation.
+     * Also excluded from reviewer choice, the same as `review_deny`.
+     */
+    agent_deny?: string[];
+    /**
+     * First choice inside the eligible set, by the author's vendor
+     * (`claude-code` → `claude`). The least-loaded name in the first
+     * non-empty tier wins. Empty means the route map is next.
+     */
+    reviewer_prefer?: Record<string, string[]>;
+    /**
+     * Author-name glob → seats that may review that person, including their
+     * own other seats (`ales-*` → `ales-codex1`). Never the author, and never
+     * a denied name.
+     */
+    reviewer_pool_by_author_glob?: Record<string, string[]>;
+    /**
+     * Reassign a review that has waited this many minutes on a busy seat
+     * with no verdict. 0 disables. Default 15.
+     */
+    review_reassign_minutes?: number;
     /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
     freeze_dir?: string;
   };
@@ -172,6 +199,13 @@ export interface ProfileConfig {
    * admin-only; using the agents that exist is open to all.
    */
   public?: boolean;
+}
+
+export interface DeveloperConfig {
+  name: string;
+  users?: string[];
+  tokens?: string[];
+  lanes: string[];
 }
 
 export interface WaveConfig {
@@ -280,6 +314,12 @@ export interface WaveConfig {
     freeze_inbox?: string[];
   };
   /**
+   * Who is looking at Reviews. `users` matches the logged-in user name.
+   * `tokens` matches the bearer token they presented. `lanes` are globs.
+   * An identity that matches nobody sees every lane.
+   */
+  developers?: DeveloperConfig[];
+  /**
    * Releases (src/server/releases.ts). On the deploy box: the agent that receives staging
    * and production requests (alias, name or id). A box without it forwards requests to
    * `projects.<p>.release_peer`.
@@ -305,6 +345,13 @@ export interface WaveConfig {
      * Off unless set. `{project}` is optional.
      */
     staging_health_command?: string[];
+    /**
+     * Optional argv that prints the SHA (and version) actually on production.
+     * When it returns a SHA it wins over the latest deployed production record.
+     * Off unless set. `{project}` is optional. A missing SHA is unknown — the
+     * reconciler does not assume the commit is absent.
+     */
+    prod_health_command?: string[];
   };
   /**
    * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
@@ -441,6 +488,12 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
   if (pipeline.review_deny !== undefined && (!Array.isArray(pipeline.review_deny) || pipeline.review_deny.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
     throw new Error(`projects.${name}.pipeline.review_deny must be a list of agent names`);
   }
+  if (pipeline.agent_deny !== undefined && (!Array.isArray(pipeline.agent_deny) || pipeline.agent_deny.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
+    throw new Error(`projects.${name}.pipeline.agent_deny must be a list of agent names or aliases`);
+  }
+  if (pipeline.lane_deny !== undefined && (!Array.isArray(pipeline.lane_deny) || pipeline.lane_deny.some((s) => typeof s !== 'string' || !s.trim() || s.length > 80 || s.includes('..')))) {
+    throw new Error(`projects.${name}.pipeline.lane_deny must be a list of globs`);
+  }
   if (pipeline.review_routes !== undefined) {
     if (typeof pipeline.review_routes !== 'object' || pipeline.review_routes === null || Array.isArray(pipeline.review_routes)) {
       throw new Error(`projects.${name}.pipeline.review_routes must be an author-to-reviewer map`);
@@ -449,6 +502,35 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
       if (!AGENT_HANDLE.test(author) || typeof reviewer !== 'string' || !AGENT_HANDLE.test(reviewer)) {
         throw new Error(`projects.${name}.pipeline.review_routes entries must be agent names`);
       }
+    }
+  }
+  validateNamedListMap(`projects.${name}.pipeline.reviewer_prefer`, pipeline.reviewer_prefer, /^[A-Za-z][A-Za-z0-9]{0,20}$/, 'vendor names');
+  validateNamedListMap(`projects.${name}.pipeline.reviewer_pool_by_author_glob`, pipeline.reviewer_pool_by_author_glob, null, 'author globs');
+  if (pipeline.review_reassign_minutes !== undefined) {
+    const minutes = pipeline.review_reassign_minutes;
+    if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+      throw new Error(`projects.${name}.pipeline.review_reassign_minutes must be a number of minutes from 0 to 1440`);
+    }
+  }
+}
+
+function validateNamedListMap(
+  label: string,
+  value: Record<string, string[]> | undefined,
+  keyRe: RegExp | null,
+  keyWhat: string,
+): void {
+  if (value === undefined) return;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be a map of ${keyWhat} to agent names`);
+  }
+  for (const [key, names] of Object.entries(value)) {
+    const globOk = key.trim().length > 0 && key.length <= 80 && !key.includes('..');
+    if (keyRe ? !keyRe.test(key) : !globOk) {
+      throw new Error(`${label} keys must be ${keyWhat}`);
+    }
+    if (!Array.isArray(names) || names.some((n) => typeof n !== 'string' || !AGENT_HANDLE.test(n))) {
+      throw new Error(`${label} values must be lists of agent names`);
     }
   }
 }
@@ -498,6 +580,34 @@ function validateSuiteNames(name: string, suites: string[] | undefined): void {
 
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
 const SAFE_REL_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const DEVELOPER_NAME = /^[\p{L}][\p{L}0-9 .'_-]{0,40}$/u;
+const DEVELOPER_USER = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+function validateDevelopers(list: DeveloperConfig[] | undefined): void {
+  if (list === undefined) return;
+  if (!Array.isArray(list)) throw new Error('developers must be a list');
+  for (const [i, dev] of list.entries()) {
+    const at = `developers[${i}]`;
+    if (!dev || typeof dev !== 'object' || Array.isArray(dev)) throw new Error(`${at} must be a developer`);
+    if (typeof dev.name !== 'string' || !DEVELOPER_NAME.test(dev.name.trim())) {
+      throw new Error(`${at}.name must be a person's name`);
+    }
+    const users = dev.users ?? [];
+    const tokens = dev.tokens ?? [];
+    if (!Array.isArray(users) || users.some((u) => typeof u !== 'string' || !DEVELOPER_USER.test(u))) {
+      throw new Error(`${at}.users must be a list of user names`);
+    }
+    if (!Array.isArray(tokens) || tokens.some((t) => typeof t !== 'string' || !t.trim() || /\s/.test(t) || t.length > 200)) {
+      throw new Error(`${at}.tokens must be a list of bearer tokens`);
+    }
+    if (users.length === 0 && tokens.length === 0) {
+      throw new Error(`${at} needs users or tokens`);
+    }
+    if (!Array.isArray(dev.lanes) || dev.lanes.length === 0 || dev.lanes.some((s) => typeof s !== 'string' || !s.trim() || s.length > 80 || s.includes('..'))) {
+      throw new Error(`${at}.lanes must be a list of globs`);
+    }
+  }
+}
 
 export function validateConfig(cfg: WaveConfig): void {
   const profileErrors = validateProfilesConfig(cfg);
@@ -527,6 +637,7 @@ export function validateConfig(cfg: WaveConfig): void {
   validateArgvTemplate('releases.staging_command', cfg.releases?.staging_command, '{sha}');
   validateArgvTemplate('releases.staging_watch_command', cfg.releases?.staging_watch_command, '{deploy_id}');
   validateArgvList('releases.staging_health_command', cfg.releases?.staging_health_command);
+  validateArgvList('releases.prod_health_command', cfg.releases?.prod_health_command);
   if (cfg.artifacts.fixture_inbox !== undefined) {
     if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
       throw new Error('artifacts.fixture_inbox must be a list of directory paths');
@@ -537,6 +648,7 @@ export function validateConfig(cfg: WaveConfig): void {
       throw new Error('review.freeze_inbox must be a list of directory paths');
     }
   }
+  validateDevelopers(cfg.developers);
   for (const [name, project] of Object.entries(cfg.projects ?? {})) {
     if (project.main_remote !== undefined && !SAFE_REF.test(project.main_remote)) {
       throw new Error(`projects.${name}.main_remote must be a remote name`);
@@ -780,6 +892,7 @@ function buildDefaults(baseDir: string): WaveConfig {
       gate_dependents_on_approval: false,
       auto_pick: true,
     },
+    developers: [],
     llm: {
       provider: 'anthropic',
       api_key: null,

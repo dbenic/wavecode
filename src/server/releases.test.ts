@@ -660,7 +660,7 @@ describe('releases.ts', () => {
     it('a staging request carries the automated header, and a production request from a local non-admin is refused', async () => {
       const fable = agent('fable');
       cfg.releases = { deploy_agent: 'fable' };
-      const r = rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse', requested_by: 'antonio' }, { userName: 'antonio', fromPeer: false });
+      const r = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse', requested_by: 'antonio' }, { userName: 'antonio', fromPeer: false });
       expect(r.ok).toBe(true);
       expect(typedInto(fable.id)[0]).toMatch(/^\[Staging request \w+ from antonio via WaveCode\. Automated: deploy to STAGING only; no production step is authorized/);
       acting.user = { id: 'u-dev', name: 'antonio', role: 'developer', allowed_agents: null };
@@ -683,7 +683,7 @@ describe('releases.ts', () => {
       const empty = await post(named);
       expect(empty.status).toBe(403);
       expect(((await empty.json()) as { error: string }).error).toMatch(/not in releases\.production_approvers/);
-      const direct = rel.acceptRelease(named, { userName: 'peer-countix-dev', fromPeer: true });
+      const direct = await rel.acceptRelease(named, { userName: 'peer-countix-dev', fromPeer: true });
       expect(direct.ok).toBe(false);
       expect(typedInto(fable.id)).toEqual([]);
       expect(rel.listReleases({ sha: SHA, target: 'production' })).toEqual([]);
@@ -710,19 +710,19 @@ describe('releases.ts', () => {
       expect(typedInto(fable.id)[1]).toMatch(/Automated: deploy to STAGING only/);
     });
 
-    it('without a deploy agent the request fails loudly instead of vanishing', () => {
+    it('without a deploy agent the request fails loudly instead of vanishing', async () => {
       cfg.releases = {};
-      const r = rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
+      const r = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
       expect(r.ok).toBe(false);
       expect(rel.listReleases({ sha: SHA })[0]).toMatchObject({ status: 'failed', error: expect.stringMatching(/deploy_agent/) });
     });
 
-    it('RELEASED / RELEASE FAILED lines in the deploy agent pane report the outcome; another agent cannot', () => {
+    it('RELEASED / RELEASE FAILED lines in the deploy agent pane report the outcome; another agent cannot', async () => {
       const fable = agent('fable');
       const other = agent('claude1');
       cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'] };
-      const a = rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
-      const b = rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'peer', fromPeer: true });
+      const a = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
+      const b = await rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'peer', fromPeer: true });
       if (!a.ok || !b.ok) throw new Error('accept failed');
       expect(rel.detectReleaseLines(other.id, `• RELEASED ${a.data.id}: deployed ${SHA.slice(0, 8)} version 0.442.10 to staging\n`)).toBe(0);
       expect(rel.getRelease(a.data.id)!.status).toBe('sent');
@@ -750,7 +750,7 @@ describe('releases.ts', () => {
       fs.writeFileSync(note, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${FIXTURE_SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- gate: GREEN\n`);
       expect(rf.ingestFreezeFile(note).ok).toBe(true);
       cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'], staging_command: ['node', replay, success, '0', '{sha}', '--lane', '{lane}', '--desk', '{desk}'] };
-      const staged = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', lane: 'lane-a', desk: '7', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
+      const staged = await rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', lane: 'lane-a', desk: '7', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
       expect(staged.ok).toBe(true);
       if (!staged.ok) return;
       for (let i = 0; i < 50 && rel.getRelease(staged.data.id)!.status !== 'deployed'; i++) await flush(20);
@@ -764,7 +764,8 @@ describe('releases.ts', () => {
       expect(vi.mocked(emit)).toHaveBeenCalledWith('release.reported', 'release', staged.data.id, expect.objectContaining({ status: 'deployed', version: '1.2.3' }), null);
 
       cfg.releases = { ...cfg.releases, staging_command: ['node', replay, failed, '1', '{sha}'] };
-      const broke = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
+      db.getDb().prepare('DELETE FROM release_requests').run();
+      const broke = await rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
       expect(broke.ok).toBe(true);
       if (!broke.ok) return;
       for (let i = 0; i < 50 && rel.getRelease(broke.data.id)!.status !== 'failed'; i++) await flush(20);
@@ -776,14 +777,14 @@ describe('releases.ts', () => {
       cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'], staging_command: ['node', replay, success, '0', '{sha}'] };
       fs.writeFileSync(path.join(tmp, 'touch.cjs'), "require('fs').writeFileSync(process.argv[2], 'ran');\n");
       cfg.releases.staging_command = ['node', path.join(tmp, 'touch.cjs'), marker, '{sha}'];
-      const prod = rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
+      const prod = await rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
       expect(prod.ok).toBe(true);
       expect(typedInto(fable.id)[0]).toMatch(/authorization for PRODUCTION/);
       await flush(40);
       expect(fs.existsSync(marker)).toBe(false);
     });
 
-    it('refuses a staging command when the known freeze is not PASS or not GREEN', () => {
+    it('refuses a staging command when the known freeze is not PASS or not GREEN', async () => {
       agent('claude2');
       const marker = path.join(tmp, 'ran');
       const touch = path.join(tmp, 'touch.cjs');
@@ -792,7 +793,7 @@ describe('releases.ts', () => {
       const needs = path.join(tmp, 'freeze-needs.md');
       fs.writeFileSync(needs, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${FIXTURE_SHA}\`\n- Review: @codex3 **VERDICT: NEEDS FIXES** on this exact SHA: /r/v.md\n`);
       expect(rf.ingestFreezeFile(needs).ok).toBe(true);
-      const blocked = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      const blocked = await rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
       expect(blocked.ok).toBe(false);
       if (!blocked.ok) expect(blocked.error).toBe(rel.STAGE_NEEDS_PASS);
       expect(rel.listReleases({ sha: FIXTURE_SHA })[0]).toMatchObject({ status: 'failed', error: rel.STAGE_NEEDS_PASS });
@@ -801,7 +802,7 @@ describe('releases.ts', () => {
       const redSha = SHA;
       fs.writeFileSync(path.join(tmp, 'freeze-red.md'), `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${redSha}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- gate: RED\n`);
       expect(rf.ingestFreezeFile(path.join(tmp, 'freeze-red.md')).ok).toBe(true);
-      const red = rel.acceptRelease({ sha: redSha, target: 'staging' }, { userName: 'antonio', fromPeer: true });
+      const red = await rel.acceptRelease({ sha: redSha, target: 'staging' }, { userName: 'antonio', fromPeer: true });
       expect(red.ok).toBe(false);
       if (!red.ok) expect(red.error).toBe(rel.stageNeedsGreen('RED'));
       expect(fs.existsSync(marker)).toBe(false);
@@ -817,7 +818,7 @@ describe('releases.ts', () => {
         staging_command: ['node', hold, '{sha}'],
         staging_watch_command: ['node', watch, '{deploy_id}', success],
       };
-      const staged = rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
+      const staged = await rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
       expect(staged.ok).toBe(true);
       if (!staged.ok) return;
       for (let i = 0; i < 50 && rel.getRelease(staged.data.id)?.deploy_id !== '20261012T120000Z-abc123abc'; i++) await flush(20);

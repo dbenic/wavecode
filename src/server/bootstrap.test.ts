@@ -43,6 +43,11 @@ vi.mock('./artifact-manager.js', () => ({
   pruneOldArtifacts: vi.fn(),
 }));
 
+vi.mock('./deploy-state.js', () => ({
+  startDeployReconciler: vi.fn(),
+  stopDeployReconciler: vi.fn(),
+}));
+
 vi.mock('./startup-reconcile.js', () => ({
   reconcileStartupState: vi.fn(),
 }));

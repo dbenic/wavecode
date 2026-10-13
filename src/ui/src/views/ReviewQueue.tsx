@@ -1,112 +1,218 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Agent, DevLane, ReleaseRequest, ReviewItem as ReviewItemType, User } from '../types';
-import type { StageProgress } from '../components/StageChip';
+import type { LaneCard, ReleaseView, ReviewBoard, ReviewerLoadView } from '../types';
 import { isReviewEventType } from '../sse-events';
-import ReviewItemCard from '../components/ReviewItem';
+import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 import RoomProposals from '../components/RoomProposals';
 
-function LaneSection({ lanes, onSent }: { lanes: DevLane[]; onSent: () => void }) {
-  const [pick, setPick] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  if (lanes.length === 0) return null;
+const HOW_IT_WORKS = [
+  'Freeze the lane when the work is ready.',
+  'The quick check runs, then a reviewer reads that exact SHA.',
+  'You press Stage, or it stages itself. Then check it on staging.',
+  'Press Ready for prod. Denis ships that release.',
+  'Behind main, merge main and freeze again. Your agent is told.',
+];
+
+function reconciledLabel(iso: string | null): string {
+  if (!iso) return 'not yet';
+  const match = iso.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!match) return iso;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const month = months[Number(match[2]) - 1] ?? match[2];
+  return `${Number(match[3])} ${month} ${match[4]}:${match[5]} UTC`;
+}
+
+function shortSha(sha: string | null): string {
+  return sha ? sha.slice(0, 8) : '';
+}
+
+function Pipeline({ card }: { card: LaneCard }) {
+  const blocked = card.pipeline.find((step) => step.mark === 'blocked');
   return (
-    <section id="lanes" className="space-y-2 pt-4" data-testid="lanes">
-      <h2 className="text-[10px] font-bold tracking-[0.2em] text-slate-500 uppercase">Lanes</h2>
-      {lanes.map((lane) => (
-        <div key={`${lane.project}:${lane.lane}`} className="rounded-lg border border-slate-800/50 bg-slate-900/40 p-3 space-y-2" data-testid={`lane-${lane.lane}`}>
-          <div className="flex flex-wrap items-center gap-2 text-[10px]">
-            <span className="font-mono text-slate-300">{lane.lane}</span>
-            <span className="font-mono text-slate-500">{lane.sha.slice(0, 8)}</span>
-            {lane.author_name && <span className="text-cyan-300">@{lane.author_name}</span>}
-          </div>
-          <p className="text-[11px] text-slate-200" data-testid="lane-status">{lane.status_line}</p>
-          {lane.full_fail_flag && <p className="text-[11px] font-semibold text-red-300" data-testid="full-fail-flag">{lane.full_fail_flag}</p>}
-          {lane.before_freeze_tip && <p className="text-[10px] text-slate-500" data-testid="before-freeze-tip">{lane.before_freeze_tip}</p>}
-          {lane.reviewers.length > 0 && lane.freeze_sha && (
-            <div className="flex items-center gap-2">
-              <select
-                value={pick[lane.lane] ?? ''}
-                onChange={(e) => setPick((p) => ({ ...p, [lane.lane]: e.target.value }))}
-                className="flex-1 px-2 py-1 rounded border border-slate-800/60 bg-slate-950/50 text-xs text-slate-300 font-mono"
-              >
-                <option value="">Request review…</option>
-                {lane.reviewers.map((r) => <option key={r.id} value={r.id}>@{r.alias ?? r.name}</option>)}
-              </select>
-              <button
-                type="button"
-                disabled={busy === lane.lane || !pick[lane.lane]}
-                onClick={() => {
-                  setBusy(lane.lane);
-                  apiPost('/reviews/lanes/request-review', { project: lane.project, lane: lane.lane, reviewer: pick[lane.lane] })
-                    .then(() => onSent())
-                    .catch(() => {})
-                    .finally(() => setBusy(null));
-                }}
-                className="px-2 py-1 rounded border border-cyan-500/30 text-[10px] font-semibold text-cyan-300 disabled:opacity-40"
-              >
-                Request review
-              </button>
-            </div>
-          )}
-        </div>
-      ))}
-    </section>
+    <div data-testid="pipeline">
+      <ol className="flex flex-wrap items-center gap-1">
+        {card.pipeline.map((step, index) => (
+          <li key={step.id} className="flex items-center gap-1">
+            {index > 0 && <span className="text-[10px] text-slate-600" aria-hidden="true">&gt;</span>}
+            <span
+              data-testid={`step-${step.id}`}
+              data-mark={step.mark}
+              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${
+                step.mark === 'blocked'
+                  ? 'bg-red-950 text-red-200 ring-1 ring-red-500/50'
+                  : step.mark === 'current'
+                    ? 'bg-sky-950 text-sky-100 ring-1 ring-sky-400/60'
+                    : step.mark === 'done'
+                      ? 'text-emerald-400'
+                      : 'text-slate-600'
+              }`}
+            >
+              {step.label}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {blocked?.reason && blocked.reason !== card.action && (
+        <p className="mt-1 text-[11px] text-red-300" data-testid="blocked-reason">{blocked.reason}</p>
+      )}
+    </div>
   );
 }
 
-function indexStaging(rows: ReleaseRequest[]): Map<string, StageProgress & { id?: string }> {
-  const open = new Map<string, ReleaseRequest>();
-  const newest = new Map<string, ReleaseRequest>();
-  for (const row of rows) {
-    if (row.target !== 'staging') continue;
-    if (!newest.has(row.sha)) newest.set(row.sha, row);
-    if ((row.status === 'sent' || row.status === 'requested') && !open.has(row.sha)) open.set(row.sha, row);
-  }
-  const out = new Map<string, StageProgress & { id?: string }>();
-  for (const [sha, row] of newest) {
-    const picked = open.get(sha) ?? row;
-    out.set(sha, {
-      id: picked.id,
-      sha: picked.sha,
-      status: picked.status,
-      phase: picked.progress_phase ?? null,
-      progress: picked.progress_status ?? null,
-      version: picked.version,
-      pinUntil: picked.pin_until ?? null,
-      url: picked.staging_url ?? null,
-      error: picked.error,
-      rollbackStatus: picked.rollback_status ?? null,
-    });
-  }
-  return out;
+function LaneCardView({ card, onDone }: { card: LaneCard; onDone: () => void }) {
+  const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [openOlder, setOpenOlder] = useState(false);
+  const openFile = internalLinkClickHandler(navigate);
+  const press = async () => {
+    const button = card.button;
+    if (!button || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (button.kind === 'stage' && button.run_id) {
+        await apiPost(`/reviews/${button.run_id}/stage`);
+      } else if (button.kind === 'ready') {
+        await apiPost('/releases/verify', { sha: button.sha, project: button.project, note: 'Checked on staging' });
+      } else if (button.kind === 'promote' && button.run_id) {
+        await apiPost(`/reviews/${button.run_id}/promote`);
+      }
+      onDone();
+    } catch (e) {
+      setError((e as Error).message || 'That did not go through');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <article
+      data-testid={`lane-card-${card.lane ?? card.key}`}
+      className={`rounded-xl border bg-slate-900/70 p-4 space-y-2 ${card.needs_you ? 'border-sky-500/40' : 'border-slate-800'}`}
+    >
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="text-base font-semibold text-slate-100" data-testid="lane-title">{card.title}</h2>
+        {card.sha && <span className="font-mono text-[10px] text-slate-500">{shortSha(card.sha)}</span>}
+      </div>
+      {card.lane && <p className="text-[10px] font-mono text-slate-600">{card.lane}</p>}
+      <p className="text-lg font-semibold text-slate-50" data-testid="lane-status">{card.status}</p>
+      <p className="text-sm text-slate-200" data-testid="lane-action">{card.action}</p>
+      {card.link && (
+        <a
+          href={fileViewHref(card.link.path)}
+          onClick={openFile}
+          className="inline-block text-sm text-sky-300 underline underline-offset-2"
+          data-testid="verdict-link"
+        >
+          {card.link.label}
+        </a>
+      )}
+      <p className="text-[11px] text-slate-400" data-testid="lane-owner">Owner · {card.owner_label}</p>
+      <Pipeline card={card} />
+      {card.button && (
+        <button
+          type="button"
+          data-testid={`action-${card.button.kind}`}
+          disabled={busy}
+          onClick={press}
+          className="mt-1 w-full rounded-lg border border-emerald-500/50 bg-emerald-950 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
+        >
+          {busy ? 'Sending…' : card.button.label}
+        </button>
+      )}
+      {error && <p className="text-[11px] text-red-300">{error}</p>}
+      {card.older.length > 0 && (
+        <div>
+          <button
+            type="button"
+            data-testid="older-freezes"
+            onClick={() => setOpenOlder((open) => !open)}
+            className="text-[11px] text-slate-400 underline underline-offset-2"
+          >
+            {card.older.length} older freeze{card.older.length === 1 ? '' : 's'}
+          </button>
+          {openOlder && (
+            <ul className="mt-1 space-y-1" data-testid="older-list">
+              {card.older.map((row) => (
+                <li key={row.sha} className="text-[11px] text-slate-500">
+                  {row.title} · {row.when} · {shortSha(row.sha)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ReleasePanel({ release }: { release: ReleaseView }) {
+  const tip = (label: string, row: { version: string | null; sha: string | null }) => (
+    <section className="rounded-xl border border-slate-800 bg-slate-900/70 p-4" data-testid={`release-${label.toLowerCase()}`}>
+      <h2 className="text-[10px] font-bold tracking-[0.18em] text-slate-500 uppercase">{label}</h2>
+      <p className="mt-1 text-lg font-semibold text-slate-50">{row.version ? row.version : 'Version unknown'}</p>
+      <p className="font-mono text-xs text-slate-400">{row.sha ? shortSha(row.sha) : 'SHA unknown'}</p>
+    </section>
+  );
+  return (
+    <div className="space-y-3" data-testid="release-view">
+      <div className="grid gap-3 sm:grid-cols-2">
+        {tip('Production', release.prod)}
+        {tip('Staging', release.staging)}
+      </div>
+      <section className="rounded-xl border border-slate-800 bg-slate-900/70 p-4" data-testid="release-queue">
+        <h2 className="text-[10px] font-bold tracking-[0.18em] text-slate-500 uppercase">
+          Next release{release.next_version ? ` ${release.next_version}` : ''}
+        </h2>
+        {release.queued.length === 0 ? (
+          <p className="mt-2 text-sm text-slate-400">Nothing queued for the next release.</p>
+        ) : (
+          <ul className="mt-2 space-y-2">
+            {release.queued.map((row) => (
+              <li key={row.sha} data-testid={`queued-${row.lane ?? row.sha}`} className="flex items-baseline justify-between gap-3">
+                <span className="text-sm text-slate-100">{row.title}</span>
+                <span className="font-mono text-[10px] text-slate-500">{shortSha(row.sha)}{row.lane ? ` · ${row.lane}` : ''}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
 }
 
 export default function ReviewQueue() {
   const navigate = useNavigate();
-  const [reviews, setReviews] = useState<ReviewItemType[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const [cards, setCards] = useState<LaneCard[]>([]);
+  const [release, setRelease] = useState<ReleaseView>({ prod: { version: null, sha: null }, staging: { version: null, sha: null }, next_version: null, queued: [] });
+  const [viewer, setViewer] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [proposalsVersion, setProposalsVersion] = useState(0);
-  const [stagingBySha, setStagingBySha] = useState<Map<string, StageProgress & { id?: string }>>(new Map());
-  const [lanes, setLanes] = useState<DevLane[]>([]);
+  const [reconciledAt, setReconciledAt] = useState<string | null>(null);
+  const [reconcileStale, setReconcileStale] = useState(false);
+  const [reviewerLoads, setReviewerLoads] = useState<ReviewerLoadView[]>([]);
+  const [view, setView] = useState<'lanes' | 'release' | 'history'>('lanes');
+  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  const scopeInit = useRef(false);
 
   const fetchData = useCallback(() => {
-    Promise.all([
-      apiGet<ReviewItemType[]>('/reviews'),
-      apiGet<Agent[]>('/agents'),
-      apiGet<User>('/me').catch(() => null),
-      apiGet<ReleaseRequest[]>('/releases?target=staging&limit=200').catch(() => [] as ReleaseRequest[]),
-      apiGet<DevLane[]>('/reviews/lanes').catch(() => [] as DevLane[]),
-    ]).then(([r, a, me, releases, laneRows]) => {
-      setReviews(r);
-      setAgents(a);
-      setIsAdmin(me?.role === 'admin');
-      setStagingBySha(indexStaging(releases));
-      setLanes(Array.isArray(laneRows) ? laneRows : []);
+    apiGet<ReviewBoard>('/reviews/board').then((board) => {
+      const nextCards = Array.isArray(board?.cards) ? board.cards : [];
+      const name = board?.viewer?.name ?? null;
+      setCards(nextCards);
+      setRelease(board?.release ?? { prod: { version: null, sha: null }, staging: { version: null, sha: null }, next_version: null, queued: [] });
+      setViewer(name);
+      if (!scopeInit.current) {
+        scopeInit.current = true;
+        setScope(name ? 'mine' : 'all');
+      } else if (!name) {
+        setScope('all');
+      }
+      setReconciledAt(board?.last_reconciled_at ?? null);
+      setReconcileStale(board?.stale === true);
+      setReviewerLoads(board?.reviewers ?? []);
       setLoaded(true);
     }).catch(() => setLoaded(true));
   }, []);
@@ -114,7 +220,7 @@ export default function ReviewQueue() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSSE = useCallback((event: SSEEvent) => {
-    if (isReviewEventType(event.type) || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.') || event.type.startsWith('pipeline.')) {
+    if (isReviewEventType(event.type) || event.type === 'deploy.reconciled' || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.') || event.type.startsWith('pipeline.')) {
       fetchData();
     }
     if (event.type.startsWith('room.proposal_')) setProposalsVersion((v) => v + 1);
@@ -122,82 +228,97 @@ export default function ReviewQueue() {
 
   useSSE(handleSSE);
 
-  return (
-    <div className="min-h-screen bg-slate-950 relative">
-      {/* Scan-line */}
-      <div
-        className="pointer-events-none fixed inset-0 z-50 opacity-[0.015]"
-        style={{
-          backgroundImage:
-            'repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(255,255,255,0.03) 3px, rgba(255,255,255,0.03) 6px)',
-        }}
-      />
+  const mineKnown = !!viewer;
+  const scoped = cards.filter((card) => (scope === 'all' || !mineKnown ? true : card.mine));
+  const visible = view === 'history'
+    ? scoped.filter((card) => card.history)
+    : scoped.filter((card) => !card.history);
+  const todo = cards.filter((card) => card.mine && card.needs_you && !card.history).length;
+  const historyCount = cards.filter((card) => card.history && (scope === 'all' || !mineKnown || card.mine)).length;
 
-      {/* Header */}
+  const tab = (id: 'lanes' | 'release' | 'history', label: string) => (
+    <button
+      type="button"
+      data-testid={`view-${id === 'lanes' ? scope : id}`}
+      onClick={() => setView(id)}
+      className={`rounded-full px-3 py-1 text-[11px] font-semibold ${view === id ? 'bg-slate-100 text-slate-950' : 'border border-slate-700 text-slate-300'}`}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-950">
       <header className="sticky top-0 z-40 border-b border-slate-800/60 bg-slate-950/90 backdrop-blur-xl">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+        <div className="max-w-3xl mx-auto px-4 py-3 space-y-2">
           <div className="flex items-center gap-3">
-            <button onClick={() => navigate('/')} className="text-slate-500 hover:text-slate-300 transition-colors text-sm">
-              &larr;
-            </button>
+            <button type="button" onClick={() => navigate('/')} className="text-slate-500 hover:text-slate-300 text-sm">&larr;</button>
             <div>
-              <h1 className="text-sm font-bold tracking-[0.15em] text-slate-100 uppercase">
-                Review Queue
-              </h1>
-              <p className="text-[9px] text-slate-600 tracking-[0.3em] uppercase">
-                {reviews.length} pending &middot; Quality Gate
-                {lanes.length > 0 && <> &middot; <a href="#lanes" className="text-sky-400/80 hover:text-sky-300">Lanes</a></>}
-              </p>
+              <h1 className="text-sm font-bold tracking-[0.15em] text-slate-100 uppercase">Reviews</h1>
+              {mineKnown && (
+                <p className="text-sm text-slate-200" data-testid="things-to-do">
+                  You have {todo} {todo === 1 ? 'thing' : 'things'} to do
+                </p>
+              )}
             </div>
           </div>
+          <div className="flex flex-wrap gap-2">
+            {tab('lanes', mineKnown && scope === 'mine' ? 'My lanes' : 'All lanes')}
+            {mineKnown && (
+              <button
+                type="button"
+                data-testid="scope-toggle"
+                onClick={() => { setScope((s) => (s === 'mine' ? 'all' : 'mine')); setView('lanes'); }}
+                className="rounded-full border border-slate-700 px-3 py-1 text-[11px] font-semibold text-slate-300"
+              >
+                {scope === 'mine' ? 'All lanes' : 'My lanes'}
+              </button>
+            )}
+            {tab('release', 'Release')}
+            {tab('history', historyCount ? `History (${historyCount})` : 'History')}
+          </div>
+          <p className={`text-[10px] ${reconcileStale ? 'text-amber-300' : 'text-slate-500'}`} data-testid="last-reconciled">
+            Last reconciled {reconciledLabel(reconciledAt)}
+            {reconcileStale && <span data-testid="reconcile-stale"> · stale — more than 5 minutes</span>}
+          </p>
         </div>
+        {reviewerLoads.length > 0 && (
+          <div className="max-w-3xl mx-auto px-4 pb-2 flex flex-wrap gap-x-3 gap-y-1" data-testid="reviewer-load">
+            {reviewerLoads.map((seat) => (
+              <span
+                key={seat.id}
+                data-testid={`reviewer-load-${seat.name}`}
+                className={`text-[10px] font-mono ${seat.busy ? 'text-amber-300' : 'text-slate-400'}`}
+              >
+                @{seat.alias ?? seat.name} {seat.busy ? 'busy' : 'idle'} · queue {seat.queue}
+              </span>
+            ))}
+          </div>
+        )}
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-6">
+      <main className="max-w-3xl mx-auto px-4 py-4 space-y-4">
         <RoomProposals version={proposalsVersion} />
+        {view === 'lanes' && (
+          <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-3" data-testid="how-it-works">
+            <h2 className="text-[10px] font-bold tracking-[0.18em] text-slate-500 uppercase">How it works</h2>
+            <ol className="mt-1 list-decimal pl-4 text-[12px] text-slate-300 space-y-0.5">
+              {HOW_IT_WORKS.map((line) => <li key={line}>{line}</li>)}
+            </ol>
+          </section>
+        )}
         {!loaded ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="text-[10px] text-slate-600 tracking-[0.3em] uppercase animate-pulse">
-              Loading reviews...
-            </div>
-          </div>
+          <p className="py-16 text-center text-[10px] tracking-[0.3em] text-slate-600 uppercase">Loading reviews...</p>
+        ) : view === 'release' ? (
+          <ReleasePanel release={release} />
+        ) : visible.length === 0 ? (
+          <p className="py-16 text-center text-sm text-slate-300" data-testid="empty-state">Nothing for you, everything is moving.</p>
         ) : (
-          <div className="space-y-3">
-            {reviews.length === 0 && lanes.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-20 gap-4">
-                <div className="w-16 h-16 rounded-lg border border-dashed border-slate-800 flex items-center justify-center">
-                  <span className="text-2xl text-slate-700">&#10003;</span>
-                </div>
-                <div className="text-center">
-                  <p className="text-sm text-slate-500">Queue clear</p>
-                  <p className="text-[11px] text-slate-600 mt-1">
-                    All runs reviewed. Check back when agents complete tasks.
-                  </p>
-                </div>
-              </div>
-            )}
-            {reviews.map((item, i) => (
-              <ReviewItemCard
-                key={item.run.id}
-                item={item}
-                agents={agents}
-                onAction={fetchData}
-                index={i}
-                isAdmin={isAdmin}
-                staging={item.freeze ? stagingBySha.get(item.freeze.sha) ?? null : null}
-              />
-            ))}
-            <LaneSection lanes={lanes.filter((l) => !reviews.some((r) => r.run.id === l.run_id || (l.freeze_sha && r.freeze?.sha === l.freeze_sha)))} onSent={fetchData} />
+          <div className="space-y-3" data-testid="lane-list">
+            {visible.map((card) => <LaneCardView key={card.key} card={card} onDone={fetchData} />)}
           </div>
         )}
       </main>
-
-      <style>{`
-        @keyframes reviewIn {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   );
 }

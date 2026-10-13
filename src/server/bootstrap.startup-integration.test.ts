@@ -75,6 +75,11 @@ vi.mock('./task-dispatcher.js', () => ({
   dispatchNext: vi.fn(),
 }));
 
+vi.mock('./deploy-state.js', () => ({
+  startDeployReconciler: vi.fn(),
+  stopDeployReconciler: vi.fn(),
+}));
+
 vi.mock('./tmux.js', () => ({
   hasSession: vi.fn(),
 }));

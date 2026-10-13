@@ -26,6 +26,7 @@ import { currentActorId, currentActorIsAdmin } from './request-context.js';
 import { OWNER_USER_ID } from './users.js';
 import * as freezes from './release-freezes.js';
 import * as releases from './releases.js';
+import { shaStageBlock } from './sha-stage-block.js';
 import { productionPrereqGate } from './prereqs.js';
 
 export interface ReviewItem {
@@ -45,7 +46,7 @@ export interface ReviewItem {
  */
 export function listPendingReviews(): ReviewItem[] {
   const runs = listReviewableRuns();
-  return runs.map(runToReviewItem).filter((r): r is ReviewItem => r !== null);
+  return runs.map(runToReviewItem).filter((r): r is ReviewItem => r !== null && (!r.freeze || freezes.freezeOnReviews(r.freeze)));
 }
 
 /**
@@ -276,8 +277,11 @@ export async function stage(runId: string, opts: { actorIsAdmin?: boolean } = {}
   if (stale) return { ok: false, error: stale };
   const behind = freezes.behindMainBlock(freeze);
   if (behind) return { ok: false, error: behind };
-  const gateBlock = releases.stageGateBlock(freeze);
-  if (gateBlock) return { ok: false, error: gateBlock };
+  // Behind main, rollback, nothing new, superseded, rejected, and the gate.
+  // The same sentence is what the card shows before the button is pressed.
+  // A merged SHA that is on main and forward of staging is still stageable.
+  const blocked = await shaStageBlock(freeze);
+  if (blocked) return { ok: false, error: blocked };
   if (!freeze.project) return { ok: false, error: 'The freeze names no project, so no release peer can be chosen' };
   const admin = opts.actorIsAdmin === true || currentActorIsAdmin();
   if (freeze.verdict !== 'pass' && !admin && !coveredByDeployedCandidate(freeze)) {

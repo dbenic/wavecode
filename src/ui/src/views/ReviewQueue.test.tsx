@@ -2,22 +2,69 @@
 
 import '../../test-setup';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import ReviewQueue from './ReviewQueue';
+import type { LaneCard, ReviewBoard } from '../types';
 import type { SSEEvent } from '../hooks/useSSE';
 
 vi.mock('../hooks/useApi', () => ({
   apiGet: vi.fn(),
+  apiPost: vi.fn(),
 }));
 
 vi.mock('../hooks/useSSE', () => ({
   useSSE: vi.fn(),
 }));
 
-vi.mock('../components/ReviewItem', () => ({
-  default: ({ item }: { item: { task: { prompt: string } } }) => <div>{item.task.prompt}</div>,
+vi.mock('../components/RoomProposals', () => ({
+  default: () => null,
 }));
+
+function card(over: Partial<LaneCard> & Pick<LaneCard, 'key' | 'title' | 'status' | 'action'>): LaneCard {
+  return {
+    project: 'countix',
+    lane: over.key,
+    desk: null,
+    sha: 'abcdef12' + '0'.repeat(32),
+    owner: 'developer',
+    owner_label: 'Antonio',
+    needs_you: false,
+    mine: true,
+    history: false,
+    button: null,
+    pipeline: [
+      { id: 'freeze', label: 'Freeze', mark: 'done', reason: null },
+      { id: 'tests', label: 'Tests', mark: 'done', reason: null },
+      { id: 'review', label: 'Review', mark: 'current', reason: null },
+      { id: 'staging', label: 'Staging', mark: 'todo', reason: null },
+      { id: 'ready', label: 'Ready', mark: 'todo', reason: null },
+      { id: 'prod', label: 'Prod', mark: 'todo', reason: null },
+    ],
+    older: [],
+    link: null,
+    version: null,
+    ...over,
+  };
+}
+
+function board(over: Partial<ReviewBoard>): ReviewBoard {
+  return {
+    last_reconciled_at: '2026-10-12T20:00:00.000Z',
+    stale: false,
+    items: [],
+    reviewers: [],
+    cards: [],
+    viewer: { name: 'Antonio' },
+    release: {
+      prod: { version: '0.442.9', sha: 'a'.repeat(40) },
+      staging: { version: '0.443.2', sha: 'e69d42f4' + 'b'.repeat(32) },
+      next_version: '0.443.4',
+      queued: [{ lane: 'wc-canary', title: 'Canary', sha: '7b2bccd8' + 'c'.repeat(32), version: '0.443.4', desk: null }],
+    },
+    ...over,
+  };
+}
 
 describe('ReviewQueue', () => {
   let sseHandler: ((event: SSEEvent) => void) | null = null;
@@ -25,86 +72,114 @@ describe('ReviewQueue', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     sseHandler = null;
-
     const sse = await import('../hooks/useSSE');
     vi.mocked(sse.useSSE).mockImplementation((handler) => {
       sseHandler = handler;
     });
   });
 
-  it('refreshes reviews when a review-related SSE event arrives', async () => {
+  async function renderBoard(payload: ReviewBoard) {
     const useApi = await import('../hooks/useApi');
-
-    let reviewFetchCount = 0;
     vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
-      if (path === '/reviews') {
-        reviewFetchCount += 1;
-        return (reviewFetchCount === 1
-          ? [makeReviewItem('Initial review item')]
-          : [makeReviewItem('Updated review item')]) as never;
-      }
-
-      if (path === '/agents') {
-        return [] as never;
-      }
-
+      if (path === '/reviews/board') return payload as never;
       throw new Error(`Unexpected path: ${path}`);
     });
+    render(<MemoryRouter><ReviewQueue /></MemoryRouter>);
+  }
 
-    render(
-      <MemoryRouter>
-        <ReviewQueue />
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByText('Initial review item')).toBeInTheDocument();
-    expect(sseHandler).toBeTruthy();
-
-    await act(async () => {
-      sseHandler?.(makeReviewEvent('run.finished'));
+  it('refreshes the lane card when a review event arrives', async () => {
+    const useApi = await import('../hooks/useApi');
+    let n = 0;
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      if (path !== '/reviews/board') throw new Error(path);
+      n += 1;
+      const title = n === 1 ? 'S3' : 'S3 updated';
+      return board({ cards: [card({ key: 'wc-s3-104', lane: 'wc-s3-104', title, status: 'In review', action: 'codex2 reviewing since 19:10' })] }) as never;
     });
+    render(<MemoryRouter><ReviewQueue /></MemoryRouter>);
+    expect(await screen.findByText('S3')).toBeInTheDocument();
+    await act(async () => { sseHandler?.({ id: 1, type: 'run.finished', entityType: 'run', entityId: 'r', payload: null, createdAt: '2026-10-12T20:00:00Z' }); });
+    await waitFor(() => expect(screen.getByText('S3 updated')).toBeInTheDocument());
+  });
 
-    await waitFor(() => {
-      expect(screen.getByText('Updated review item')).toBeInTheDocument();
-    });
+  it('defaults to My lanes, counts what you have to do, and hides the other developer', async () => {
+    await renderBoard(board({
+      cards: [
+        card({ key: 'wc-eba-viewer', lane: 'wc-eba-viewer', title: 'EBA viewer', status: 'On staging', action: 'Check it on staging, then press Ready for prod', needs_you: true, button: { kind: 'ready', label: 'Ready for prod', run_id: null, sha: 'e69d42f4', project: 'countix' } }),
+        card({ key: 'wc-recognition-timeout', lane: 'wc-recognition-timeout', title: 'Recognition timeout', status: 'Behind main', action: 'Merge main and refreeze (agent notified)', mine: false, needs_you: true, owner_label: 'Aleš' }),
+      ],
+    }));
+    expect(await screen.findByTestId('things-to-do')).toHaveTextContent('You have 1 thing to do');
+    expect(screen.getByText('EBA viewer')).toBeInTheDocument();
+    expect(screen.queryByText('Recognition timeout')).not.toBeInTheDocument();
+    expect(screen.getByTestId('action-ready')).toHaveTextContent('Ready for prod');
+    expect(screen.getByTestId('how-it-works').querySelectorAll('li')).toHaveLength(5);
+    fireEvent.click(screen.getByTestId('scope-toggle'));
+    expect(screen.getByText('Recognition timeout')).toBeInTheDocument();
+  });
+
+  it('puts a superseded card in History and shows the release', async () => {
+    await renderBoard(board({
+      cards: [
+        card({ key: 'wc-s3-104', lane: 'wc-s3-104', title: '#104 S3', status: 'In review', action: 'codex2 reviewing since 19:10' }),
+        card({ key: 'wc-old', lane: 'wc-old', title: 'Old freeze', status: 'Superseded', action: 'A newer freeze replaced this one', history: true, needs_you: false }),
+      ],
+    }));
+    expect(await screen.findByText('#104 S3')).toBeInTheDocument();
+    expect(screen.queryByText('Old freeze')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('view-history'));
+    expect(screen.getByText('Old freeze')).toBeInTheDocument();
+    expect(screen.queryByText('#104 S3')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('view-release'));
+    expect(screen.getByTestId('release-production')).toHaveTextContent('0.442.9');
+    expect(screen.getByTestId('release-staging')).toHaveTextContent('e69d42f4');
+    expect(screen.getByTestId('queued-wc-canary')).toHaveTextContent('Canary');
+  });
+
+  it('says the queue is clear when nothing is yours', async () => {
+    await renderBoard(board({ cards: [], viewer: { name: 'Antonio' } }));
+    expect(await screen.findByTestId('empty-state')).toHaveTextContent('Nothing for you, everything is moving.');
+  });
+
+  it('shows every lane when the viewer is unknown', async () => {
+    await renderBoard(board({
+      viewer: { name: null },
+      cards: [
+        card({ key: 'wc-s3-104', lane: 'wc-s3-104', title: '#104 S3', status: 'In review', action: 'codex2 reviewing since 19:10', mine: false }),
+        card({ key: 'wc-ales-106', lane: 'wc-ales-106', title: '#106', status: 'Needs fixes', action: 'The timeout still fires.', mine: false, owner_label: "Aleš's agent" }),
+      ],
+    }));
+    expect(await screen.findByText('#104 S3')).toBeInTheDocument();
+    expect(screen.getByText('#106')).toBeInTheDocument();
+    expect(screen.queryByTestId('things-to-do')).not.toBeInTheDocument();
+    expect(screen.getByTestId('view-all')).toHaveTextContent('All lanes');
+  });
+
+  it('shows each reviewer queue and whether the pane is busy', async () => {
+    await renderBoard(board({
+      reviewers: [
+        { id: 'c2', name: 'codex2', alias: null, busy: true, queue: 2 },
+        { id: 'c3', name: 'codex3', alias: 'c3', busy: false, queue: 0 },
+      ],
+    }));
+    expect(await screen.findByTestId('reviewer-load-codex2')).toHaveTextContent('@codex2 busy · queue 2');
+    expect(screen.getByTestId('reviewer-load-codex3')).toHaveTextContent('@c3 idle · queue 0');
+  });
+
+  it('does not show a file path as the thing to do', async () => {
+    await renderBoard(board({
+      cards: [card({
+        key: 'wc-ales-106',
+        lane: 'wc-ales-106',
+        title: '#106',
+        status: 'Needs fixes',
+        action: 'The timeout still fires.',
+        owner_label: "Aleš's agent",
+        link: { label: 'Read the verdict', path: '/home/wave/inbox/freezes/verdict.md' },
+        mine: true,
+      })],
+    }));
+    expect(await screen.findByTestId('verdict-link')).toHaveTextContent('Read the verdict');
+    expect(screen.queryByText(/\/home\/wave/)).not.toBeInTheDocument();
   });
 });
-
-function makeReviewItem(prompt: string) {
-  return {
-    run: {
-      id: prompt,
-      task_id: 'task-1',
-      agent_id: 'agent-1',
-      attempt: 1,
-      status: 'done' as const,
-      started_at: '2026-04-03T00:00:00Z',
-      finished_at: '2026-04-03T00:01:00Z',
-      exit_code: 0,
-      transcript_path: null,
-      review_status: 'pending' as const,
-    },
-    task: {
-      id: 'task-1',
-      agent_id: 'agent-1',
-      prompt,
-      status: 'done' as const,
-      priority: 0,
-      created_at: '2026-04-03T00:00:00Z',
-    },
-    agentName: 'agent-1',
-    artifacts: [],
-    duration: 60,
-  };
-}
-
-function makeReviewEvent(type: string): SSEEvent {
-  return {
-    id: 1,
-    type,
-    entityType: 'run',
-    entityId: 'run-1',
-    payload: null,
-    createdAt: '2026-04-03T00:00:00Z',
-  };
-}

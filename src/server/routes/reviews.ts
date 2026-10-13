@@ -6,11 +6,13 @@ import * as reviewQueue from '../review-queue.js';
 import * as codeReview from '../code-review.js';
 import { presentRunResult } from '../run-result.js';
 import { presentFileRun } from '../file-runner.js';
-import { getActingUser, type NodeAppEnv } from '../auth.js';
+import { getActingUser, resolveRequestToken, type NodeAppEnv } from '../auth.js';
 import * as leases from '../leases.js';
 import { canMutate, isAdmin } from '../users.js';
 import * as freezes from '../release-freezes.js';
 import * as devLanes from '../dev-lanes.js';
+import * as deployState from '../deploy-state.js';
+import { shaStageBlock } from '../sha-stage-block.js';
 import logger from '../logger.js';
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
@@ -104,6 +106,16 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result.data);
   });
 
+  app.get('/api/reviews/board', async (c) => {
+    const user = getActingUser(c);
+    let lanes: devLanes.DevLane[] = [];
+    try { lanes = await devLanes.lanesForRequest(); } catch (e) {
+      logger.warn({ error: (e as Error).message }, 'Lane list failed');
+    }
+    const token = resolveRequestToken(c.req.path, c.req.raw.headers, c.req.query('access_token'));
+    return c.json(await deployState.reviewBoard({ name: user.name, role: user.role }, lanes, token));
+  });
+
   app.get('/api/reviews', async (c) => {
     const items = reviewQueue.listPendingReviews();
     let lanes: devLanes.DevLane[] = [];
@@ -112,10 +124,16 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     }
     const bySha = new Map(lanes.filter((l) => l.freeze_sha).map((l) => [l.freeze_sha as string, l]));
     const byLane = new Map(lanes.map((l) => [`${l.project}:${l.lane}`, l]));
-    return c.json(items.map((item) => {
+    return c.json(await Promise.all(items.map(async (item) => {
       const lane = (item.freeze && bySha.get(item.freeze.sha))
         || (item.freeze?.lane ? byLane.get(`${item.freeze.project}:${item.freeze.lane}`) : undefined);
-      const stage_block = lane?.stage_block ?? null;
+      // The lane row is the current tip. An older SHA, or a lane that is not
+      // configured, still gets behind-main and forward-only from its own SHA.
+      let stage_block: string | null = null;
+      if (item.freeze) {
+        try { stage_block = await shaStageBlock(item.freeze); } catch { stage_block = null; }
+      }
+      if (!stage_block && lane?.freeze_sha && item.freeze?.sha === lane.freeze_sha) stage_block = lane.stage_block;
       if (!lane) return { ...item, stage_block };
       return {
         ...item,
@@ -130,13 +148,17 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
         delta_review: lane.delta_review,
         reviewers: lane.reviewers,
       };
-    }));
+    })));
   });
 
-  app.get('/api/reviews/:runId', (c) => {
+  app.get('/api/reviews/:runId', async (c) => {
     const result = reviewQueue.getReview(c.req.param('runId'));
     if (!result.ok) return c.json({ error: result.error }, 404);
-    return c.json(result.data);
+    let stage_block: string | null = null;
+    if (result.data.freeze) {
+      try { stage_block = await shaStageBlock(result.data.freeze); } catch { stage_block = null; }
+    }
+    return c.json({ ...result.data, stage_block });
   });
 
   app.post('/api/reviews/:runId/promote', async (c) => {
@@ -182,7 +204,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   // Release freezes reviewed by files (release-freezes.ts). The watcher ingests
   // the freeze inbox on its own; a reviewer may also hand a file in directly.
-  app.get('/api/reviews/freezes', (c) => c.json(freezes.listFreezes().map(freezes.toCard)));
+  app.get('/api/reviews/freezes', (c) => c.json(freezes.listReviewFreezes().map(freezes.toCard)));
 
   app.post('/api/reviews/freezes/ingest', async (c) => {
     const user = getActingUser(c);

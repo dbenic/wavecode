@@ -199,6 +199,15 @@ projects:
         claude1: codex2
         codex2: claude1
       review_deny: [codex1]
+      lane_deny: ['wc-codex1']             # globs: no merge, ping, freeze, or Reviews card
+      agent_deny: [codex1]                 # names or aliases; also never chosen as a reviewer
+      # Least-loaded seat in the first non-empty tier. Prefer replaces the map as the first choice.
+      reviewer_prefer:
+        claude: [codex2, codex3]           # Claude-authored work
+        codex: [claude1, claude2]          # Codex-authored work
+      reviewer_pool_by_author_glob:
+        'ales-*': [ales-codex1]            # fallback only, after every independent reviewer
+      review_reassign_minutes: 15          # busy seat, no verdict; 0 disables. Once, unless the next seat is idle
       freeze_dir: /home/wave/inbox/freezes
     # Off unless a freeze note declares prereqs. Commands are argv, run on the deploy box.
     prereq_checks:
@@ -222,6 +231,18 @@ autonomy:
   hang_timeout_min: 10
   hang_action: alert             # alert | restart (restart only task-driven agents)
   max_task_retries: 2
+```
+
+Reviews opens on the logged-in developer's lanes. `developers[].users` is their user name, `developers[].tokens` is a bearer token that means the same person, and `developers[].lanes` is lane globs. An identity that matches nobody sees every lane.
+
+```yaml
+developers:
+  - name: Antonio
+    users: [antonio]
+    lanes: ['wc-s3-*', 'wc-eba-*', 'wc-canary', 'wc-pd111*']
+  - name: Aleš
+    users: [ales]
+    lanes: ['wc-ales-*', 'wc-recognition-*']
 ```
 
 ## 7. Known limits (deliberate, current)

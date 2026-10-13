@@ -102,6 +102,25 @@ describe('Release view (candidates are the unit of production)', () => {
     await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/reviews/run-2431/stage'));
   });
 
+  it('locks a run-level STAGE button when that SHA is behind main or would roll staging back', async () => {
+    const api = await import('../hooks/useApi');
+    const block = 'behind main: merge main';
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/overview') return RESPONSE;
+      if (p === '/reviews') return [{ freeze: { sha: SHA_A }, stage_block: block }];
+      if (p === '/me') return { id: 'owner', name: 'denis', role: 'admin', color: '#64748b' };
+      return [];
+    });
+    render(<MemoryRouter><Release /></MemoryRouter>);
+    const row = await waitFor(() => within(screen.getByTestId('lanes')).getByTestId(`lane-${SHA_A.slice(0, 8)}`));
+    const stage = within(row).getByText('STAGE') as HTMLButtonElement;
+    expect(stage.disabled).toBe(true);
+    expect(stage.getAttribute('title')).toBe(block);
+    expect(within(row).getByTestId('stage-lock').textContent).toBe(block);
+    fireEvent.click(stage);
+    expect(vi.mocked(api.apiPost)).not.toHaveBeenCalled();
+  });
+
   it('a developer can Stage and mark Ready for prod, and does not see Deploy to production', async () => {
     const api = await import('../hooks/useApi');
     vi.mocked(api.apiGet).mockImplementation(async (p: string) => {

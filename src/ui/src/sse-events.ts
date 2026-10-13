@@ -46,6 +46,7 @@ export const SSE_EVENT_TYPES = [
   'release.reported',
   'release.progress',
   'release.verified',
+  'deploy.reconciled',
   'overlord.report',
   'overlord.chat',
   'queue.empty',

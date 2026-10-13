@@ -173,11 +173,11 @@ describe('forward-only staging', () => {
 
   it('runs the forward check when the body omits the project and refuses when it cannot be resolved', async () => {
     await deploy(newer, '1.4.0');
-    const resolved = acceptRelease({ sha: older, target: 'staging', lane: 'wc-ales' }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
+    const resolved = await acceptRelease({ sha: older, target: 'staging', lane: 'wc-ales' }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
     expect(resolved.ok).toBe(false);
     if (!resolved.ok) expect(resolved.error).toMatch(/behind main|would roll staging back|cannot prove/);
     projects.other = { workspace_match: '**/*', repo };
-    const refused = acceptRelease({ sha: newer, target: 'staging' }, { userName: 'denis', fromPeer: false });
+    const refused = await acceptRelease({ sha: newer, target: 'staging' }, { userName: 'denis', fromPeer: false });
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.error).toBe('project is required');
     delete projects.other;
@@ -190,7 +190,7 @@ describe('forward-only staging', () => {
     db.getDb().prepare(
       `INSERT INTO release_freezes (sha, project, lane, freeze_path, status) VALUES (?, 'demo', 'wc-ales', ?, 'open')`,
     ).run(newer, note);
-    const refused = acceptRelease({ sha: newer, target: 'production' }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
+    const refused = await acceptRelease({ sha: newer, target: 'production' }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.error).toBe('prereq prod_owner_count>=2 has no check');
     const viaRequest = await requestRelease({ project: '', sha: newer, target: 'production', actorName: 'denis', actorIsAdmin: true });

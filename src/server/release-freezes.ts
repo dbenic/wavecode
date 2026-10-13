@@ -42,7 +42,7 @@ import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
 import { behindMainLine } from './lane-status.js';
 import { gitText } from './git-memo.js';
-import { commitsBehind, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
+import { commitsBehind, laneAutomationDenied, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured, type TestRun } from './test-runs.js';
 
@@ -154,8 +154,28 @@ export function setFreezeGate(sha: string, gate: string): void {
   patch(sha, { gate: g });
 }
 
+/** Point an open, undecided freeze at a reviewer. A written verdict stays put. */
+export function setFreezeReviewer(sha: string, reviewer: { id: string; name: string } | null): void {
+  const freeze = getFreeze(sha);
+  if (!freeze || freeze.verdict) return;
+  patch(sha, {
+    reviewer_agent_id: reviewer?.id ?? null,
+    reviewer_name: reviewer?.name ?? null,
+  });
+}
+
 export function listFreezes(): ReleaseFreeze[] {
   return withTable(() => getDb().prepare('SELECT * FROM release_freezes ORDER BY created_at DESC').all() as ReleaseFreeze[]);
+}
+
+/** A denied lane or author is not a Reviews card and is not a developer lane on that page. */
+export function freezeOnReviews(freeze: { project: string | null; lane: string | null; author_name?: string | null }): boolean {
+  return !laneAutomationDenied(freeze.project, freeze.author_name ? { name: freeze.author_name } : null, freeze.lane);
+}
+
+/** Freezes the Reviews page may show. Denied lanes and agents are left out. */
+export function listReviewFreezes(): ReleaseFreeze[] {
+  return listFreezes().filter(freezeOnReviews);
 }
 
 export function toCard(f: ReleaseFreeze): FreezeCard {
@@ -178,6 +198,115 @@ const SHA40 = /\b[0-9a-f]{40}\b/;
 function titleOf(lines: string[]): string {
   const first = lines.find((l) => l.trim().length > 0) ?? '';
   return first.replace(/^#+\s*/, '').trim();
+}
+
+/**
+ * Words that used to be captured as a lane name ("the lane is…", "branch from…",
+ * "lane remains update"). A real lane is a quoted token, a `wc-…` name, or the
+ * first token after `Lane:` / `Branch:`.
+ */
+const LANE_FILLER = new Set([
+  'is', 'from', 'remains', 'remain', 'update', 'updated', 'the', 'a', 'an', 'and', 'or',
+  'of', 'to', 'for', 'on', 'in', 'at', 'by', 'with', 'still', 'now', 'currently',
+  'was', 'were', 'be', 'been', 'this', 'that', 'it', 'its', 'not', 'no', 'yes', 'as', 'into', 'onto',
+]);
+
+export function isFillerLane(lane: string | null | undefined): boolean {
+  if (!lane) return false;
+  return LANE_FILLER.has(lane.trim().toLowerCase());
+}
+
+function cleanToken(raw: string): string {
+  return raw.replace(/^[`*'"]+|[`*'".),:;]+$/g, '').trim();
+}
+
+function acceptLane(token: string): string | null {
+  const t = cleanToken(token);
+  if (!t || t.length > 80) return null;
+  if (LANE_FILLER.has(t.toLowerCase())) return null;
+  if (/^(origin\/main|main)$/i.test(t)) return null;
+  if (/^[0-9a-f]{7,40}$/i.test(t)) return null;
+  if (!/^[\w./~+-]+$/.test(t)) return null;
+  return t;
+}
+
+/** Lane or branch named in the head of a freeze note. Filler words are not lanes. */
+export function laneFromLines(lines: string[]): string | null {
+  for (const line of lines) {
+    const kw = line.search(/\b(?:lane|branch)\b/i);
+    if (kw < 0) continue;
+    const rest = line.slice(kw).replace(/^\**\s*(?:lane|branch)\b\**\s*[:：]?\**\s*/i, '');
+    const quoted = [...rest.matchAll(/`([^`]+)`/g)].map((m) => acceptLane(m[1])).find((v): v is string => !!v);
+    if (quoted) return quoted;
+    const labelled = /(?:lane|branch)\b\**\s*[:：]/i.test(line.slice(kw));
+    for (const word of rest.split(/[\s,;]+/)) {
+      const lane = acceptLane(word);
+      if (!lane) continue;
+      if (/^wc-/i.test(lane) || lane.includes('/') || labelled) return lane;
+    }
+  }
+  return null;
+}
+
+function deskNumbers(text: string, filename: string): number[] {
+  const found = new Set<number>();
+  const re = /\b(?:desk|pd)[\s#_-]*(\d{1,6})\b/gi;
+  for (const src of [text, filename]) {
+    for (const m of src.matchAll(re)) found.add(Number(m[1]));
+  }
+  return [...found];
+}
+
+/** A composition or multi-desk note is a bundle: it must not wear one desk number. */
+export function isBundleNote(title: string, lane: string | null, desks: number[]): boolean {
+  if (desks.length > 1) return true;
+  return /\b(?:composition|bundle|bundles)\b/i.test(`${title}\n${lane ?? ''}`);
+}
+
+export interface FreezeLabels {
+  title: string;
+  /** One line taken from the freeze-note title (the clause after the dash, or the title). */
+  summary: string;
+  desk: number | null;
+  lane: string | null;
+  bundle: boolean;
+}
+
+export function freezeNoteSummary(title: string): string {
+  const parts = title.split(/\s+[—–-]\s+/);
+  const clause = (parts.length > 1 ? parts.slice(1).join(' — ') : title).replace(/\s+/g, ' ').trim();
+  return clause.length > 180 ? `${clause.slice(0, 177)}…` : clause;
+}
+
+/** Title, one-line summary, desk and lane as the freeze note actually says them. */
+export function labelsFromFreezeNote(text: string, filename: string): FreezeLabels {
+  const lines = text.replace(/\r/g, '').split('\n');
+  const head = lines.slice(0, 40);
+  const title = titleOf(lines);
+  const lane = laneFromLines(head);
+  const desks = deskNumbers(text, path.basename(filename));
+  const bundle = isBundleNote(title, lane, desks);
+  const desk = bundle || desks.length !== 1 ? null : desks[0];
+  return { title, summary: freezeNoteSummary(title), desk, lane, bundle };
+}
+
+/**
+ * Rewrite a stored lane or desk when the freeze note disagrees.
+ * A filler lane ("is", "from", "remains", "update") is cleared.
+ * A bundle drops a single desk number. A missing desk on a non-bundle note
+ * leaves the stored desk alone.
+ */
+export function applyNoteLabels(sha: string, text: string, filename: string): FreezeLabels {
+  const labels = labelsFromFreezeNote(text, filename);
+  const row = getFreeze(sha);
+  if (!row) return labels;
+  const lane = labels.lane ?? (isFillerLane(row.lane) ? null : row.lane);
+  const desk = labels.bundle ? null : (labels.desk ?? row.desk);
+  const fields: Partial<ReleaseFreeze> = {};
+  if (lane !== row.lane) fields.lane = lane;
+  if (desk !== row.desk) fields.desk = desk;
+  if (Object.keys(fields).length) patch(sha, fields);
+  return { ...labels, lane, desk };
 }
 
 function findSha(text: string, lines: string[]): string | null {
@@ -401,11 +530,9 @@ export function parseFreezeFile(text: string, filename: string): ParsedFreezeFil
     pushUnique(reviewerCandidates, nameAfter(/\b(?:independent\s+)?reviewer\b\**\s*[:：]?\**\s*@?([A-Za-z][\w-]*)/i, head));
   }
 
-  // "Desk #91", "PD-108", "pd108" in the text or the file name
-  const desk = (text.match(/\b(?:desk|pd)[\s#_-]*(\d{1,6})\b/i) ?? base.match(/(?:desk|pd)[\s#_-]*(\d{1,6})/i))?.[1];
+  const labels = labelsFromFreezeNote(text, base);
   const project = nameAfter(/\bproject\b\**\s*[:：]\**\s*([A-Za-z][\w-]*)/i, head)
     ?? head.join('\n').match(/\bCountix\s*\/\s*([A-Za-z][\w-]*)/)?.[1] ?? null;
-  const lane = nameAfter(/\b(?:lane|branch)\b\**\s*[:：]?\**\s*`?(wc-[\w./-]+|[\w./-]*\/[\w./-]+|[\w.-]+)`?/i, head);
   const noted = sha ? parseNoteChecks(text, sha) : null;
   const gate = noted?.full === 'green' ? 'GREEN' : noted?.full === 'red' ? 'RED' : null;
   const verdictPath = v ? (v.line.match(/(\/[\w.@+-]+(?:\/[\w.@+-]+)*\.(?:md|markdown|txt))/)?.[1] ?? null) : null;
@@ -418,8 +545,8 @@ export function parseFreezeFile(text: string, filename: string): ParsedFreezeFil
     reviewerCandidates,
     authorCandidates,
     project: project ? project.toLowerCase() : null,
-    desk: desk ? Number(desk) : null,
-    lane: lane && !/^(and|or|the)$/i.test(lane) ? lane : null,
+    desk: labels.desk,
+    lane: labels.lane,
     gate,
     verdictPath,
   };
@@ -488,6 +615,10 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   const reviewer = firstAgent(parsed.reviewerCandidates);
   const reviewerName = reviewer?.name ?? parsed.reviewerCandidates[0] ?? null;
   const project = projectFor(parsed, text);
+  const authorLabel = author ?? (parsed.authorCandidates[0] ? { name: parsed.authorCandidates[0] } : null);
+  if (laneAutomationDenied(project, authorLabel, parsed.lane)) {
+    return { ok: false, error: `${path.basename(filePath)}: denied lane or agent` };
+  }
 
   // Keep the file itself: the inbox is transient, the library is not.
   let archivedPath: string | null = null;

@@ -22,10 +22,13 @@ import * as db from './db.js';
 import { notify } from './notifications.js';
 import { commitsBehind } from './lane-main.js';
 import { laneStatusLine } from './lane-status.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
-  considerAutoStage, drainStagingQueue, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, setPipelineExecForTest,
+  considerAutoStage, drainStagingQueue, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, reassignWaitingReviews, setPipelineExecForTest,
 } from './lane-pipeline.js';
-import { getFreeze, ingestFreezeFile } from './release-freezes.js';
+import { listPendingReviews } from './review-queue.js';
+import { ensureReleaseFreezeTable, getFreeze, ingestFreezeFile, listReviewFreezes, setFetchDisabledForTest } from './release-freezes.js';
+import { loadDevLanes, requestLaneReview } from './dev-lanes.js';
 import { auditTrail, listReleases, reportRelease, verifyStaging } from './releases.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -479,6 +482,70 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
+  it('gives a denied lane and agent no ping, auto merge, freeze card, or reviewer', async () => {
+    pipe.lane_deny = ['wc-codex1'];
+    pipe.agent_deny = ['codex1'];
+    pipe.review_deny = [];
+    pipe.auto_merge_main = true;
+    pipe.auto_freeze = true;
+    pipe.auto_review = true;
+    pipe.review_routes = { ales: 'codex1' };
+    const sha = branch('wc-codex1', 'codex.txt', 'lane');
+    const author = agent('codex1', repo);
+    const reviewer = agent('codex3', path.join(tmp, 'codex3'));
+    moveMain('main.txt', 'later');
+    git(repo, 'checkout', '-q', 'wc-codex1');
+    const mainSha = git(repo, 'rev-parse', 'origin/main');
+    onMainAdvanced('wave');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
+    expect(messages(author.id)).toEqual([]);
+    expect(pingLaneAboutMain({ lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved', authorName: 'codex1' })).toBe(false);
+    expect(alertBehind({ lane: 'wc-codex1', project: 'wave', authorName: 'codex1' })).toBe(false);
+    expect(alertMerged({ lane: 'wc-codex1', project: 'wave', mainSha, authorName: 'codex1' })).toBe(false);
+    expect(messages(author.id)).toEqual([]);
+
+    const frozen = onAuthorDone(author.id);
+    expect(frozen.ok).toBe(false);
+    if (!frozen.ok) expect(frozen.error).toMatch(/denied/);
+    const written = fs.existsSync(freezeDir) ? fs.readdirSync(freezeDir).filter((name) => name.includes('auto-freeze')) : [];
+    expect(written).toEqual([]);
+    const ingested = ingestFreezeFile(passNote('codex1', 'wc-codex1', sha));
+    expect(ingested.ok).toBe(false);
+    expect(getFreeze(sha)).toBeNull();
+    expect(listPendingReviews()).toEqual([]);
+    expect(messages(reviewer.id).join('\n')).not.toMatch(/Please review/);
+
+    ensureReleaseFreezeTable();
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, project, lane, author_name, status) VALUES (?, 'wave', 'wc-codex1', 'codex1', 'open')`,
+    ).run(sha);
+    expect(listReviewFreezes().some((row) => row.lane === 'wc-codex1')).toBe(false);
+    projects.wave.lane_glob = 'wc-ales';
+    alertLanesPastStaging('wave', mainSha);
+    expect(messages(author.id)).toEqual([]);
+
+    const other = branch('wc-ales', 'ales.txt', 'ales');
+    const ales = agent('ales', path.join(tmp, 'ales'));
+    const allowed = ingestFreezeFile(passNote('ales', 'wc-ales', other));
+    expect(allowed.ok).toBe(true);
+    expect(listPendingReviews().some((item) => item.freeze?.lane === 'wc-ales')).toBe(true);
+    expect(listPendingReviews().some((item) => item.freeze?.lane === 'wc-codex1')).toBe(false);
+    expect(messages(author.id).join('\n')).not.toMatch(/Please review/);
+    expect(messages(reviewer.id).join('\n')).toMatch(/Please review/);
+    expect(messages(ales.id).join('\n')).not.toMatch(/Please review/);
+
+    setFetchDisabledForTest(true);
+    const lanes = await loadDevLanes();
+    expect(lanes.some((lane) => lane.lane === 'wc-codex1')).toBe(false);
+    const alesLane = lanes.find((lane) => lane.lane === 'wc-ales');
+    expect(alesLane).toBeTruthy();
+    expect(alesLane?.reviewers.some((row) => row.name === 'codex1')).toBe(false);
+    expect(alesLane?.reviewers.some((row) => row.name === 'codex3')).toBe(true);
+    const asked = await requestLaneReview({ project: 'wave', lane: 'wc-codex1', reviewer: 'codex3' });
+    expect(asked.ok).toBe(false);
+    setFetchDisabledForTest(false);
+  });
+
   it('queues one full gate for a new freeze SHA', () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     agent('ales', path.join(tmp, 'ales'));
@@ -501,5 +568,80 @@ describe('hands-free lane pipeline', () => {
     expect(getFreeze(sha)?.gate).toBe('GREEN');
     expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/full gate GREEN/);
     expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  function openNote(authorName: string, lane: string, sha: string): string {
+    const file = path.join(freezeDir, `${authorName}-freeze-${sha.slice(0, 8)}.md`);
+    fs.mkdirSync(freezeDir, { recursive: true });
+    fs.writeFileSync(file, [
+      `# ${lane} freeze note`,
+      '',
+      `Project: wave · Author: ${authorName}`,
+      `- Lane: \`${lane}\``,
+      `- Freeze SHA: \`${sha}\``,
+      '',
+    ].join('\n'));
+    return file;
+  }
+
+  it('assigns the least-loaded preferred reviewer and reassigns a busy seat', () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    const author = agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex1 = agent('codex1', path.join(tmp, 'codex1'));
+    const codex2 = agent('codex2', path.join(tmp, 'codex2'));
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    const ownSeat = agent('claude1-codex', path.join(tmp, 'claude1-codex'));
+    const claude2 = agent('claude2', path.join(tmp, 'claude2'), 'claude-code');
+    db.updateAgentStatus(codex2.id, 'working');
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex2', 'codex3', 'codex1', 'claude1-codex'] };
+    const ingested = ingestFreezeFile(openNote('claude1', 'wc-claude1', sha));
+    expect(ingested.ok).toBe(true);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    expect(getFreeze(sha)?.verdict).toBeNull();
+    expect(messages(codex3.id).join('\n')).toMatch(/Please review freeze/);
+    for (const skipped of [author, codex1, codex2, ownSeat, claude2]) {
+      expect(messages(skipped.id).join('\n')).not.toMatch(/Please review/);
+    }
+
+    db.updateAgentStatus(codex3.id, 'working');
+    db.updateAgentStatus(codex2.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 14 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+
+    expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(1);
+    expect(getFreeze(sha)?.reviewer_name).toBe('codex2');
+    expect(messages(codex2.id).join('\n')).toMatch(/Please review freeze/);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex3 → @codex2 \(busy, no verdict\)/);
+
+    db.updateAgentStatus(codex2.id, 'working');
+    db.updateAgentStatus(codex3.id, 'working');
+    expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex2.id);
+
+    db.updateAgentStatus(codex3.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(1);
+    expect(getFreeze(sha)?.reviewer_name).toBe('codex3');
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex2 → @codex3 \(busy, no verdict\)/);
+    expect(messages(ownSeat.id).join('\n')).not.toMatch(/Please review/);
+    expect(messages(claude2.id).join('\n')).not.toMatch(/Please review/);
+    expect(messages(codex1.id).join('\n')).not.toMatch(/Please review/);
+  });
+
+  it('does not reassign when review_reassign_minutes is 0', () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex2 = agent('codex2', path.join(tmp, 'codex2'));
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    db.updateAgentStatus(codex2.id, 'working');
+    pipe.auto_review = true;
+    pipe.review_reassign_minutes = 0;
+    pipe.reviewer_prefer = { claude: ['codex2', 'codex3'] };
+    ingestFreezeFile(openNote('claude1', 'wc-claude1', sha));
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    db.updateAgentStatus(codex3.id, 'working');
+    db.updateAgentStatus(codex2.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 60 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
   });
 });
