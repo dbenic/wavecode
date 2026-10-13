@@ -17,6 +17,7 @@ import * as sessionManager from './session-manager.js';
 import * as tmux from './tmux.js';
 import logger from './logger.js';
 import { recordReviewReport } from './rooms.js';
+import { reviewerDenied } from './reviewer-assign.js';
 import { pickReviewer, summarizeAgent, type ReviewerNone, type ReviewerPick, type ReviewerRung } from './reviewer-ladder.js';
 
 /** How a reviewer was chosen; recorded on the `review.ai_started` event for the thread. */
@@ -598,6 +599,9 @@ export async function reassignReview(reviewId: string, reviewerRef: string, by: 
   if (!target.ok) return { ok: false, error: target.error };
   if (target.data.id === runResult.data.agent_id) {
     return { ok: false, error: `${target.data.alias ?? target.data.name} wrote this run and cannot review it` };
+  }
+  if (reviewerDenied(target.data)) {
+    return { ok: false, error: `${target.data.alias ?? target.data.name} is excluded from review` };
   }
   if (target.data.id === review.reviewer_agent_id) return { ok: false, error: 'That agent already has this review' };
 

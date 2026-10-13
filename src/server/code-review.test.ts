@@ -21,9 +21,10 @@ const reviewConfig = {
   gate_dependents_on_approval: false,
   auto_pick: true,
 };
+const projects: Record<string, { pipeline?: { review_deny?: string[]; agent_deny?: string[] } }> = {};
 
 vi.mock('./config.js', () => ({
-  getConfig: vi.fn(() => ({ review: reviewConfig })),
+  getConfig: vi.fn(() => ({ review: reviewConfig, projects })),
 }));
 
 vi.mock('./session-manager.js', () => ({
@@ -48,6 +49,7 @@ describe('code-review.ts', () => {
     vi.resetModules();
     reviewConfig.auto_review = true;
     reviewConfig.max_fix_loops = 2;
+    for (const k of Object.keys(projects)) delete projects[k];
     reviewConfig.default_reviewer = 'aider';
 
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-code-review-'));
@@ -379,6 +381,26 @@ describe('code-review.ts', () => {
 
       // a closed review cannot be moved again
       expect((await codeReview.reassignReview(firstId, 'reviewer', 'ana')).ok).toBe(false);
+    });
+
+    it('refuses to reassign a review to a denied seat and leaves the row untouched', async () => {
+      const db = await import('./db.js');
+      const codeReview = await import('./code-review.js');
+      projects.wave = { pipeline: { review_deny: ['codex1'], agent_deny: ['chatgpt-countix'] } };
+      const { reviewer, runId } = await seedRunFixture();
+      const denied = db.insertAgent({ name: 'codex1', runtime: 'codex', tmux_session: 'wc-codex1', workspace: null, mode: 'spawned', status: 'idle' });
+      if (!denied.ok) throw new Error(denied.error);
+      const firstId = db.generateId();
+      db.getDb().prepare(`
+        INSERT INTO code_reviews (id, run_id, reviewer_type, reviewer_agent_id, reviewer_runtime, status, diff, fix_round)
+        VALUES (?, ?, 'cross-model', ?, 'aider', 'reviewing', 'diff --git a b', 1)
+      `).run(firstId, runId, reviewer.id);
+
+      const moved = await codeReview.reassignReview(firstId, 'codex1', 'ana');
+      expect(moved.ok).toBe(false);
+      if (!moved.ok) expect(moved.error).toMatch(/excluded from review/);
+      expect(codeReview.getReview(firstId)).toMatchObject({ status: 'reviewing', reviewer_agent_id: reviewer.id });
+      expect(codeReview.getReviewsForRun(runId).some((row) => row.reviewer_agent_id === denied.data.id)).toBe(false);
     });
   });
 

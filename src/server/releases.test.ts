@@ -132,6 +132,8 @@ describe('releases.ts', () => {
 
   describe('requester side (dev box)', () => {
     it('Stage / Promote become release records forwarded to the release peer, and the peer outcome is mirrored back', async () => {
+      const deployState = await import('./deploy-state.js');
+      const reconcile = vi.spyOn(deployState, 'scheduleReconcile').mockImplementation(() => {});
       cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
       cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789', agents: ['fable'] };
       const box = fakeDeployBox();
@@ -149,6 +151,9 @@ describe('releases.ts', () => {
       // a second request for the same SHA + target while one is open is refused
       const again = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
       expect(again.ok).toBe(false);
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
+      reconcile.mockClear();
 
       box.deployed(r.data.peer_request_id!, '0.442.10');
       for (let i = 0; i < 40 && rel.getRelease(r.data.id)!.status !== 'deployed'; i++) await flush(25);
@@ -158,6 +163,8 @@ describe('releases.ts', () => {
       expect(vi.mocked(notify)).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^Staging deployed: wavepulse 2431f684 v0\.442\.10/) }));
       expect(rel.releaseStateFor(SHA).staging?.status).toBe('deployed');
       expect(rel.releaseStateFor(SHA).production).toBeNull();
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
     });
 
     it('mirrors staging progress from the peer while the request is still open', async () => {
@@ -617,6 +624,154 @@ describe('releases.ts', () => {
       expect(ready.status).toBe(200);
       expect(rel.auditTrail().find((e) => e.action === 'verify')).toMatchObject({ who: 'antonio', detail: expect.stringMatching(/Ready for prod/) });
     });
+
+    it('an in-flight peer tip fetch does not repopulate the cache after invalidation', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      let releaseStale: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { releaseStale = resolve; });
+      let fetches = 0;
+      peers.setPeerFetchForTest(async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith('/staging-tip')) {
+          fetches += 1;
+          if (fetches === 1) {
+            await gate;
+            return Response.json({ sha: SHA, version: '1.0.0', lane: 'wc-old' });
+          }
+          return Response.json({ sha: SHA_B, version: '1.1.0', lane: 'wc-new' });
+        }
+        return Response.json({ events: [], last_id: 0 });
+      });
+      const inFlight = rel.resolveStagingTip('wavepulse');
+      for (let i = 0; i < 20 && fetches < 1; i++) await flush(5);
+      expect(fetches).toBe(1);
+      rel.invalidateStagingTipCache('wavepulse');
+      releaseStale();
+      const stale = await inFlight;
+      expect(stale.tip?.sha).toBe(SHA);
+      const next = await rel.resolveStagingTip('wavepulse');
+      expect(next.tip?.sha).toBe(SHA_B);
+      expect(fetches).toBe(2);
+    });
+
+    it('a crashed requested row expires on startup and Stage works again', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      peers.setPeerFetchForTest(fakeDeployBox().fetchImpl);
+      const stuck = '01CRASHEDREQUESTSTUCK00001';
+      const young = '01CRASHEDREQUESTYOUNG00001';
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, project, sha, target, origin, status, peer_request_id, created_at, updated_at)
+         VALUES (?, 'wavepulse', ?, 'staging', 'local', 'requested', NULL, datetime('now', '-3 minutes'), datetime('now', '-3 minutes'))`,
+      ).run(stuck, SHA);
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, project, sha, target, origin, status, peer_request_id, created_at, updated_at)
+         VALUES (?, 'other', ?, 'staging', 'local', 'requested', NULL, datetime('now', '-30 seconds'), datetime('now', '-30 seconds'))`,
+      ).run(young, SHA_B);
+      rel.startReleasePollers();
+      expect(rel.getRelease(stuck)).toMatchObject({ status: 'failed', error: 'expired' });
+      expect(rel.getRelease(young)?.status).toBe('requested');
+      const again = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
+      expect(again.ok).toBe(true);
+    });
+
+    it('a 30-minute sent handoff stays a lock until an admin clears it, and a late RELEASED does not move the tip', async () => {
+      const fable = agent('fable');
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
+      cfg.releases = { deploy_agent: 'fable' };
+      const id = '01SENTHANDOFF30MIN00000001';
+      db.getDb().prepare(
+        `INSERT INTO release_requests (id, project, sha, lane, target, origin, status, deploy_agent_id, created_at, updated_at)
+         VALUES (?, 'wavepulse', ?, 'wc-old', 'staging', 'local', 'sent', ?, datetime('now', '-30 minutes'), datetime('now', '-30 minutes'))`,
+      ).run(id, SHA, fable.id);
+      rel.startReleasePollers();
+      expect(rel.getRelease(id)).toMatchObject({ status: 'sent', deploy_agent_id: fable.id });
+      const blocked = await rel.requestRelease({ project: 'wavepulse', sha: SHA_B, lane: 'wc-next', target: 'staging', actorName: 'denis' });
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.error).toMatch(new RegExp(`already open \\(${id}\\)`));
+      expect(rel.getRelease(id)?.status).toBe('sent');
+
+      acting.user = { id: 'u-dev', name: 'antonio', role: 'developer', allowed_agents: null };
+      const denied = await app.fetch(new Request(`http://x/api/releases/${id}/clear`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'stuck' }),
+      }));
+      expect(denied.status).toBe(403);
+      expect(rel.getRelease(id)?.status).toBe('sent');
+
+      acting.user = { id: 'u-admin', name: 'denis', role: 'admin', allowed_agents: null };
+      const missing = await app.fetch(new Request(`http://x/api/releases/${id}/clear`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: '   ' }),
+      }));
+      expect(missing.status).toBe(400);
+      expect(rel.getRelease(id)?.status).toBe('sent');
+
+      const cleared = await app.fetch(new Request(`http://x/api/releases/${id}/clear`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'agent never started' }),
+      }));
+      expect(cleared.status).toBe(200);
+      expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared', report: 'agent never started' });
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.cleared', 'release', id, expect.objectContaining({ reason: 'agent never started', who: 'denis', sha: SHA }), 'u-admin');
+      expect(typedInto(fable.id).some((line) => line.includes(`Cancel release ${id}`) && line.includes(SHA))).toBe(true);
+
+      const next = await rel.requestRelease({ project: 'wavepulse', sha: SHA_B, lane: 'wc-next', target: 'staging', actorName: 'denis' });
+      expect(next.ok).toBe(true);
+      if (!next.ok) return;
+
+      const deployState = await import('./deploy-state.js');
+      const reconcile = vi.spyOn(deployState, 'scheduleReconcile').mockImplementation(() => {});
+      expect(rel.detectReleaseLines(fable.id, `RELEASED ${id}: deployed ${SHA} version 1.4.0 to staging`)).toBe(1);
+      expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared', deployed_sha: null });
+      expect(rel.getRelease(next.data.id)?.status).toBe('sent');
+      expect(rel.currentStagingTip('wavepulse')).toBeNull();
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.late_result', 'release', id, expect.objectContaining({ sha: SHA, id }), null);
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
+
+      const deployed = rel.reportRelease(next.data.id, { status: 'deployed', sha: SHA_B, version: '2.0.0' });
+      expect(deployed.ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(SHA_B);
+      expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared' });
+    });
+
+    it('two overlapping Stage calls insert one staging request', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', release_peer: 'deploy/fable' };
+      cfg.peers.deploy = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      const box = fakeDeployBox();
+      let releaseTips: () => void = () => {};
+      const tipGate = new Promise<void>((resolve) => { releaseTips = resolve; });
+      let tipWaits = 0;
+      let releasePost: () => void = () => {};
+      const postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+      let posts = 0;
+      peers.setPeerFetchForTest(async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === '/api/releases/staging-tip') {
+          tipWaits += 1;
+          await tipGate;
+        }
+        if (url.pathname === '/api/releases' && init?.method === 'POST') {
+          posts += 1;
+          if (posts === 1) await postGate;
+        }
+        return box.fetchImpl(input, init);
+      });
+      const first = rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
+      const second = rel.requestRelease({ project: 'wavepulse', sha: SHA_B, target: 'staging', actorName: 'denis' });
+      for (let i = 0; i < 40 && tipWaits < 2; i++) await flush(5);
+      expect(tipWaits).toBe(2);
+      releaseTips();
+      for (let i = 0; i < 40 && posts < 1; i++) await flush(5);
+      const count = () => (db.getDb().prepare('SELECT COUNT(*) AS n FROM release_requests').get() as { n: number }).n;
+      expect(count()).toBe(1);
+      releasePost();
+      const [a, b] = await Promise.all([first, second]);
+      expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+      expect(count()).toBe(1);
+      const refused = a.ok ? b : a;
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toMatch(/already open/);
+    });
   });
 
   describe('deploy side (the box with the deploy agent)', () => {
@@ -655,6 +810,20 @@ describe('releases.ts', () => {
       // final: a second report is a no-op
       expect(rel.reportRelease(r.id, { status: 'failed', note: 'late' }).ok).toBe(true);
       expect(rel.getRelease(r.id)!.status).toBe('deployed');
+    });
+
+    it('schedules a reconcile when the staging deploy is reported', async () => {
+      const deployState = await import('./deploy-state.js');
+      const reconcile = vi.spyOn(deployState, 'scheduleReconcile').mockImplementation(() => {});
+      const fable = agent('fable');
+      cfg.releases = { deploy_agent: 'fable' };
+      const accepted = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse', requested_by: 'antonio' }, { userName: 'antonio', fromPeer: false });
+      expect(accepted.ok).toBe(true);
+      if (!accepted.ok) return;
+      const reported = rel.reportRelease(accepted.data.id, { status: 'deployed', version: '1.2.3' });
+      expect(reported.ok).toBe(true);
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
     });
 
     it('a staging request carries the automated header, and a production request from a local non-admin is refused', async () => {
@@ -829,6 +998,145 @@ describe('releases.ts', () => {
       rel.resumeStagingDeploys();
       for (let i = 0; i < 50 && rel.getRelease(staged.data.id)?.status !== 'deployed'; i++) await flush(20);
       expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'deployed', version: '1.2.3', staging_url: 'https://staging.example/app' });
+    });
+
+    it('clear kills a running staging command', async () => {
+      const hold = path.join(tmp, 'hold-clear.cjs');
+      const pidFile = path.join(tmp, 'hold.pid');
+      fs.writeFileSync(hold, "require('fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 60000);\n");
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
+      cfg.releases = { staging_command: ['node', hold, pidFile, '{sha}'] };
+      const staged = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'denis', fromPeer: false });
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      for (let i = 0; i < 50 && !fs.existsSync(pidFile); i++) await flush(20);
+      const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+      expect(pid).toBeGreaterThan(0);
+      const cleared = rel.clearStuckRelease(staged.data.id, { name: 'denis', id: 'u-admin' }, 'command stuck');
+      expect(cleared.ok).toBe(true);
+      let gone = false;
+      for (let i = 0; i < 50; i++) {
+        try { process.kill(pid, 0); } catch { gone = true; break; }
+        await flush(20);
+      }
+      expect(gone).toBe(true);
+      expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'failed', error: 'cleared' });
+    });
+
+    it('refuses a deployed result that is not a descendant of the staging tip', () => {
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: gitEnv }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-q', '-m', 'parent');
+      const parent = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-q', '-m', 'child');
+      const child = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'c');
+      git('add', '.');
+      git('commit', '-q', '-m', 'grandchild');
+      const grandchild = git('rev-parse', 'HEAD');
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo };
+      const insert = (id: string, sha: string, age: string) => {
+        db.getDb().prepare(
+          `INSERT INTO release_requests (id, project, sha, lane, target, origin, status, created_at, updated_at)
+           VALUES (?, 'wavepulse', ?, 'wc-lane', 'staging', 'local', 'sent', datetime('now', ?), datetime('now', ?))`,
+        ).run(id, sha, age, age);
+      };
+      insert('01CHILDROW0000000000000001', child, '-2 minutes');
+      insert('01GRANDROW0000000000000001', grandchild, '-1 minutes');
+
+      expect(rel.reportRelease('01CHILDROW0000000000000001', { status: 'deployed', sha: child, version: '1.0.0' }).ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(child);
+      expect(rel.reportRelease('01GRANDROW0000000000000001', { status: 'deployed', sha: grandchild, version: '1.1.0' }).ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
+      insert('01PARENTROW000000000000001', parent, '-3 minutes');
+
+      const refused = rel.reportRelease('01PARENTROW000000000000001', { status: 'deployed', sha: parent, version: '0.9.0' });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toMatch(/not a descendant/);
+      expect(rel.getRelease('01PARENTROW000000000000001')?.status).toBe('sent');
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
+    });
+
+    it('an admin force_rollback deploy becomes the tip locally, and the forwarding box refuses it', async () => {
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: gitEnv }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-q', '-m', 'parent');
+      const parent = git('rev-parse', 'HEAD');
+      git('update-ref', 'refs/remotes/origin/main', parent);
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-q', '-m', 'child');
+      const child = git('rev-parse', 'HEAD');
+      git('update-ref', 'refs/heads/main', parent);
+      const tip = (sha: string) => {
+        db.getDb().prepare(
+          `INSERT INTO release_requests (id, project, sha, lane, target, origin, status, deployed_sha, version, created_at, updated_at)
+           VALUES ('01CHILDTIP000000000000001', 'wavepulse', ?, 'wc-lane', 'staging', 'local', 'deployed', ?, '1.1.0', datetime('now', '-5 minutes'), datetime('now', '-5 minutes'))`,
+        ).run(sha, sha);
+      };
+
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo };
+      cfg.releases = { deploy_agent: 'fable' };
+      agent('fable');
+      tip(child);
+      const accepted = await rel.acceptRelease({
+        sha: parent, target: 'staging', project: 'wavepulse', lane: 'wc-old',
+        requested_by: 'denis', force_rollback: true, force_reason: 'staging was bad', rollback_by: 'denis',
+      }, { userName: 'denis', fromPeer: false, actorIsAdmin: true });
+      expect(accepted.ok).toBe(true);
+      if (!accepted.ok) return;
+      expect(accepted.data).toMatchObject({ status: 'sent', force_rollback: 1, rollback_reason: 'staging was bad', rollback_by: 'denis' });
+      const reported = rel.reportRelease(accepted.data.id, { status: 'deployed', sha: parent, version: '0.9.0' });
+      expect(reported.ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(parent);
+
+      db.getDb().prepare('DELETE FROM release_requests').run();
+      tip(child);
+      cfg.releases = {};
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo, release_peer: 'wavecode-countix/fable' };
+      cfg.peers['wavecode-countix'] = { url: 'http://deploy.test', token: 'peer-token-0123456789' };
+      const box = fakeDeployBox();
+      box.state.stagingTip = { sha: child, version: '1.1.0', lane: 'wc-lane' };
+      peers.setPeerFetchForTest(box.fetchImpl);
+      const forwarded = await rel.requestRelease({
+        project: 'wavepulse', sha: parent, lane: 'wc-old', target: 'staging',
+        actorName: 'denis', actorIsAdmin: true, forceRollback: true, forceReason: 'staging was bad',
+      });
+      expect(forwarded.ok).toBe(false);
+      if (!forwarded.ok) expect(forwarded.error).toBe(rel.rollbackOnDeployBox('wavecode-countix'));
+      expect(box.state.posts).toEqual([]);
+      expect(rel.listReleases({ sha: parent, target: 'staging' })).toEqual([]);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(child);
+    });
+
+    it('a peer token cannot authorize a rollback by claiming to be an admin', async () => {
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
+      cfg.releases = { deploy_agent: 'fable' };
+      const fable = agent('fable');
+      acting.user = { id: 'u-peer', name: 'peer-countix-dev', role: 'developer', allowed_agents: '["fable"]' };
+      const res = await app.fetch(new Request('http://x/api/releases', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sha: SHA, target: 'staging', project: 'wavepulse', requested_by: 'denis',
+          requester_is_admin: true, force_rollback: true, force_reason: 'staging was bad', rollback_by: 'denis',
+        }),
+      }));
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe(rel.PEER_ROLLBACK_FORBIDDEN);
+      expect(rel.listReleases({ sha: SHA, target: 'staging' })).toEqual([]);
+      expect(typedInto(fable.id)).toEqual([]);
     });
 
     it('GET /api/releases/staging-tip returns the deployed staging tip', async () => {

@@ -17,11 +17,13 @@ export interface PipeStep {
 }
 
 export interface LaneButton {
-  kind: 'stage' | 'ready' | 'promote';
+  kind: 'stage' | 'ready' | 'promote' | 'clear';
   label: string;
   run_id: string | null;
   sha: string;
   project: string | null;
+  /** Set when kind is `clear`: the open staging request an admin may end. */
+  release_id?: string | null;
 }
 
 export interface LaneLink {
@@ -108,6 +110,11 @@ export interface LaneFreezeFact {
   live_at: string | null;
   /** The reviewer is the author's other seat, allowed only by the author-glob pool. */
   same_owner_pool?: boolean;
+  /** An open staging request for this project. The card says so instead of offering Stage. */
+  open_request_id?: string | null;
+  open_request_at?: string | null;
+  /** Admin viewer: the card may clear that request. */
+  can_clear?: boolean;
 }
 
 export interface WorkingLaneFact {
@@ -160,7 +167,7 @@ export function conflictFilesFromNote(note: string | null): string[] {
 
 function hhmm(iso: string | null): string | null {
   if (!iso) return null;
-  const match = iso.match(/T(\d{2}):(\d{2})/);
+  const match = iso.match(/(?:T| )(\d{2}):(\d{2})/);
   return match ? `${match[1]}:${match[2]}` : null;
 }
 
@@ -357,6 +364,23 @@ function present(fact: LaneFreezeFact, who: string): Presented {
       link,
     };
   }
+  if (fact.open_request_at && fact.state !== 'on_staging' && fact.state !== 'live_on_prod') {
+    const when = hhmm(fact.open_request_at);
+    const action = when ? `Staging request open since ${when}` : 'Staging request open';
+    const clear = fact.can_clear && fact.open_request_id
+      ? { kind: 'clear' as const, label: 'Clear stuck request', run_id: fact.run_id, sha: fact.sha, project: fact.project, release_id: fact.open_request_id }
+      : null;
+    return {
+      status: fact.state === 'ready_to_stage' ? 'Ready to stage' : 'Staging',
+      action,
+      owner: 'system',
+      owner_label: 'system',
+      history: false,
+      button: clear,
+      pipeline: steps('staging', { id: 'staging', reason: action }),
+      link: null,
+    };
+  }
   if (fact.state === 'on_staging') {
     const locked = !!fact.action_lock;
     return {
@@ -364,7 +388,7 @@ function present(fact: LaneFreezeFact, who: string): Presented {
       action: locked ? fact.action_lock! : 'Check it on staging, then press Ready for prod',
       owner: locked ? 'system' : 'developer',
       owner_label: locked ? 'system' : who,
-      history: false,
+      history: true,
       button: locked ? null : buttonFor(fact, 'ready', 'Ready for prod'),
       pipeline: locked
         ? steps('ready', { id: 'ready', reason: fact.action_lock! })
@@ -504,9 +528,9 @@ function workingCard(fact: WorkingLaneFact, viewer: LaneViewer | null, owners: A
     action: 'Nothing frozen yet',
     owner: 'developer',
     owner_label: who,
-    needs_you: true,
+    needs_you: false,
     mine: viewer?.name ? laneMatches(viewer.lanes, fact.lane) : false,
-    history: false,
+    history: true,
     button: null,
     pipeline: steps('freeze', null),
     older,

@@ -29,9 +29,9 @@ import { peerGetJson, peerPostJson } from './peers.js';
 import { getFreeze, releaseBehindMain, staleStageBlock, viewShaChecks } from './release-freezes.js';
 import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
-import { alertBehind, alertLanesPastStaging } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, projectRepo } from './lane-main.js';
 import { productionPrereqGate, stepsPrompt, type GoStep } from './prereqs.js';
-import { evaluateForward, readStagingHealth, type StagingTip } from './staging-forward.js';
+import { evaluateForward, isMissingAncestor, readStagingHealth, type StagingTip } from './staging-forward.js';
 import { setStagingTipStatuses, stagingTipStatuses, type StagingTipStatus } from './staging-tip-status.js';
 import { testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
@@ -97,6 +97,11 @@ export interface ReleaseRequest {
   steps_json: string | null;
   /** The step the deploy agent reported as the one that failed. */
   failed_step: string | null;
+  /** 1 when an admin authorized this staging request to move the tip backwards. */
+  force_rollback: number | null;
+  rollback_reason: string | null;
+  /** Admin who authorized the rollback. */
+  rollback_by: string | null;
   created_at: string;
   updated_at: string;
   reported_at: string | null;
@@ -142,6 +147,7 @@ export function ensureReleaseTables(): void {
     'deploy_id TEXT', 'progress_phase TEXT', 'progress_status TEXT',
     'pin_until TEXT', 'staging_url TEXT', 'rollback_status TEXT', 'rollback_to TEXT',
     'steps_json TEXT', 'failed_step TEXT',
+    'force_rollback INTEGER', 'rollback_reason TEXT', 'rollback_by TEXT',
   ]) {
     try { getDb().exec(`ALTER TABLE release_requests ADD COLUMN ${col}`); } catch { /* exists */ }
   }
@@ -260,7 +266,7 @@ function patch(id: string, fields: Partial<ReleaseRequest>): void {
     .run(...keys.map((k) => fields[k] ?? null), id);
 }
 
-function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note' | 'deploy_id' | 'progress_phase' | 'progress_status' | 'pin_until' | 'staging_url' | 'rollback_status' | 'rollback_to' | 'steps_json' | 'failed_step'> & { steps_json?: string | null }): ReleaseRequest {
+function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reported_at' | 'verified_by' | 'verified_at' | 'verification_note' | 'deploy_id' | 'progress_phase' | 'progress_status' | 'pin_until' | 'staging_url' | 'rollback_status' | 'rollback_to' | 'steps_json' | 'failed_step' | 'force_rollback' | 'rollback_reason' | 'rollback_by'> & { steps_json?: string | null }): ReleaseRequest {
   ensureReleaseTables();
   withTable(() => getDb().prepare(`INSERT INTO release_requests (id, project, sha, lane, target, desk, reviewer, requested_by, origin, peer, peer_request_id, origin_id, run_id, deploy_agent_id, status, version, deployed_sha, report, error, steps_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -268,8 +274,138 @@ function insert(row: Omit<ReleaseRequest, 'created_at' | 'updated_at' | 'reporte
   return getRelease(row.id)!;
 }
 
+/** The accepted admin rollback. Written before the deploy starts, so the report can see it. */
+function rememberForceRollback(id: string, reason: string, by: string | null): void {
+  patch(id, {
+    force_rollback: 1,
+    rollback_reason: reason.trim().slice(0, 1000),
+    rollback_by: by?.trim().slice(0, 64) || null,
+  });
+}
+
 function isTarget(t: unknown): t is ReleaseTarget {
   return t === 'staging' || t === 'production';
+}
+
+function openStagingRequest(project: string | null): ReleaseRequest | null {
+  if (!project) return null;
+  return listReleases({ project, target: 'staging', limit: 50 }).find((r) => r.status === 'requested' || r.status === 'sent') ?? null;
+}
+
+/** A `requested` row that never received a peer id. A `sent` row may still be deploying. */
+const STAGING_REQUESTED_TTL = '-2 minutes';
+
+/**
+ * A send that never reached the peer. `sent` rows are left alone: a deploy-agent
+ * handoff and a staging command both sit in `sent` before the first progress line.
+ * Called from the poller, from startup, and inside the claim transaction.
+ */
+function expireStuckReleases(): number {
+  const rows = withTable(() => getDb().prepare(
+    `SELECT * FROM release_requests
+     WHERE target = 'staging' AND status = 'requested' AND peer_request_id IS NULL
+       AND created_at <= datetime('now', ?)`,
+  ).all(STAGING_REQUESTED_TTL) as ReleaseRequest[]);
+  for (const row of rows) {
+    patch(row.id, { status: 'failed', error: 'expired' });
+    emit('release.reported', 'release', row.id, {
+      status: 'failed', target: row.target, sha: row.sha, project: row.project, lane: row.lane, error: 'expired',
+    }, null);
+  }
+  return rows.length;
+}
+
+/** An admin ends a stuck staging lock. The reason is required and written to the audit. */
+export function clearStuckRelease(id: string, by: { name: string; id?: string | null }, reason: string): Result<ReleaseRequest> {
+  const why = reason.trim();
+  if (!why) return { ok: false, error: 'a reason is required' };
+  const row = getRelease(id);
+  if (!row) return { ok: false, error: `Release ${id} not found` };
+  if (row.target !== 'staging' || (row.status !== 'sent' && row.status !== 'requested')) {
+    return { ok: false, error: `Release ${id} is not an open staging request` };
+  }
+  patch(id, {
+    status: 'failed',
+    error: 'cleared',
+    report: why.slice(0, 1000),
+    reported_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+  });
+  stopStagingCommand(id);
+  cancelDeployAgent(row);
+  const done = getRelease(id)!;
+  emit('release.cleared', 'release', id, {
+    reason: why, who: by.name, sha: done.sha, project: done.project, lane: done.lane, target: done.target,
+  }, by.id ?? null);
+  logger.info({ releaseId: id, by: by.name, reason: why }, 'Stuck staging request cleared');
+  return { ok: true, data: done };
+}
+
+/** Stop the local staging command for this row, if one is still running. */
+function stopStagingCommand(id: string): void {
+  const handle = stagingChildren.get(id);
+  if (!handle) return;
+  handle.abandoned = true;
+  stagingChildren.delete(id);
+  try {
+    handle.child.kill('SIGTERM');
+    logger.info({ releaseId: id }, 'Stopped the staging command for a cleared request');
+  } catch (err) {
+    logger.warn({ releaseId: id, err: (err as Error).message }, 'Could not stop the staging command');
+  }
+}
+
+/** Ask the deploy agent to stop. A missing agent or a failed send does not undo the clear. */
+function cancelDeployAgent(row: ReleaseRequest): void {
+  let agent: Agent | null = null;
+  if (row.deploy_agent_id) {
+    const named = getAgent(row.deploy_agent_id);
+    if (named.ok) agent = named.data;
+  }
+  if (!agent) {
+    const configured = deployAgent();
+    if (configured.ok) agent = configured.data;
+  }
+  if (!agent) {
+    logger.info({ releaseId: row.id }, 'No deploy agent to cancel');
+    return;
+  }
+  const text = `[Cancel release ${row.id}: stop the staging deploy of ${row.sha}${row.project ? ` (${row.project})` : ''}. Do not report RELEASED for this id.]`;
+  try {
+    deliverSystemLine(agent, text, { kind: 'info', source: 'release:cancel' });
+    logger.info({ releaseId: row.id, agent: agent.name }, 'Sent a cancel line to the deploy agent');
+  } catch (err) {
+    logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Could not send the cancel line');
+  }
+}
+
+type ReleaseInsert = Parameters<typeof insert>[0];
+
+/**
+ * The open-request check and the insert are one synchronous transaction, so two
+ * Stage calls that both already awaited the tip cannot both insert.
+ * `accept` returns the same SHA's open row to the caller as a success.
+ * `request` refuses any open staging row for the project, including the same SHA.
+ */
+function claimRelease(row: ReleaseInsert, mode: 'request' | 'accept'):
+  | { ok: true; data: ReleaseRequest }
+  | { ok: false; error: string; existing: ReleaseRequest | null; sameSha: boolean } {
+  ensureReleaseTables();
+  const run = getDb().transaction(() => {
+    expireStuckReleases();
+    const same = listReleases({ sha: row.sha, target: row.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent') ?? null;
+    const pending = row.target === 'staging' ? openStagingRequest(row.project) : null;
+    if (mode === 'accept' && same) {
+      return { ok: false as const, error: `A ${row.target} request for ${row.sha.slice(0, 8)} is already open (${same.id})`, existing: same, sameSha: true };
+    }
+    if (pending) {
+      return { ok: false as const, error: `A staging request for ${row.project} is already open (${pending.id})`, existing: pending, sameSha: pending.sha === row.sha };
+    }
+    if (same) {
+      return { ok: false as const, error: `A ${row.target} request for ${row.sha.slice(0, 8)} is already open (${same.id})`, existing: same, sameSha: true };
+    }
+    return { ok: true as const, data: insert(row) };
+  });
+  return run();
 }
 
 const STAGING_TIP_TTL_MS = 15_000;
@@ -294,9 +430,12 @@ export interface StagingTipPayload {
 export type { StagingTipStatus };
 
 const peerTipCache = new Map<string, { at: number; value: ResolvedStagingTip }>();
+/** Bumped on invalidation. An in-flight fetch stores only if this is unchanged. */
+const peerTipGen = new Map<string, number>();
 
 export function resetStagingTipCacheForTest(): void {
   peerTipCache.clear();
+  peerTipGen.clear();
   setStagingTipStatuses([]);
 }
 
@@ -323,21 +462,39 @@ export function releaseForwardTarget(project: string): { peer: string; agent: st
   return { peer, agent: agent ?? '' };
 }
 
+/** Drop a cached peer tip and ignore any fetch that started before this call. */
+export function invalidateStagingTipCache(project?: string | null): void {
+  const bump = (name: string) => peerTipGen.set(name, (peerTipGen.get(name) ?? 0) + 1);
+  if (project) {
+    peerTipCache.delete(project);
+    bump(project);
+    return;
+  }
+  peerTipCache.clear();
+  for (const name of peerTipGen.keys()) bump(name);
+}
+
 /**
  * Whenever this project's releases are forwarded, the staging tip comes from
  * that same peer. The local release row is not authoritative, and a local
  * health command does not override the peer. Otherwise the health command
  * wins, then the newest deployed staging record. A peer answer is cached 15s.
  * A failed ask stays `unknown`, is cached 5s, and does not fall back to the local row.
+ * `fresh` skips the cache: a Stage mutation and the reconcile after a deploy
+ * must not decide from the tip that was true at send time.
  * The outbound ask sets `local=1` so the peer answers from its own health command
  * or deployed row and does not proxy again.
  */
-export async function resolveStagingTip(project: string, opts?: { localOnly?: boolean }): Promise<ResolvedStagingTip> {
+export async function resolveStagingTip(project: string, opts?: { localOnly?: boolean; fresh?: boolean }): Promise<ResolvedStagingTip> {
   const forward = opts?.localOnly ? null : releaseForwardTarget(project);
   if (forward) {
-    const hit = peerTipCache.get(project);
-    const ttl = hit?.value.state === 'unknown' ? STAGING_TIP_FAILURE_TTL_MS : STAGING_TIP_TTL_MS;
-    if (hit && Date.now() - hit.at < ttl) return hit.value;
+    if (!opts?.fresh) {
+      const hit = peerTipCache.get(project);
+      const ttl = hit?.value.state === 'unknown' ? STAGING_TIP_FAILURE_TTL_MS : STAGING_TIP_TTL_MS;
+      if (hit && Date.now() - hit.at < ttl) return hit.value;
+    }
+    const generation = peerTipGen.get(project) ?? 0;
+    peerTipGen.set(project, generation);
     const res = await peerGetJson<unknown>(
       forward.peer,
       `/releases/staging-tip?project=${encodeURIComponent(project)}&local=1`,
@@ -346,6 +503,8 @@ export async function resolveStagingTip(project: string, opts?: { localOnly?: bo
     const value: ResolvedStagingTip = res.ok
       ? { state: 'peer', source: 'peer', tip: normalizePeerTip(res.data) }
       : { state: 'unknown', source: 'peer', tip: null };
+    // A deploy finish or a Stage send may have invalidated while this fetch was in flight.
+    if ((peerTipGen.get(project) ?? 0) !== generation) return value;
     peerTipCache.set(project, { at: Date.now(), value });
     return value;
   }
@@ -536,7 +695,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     stepsJson = gate.steps ? JSON.stringify(gate.steps) : null;
   }
   if (opts.target === 'staging') {
-    const resolvedTip = await resolveStagingTip(opts.project);
+    const resolvedTip = await resolveStagingTip(opts.project, { fresh: true });
     const staging = resolvedTip.state === 'unknown' ? null : resolvedTip.tip;
     if (resolvedTip.state !== 'unknown') rejectStaleStaging(opts.project, staging);
     const { stageEligibility } = await import('./sha-stage-block.js');
@@ -553,6 +712,8 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
       return { ok: false, error: eligible.error };
     }
     if (eligible.rollbackReason) rollbackReason = eligible.rollbackReason;
+    const dest = releaseForwardTarget(opts.project);
+    if (rollbackReason && dest) return { ok: false, error: rollbackOnDeployBox(dest.peer) };
   }
   try {
     const freeze = getFreeze(opts.sha);
@@ -564,8 +725,6 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   const cfg = getConfig();
   const project = cfg.projects?.[opts.project];
   if (!project) return { ok: false, error: `Unknown project '${opts.project}'` };
-  const open = listReleases({ sha: opts.sha, target: opts.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
-  if (open) return { ok: false, error: `A ${opts.target} request for ${opts.sha.slice(0, 8)} is already open (${open.id})` };
 
   const id = ulid();
   const base = {
@@ -587,13 +746,13 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   const forward = releaseForwardTarget(opts.project);
   if (forward) {
     const peerName = forward.peer;
-    const row = insert({ ...base, origin: 'local', peer: peerName, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
+    const claimed = claimRelease({ ...base, origin: 'local', peer: peerName, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null }, 'request');
+    if (!claimed.ok) return { ok: false, error: claimed.error };
     const remote = await peerPostJson<{ id: string; status: string }>(peerName, '/releases', {
       sha: opts.sha, lane: opts.lane ?? null, target: opts.target, project: opts.project, desk: opts.desk ?? null,
       reviewer: opts.reviewer ?? null, requested_by: opts.actorName, requester_is_admin: opts.actorIsAdmin === true,
       // Production forwards the originating user. Staging bodies stay as they were.
       ...(opts.target === 'production' ? { requester_role: opts.actorRole ?? null, steps: stepsJson } : {}),
-      ...(opts.forceRollback ? { force_rollback: true, force_reason: opts.forceReason ?? null } : {}),
       origin_id: id, origin_box: os.hostname(), note: opts.note ?? null,
     });
     if (!remote.ok || !remote.data?.id) {
@@ -605,16 +764,26 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     patch(id, { status: 'sent', peer_request_id: remote.data.id });
     const sent = getRelease(id)!;
     emit('release.requested', 'release', id, { target: opts.target, sha: opts.sha, project: opts.project, lane: opts.lane ?? null, desk: opts.desk ?? null, peer: peerName, peer_request_id: remote.data.id, requested_by: opts.actorName, run_id: opts.runId ?? null });
-    if (rollbackReason) recordRollback(sent, opts.actorName, rollbackReason);
     ensureReleasePoller(peerName);
+    if (opts.target === 'staging') {
+      invalidateStagingTipCache(opts.project);
+      reconcileAfterDeploy();
+    }
     return { ok: true, data: sent };
   }
 
   if (cfg.releases?.deploy_agent) {
     // this box deploys itself
-    const row = insert({ ...base, origin: 'local', peer: null, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null });
+    const claimed = claimRelease({ ...base, origin: 'local', peer: null, peer_request_id: null, origin_id: null, deploy_agent_id: null, status: 'requested', error: null }, 'request');
+    if (!claimed.ok) return { ok: false, error: claimed.error };
+    if (rollbackReason) rememberForceRollback(claimed.data.id, rollbackReason, opts.actorName);
+    const row = getRelease(claimed.data.id)!;
     const handed = handToDeployAgent(row);
     if (handed.ok && rollbackReason) recordRollback(handed.data, opts.actorName, rollbackReason);
+    if (handed.ok && opts.target === 'staging') {
+      invalidateStagingTipCache(opts.project);
+      reconcileAfterDeploy();
+    }
     return handed;
   }
   return { ok: false, error: `Project '${opts.project}' has no release_peer and this box has no releases.deploy_agent` };
@@ -625,7 +794,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
 export interface IncomingRelease {
   sha?: unknown; lane?: unknown; target?: unknown; project?: unknown; desk?: unknown; reviewer?: unknown;
   requested_by?: unknown; requester_role?: unknown; requester_is_admin?: unknown; origin_id?: unknown; origin_box?: unknown; note?: unknown;
-  force_rollback?: unknown; force_reason?: unknown; steps?: unknown;
+  force_rollback?: unknown; force_reason?: unknown; rollback_by?: unknown; steps?: unknown;
 }
 
 function forwardedUser(body: IncomingRelease): { name: string | null; role: string | null } {
@@ -652,11 +821,31 @@ function laneAlert(error: string): boolean {
   return /^(behind main|would roll staging back|cannot prove|force_rollback)/.test(error);
 }
 
+/** A peer token cannot authorize a rewind. The words are the HTTP 403 body. */
+export const PEER_ROLLBACK_FORBIDDEN = 'rollback must be requested by an admin on the deploy box';
+
+export function rollbackOnDeployBox(peer: string): string {
+  return `Run the rollback on the deploy box (${peer}) directly`;
+}
+
+function asksForceRollback(v: unknown): boolean {
+  return v === true || v === 1 || v === 'true' || v === '1';
+}
+
+/** Set when a peer body carries force_rollback. Null when it does not. */
+export function peerRollbackRefusal(body: IncomingRelease): string | null {
+  return asksForceRollback(body.force_rollback) ? PEER_ROLLBACK_FORBIDDEN : null;
+}
+
 /** A request from a peer box (or a local caller): store it and hand it to the deploy agent. */
 export async function acceptRelease(body: IncomingRelease, via: { userName: string; fromPeer: boolean; actorIsAdmin?: boolean }): Promise<Result<ReleaseRequest>> {
   const sha = typeof body.sha === 'string' ? body.sha.trim().toLowerCase() : '';
   if (!SHA_RE.test(sha)) return { ok: false, error: 'sha must be the exact 40-character commit id' };
   if (!isTarget(body.target)) return { ok: false, error: "target must be 'staging' or 'production'" };
+  if (via.fromPeer) {
+    const refused = peerRollbackRefusal(body);
+    if (refused) return { ok: false, error: refused };
+  }
   // Before the idempotent open-request lookup, so a retry that drops the originating
   // user cannot fetch or refresh a production GO.
   if (body.target === 'production' && via.fromPeer) {
@@ -688,9 +877,9 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
     const { stageEligibility } = await import('./sha-stage-block.js');
     const eligible = await stageEligibility(sha, projectName, {
       localTip: true,
-      forceRollback: body.force_rollback === true,
+      forceRollback: !via.fromPeer && body.force_rollback === true,
       forceReason: typeof body.force_reason === 'string' ? body.force_reason : null,
-      actorIsAdmin: via.actorIsAdmin === true,
+      actorIsAdmin: !via.fromPeer && via.actorIsAdmin === true,
       markStale: true,
     });
     if (eligible.error) {
@@ -700,9 +889,7 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
     }
     if (eligible.rollbackReason) rollbackReason = eligible.rollbackReason;
   }
-  const open = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
-  if (open) return { ok: true, data: open }; // idempotent: a retried request is the same request
-  const row = insert({
+  const claimed = claimRelease({
     id: ulid(),
     project: projectName,
     sha,
@@ -723,9 +910,16 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
     report: str(body.note, 2000),
     error: null,
     steps_json: stepsJson,
-  });
-  const handed = handToDeployAgent(row);
-  if (handed.ok && rollbackReason) recordRollback(handed.data, str(body.requested_by, 64) ?? via.userName, rollbackReason);
+  }, 'accept');
+  if (!claimed.ok) {
+    if (claimed.sameSha && claimed.existing) return { ok: true, data: claimed.existing };
+    return { ok: false, error: claimed.error };
+  }
+  const row = claimed.data;
+  const rollbackBy = str(body.rollback_by, 64) ?? str(body.requested_by, 64) ?? via.userName;
+  if (rollbackReason) rememberForceRollback(row.id, rollbackReason, rollbackBy);
+  const handed = handToDeployAgent(getRelease(row.id) ?? row);
+  if (handed.ok && rollbackReason) recordRollback(handed.data, rollbackBy, rollbackReason);
   return handed;
 }
 
@@ -824,7 +1018,11 @@ function applyProgress(id: string, raw: string): boolean {
   if (!line) return false;
   const row = getRelease(id);
   if (!row) return false;
-  if (row.status === 'deployed' || row.status === 'failed' || row.status === 'rejected') {
+  if (row.status === 'deployed' || row.status === 'rejected') {
+    return line.phase === 'done' || line.phase === 'failed';
+  }
+  if (row.status === 'failed') {
+    if (line.phase === 'done') noteLateResult(row, line.staging_sha ?? row.sha);
     return line.phase === 'done' || line.phase === 'failed';
   }
   // Keep the phase that failed (build, verify, …) so the chip can name it.
@@ -1005,15 +1203,59 @@ export interface ReleaseReport {
   failed_step?: string | null;
 }
 
+/**
+ * A failed row stays failed. A deploy that lands anyway is recorded as an event
+ * so the board can refresh, and it does not change the row or the tip.
+ */
+function noteLateResult(row: ReleaseRequest, sha: string | null | undefined): void {
+  const raw = sha?.trim().toLowerCase() ?? '';
+  const recorded = /^[0-9a-f]{40}$/.test(raw) ? raw : row.sha.toLowerCase();
+  emit('release.late_result', 'release', row.id, { sha: recorded, id: row.id }, null);
+  logger.warn({ releaseId: row.id, sha: recorded, error: row.error }, 'Late release result ignored; the row is already final');
+  reconcileAfterDeploy();
+}
+
+/**
+ * Staging only moves forward. A deployed SHA that git can show is not the
+ * current tip and not a descendant of it is refused. No tip, or no repo,
+ * leaves the report alone — a box without git still records its first deploys.
+ */
+function stagingRewindRefusal(project: string | null, sha: string, row?: ReleaseRequest | null): string | null {
+  if (!project) return null;
+  const tip = currentStagingTip(project);
+  if (!tip?.sha) return null;
+  const tipSha = tip.sha.toLowerCase();
+  const next = sha.toLowerCase();
+  if (tipSha === next) return null;
+  const repo = projectRepo(project);
+  if (!repo) return null;
+  if (!isMissingAncestor(repo, tipSha, next)) return null;
+  if (row?.force_rollback === 1) {
+    logger.info({ project, sha: next, tip: tipSha, by: row.rollback_by, reason: row.rollback_reason }, 'Authorized staging rollback');
+    return null;
+  }
+  const error = `refusing to move staging backwards: ${next.slice(0, 8)} is not a descendant of ${tipSha.slice(0, 8)}`;
+  logger.warn({ project, sha: next, tip: tipSha }, error);
+  return error;
+}
+
 /** The deploy agent's outcome (MCP tool, API, or a RELEASED / RELEASE FAILED line). */
 export function reportRelease(id: string, report: ReleaseReport): Result<ReleaseRequest> {
   const r = getRelease(id);
   if (!r) return { ok: false, error: `Release ${id} not found` };
-  if (r.status === 'deployed' || r.status === 'failed' || r.status === 'rejected') return { ok: true, data: r }; // final: a repeat is a no-op
+  if (r.status === 'deployed' || r.status === 'rejected') return { ok: true, data: r }; // final: a repeat is a no-op
+  if (r.status === 'failed') {
+    if (report.status === 'deployed') noteLateResult(r, report.sha ?? r.sha);
+    return { ok: true, data: r };
+  }
   if (!['deployed', 'failed', 'rejected'].includes(report.status)) return { ok: false, error: "status must be 'deployed', 'failed' or 'rejected'" };
   const deployedSha = report.sha ? report.sha.trim().toLowerCase() : null;
   if (report.status === 'deployed' && deployedSha && deployedSha !== r.sha && !r.sha.startsWith(deployedSha)) {
     return { ok: false, error: `Reported SHA ${deployedSha.slice(0, 8)} is not the requested ${r.sha.slice(0, 8)}; report a failure instead` };
+  }
+  if (report.status === 'deployed' && r.target === 'staging') {
+    const rewind = stagingRewindRefusal(r.project, r.sha, r);
+    if (rewind) return { ok: false, error: rewind };
   }
   patch(id, {
     status: report.status,
@@ -1035,8 +1277,15 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     rejectStaleStaging(done.project);
     try { alertLanesPastStaging(done.project, done.deployed_sha || done.sha); } catch { /* alert is best-effort */ }
     fireStagingDeployed(done.id);
+    invalidateStagingTipCache(done.project);
+    reconcileAfterDeploy();
   }
   return { ok: true, data: done };
+}
+
+/** The board must not wait for the 90s pass after a stage or deploy finishes. */
+function reconcileAfterDeploy(): void {
+  void import('./deploy-state.js').then((m) => m.scheduleReconcile('deploy')).catch(() => {});
 }
 
 function announce(r: ReleaseRequest): void {
@@ -1064,7 +1313,7 @@ export function verifyStaging(id: string, by: { name: string }, note: string | n
 export interface AuditEntry {
   at: string;
   who: string;
-  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq';
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq' | 'clear';
   target: ReleaseTarget | null;
   sha: string | null;
   project: string | null;
@@ -1107,14 +1356,15 @@ export function auditTrail(limit = 200): AuditEntry[] {
     out.push({ at: e.created_at, who: e.user_name ?? 'owner', action: 'reject', target: null, sha: typeof fz.sha === 'string' ? fz.sha : null, project: typeof fz.project === 'string' ? fz.project : null, desk: fz.desk != null ? String(fz.desk) : null, detail: typeof p.reason === 'string' ? p.reason : null, release_id: null, run_id: e.run_id });
   }
   const extras = getDb().prepare(
-    `SELECT created_at, type, payload_json FROM events WHERE type IN ('release.rollback', 'release.prereq') ORDER BY id DESC LIMIT ?`,
+    `SELECT created_at, type, payload_json FROM events WHERE type IN ('release.rollback', 'release.prereq', 'release.cleared') ORDER BY id DESC LIMIT ?`,
   ).all(limit) as Array<{ created_at: string; type: string; payload_json: string | null }>;
   for (const e of extras) {
     let payload: { who?: string; sha?: string; project?: string; reason?: string; error?: string; id?: string; output?: string; lane?: string } = {};
     try { payload = e.payload_json ? JSON.parse(e.payload_json) as typeof payload : {}; } catch { /* ignore */ }
     const prereq = e.type === 'release.prereq';
+    const cleared = e.type === 'release.cleared';
     out.push({
-      at: e.created_at, who: payload.who ?? 'unknown', action: prereq ? 'prereq' : 'rollback',
+      at: e.created_at, who: payload.who ?? 'unknown', action: cleared ? 'clear' : prereq ? 'prereq' : 'rollback',
       target: prereq ? 'production' : 'staging', sha: payload.sha ?? null, project: payload.project ?? null, desk: null,
       detail: prereq ? (payload.error ?? payload.id ?? null) : (payload.reason ?? null),
       release_id: null, run_id: null,
@@ -1184,7 +1434,10 @@ export function resetReleaseLinesForTest(): void {
 const pollers = new Map<string, { stop: boolean }>();
 
 function openForwarded(peer: string): ReleaseRequest[] {
-  return withTable(() => getDb().prepare("SELECT * FROM release_requests WHERE origin = 'local' AND peer = ? AND status = 'sent' AND peer_request_id IS NOT NULL").all(peer) as ReleaseRequest[]);
+  return withTable(() => getDb().prepare(
+    `SELECT * FROM release_requests
+     WHERE origin = 'local' AND peer = ? AND peer_request_id IS NOT NULL AND status = 'sent'`,
+  ).all(peer) as ReleaseRequest[]);
 }
 
 export function ensureReleasePoller(peer: string): void {
@@ -1197,6 +1450,7 @@ export function ensureReleasePoller(peer: string): void {
 async function pollLoop(peer: string, handle: { stop: boolean }): Promise<void> {
   let cursor = 0;
   while (!handle.stop) {
+    expireStuckReleases();
     const open = openForwarded(peer);
     if (open.length === 0) return;
     // One round trip settles everything that already finished; the long poll waits for the rest.
@@ -1255,10 +1509,21 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   if (!remote.ok || !remote.data) return;
   if (!pollers.has(peer)) return; // stopped while the request was in flight
   const local = getRelease(r.id) ?? r;
+  if (local.status === 'failed' || local.status === 'rejected' || local.status === 'deployed') {
+    if (local.status === 'failed' && remote.data.status === 'deployed') {
+      noteLateResult(local, remote.data.deployed_sha ?? remote.data.sha ?? local.sha);
+    }
+    return;
+  }
   mirrorProgress(local, remote.data);
   const s = remote.data.status;
   if (s !== 'deployed' && s !== 'failed' && s !== 'rejected') return;
   const fresh = getRelease(r.id) ?? local;
+  if (s === 'deployed' && fresh.target === 'staging') {
+    const tipSha = remote.data.deployed_sha || fresh.sha;
+    const rewind = stagingRewindRefusal(fresh.project, tipSha, fresh);
+    if (rewind) return;
+  }
   patch(r.id, {
     status: s,
     version: remote.data.version ?? fresh.version ?? null,
@@ -1274,10 +1539,16 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
     version: done.version, note: done.report, error: done.error, origin: 'local', peer, peer_request_id: r.peer_request_id, requested_by: done.requested_by, run_id: done.run_id,
   }, null);
   announce(done);
+  if (done.target === 'staging' && done.status === 'deployed') {
+    fireStagingDeployed(done.id);
+    invalidateStagingTipCache(done.project);
+    reconcileAfterDeploy();
+  }
   logger.info({ releaseId: done.id, peer, status: done.status, version: done.version }, 'Release outcome mirrored from peer');
 }
 
 export function startReleasePollers(): void {
+  expireStuckReleases();
   const peers = withTable(() => getDb().prepare("SELECT DISTINCT peer FROM release_requests WHERE origin = 'local' AND status = 'sent' AND peer IS NOT NULL").all() as Array<{ peer: string }>);
   for (const { peer } of peers) ensureReleasePoller(peer);
   resumeStagingDeploys();

@@ -53,6 +53,10 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
         return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})` }, 403);
       }
     }
+    if (fromPeer) {
+      const rollback = releases.peerRollbackRefusal(body);
+      if (rollback) return c.json({ error: rollback }, 403);
+    }
     const r = await releases.acceptRelease(
       { ...body, requested_by: fromPeer ? body.requested_by : user.name },
       { userName: user.name, fromPeer, actorIsAdmin: isAdmin(user) && !fromPeer },
@@ -116,6 +120,17 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<{ note?: unknown }>().catch(() => ({} as { note?: unknown }));
     const r = releases.verifyStaging(c.req.param('id'), { name: user.name }, typeof body.note === 'string' ? body.note : null);
+    if (!r.ok) return c.json({ error: r.error }, r.error.includes('not found') ? 404 : 400);
+    return c.json(r.data);
+  });
+
+  // An admin ends a stuck staging lock. A reason is required and is written to the audit.
+  app.post('/api/releases/:id/clear', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin can clear a stuck staging request' }, 403);
+    const body = await c.req.json<{ reason?: unknown }>().catch(() => ({} as { reason?: unknown }));
+    const reason = typeof body.reason === 'string' ? body.reason : '';
+    const r = releases.clearStuckRelease(c.req.param('id'), { name: user.name, id: user.id }, reason);
     if (!r.ok) return c.json({ error: r.error }, r.error.includes('not found') ? 404 : 400);
     return c.json(r.data);
   });

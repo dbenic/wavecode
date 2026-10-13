@@ -20,6 +20,28 @@
 import { getConfig } from './config.js';
 import { getDb, listAgents, type Agent } from './db.js';
 
+/** Lowercased `review_deny` and `agent_deny` across every project. */
+export function deniedReviewerHandles(): Set<string> {
+  const deny = new Set<string>();
+  try {
+    for (const project of Object.values(getConfig().projects ?? {})) {
+      const pipe = project.pipeline;
+      for (const name of [...(pipe?.review_deny ?? []), ...(pipe?.agent_deny ?? [])]) {
+        const handle = name.trim().toLowerCase();
+        if (handle) deny.add(handle);
+      }
+    }
+  } catch { /* config not loaded */ }
+  return deny;
+}
+
+export function reviewerDenied(agent: { name: string; alias?: string | null }): boolean {
+  const deny = deniedReviewerHandles();
+  if (deny.size === 0) return false;
+  if (deny.has(agent.name.toLowerCase())) return true;
+  return !!agent.alias && deny.has(agent.alias.toLowerCase());
+}
+
 export const SAME_OWNER_POOL_NOTE = 'same-owner reviewer via pool';
 
 export interface ReviewerLoad {
@@ -335,7 +357,7 @@ export function reviewerLoads(): ReviewerLoadView[] {
   let agents: Agent[] = [];
   try { agents = listAgents(); } catch { agents = []; }
   return agents
-    .filter((agent) => agent.mode !== 'file' && agent.role !== 'orchestrator')
+    .filter((agent) => agent.mode !== 'file' && agent.role !== 'orchestrator' && !reviewerDenied(agent))
     .map((agent) => {
       const load = loadFor(agent);
       return { id: agent.id, name: agent.name, alias: agent.alias ?? null, busy: load.busy, queue: load.openReviews };

@@ -65,6 +65,7 @@ function LaneCardView({ card, onDone }: { card: LaneCard; onDone: () => void }) 
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
   const [openOlder, setOpenOlder] = useState(false);
   const openFile = internalLinkClickHandler(navigate);
   const press = async () => {
@@ -79,6 +80,14 @@ function LaneCardView({ card, onDone }: { card: LaneCard; onDone: () => void }) 
         await apiPost('/releases/verify', { sha: button.sha, project: button.project, note: 'Checked on staging' });
       } else if (button.kind === 'promote' && button.run_id) {
         await apiPost(`/reviews/${button.run_id}/promote`);
+      } else if (button.kind === 'clear' && button.release_id) {
+        const why = reason.trim();
+        if (!why) {
+          setError('A reason is required');
+          setBusy(false);
+          return;
+        }
+        await apiPost(`/releases/${button.release_id}/clear`, { reason: why });
       }
       onDone();
     } catch (e) {
@@ -111,13 +120,22 @@ function LaneCardView({ card, onDone }: { card: LaneCard; onDone: () => void }) 
       )}
       <p className="text-[11px] text-slate-400" data-testid="lane-owner">Owner · {card.owner_label}</p>
       <Pipeline card={card} />
+      {card.button?.kind === 'clear' && (
+        <input
+          data-testid="clear-reason"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Why this request is stuck"
+          className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+        />
+      )}
       {card.button && (
         <button
           type="button"
           data-testid={`action-${card.button.kind}`}
           disabled={busy}
           onClick={press}
-          className="mt-1 w-full rounded-lg border border-emerald-500/50 bg-emerald-950 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
+          className={`mt-1 w-full rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-50 ${card.button.kind === 'clear' ? 'border-amber-500/50 bg-amber-950 text-amber-100 hover:bg-amber-900' : 'border-emerald-500/50 bg-emerald-950 text-emerald-100 hover:bg-emerald-900'}`}
         >
           {busy ? 'Sending…' : card.button.label}
         </button>

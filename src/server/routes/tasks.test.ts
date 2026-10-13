@@ -27,6 +27,7 @@ vi.mock('../db.js', () => {
   latestRunsByTask: vi.fn(() => new Map()),
   dependencyEdgesForTasks: vi.fn(() => ({ dependsOn: new Map(), dependents: new Map() })),
   updateTaskStatus: vi.fn(),
+  updateTaskReviewer: vi.fn(),
 };
 });
 
@@ -488,6 +489,28 @@ describe('task routes', () => {
     const logResponse = await requestJson(app, '/api/runs/run-card/log', 'GET');
     expect(logResponse.json.log).toContain('claude -p started');
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('POST /api/tasks/:id/reviewer refuses a denied seat before storing it', async () => {
+    const db = await import('../db.js');
+    const { getConfig } = await import('../config.js');
+    vi.mocked(getConfig).mockReturnValue({
+      autonomy: { auto_dispatch: false, auto_restart: true, hang_timeout_min: 10, max_task_retries: 2 },
+      projects: { wave: { pipeline: { review_deny: ['codex1'], agent_deny: ['chatgpt-countix'] } } },
+    } as never);
+    vi.mocked(db.getTask).mockReturnValue({
+      ok: true,
+      data: { id: 'task-1', agent_id: 'author', prompt: 'review me', status: 'done', priority: 0, created_at: '2026-10-13T00:00:00Z', goal_id: null },
+    } as never);
+    vi.mocked(db.resolveAgent).mockReturnValue({
+      ok: true,
+      data: { id: 'codex1-id', name: 'codex1', alias: null, role: null, mode: 'spawned' },
+    } as never);
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks/task-1/reviewer', 'POST', { reviewer: 'codex1' });
+    expect(response.status).toBe(400);
+    expect(response.json.error).toMatch(/excluded from review/);
+    expect(db.updateTaskReviewer).not.toHaveBeenCalled();
   });
 });
 

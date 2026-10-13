@@ -293,11 +293,12 @@ export interface LanePipeStep {
 }
 
 export interface LaneCardButton {
-  kind: 'stage' | 'ready' | 'promote';
+  kind: 'stage' | 'ready' | 'promote' | 'clear';
   label: string;
   run_id: string | null;
   sha: string;
   project: string | null;
+  release_id?: string | null;
 }
 
 export interface LaneCard {
@@ -625,7 +626,7 @@ export interface ReleaseRequest {
 export interface AuditEntry {
   at: string;
   who: string;
-  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq';
+  action: 'stage' | 'promote' | 'verify' | 'reject' | 'deployed' | 'failed' | 'auto-stage' | 'auto' | 'rollback' | 'prereq' | 'clear';
   target: 'staging' | 'production' | null;
   sha: string | null;
   project: string | null;

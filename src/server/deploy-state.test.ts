@@ -12,6 +12,7 @@ function facts(over: Partial<DeriveFacts> = {}): DeriveFacts {
     quick: 'green',
     full: 'green',
     readyForProd: false,
+    isStagingTip: false,
     ...over,
   };
 }
@@ -22,8 +23,9 @@ describe('deriveDeployState', () => {
   });
 
   it('a SHA contained in staging, and not in prod, waits for Ready for prod', () => {
-    expect(deriveDeployState(facts({ containedInStaging: true }))).toBe('on_staging');
-    expect(deriveDeployState(facts({ containedInStaging: true, readyForProd: true }))).toBe('awaiting_prod_go');
+    expect(deriveDeployState(facts({ containedInStaging: true, isStagingTip: true }))).toBe('on_staging');
+    expect(deriveDeployState(facts({ containedInStaging: true, isStagingTip: true, readyForProd: true }))).toBe('awaiting_prod_go');
+    expect(deriveDeployState(facts({ containedInStaging: true, isStagingTip: false }))).toBe('superseded');
   });
 
   it('behind main stays actionable, and a superseded card is history', () => {
