@@ -454,6 +454,12 @@ export interface AttentionRow {
   sha?: string;
 }
 
+export interface AttentionGroup {
+  kind: string;
+  count: number;
+  items: AttentionRow[];
+}
+
 export interface DeskLink {
   lanes: Array<{ sha: string; verdict: string | null; status: string; lane: string | null; author: string | null }>;
   tasks: Array<{ id: string; num: number | null; status: string; agent_id: string | null; agent_name: string | null }>;
@@ -548,10 +554,14 @@ export interface Board {
   host: string;
   agents: AgentBoardRow[];
   lanes: LaneBoardRow[];
+  history?: LaneBoardRow[];
   candidates: CandidateRow[];
   desk: DeskBoardRow[] | null;
   fixes: FixRow[];
   attention: AttentionRow[];
+  attention_groups?: AttentionGroup[];
+  attention_total?: number;
+  attention_page?: number;
   counts: { working: number; idle: number; error: number; open_lanes: number; promotable: number; releases_open: number; open_fixes: number; unassigned_fixes: number };
 }
 

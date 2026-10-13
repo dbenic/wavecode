@@ -81,7 +81,7 @@ describe('overview board + overlord', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('the board reads agents, their work, replies and blocks, and the reviewed lanes with a deterministic next step — without asking anyone', () => {
+  it('the board reads agents, their work, replies and blocks, and the reviewed lanes with a deterministic next step — without asking anyone', async () => {
     const claude2 = agent('claude2', 'working');
     const codex3 = agent('codex3');
     const task = db.insertTask({ agent_id: claude2.id, prompt: 'Desk #91: issued credit notes', created_by: null });
@@ -95,7 +95,7 @@ describe('overview board + overlord', () => {
     fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- Remote full-tuned: GREEN\n`);
     expect(rf.ingestFreezeFile(note).ok).toBe(true);
 
-    const board = ov.buildBoard();
+    const board = await ov.buildBoard();
     const c2 = board.agents.find((a) => a.name === 'claude2')!;
     expect(c2.status).toBe('working');
     expect(c2.for_min).toBe(0);
@@ -116,7 +116,7 @@ describe('overview board + overlord', () => {
     agent('codex3');
     fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
     expect(rf.ingestFreezeFile(note).ok).toBe(true);
-    const runId = ov.buildBoard().lanes[0].run_id!;
+    const runId = (await ov.buildBoard()).lanes[0].run_id!;
 
     vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: '```json\n' + JSON.stringify({
       agents: [{ id: claude2.id, note: 'idle; Desk #91 reviewed and waiting for you' }],
@@ -192,42 +192,37 @@ describe('overview board + overlord', () => {
     fs.writeFileSync(verdict, `# Verdict: Codex2 Desk #43 settlement (exact SHA ${SHA_B})\nProject: wavepulse · reviewer Claude1 · Author: codex2\n\n- [HIGH] rounding wrong\n\nVERDICT: NEEDS FIXES\n`);
     expect(rf.ingestFreezeFile(verdict).ok).toBe(true);
 
-    let board = ov.buildBoard();
+    let board = await ov.buildBoard();
     expect(board.fixes).toHaveLength(1);
-    expect(board.fixes[0]).toMatchObject({ sha: SHA_B, reason: 'needs fixes', author: 'codex2', reviewer: 'claude1', assigned: null });
-    expect(board.attention.some((a) => a.kind === 'fix_unassigned')).toBe(true);
-    expect(board.counts).toMatchObject({ open_fixes: 1, unassigned_fixes: 1 });
+    expect(board.fixes[0]).toMatchObject({ sha: SHA_B, reason: 'needs fixes', author: 'codex2', reviewer: 'claude1' });
+    expect(board.fixes[0].assigned).toMatchObject({ agent_name: 'codex2', status: 'pending' });
+    expect(board.attention.some((a) => a.kind === 'fix_unassigned')).toBe(false);
+    expect(board.counts).toMatchObject({ open_fixes: 1, unassigned_fixes: 0 });
+    const made = db.getDb().prepare('SELECT id, prompt, agent_id FROM tasks WHERE fix_sha = ?').get(SHA_B) as { id: string; prompt: string; agent_id: string };
+    expect(made.agent_id).toBe(codex2.id);
+    expect(made.prompt).toMatch(/^\[fix e65a2ab5\] Fix the review findings on lane/);
+    expect(made.prompt).toContain(`exact SHA ${SHA_B}`);
 
-    const res = await app.fetch(new Request('http://x/api/overview/fixes/assign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ run_id: board.fixes[0].run_id, agent_id: 'codex2', note: 'please today' }) }));
-    expect(res.status).toBe(201);
-    const made = await res.json() as { task: { id: string; prompt: string; agent_id: string; reviewer: string | null } };
-    expect(made.task.agent_id).toBe(codex2.id);
-    expect(made.task.prompt).toMatch(/^\[fix e65a2ab5\] Fix the review findings on lane/);
-    expect(made.task.prompt).toContain(`exact SHA ${SHA_B}`);
-    expect(made.task.prompt).toContain('From owner: please today');
-    board = ov.buildBoard();
-    expect(board.fixes[0].assigned).toMatchObject({ task_id: made.task.id, agent_name: 'codex2', status: 'pending' });
-    expect(board.counts.unassigned_fixes).toBe(0);
     // a second assignment while the task is open is refused
     const dup = await app.fetch(new Request('http://x/api/overview/fixes/assign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ run_id: board.fixes[0].run_id, agent_id: 'claude1' }) }));
     expect(dup.status).toBe(409);
     // when the task is done the fix leaves the list
-    db.updateTaskStatus(made.task.id, 'done');
-    expect(ov.buildBoard().fixes).toHaveLength(0);
+    db.updateTaskStatus(made.id, 'done');
+    expect((await ov.buildBoard()).fixes).toHaveLength(0);
 
     // the overlord's "fix" recommendation becomes an assign button in the thread
-    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: JSON.stringify({ agents: [], recommendations: [{ kind: 'fix', run_id: made.task.id, agent_id: codex2.id, text: 'codex2 is idle with budget; have it fix Desk #43.' }], plan: [], digest: null }) });
+    vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: JSON.stringify({ agents: [], recommendations: [{ kind: 'fix', run_id: made.id, agent_id: codex2.id, text: 'codex2 is idle with budget; have it fix Desk #43.' }], plan: [], digest: null }) });
     await ol.wake('review.ai_completed');
     const ev = db.listEvents({ entity_type: 'overlord' }).filter((e) => e.type === 'overlord.report').pop()!;
     const item = thread.toThreadItem(ev, new thread.ThreadContext({ id: 'owner', name: 'owner', role: 'admin' } as never))!;
-    expect(item.actions[0]).toMatchObject({ path: '/api/overview/fixes/assign', body: { run_id: made.task.id, agent_id: codex2.id } });
+    expect(item.actions[0]).toMatchObject({ path: '/api/overview/fixes/assign', body: { run_id: made.id, agent_id: codex2.id } });
   });
 
   it('budget per agent comes from the usage probe and reaches the model', async () => {
     const claude2 = agent('claude2');
     db.getDb().exec(`CREATE TABLE IF NOT EXISTS profile_usage (runtime TEXT NOT NULL, profile TEXT NOT NULL, data TEXT NOT NULL, probed_at TEXT NOT NULL, PRIMARY KEY (runtime, profile))`);
     db.getDb().prepare('INSERT INTO profile_usage (runtime, profile, data, probed_at) VALUES (?, ?, ?, ?)').run('claude-code', 'home', JSON.stringify({ summary: '12% left · resets 14 Oct', metrics: [{ label: 'weekly', left_pct: 12, used_pct: 88, resets: '14 Oct' }, { label: '5h', left_pct: 70, used_pct: 30, resets: null }] }), '2026-10-10 15:00:00');
-    const row = ov.buildBoard().agents.find((a) => a.id === claude2.id)!;
+    const row = (await ov.buildBoard()).agents.find((a) => a.id === claude2.id)!;
     expect(row.budget).toEqual({ weekly_left: 12, five_h_left: 70, resets: '14 Oct' });
     vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: JSON.stringify({ agents: [], recommendations: [], plan: [], digest: null }) });
     await ol.wake('heartbeat');
@@ -320,6 +315,7 @@ describe('overview board + overlord', () => {
 
   it('the routes: GET /api/overview returns board + report + settings; wake is admin only', async () => {
     agent('claude2');
+    await ov.reconcileOverview();
     const res = await app.fetch(new Request('http://x/api/overview'));
     expect(res.status).toBe(200);
     const body = await res.json() as { board: { agents: unknown[] }; report: unknown; overlord: { enabled: boolean; model: string } };

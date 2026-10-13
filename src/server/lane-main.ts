@@ -634,16 +634,56 @@ export function alertLanesPastStaging(project: string | null, stagingSha: string
   }
 }
 
-/** Open freezes whose SHA no longer contains main become behind-main, and the author is pinged once for this main tip. */
-export function reconcileBehindFreezes(): void {
-  let rows: FreezeRow[] = [];
+/** Latest nudge for this lane, whatever main SHA it named. A new main tip must not ping again inside 30 minutes. */
+function laneNudgedRecently(lane: string): boolean {
   try {
-    rows = getDb().prepare("SELECT sha, project, lane, status, author_agent_id, author_name FROM release_freezes WHERE status IN ('open', 'behind-main')").all() as FreezeRow[];
+    const rows = getDb().prepare(
+      "SELECT entity_id, payload_json, created_at FROM events WHERE entity_type = 'lane' AND type = ? ORDER BY id DESC LIMIT 200",
+    ).all(MAIN_PING) as { entity_id: string; payload_json: string | null; created_at: string }[];
+    const prefix = `${lane}:`;
+    const row = rows.find((item) => item.entity_id.startsWith(prefix));
+    if (!row) return false;
+    let at = 0;
+    if (row.payload_json) {
+      const payload = JSON.parse(row.payload_json) as { at?: unknown };
+      if (typeof payload.at === 'number') at = payload.at;
+    }
+    if (!at) {
+      const parsed = Date.parse(row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`);
+      at = Number.isNaN(parsed) ? 0 : parsed;
+    }
+    return nowMs() - at < REPEAT_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Open freezes whose SHA no longer contains main become behind-main.
+ * Only the newest freeze on a lane is considered. A tip that is only a merge
+ * of main (no new lane commits) is not marked and not pinged — that nudge is
+ * what left one lane with a pile of stale freezes. The same lane is not
+ * nudged again inside 30 minutes, even when main moves again.
+ */
+export function reconcileBehindFreezes(): void {
+  let rows: Array<FreezeRow & { created_at: string }> = [];
+  try {
+    rows = getDb().prepare(
+      "SELECT sha, project, lane, status, author_agent_id, author_name, created_at FROM release_freezes WHERE status IN ('open', 'behind-main') ORDER BY created_at DESC, rowid DESC",
+    ).all() as Array<FreezeRow & { created_at: string }>;
   } catch {
     return;
   }
+  const seen = new Set<string>();
   for (const f of rows) {
+    const key = `${f.project ?? ''}\0${f.lane ?? f.sha}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     if (laneAutomationDenied(f.project, { name: f.author_name }, f.lane)) continue;
+    const repo = projectRepo(f.project);
+    const mainRef = repo ? resolveMainRef(repo, f.project) : null;
+    const tip = f.lane ? laneTipSha(f.project, f.lane) : null;
+    if (repo && mainRef && tip && tip !== f.sha && isMergeOnlyDelta(repo, f.sha, tip, mainRef)) continue;
     const n = commitsBehind(f.project, f.sha);
     if (n == null || n <= 0) continue;
     if (f.status === 'open') {
@@ -651,11 +691,10 @@ export function reconcileBehindFreezes(): void {
         getDb().prepare("UPDATE release_freezes SET status = 'behind-main', updated_at = datetime('now') WHERE sha = ? AND status = 'open'").run(f.sha);
       } catch { /* ignore */ }
     }
-    const repo = projectRepo(f.project);
-    const tip = repo ? mainTip(repo, f.project) : null;
-    if (!tip || !f.lane) continue;
+    const main = repo ? mainTip(repo, f.project) : null;
+    if (!main || !f.lane || laneNudgedRecently(f.lane)) continue;
     pingLaneAboutMain({
-      lane: f.lane, project: f.project, mainSha: tip.sha, subject: tip.subject,
+      lane: f.lane, project: f.project, mainSha: main.sha, subject: main.subject,
       authorAgentId: f.author_agent_id, authorName: f.author_name, kind: 'freeze',
     });
   }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { Board, ChatAction, ChatTurn, FixRow, OverlordReport, OverviewResponse, Recommendation, User } from '../types';
+import type { AttentionGroup, Board, ChatAction, ChatTurn, FixRow, OverlordReport, OverviewResponse, Recommendation, User } from '../types';
 
 function ago(min: number | null): string {
   if (min === null) return '';
@@ -40,14 +40,24 @@ const field = 'px-2 py-1 rounded border border-slate-800/60 bg-slate-950/50 text
 /**
  * Chat with the overlord first, then its latest report and release plan, then the data:
  * open fixes (assign an agent, see who is on it), the attention list, the agent board with
- * budget, and the lanes.
+ * budget, and the lanes. The board itself is a snapshot; only overview.board refetches it.
  */
-const BOARD_RELOAD_DEBOUNCE_MS = 1500;
+export const BOARD_RELOAD_DEBOUNCE_MS = 5000;
 
-/** Which events change the board. Pane output and usage probes do not. */
+/** The snapshot is rebuilt in the background. Reload when that finishes, not on every event. */
 export function boardEventReloads(type: string): boolean {
-  if (type === 'agent.output_updated' || type === 'usage.probed') return false;
-  return /^(overlord|release|review|run|agent|task)\./.test(type);
+  return type === 'overview.board';
+}
+
+function attentionGroups(board: Board): AttentionGroup[] {
+  if (board.attention_groups && board.attention_groups.length > 0) return board.attention_groups;
+  const grouped = new Map<string, AttentionGroup['items']>();
+  for (const row of board.attention) {
+    const items = grouped.get(row.kind) ?? [];
+    items.push(row);
+    grouped.set(row.kind, items);
+  }
+  return [...grouped.entries()].map(([kind, items]) => ({ kind, count: items.length, items }));
 }
 
 export default function Overview() {
@@ -63,15 +73,16 @@ export default function Overview() {
   const [error, setError] = useState<string | null>(null);
   const [assignPick, setAssignPick] = useState<Record<string, string>>({});
   const [me, setMe] = useState<Pick<User, 'role'> | null>(null);
+  const [attentionPage, setAttentionPage] = useState(1);
   const isAdmin = me?.role === 'admin';
   const chatEnd = useRef<HTMLDivElement>(null);
 
   const fetchData = useCallback(() => {
-    apiGet<OverviewResponse>('/overview')
+    apiGet<OverviewResponse>(`/overview?attention_page=${attentionPage}`)
       .then((r) => { setBoard(r.board); setReport(r.report); setOverlord(r.overlord); setLoaded(true); })
       .catch(() => setLoaded(true));
     apiGet<User>('/me').then(setMe).catch(() => setMe(null));
-  }, []);
+  }, [attentionPage]);
   const fetchChat = useCallback(() => {
     apiGet<ChatTurn[]>('/overview/chat').then(setChat).catch(() => setChat([]));
   }, []);
@@ -79,11 +90,10 @@ export default function Overview() {
   useEffect(() => { fetchData(); fetchChat(); }, [fetchData, fetchChat]);
   useEffect(() => { chatEnd.current?.scrollIntoView?.({ block: 'nearest' }); }, [chat.length]);
 
-  // The board is rebuilt server-side on every fetch (git per freeze), so a burst of events
-  // costs one reload, and the pane-output tick (several a second on a busy box) costs none.
+  // The snapshot is already built. Wait out a burst of overview.board events, then read it once.
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleFetch = useCallback(() => {
-    if (reloadTimer.current) return;
+    if (reloadTimer.current) clearTimeout(reloadTimer.current);
     reloadTimer.current = setTimeout(() => { reloadTimer.current = null; fetchData(); }, BOARD_RELOAD_DEBOUNCE_MS);
   }, [fetchData]);
   useEffect(() => () => { if (reloadTimer.current) clearTimeout(reloadTimer.current); }, []);
@@ -368,24 +378,36 @@ export default function Overview() {
               </section>
             )}
 
-            {/* 4. Attention */}
-            {board.attention.length > 0 && (
+            {/* 4. Attention — one page, grouped, with the full count of each kind */}
+            {(board.attention_total ?? board.attention.length) > 0 && (
               <section className="rounded-lg border border-amber-500/25 bg-amber-950/10 p-3" data-testid="attention">
                 <p className="text-[10px] font-semibold tracking-wider text-amber-300 mb-1.5">NEEDS A DECISION</p>
-                <ul className="space-y-1 text-[11px] text-slate-300">
-                  {board.attention.map((a, i) => (
-                    <li key={i} className="flex items-center gap-2">
-                      <span className="text-[9px] text-amber-400/80 uppercase tracking-wider w-28 shrink-0">{a.kind.replace(/_/g, ' ')}</span>
-                      <span className="flex-1">{a.text}</span>
-                      {a.run_id && a.kind === 'promotable' && (
-                        <button onClick={() => navigate('/release')} className="text-[9px] text-emerald-300 underline underline-offset-2">release</button>
-                      )}
-                      {a.agent_id && a.kind !== 'fix_unassigned' && (
-                        <button onClick={() => navigate(`/agent/${a.agent_id}`)} className="text-[9px] text-sky-300 underline underline-offset-2">open</button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
+                {attentionGroups(board).map((group) => (
+                  <div key={group.kind} className="mb-2" data-testid={`attention-${group.kind}`}>
+                    <p className="text-[9px] uppercase tracking-wider text-amber-400/80 mb-1">{group.kind.replace(/_/g, ' ')} ({group.count})</p>
+                    <ul className="space-y-1 text-[11px] text-slate-300">
+                      {group.items.map((a, i) => (
+                        <li key={`${group.kind}-${i}`} className="flex items-center gap-2">
+                          <span className="flex-1">{a.text}</span>
+                          {a.run_id && a.kind === 'promotable' && (
+                            <button onClick={() => navigate('/release')} className="text-[9px] text-emerald-300 underline underline-offset-2">release</button>
+                          )}
+                          {a.agent_id && a.kind !== 'fix_unassigned' && (
+                            <button onClick={() => navigate(`/agent/${a.agent_id}`)} className="text-[9px] text-sky-300 underline underline-offset-2">open</button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+                <div className="flex gap-2 mt-1">
+                  {(board.attention_page ?? 1) > 1 && (
+                    <button onClick={() => setAttentionPage((p) => Math.max(1, p - 1))} className="text-[9px] text-amber-200 underline underline-offset-2">previous</button>
+                  )}
+                  {(board.attention_total ?? board.attention.length) > (board.attention_page ?? 1) * 20 && (
+                    <button onClick={() => setAttentionPage((p) => p + 1)} className="text-[9px] text-amber-200 underline underline-offset-2">more</button>
+                  )}
+                </div>
               </section>
             )}
 
@@ -469,6 +491,24 @@ export default function Overview() {
                 </ul>
               )}
             </section>
+
+            {/* 7. History — newest stale freeze per lane, not a decision */}
+            {(board.history?.length ?? 0) > 0 && (
+              <section>
+                <p className="text-[9px] uppercase tracking-[0.3em] text-slate-500 mb-2">History</p>
+                <ul className="divide-y divide-slate-800/50 rounded-lg border border-slate-800/60 text-[11px] opacity-70" data-testid="history">
+                  {board.history!.map((l) => (
+                    <li key={l.sha} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+                      <span className="text-slate-400">{l.project ?? '—'}{l.desk ? ` · Desk #${l.desk}` : ''}</span>
+                      <span className="font-mono text-slate-500" title={l.sha}>{l.sha.slice(0, 8)}</span>
+                      <span className="font-mono text-[10px] text-slate-600">{l.lane ?? ''}</span>
+                      <span className="text-[9px] font-bold tracking-wider text-slate-500">{l.status.toUpperCase()}</span>
+                      <span className="text-[10px] text-slate-500 ml-auto">{l.next}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
           </>
         )}
       </main>

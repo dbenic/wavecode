@@ -198,9 +198,9 @@ describe('product-desk.ts', () => {
     cfg.product_desk = { enabled: true, url: 'https://desk.test/api/product-desk', token_file: path.join(tmp, 'curl.conf'), poll_min: 5, project: 'wavepulse' };
     pd.setDeskFetchForTest(fakeDesk().fetchImpl);
     const ov = await import('./overview.js');
-    expect(ov.buildBoard().desk).toEqual([]); // nothing cached yet: the board never waits on the network
+    expect((await ov.buildBoard()).desk).toEqual([]); // nothing cached yet: the board never waits on the network
     await pd.fetchBoard(true);
-    const desk = ov.buildBoard().desk!;
+    const desk = (await ov.buildBoard()).desk!;
     expect(desk.map((d) => d.id)).toEqual([108, 91]);
     expect(desk[0]).toMatchObject({ status: 'implementing', title: 'PD-108 outgoing line VAT treatment', lanes: [], tasks: [] });
   });

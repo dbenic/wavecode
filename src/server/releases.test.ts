@@ -252,7 +252,7 @@ describe('releases.ts', () => {
       expect(rf.ingestFreezeFile(path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`)).ok).toBe(true);
 
       const ov = await import('./overview.js');
-      const board = ov.buildBoard();
+      const board = await ov.buildBoard();
       expect(board.candidates).toHaveLength(1);
       expect(board.candidates[0]).toMatchObject({ name: 'fable/rc-0443-2', tip, verified: null, lanes: [{ sha: laneSha, desk: 91 }] });
       expect(board.lanes[0]).toMatchObject({ candidate: 'fable/rc-0443-2', promotable: false });
@@ -260,7 +260,7 @@ describe('releases.ts', () => {
       // verification keyed by the candidate tip
       const v = await app.fetch(new Request('http://x/api/releases/verify', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sha: tip, project: 'wavepulse', note: 'smoke ok' }) }));
       expect(v.status).toBe(200);
-      expect(ov.buildBoard().candidates[0].verified).toMatchObject({ by: 'owner', note: 'smoke ok' });
+      expect((await ov.buildBoard()).candidates[0].verified).toMatchObject({ by: 'owner', note: 'smoke ok' });
 
       // the GO for the candidate: production request for the tip, lanes named in the note
       const go = await app.fetch(new Request('http://x/api/releases/candidates/fable%2Frc-0443-2/promote', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'wavepulse' }) }));

@@ -525,6 +525,25 @@ userCmd
     console.log(formatCreatedUser(result.data));
   });
 
+// --- purge stale reviews ---
+program
+  .command('purge-pending-reviews')
+  .description('Mark pending review runs older than 7 days with no review activity as abandoned. The runs stay in history.')
+  .option('--days <n>', 'minimum age in days', '7')
+  .option('--dry-run', 'count the runs that would be abandoned')
+  .action(async (opts: { days: string; dryRun?: boolean }) => {
+    initDb();
+    const days = Number(opts.days);
+    if (!Number.isFinite(days) || days < 1) {
+      console.error('--days must be a positive number');
+      process.exit(1);
+    }
+    const { purgeStalePendingReviews } = await import('../server/review-purge.js');
+    const result = purgeStalePendingReviews({ days, dryRun: opts.dryRun === true });
+    const verb = result.dry_run ? 'would abandon' : 'abandoned';
+    console.log(`${verb} ${result.abandoned.length} pending review run(s) older than ${result.days} day(s)`);
+  });
+
 // --- retro ---
 program
   .command('retro <room>')

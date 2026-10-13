@@ -52,13 +52,15 @@ describe('Overview', () => {
   });
 
   it('pane output ticks never reload the board; a burst of board events reloads it once', async () => {
-    const { boardEventReloads } = await import('./Overview');
+    const { boardEventReloads, BOARD_RELOAD_DEBOUNCE_MS } = await import('./Overview');
+    expect(BOARD_RELOAD_DEBOUNCE_MS).toBeGreaterThanOrEqual(5000);
     expect(boardEventReloads('agent.output_updated')).toBe(false);
     expect(boardEventReloads('usage.probed')).toBe(false);
-    expect(boardEventReloads('agent.status_changed')).toBe(true);
-    expect(boardEventReloads('run.finished')).toBe(true);
-    expect(boardEventReloads('release.deployed')).toBe(true);
+    expect(boardEventReloads('agent.status_changed')).toBe(false);
+    expect(boardEventReloads('run.finished')).toBe(false);
+    expect(boardEventReloads('release.deployed')).toBe(false);
     expect(boardEventReloads('message.created')).toBe(false);
+    expect(boardEventReloads('overview.board')).toBe(true);
   });
 
   it('the chat comes first, with history; asking posts the message', async () => {
