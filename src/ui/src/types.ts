@@ -512,6 +512,16 @@ export interface DeskBoardRow {
   tasks: Array<{ num: number | null; status: string; agent: string | null }>;
 }
 
+export interface DeskTrackingRow {
+  id: number;
+  status: string;
+  title: string;
+  updated_at: string | null;
+  builders: string[];
+  flags: Array<'idle_24h' | 'two_builders' | 'unreviewed' | 'suggest_close'>;
+  note: string;
+}
+
 /** What an open login seat shows (GET /api/profiles/:name/login/:runtime). */
 export interface LoginHint {
   open: boolean;
@@ -557,6 +567,7 @@ export interface Board {
   history?: LaneBoardRow[];
   candidates: CandidateRow[];
   desk: DeskBoardRow[] | null;
+  desk_tracking?: DeskTrackingRow[] | null;
   fixes: FixRow[];
   attention: AttentionRow[];
   attention_groups?: AttentionGroup[];

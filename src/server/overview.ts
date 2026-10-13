@@ -17,6 +17,7 @@ import { ensureReleaseTables, verificationFor, type ReleaseRequest } from './rel
 import { readLaneTests, shaChecks, suiteNames, testsConfigured, type ShaChecks } from './test-runs.js';
 import { deskConfig, OPEN_STATUSES, type DeskItem } from './product-desk.js';
 import * as productDesk from './product-desk.js';
+import { linksFromIndex, loadDeskWork, trackOpenDesks, type DeskTrackingRow } from './desk-tracking.js';
 import * as leases from './leases.js';
 import * as taskDispatcher from './task-dispatcher.js';
 
@@ -91,7 +92,7 @@ export interface LaneBoardRow {
 }
 
 export interface AttentionRow {
-  kind: 'needs_reviewer' | 'hung' | 'crashed' | 'stale' | 'release_failed' | 'awaiting_answer' | 'promotable' | 'idle_with_open_work' | 'fix_unassigned';
+  kind: 'needs_reviewer' | 'hung' | 'crashed' | 'stale' | 'release_failed' | 'awaiting_answer' | 'promotable' | 'idle_with_open_work' | 'fix_unassigned' | 'desk_idle' | 'desk_two_builders' | 'desk_unreviewed' | 'desk_close';
   text: string;
   agent_id?: string;
   run_id?: string;
@@ -144,6 +145,8 @@ export interface Board {
   candidates: CandidateRow[];
   /** null = Product Desk not configured */
   desk: DeskBoardRow[] | null;
+  /** Open requests with idle, split, review, and close flags. Null when the desk is off. */
+  desk_tracking: DeskTrackingRow[] | null;
   fixes: FixRow[];
   /** Full list in the snapshot. GET /api/overview replaces this with one page. */
   attention: AttentionRow[];
@@ -507,6 +510,7 @@ function emptyBoard(now = Date.now()): Board {
     history: [],
     candidates: [],
     desk: null,
+    desk_tracking: null,
     fixes: [],
     attention: [],
     counts: { working: 0, idle: 0, error: 0, open_lanes: 0, promotable: 0, releases_open: 0, open_fixes: 0, unassigned_fixes: 0 },
@@ -538,6 +542,7 @@ export function readOverviewSnapshot(): Board {
     if (!parsed || !Array.isArray(parsed.agents) || !Array.isArray(parsed.attention)) return emptyBoard();
     parsed.history ??= [];
     parsed.lanes ??= [];
+    parsed.desk_tracking ??= null;
     parsed.fixes ??= [];
     parsed.candidates ??= [];
     return parsed;
@@ -776,16 +781,26 @@ function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Board {
   }
 
   let desk: DeskBoardRow[] | null = null;
+  let deskTracking: DeskTrackingRow[] | null = null;
   if (deskConfig().enabled) {
     const cached = productDesk.cachedBoard();
-    desk = (cached ?? []).filter((d: DeskItem) => OPEN_STATUSES.has(d.status)).map((d) => {
-      const links = productDesk.linksFor(d.id);
+    const open = (cached ?? []).filter((d: DeskItem) => OPEN_STATUSES.has(d.status));
+    const work = loadDeskWork();
+    desk = open.map((d) => {
+      const links = linksFromIndex(work, d.id);
       return {
         id: d.id, status: d.status, title: d.title, area: d.area, priority: d.priority, target_version: d.target_version, updated_at: d.updated_at,
         lanes: links.lanes.map((l) => ({ sha: l.sha, verdict: l.verdict, status: l.status })),
         tasks: links.tasks.map((t) => ({ num: t.num, status: t.status, agent: t.agent_name })),
       };
     });
+    deskTracking = trackOpenDesks(open, work, agents.map((a) => ({ id: a.id, name: a.name, status: a.status, for_min: a.for_min })), now);
+    for (const row of deskTracking) {
+      if (row.flags.includes('idle_24h')) attention.push({ kind: 'desk_idle', text: `Desk #${row.id} ${row.title}: idle more than 24 h` });
+      if (row.flags.includes('two_builders')) attention.push({ kind: 'desk_two_builders', text: `Desk #${row.id} ${row.title}: ${row.builders.join(' and ')} are both on it without a split` });
+      if (row.flags.includes('unreviewed')) attention.push({ kind: 'desk_unreviewed', text: `Desk #${row.id} ${row.title}: work is done and still unreviewed` });
+      if (row.flags.includes('suggest_close')) attention.push({ kind: 'desk_close', text: `Desk #${row.id} ${row.title}: all linked work is live while still implementing — suggest closing` });
+    }
   }
 
   let releasesOpen = 0;
@@ -803,6 +818,7 @@ function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Board {
     history,
     candidates,
     desk,
+    desk_tracking: deskTracking,
     fixes,
     attention,
     counts: {

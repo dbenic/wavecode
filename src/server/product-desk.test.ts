@@ -203,5 +203,25 @@ describe('product-desk.ts', () => {
     const desk = (await ov.buildBoard()).desk!;
     expect(desk.map((d) => d.id)).toEqual([108, 91]);
     expect(desk[0]).toMatchObject({ status: 'implementing', title: 'PD-108 outgoing line VAT treatment', lanes: [], tasks: [] });
+    expect(ov.buildBoard().desk_tracking?.map((row) => row.id)).toEqual([108, 91]);
+  });
+
+  it('the overview snapshot flags two builders on one request and tells the overlord, without writing to the desk', async () => {
+    pd.setDeskFetchForTest(fakeDesk().fetchImpl);
+    await pd.fetchBoard(true);
+    const claude = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: path.join(tmp, 'ws', 'claude2'), mode: 'spawned', status: 'idle' });
+    const codex = db.insertAgent({ name: 'codex2', runtime: 'codex', tmux_session: 'wc-codex2', workspace: path.join(tmp, 'ws', 'codex2'), mode: 'spawned', status: 'idle' });
+    if (!claude.ok || !codex.ok) throw new Error('agents');
+    db.insertTask({ prompt: '[desk 108] first pass', agent_id: claude.data.id, created_by: null });
+    db.insertTask({ prompt: 'Desk #108 second pass', agent_id: codex.data.id, created_by: null });
+    const ov = await import('./overview.js');
+    const board = ov.buildBoard();
+    const row = board.desk_tracking?.find((item) => item.id === 108);
+    expect(row?.flags).toContain('two_builders');
+    expect(board.attention.some((item) => item.kind === 'desk_two_builders' && item.text.includes('Desk #108'))).toBe(true);
+    const overlord = await import('./overlord.js');
+    const prompt = JSON.parse(overlord.buildPrompt(board, 'heartbeat', null)) as { desk_tracking: Array<{ id: number; flags: string[] }> };
+    expect(prompt.desk_tracking.find((item) => item.id === 108)?.flags).toContain('two_builders');
+    expect(pd.deskState().error).toBeNull();
   });
 });
