@@ -9,7 +9,7 @@ import { getAgent, getDb, getRun, insertTask, listAgents, resolveAgent, type Age
 import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
 import { candidateFor, ensureReleaseFreezeTable, getFreezeByRun, listCandidates, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
-import { autoResolveObsoleteFreezes } from './freeze-resolve.js';
+import { autoResolveObsoleteFreezes, isMergedNotDeployed } from './freeze-resolve.js';
 import { commitsBehind, isMergeOnlyDelta, laneAutomationDenied, projectRepo, resolveMainRef, withRefMemo } from './lane-main.js';
 import { behindMainLine, fullFailFlag, needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { emit } from './event-bus.js';
@@ -640,6 +640,16 @@ function buildBoardPass(now: number): Board {
   const verified = loadVerified(releaseShas);
   const summaries = loadSummaries([...new Set([...laneFreezes, ...historyFreezes].map((f) => f.run_id).filter((id): id is string => !!id))]);
 
+  const awaitingDeploy = new Map<string, boolean>();
+  const mergedNotDeployed = (project: string | null, sha: string): boolean => {
+    const key = `${project ?? ''}\0${sha}`;
+    const cached = awaitingDeploy.get(key);
+    if (cached !== undefined) return cached;
+    const value = isMergedNotDeployed(project, sha);
+    awaitingDeploy.set(key, value);
+    return value;
+  };
+
   const toRow = (f: RankedFreeze, mergeOnly: boolean): LaneBoardRow => {
     const rels = releases.get(f.sha) ?? [];
     const staging = rels.find((r) => r.target === 'staging') ?? null;
@@ -649,7 +659,9 @@ function buildBoardPass(now: number): Board {
       try { candidate = candidateFor(f.project, f.sha, now)?.name ?? null; } catch { candidate = null; }
     }
     const checks = f.status === 'stale' ? null : liveChecks(f);
-    const step = nextStep(f, staging, production, candidate, checks);
+    const step = mergedNotDeployed(f.project, f.sha)
+      ? { next: 'merged, not yet deployed', promotable: false }
+      : nextStep(f, staging, production, candidate, checks);
     const promotable = step.promotable && !mergeOnly && f.status === 'open' && !stagedOrShipped(staging?.status) && !stagedOrShipped(production?.status);
     const sha8 = f.sha.slice(0, 8);
     const fullGreen = checks ? checks.full === 'green' : f.gate === 'GREEN' || !f.gate;
@@ -682,6 +694,7 @@ function buildBoardPass(now: number): Board {
   const inCandidate = new Set(lanes.filter((l) => l.candidate).map((l) => l.sha));
   const fixFreezes = newest.filter((f) => {
     if (!f.run_id || f.status === 'stale' || f.status === 'merged') return false;
+    if (mergedNotDeployed(f.project, f.sha)) return false;
     if (mergeOnlyShas.has(f.sha)) return false;
     if (inCandidate.has(f.sha)) return false;
     if (!withinFixWindow(f.updated_at, now)) return false;

@@ -219,7 +219,7 @@ describe('overview snapshot', () => {
     expect(made.task.prompt).toContain('From owner: please today');
   });
 
-  it('closes a freeze already on main and on the deploy tip, an empty cherry, and a rejected lane that moved ahead', () => {
+  it('closes a freeze on the deploy tip, leaves a cherry-pick that is not deployed open, and closes a rejected lane that moved ahead', () => {
     const repo = path.join(tmp, 'repo');
     fs.mkdirSync(repo);
     projects.wave = { repo, lane_glob: 'wc-*' };
@@ -268,16 +268,86 @@ describe('overview snapshot', () => {
     });
     setFarAheadForTest(2);
 
-    expect(autoResolveObsoleteFreezes()).toBe(3);
-    const statusOf = (sha: string) => db.getDb().prepare('SELECT status, superseded_by FROM release_freezes WHERE sha = ?').get(sha) as { status: string; superseded_by: string };
+    expect(autoResolveObsoleteFreezes()).toBe(2);
+    const statusOf = (sha: string) => db.getDb().prepare('SELECT status, superseded_by FROM release_freezes WHERE sha = ?').get(sha) as { status: string; superseded_by: string | null };
     expect(statusOf(shipped)).toMatchObject({ status: 'merged', superseded_by: 'shipped' });
-    expect(statusOf(cherrySha)).toMatchObject({ status: 'stale', superseded_by: 'empty' });
+    expect(statusOf(cherrySha)).toMatchObject({ status: 'open', superseded_by: null });
     expect(statusOf(rejected).status).toBe('stale');
     const board = ov.buildBoard();
     expect(board.attention.filter((row) => row.kind === 'promotable' || row.kind === 'fix_unassigned')).toEqual([]);
+    expect(board.lanes.find((row) => row.sha === cherrySha)?.next).toBe('merged, not yet deployed');
     expect(board.fixes.map((row) => row.sha)).not.toContain(cherrySha);
     expect(board.fixes.map((row) => row.sha)).not.toContain(rejected);
     expect(board.lanes.map((row) => row.sha)).not.toContain(shipped);
+  });
+
+  it('closes a cherry-pick once the main commit is contained in the deploy tip', () => {
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    projects.wave = { repo, lane_glob: 'wc-*' };
+    git(repo, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'base');
+    git(repo, 'checkout', '-q', '-b', 'wc-empty');
+    fs.writeFileSync(path.join(repo, 'b.txt'), 'same');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'lane patch');
+    const cherrySha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'cherry-pick', '--no-commit', cherrySha);
+    git(repo, 'commit', '-q', '-m', 'same patch on main');
+    const mainEq = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', mainEq);
+    const agent = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'spawned', status: 'idle' });
+    if (!agent.ok) throw new Error(agent.error);
+    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00' });
+    db.getDb().prepare(
+      `INSERT INTO release_requests (id, project, sha, target, status, origin, deployed_sha) VALUES ('rel-cherry', 'wave', ?, 'staging', 'deployed', 'local', ?)`,
+    ).run(mainEq, mainEq);
+
+    expect(autoResolveObsoleteFreezes()).toBe(1);
+    const row = db.getDb().prepare('SELECT status, superseded_by FROM release_freezes WHERE sha = ?').get(cherrySha) as { status: string; superseded_by: string };
+    expect(row).toMatchObject({ status: 'merged', superseded_by: mainEq });
+  });
+
+  it('leaves a deployed cherry-pick open when the deploy tip cannot be read', () => {
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    projects.wave = { repo, lane_glob: 'wc-*' };
+    git(repo, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'base');
+    git(repo, 'checkout', '-q', '-b', 'wc-empty');
+    fs.writeFileSync(path.join(repo, 'b.txt'), 'same');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'lane patch');
+    const cherrySha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'cherry-pick', '--no-commit', cherrySha);
+    git(repo, 'commit', '-q', '-m', 'same patch on main');
+    const mainEq = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', mainEq);
+    const agent = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'spawned', status: 'idle' });
+    if (!agent.ok) throw new Error(agent.error);
+    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00' });
+    db.getDb().prepare(
+      `INSERT INTO release_requests (id, project, sha, target, status, origin, deployed_sha) VALUES ('rel-cherry', 'wave', ?, 'staging', 'deployed', 'local', ?)`,
+    ).run(mainEq, mainEq);
+    const spy = vi.spyOn(releasesApi, 'currentStagingTip').mockImplementation(() => {
+      throw new Error('unreadable tip');
+    });
+    try {
+      expect(autoResolveObsoleteFreezes()).toBe(0);
+      const row = db.getDb().prepare('SELECT status FROM release_freezes WHERE sha = ?').get(cherrySha) as { status: string };
+      expect(row.status).toBe('open');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(autoResolveObsoleteFreezes()).toBe(1);
+    const closed = db.getDb().prepare('SELECT status FROM release_freezes WHERE sha = ?').get(cherrySha) as { status: string };
+    expect(closed.status).toBe('merged');
   });
 
   it('a merge-only tip is not promotable and a stale merge-main tip is not a decision', () => {

@@ -2,9 +2,11 @@
  * Close freezes the overview must not ask anyone about.
  * Runs in the background reconciler, never on GET /api/overview.
  *
- * Shipped: the SHA is already in origin/main and in the deploy tip.
- * Superseded: `git cherry` shows nothing new against main, or a rejected
- * freeze whose lane tip has moved far ahead.
+ * Shipped: the SHA, or the main commit with the same patch, is contained in
+ * a deploy tip we could read. An empty `git cherry` or a `-` line (cherry-pick
+ * or squash) is not enough — the equivalent commit has to be in that tip.
+ * When the tip cannot be read, nothing closes.
+ * Superseded: a rejected freeze whose lane tip has moved far ahead.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -56,30 +58,87 @@ function onMain(repo: string, sha: string): boolean | null {
   return null;
 }
 
-/**
- * `git cherry` prefixes commits still missing from main with `+`.
- * Nothing new (empty output, or only `-` equivalents) is an empty diff.
- * Null when git cannot say — those freezes stay open.
- */
-function cherryEmpty(repo: string, sha: string): boolean | null {
-  const out = gitText(repo, ['cherry', 'origin/main', sha]) ?? gitText(repo, ['cherry', 'main', sha]);
-  if (out == null) return null;
-  const lines = out.split('\n').map((line) => line.trim()).filter(Boolean);
-  return !lines.some((line) => line.startsWith('+'));
+/** A readable deploy tip. `unknown` is a read error — callers fail closed and do not close. */
+export type DeployTipRead = { state: 'known'; sha: string | null } | { state: 'unknown' };
+
+function upstreamRef(repo: string): 'origin/main' | 'main' | null {
+  if (gitOk(repo, ['rev-parse', '--verify', '--quiet', 'origin/main']) === true) return 'origin/main';
+  if (gitOk(repo, ['rev-parse', '--verify', '--quiet', 'main']) === true) return 'main';
+  return null;
 }
 
-function deployTip(project: string | null): string | null {
-  if (!project) return null;
+/**
+ * Main commits that carry the same patch as `sha`.
+ * Empty when `git cherry` still shows a `+` (work that is not on main).
+ * Null when git cannot say — callers leave the freeze open.
+ */
+function mainEquivalents(repo: string, sha: string): string[] | null {
+  const upstream = upstreamRef(repo);
+  if (!upstream) return null;
+  const out = gitText(repo, ['cherry', upstream, sha]);
+  if (out == null) return null;
+  const lines = out.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.some((line) => line.startsWith('+'))) return [];
+  if (lines.length === 0) {
+    const hit = containedIn(repo, sha, upstream);
+    if (hit === true) return [sha.toLowerCase()];
+    return hit === false ? [] : null;
+  }
+  const laneShas: string[] = [];
+  for (const line of lines) {
+    const match = /^-\s+([0-9a-f]{40})$/i.exec(line);
+    if (!match?.[1]) return null;
+    laneShas.push(match[1].toLowerCase());
+  }
+  const marked = gitText(repo, ['rev-list', '--cherry-mark', `${upstream}...${sha}`]);
+  if (marked == null) return null;
+  const onMain: string[] = [];
+  for (const line of marked.split('\n').map((item) => item.trim()).filter(Boolean)) {
+    if (!line.startsWith('=')) continue;
+    const id = line.slice(1).toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(id) || laneShas.includes(id)) continue;
+    const hit = containedIn(repo, id, upstream);
+    if (hit === null) return null;
+    if (hit) onMain.push(id);
+  }
+  if (onMain.length !== laneShas.length) return null;
+  return onMain;
+}
+
+function deployTip(project: string | null): DeployTipRead {
+  if (!project) return { state: 'unknown' };
   try {
     ensureReleaseTables();
     const staging = currentStagingTip(project)?.sha ?? null;
-    if (staging && /^[0-9a-f]{40}$/i.test(staging)) return staging.toLowerCase();
+    if (staging) {
+      if (!/^[0-9a-f]{40}$/i.test(staging)) return { state: 'unknown' };
+      return { state: 'known', sha: staging.toLowerCase() };
+    }
     const prod = listReleases({ project, target: 'production', status: 'deployed', limit: 1 })[0];
     const sha = prod?.deployed_sha || prod?.sha || null;
-    return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha.toLowerCase() : null;
+    if (!sha) return { state: 'known', sha: null };
+    if (!/^[0-9a-f]{40}$/i.test(sha)) return { state: 'unknown' };
+    return { state: 'known', sha: sha.toLowerCase() };
   } catch {
-    return null;
+    return { state: 'unknown' };
   }
+}
+
+/**
+ * The patch is already on main, and a readable deploy tip does not contain it.
+ * Unknown tip or unknown git result stays false so the row remains a decision.
+ */
+export function isMergedNotDeployed(project: string | null, sha: string): boolean {
+  const repo = projectRepo(project);
+  if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return false;
+  const tip = deployTip(project);
+  if (tip.state !== 'known') return false;
+  const equivalents = mainEquivalents(repo, sha);
+  if (!equivalents || equivalents.length === 0) return false;
+  if (!tip.sha) return true;
+  const hits = equivalents.map((id) => containedIn(repo, id, tip.sha!));
+  if (hits.some((hit) => hit == null)) return false;
+  return hits.some((hit) => hit === false);
 }
 
 function laneTip(repo: string, project: string | null, lane: string): string | null {
@@ -123,16 +182,22 @@ export function autoResolveObsoleteFreezes(): number {
     const repo = projectRepo(freeze.project);
     if (!repo || !/^[0-9a-f]{40}$/i.test(freeze.sha)) continue;
     const tip = deployTip(freeze.project);
-    const shipped = onMain(repo, freeze.sha) === true && !!tip && containedIn(repo, freeze.sha, tip) === true;
-    if (shipped) {
-      closeFreeze(freeze, 'merged', 'shipped');
-      n++;
-      continue;
-    }
-    if (cherryEmpty(repo, freeze.sha) === true) {
-      closeFreeze(freeze, 'stale', 'empty');
-      n++;
-      continue;
+    // Unreadable tip: fail closed. Never close, including a cherry `-` we cannot prove is deployed.
+    if (tip.state === 'unknown') continue;
+    if (tip.sha) {
+      const shipped = onMain(repo, freeze.sha) === true && containedIn(repo, freeze.sha, tip.sha) === true;
+      if (shipped) {
+        closeFreeze(freeze, 'merged', 'shipped');
+        n++;
+        continue;
+      }
+      const equivalents = mainEquivalents(repo, freeze.sha);
+      const deployed = !!equivalents?.length && equivalents.every((id) => containedIn(repo, id, tip.sha!) === true);
+      if (deployed && equivalents) {
+        closeFreeze(freeze, 'merged', equivalents[0] ?? 'shipped');
+        n++;
+        continue;
+      }
     }
     if (freeze.status === 'rejected' && freeze.lane) {
       const head = laneTip(repo, freeze.project, freeze.lane);
