@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPut } from '../hooks/useApi';
 import ProfilesPanel from '../components/ProfilesPanel';
+import PerfPanel from '../components/PerfPanel';
 
 interface SettingsData {
   server: { port: number; host: string };
@@ -138,6 +139,9 @@ export default function Settings() {
       <main className="max-w-2xl mx-auto px-4 py-6 space-y-6">
         {/* Profiles · subscriptions (what a new developer needs first) */}
         <ProfilesPanel />
+
+        {/* Health · daemon (admins): is it keeping up? */}
+        <PerfPanel />
 
         {/* LLM Configuration */}
         <section className="rounded-lg border border-slate-800/50 bg-slate-900/50 overflow-hidden">

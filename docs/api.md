@@ -210,6 +210,17 @@ List persisted team messages.
 
 ## Tasks
 
+### `GET /api/health/perf`
+Admin only. What the daemon spends its time on, for Settings → Health:
+
+- `loop_ms` — event-loop delay over the last minute (`p50`, `p99`, `max`, `mean`); `lag_threshold_ms` (500) is where the board calls it lagging and `perf.lag` is emitted (at most every 5 minutes).
+- `last_minute` / `last_15_min` — child processes forked, by command (`git merge-base`, `tmux capture-pane`, …), how many ran synchronously and how long they blocked the loop (`sync_blocked_ms`).
+- `jobs` — last and max duration of the background passes: `deploy_reconcile`, `overview_reconcile`, `lane_board`, `event_prune`.
+- `storage` — row counts (`events`, `events_short_lived`, `freezes`, `tasks`, `runs`) and `db_bytes`.
+- `cpu_pct`, `rss_mb`, `uptime_s`.
+
+Event retention (`events:` in config.yaml, event-retention.ts): `short_lived_types` (default `agent.output_updated`, `queue.empty`) are kept `short_hours` (24); everything else `retention_days` (90). One pass 30 s after start, then every 6 hours; `events.pruned` reports what was dropped.
+
 ### `GET /api/tasks`
 List tasks.
 

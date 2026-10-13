@@ -28,6 +28,7 @@ import { registerReleaseRoutes } from './routes/releases.js';
 import { registerOverviewRoutes } from './routes/overview.js';
 import { registerDeskRoutes } from './routes/desk.js';
 import { registerDiagramRoutes } from './routes/diagrams.js';
+import { registerHealthRoutes } from './routes/health.js';
 import { registerMcpHttpRoutes } from '../mcp/http.js';
 import './lane-pipeline.js';
 
@@ -69,6 +70,7 @@ export function createApp(): Hono<NodeAppEnv> {
   registerDecisionRoutes(app);
   registerGoalRoutes(app);
   registerMessageRoutes(app);
+  registerHealthRoutes(app);
   registerUserRoutes(app);
   registerThreadRoutes(app);
   registerProfileRoutes(app);

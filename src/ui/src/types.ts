@@ -702,3 +702,17 @@ export interface ChatMessage {
   tool_calls: string | null;
   created_at: string;
 }
+
+/** GET /api/health/perf (admin): what the daemon spends its time on. */
+export interface PerfSnapshot {
+  at: string;
+  uptime_s: number;
+  loop_ms: { p50: number; p99: number; max: number; mean: number } | null;
+  cpu_pct: number | null;
+  rss_mb: number;
+  last_minute: { spawns: Record<string, number>; sync_spawns: number; sync_blocked_ms: number };
+  last_15_min: { spawns: Record<string, number>; sync_spawns: number; sync_blocked_ms: number };
+  jobs: Record<string, { last_ms: number; last_at: string; max_ms: number; runs: number }>;
+  lag_threshold_ms: number;
+  storage: { events: number; events_short_lived: number; freezes: number; tasks: number; runs: number; db_bytes: number | null };
+}

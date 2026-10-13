@@ -8,6 +8,7 @@ import { MemoryRouter } from 'react-router-dom';
 import Settings from './Settings';
 
 vi.mock('../components/ProfilesPanel', () => ({ default: () => <div data-testid="profiles-panel" /> }));
+vi.mock('../components/PerfPanel', () => ({ default: () => <div data-testid="perf-panel" /> }));
 vi.mock('../hooks/useApi', () => ({
   apiGet: vi.fn(),
   apiPut: vi.fn(),

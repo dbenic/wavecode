@@ -274,6 +274,12 @@ export interface WaveConfig {
     telegram_bot_token: string | null;
     telegram_chat_id: string | null;
   };
+  /** Journal retention: pane-output ticks for a day, everything else for 90 days (event-retention.ts). */
+  events?: {
+    short_lived_types?: string[];
+    short_hours?: number;
+    retention_days?: number;
+  };
   artifacts: {
     storage: string;
     retention_days: number;
@@ -623,6 +629,14 @@ export function validateConfig(cfg: WaveConfig): void {
     if (o.model !== undefined && (typeof o.model !== 'string' || !/^[\w.-]{3,64}$/.test(o.model))) throw new Error('overlord.model must be a model id like claude-sonnet-5-5');
     for (const k of ['heartbeat_min', 'max_wakes_per_hour', 'debounce_s'] as const) {
       if (o[k] !== undefined && (typeof o[k] !== 'number' || !(o[k]! >= 0))) throw new Error(`overlord.${k} must be a number >= 0`);
+    }
+  }
+  if (cfg.events) {
+    for (const k of ['short_hours', 'retention_days'] as const) {
+      if (cfg.events[k] !== undefined && (typeof cfg.events[k] !== 'number' || !(cfg.events[k]! >= 0))) throw new Error(`events.${k} must be a number >= 0`);
+    }
+    if (cfg.events.short_lived_types !== undefined && (!Array.isArray(cfg.events.short_lived_types) || !cfg.events.short_lived_types.every((t) => typeof t === 'string' && /^[\w.]+$/.test(t)))) {
+      throw new Error('events.short_lived_types must be a list of event type names');
     }
   }
   if (cfg.releases?.deploy_agent != null && (typeof cfg.releases.deploy_agent !== 'string' || !/^@?[\w.-]{1,64}$/.test(cfg.releases.deploy_agent))) {
