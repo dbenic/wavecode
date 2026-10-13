@@ -765,6 +765,12 @@ async function runOnce(reason: string): Promise<void> {
     } catch (e) {
       logger.warn({ reason, error: (e as Error).message }, 'Review reassignment skipped');
     }
+    try {
+      const overview = await import('./overview.js');
+      overview.reconcileOverview();
+    } catch (e) {
+      logger.warn({ reason, error: (e as Error).message }, 'Overview reconcile skipped');
+    }
   } finally {
     running = false;
     if (again) {

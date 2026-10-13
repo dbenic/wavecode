@@ -64,6 +64,8 @@ export interface Task {
   template?: string | null;
   /** Explicit reviewer agent id (assignment ladder rung 1); null = let the ladder pick. */
   reviewer?: string | null;
+  /** Exact freeze SHA this task was queued to fix. Lookup key for the overview; the prompt still carries `[fix <sha8>]`. */
+  fix_sha?: string | null;
 }
 
 export const GOAL_STATUSES = ['active', 'done', 'failed', 'cancelled'] as const;
@@ -102,7 +104,7 @@ export interface Run {
   finished_at: string | null;
   exit_code: number | null;
   transcript_path: string | null;
-  review_status: 'pending' | 'approved' | 'rejected';
+  review_status: 'pending' | 'approved' | 'rejected' | 'abandoned';
   changed_files: string | null;  // JSON array of file paths
   result_path: string | null;
   /** Final prose the agent wrote for this run (spec §5b), pane-extracted at completion. */
@@ -280,7 +282,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 24;
+export const SCHEMA_VERSION = 25;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -339,9 +341,11 @@ const SCHEMA_SQL = `
     num INTEGER,
     room TEXT,
     template TEXT,
-    reviewer TEXT
+    reviewer TEXT,
+    fix_sha TEXT
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_num ON tasks(num) WHERE num IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_tasks_fix_sha ON tasks(fix_sha) WHERE fix_sha IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS task_dependencies (
     task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -913,6 +917,11 @@ const MIGRATIONS: Record<number, string> = {
   23: `
     ALTER TABLE agents ADD COLUMN tmux_socket TEXT;
   `,
+  // v24 → v25: a fix task points at the freeze SHA. The overview no longer scans prompts with LIKE.
+  24: `
+    ALTER TABLE tasks ADD COLUMN fix_sha TEXT;
+    CREATE INDEX IF NOT EXISTS idx_tasks_fix_sha ON tasks(fix_sha) WHERE fix_sha IS NOT NULL;
+  `,
 };
 
 let db: Database.Database;
@@ -1146,14 +1155,15 @@ export function insertTask(task: {
   room?: string | null;
   template?: string | null;
   reviewer?: string | null;
+  fix_sha?: string | null;
 }): Result<Task> {
   const id = generateId();
   const createdBy = task.created_by === undefined ? currentActorId() : task.created_by;
   try {
     getDb().prepare(`
-      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num, room, template, reviewer)
-      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks), ?, ?, ?)
-    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy, task.room ?? null, task.template ?? null, task.reviewer ?? null);
+      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num, room, template, reviewer, fix_sha)
+      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks), ?, ?, ?, ?)
+    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy, task.room ?? null, task.template ?? null, task.reviewer ?? null, task.fix_sha ?? null);
     const row = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task;
     return { ok: true, data: row };
   } catch (e) {

@@ -1,21 +1,17 @@
 import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
-import { isAdmin } from '../users.js';
-import { buildBoard, cachedBoard, fixMarker } from '../overview.js';
+import { assignFixTask, pageAttention, readOverviewSnapshot, reconcileOverview } from '../overview.js';
 import * as overlord from '../overlord.js';
-import { canMutate } from '../users.js';
-import { getDb, getRun, insertTask, resolveAgent } from '../db.js';
-import { emit } from '../event-bus.js';
-import * as taskDispatcher from '../task-dispatcher.js';
-import * as leases from '../leases.js';
-import { getFreezeByRun } from '../release-freezes.js';
+import { canMutate, isAdmin } from '../users.js';
+import { purgeStalePendingReviews } from '../review-purge.js';
 
 /** The board (overview.ts) and the overlord's reports (overlord.ts). */
 export function registerOverviewRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/overview', (c) => {
     const cfg = overlord.overlordConfig();
+    const page = Number(c.req.query('attention_page') ?? 1) || 1;
     return c.json({
-      board: cachedBoard(),
+      board: pageAttention(readOverviewSnapshot(), page),
       report: overlord.getLatestReport(),
       overlord: { enabled: cfg.enabled, model: cfg.model, heartbeat_min: cfg.heartbeatMin, max_wakes_per_hour: cfg.maxWakesPerHour },
     });
@@ -45,30 +41,31 @@ export function registerOverviewRoutes(app: Hono<NodeAppEnv>): void {
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<{ run_id?: unknown; agent_id?: unknown; note?: unknown }>().catch(() => ({} as Record<string, unknown>));
     if (typeof body.run_id !== 'string' || typeof body.agent_id !== 'string') return c.json({ error: 'run_id and agent_id are required' }, 400);
-    const run = getRun(body.run_id);
-    if (!run.ok) return c.json({ error: run.error }, 404);
-    const freeze = getFreezeByRun(body.run_id);
-    if (!freeze) return c.json({ error: 'Only a release freeze (a lane with an exact SHA) can be assigned as a fix' }, 400);
-    const agent = resolveAgent(body.agent_id);
-    if (!agent.ok) return c.json({ error: agent.error }, 404);
-    const access = leases.checkAgentAccess(agent.data, user);
-    if (!access.ok) return c.json({ error: access.error }, 403);
-    const open = getDb().prepare("SELECT id, num FROM tasks WHERE prompt LIKE ? AND status IN ('pending','running','blocked') ORDER BY created_at DESC LIMIT 1")
-      .get(`%${fixMarker(freeze.sha)}%`) as { id: string; num: number | null } | undefined;
-    if (open) return c.json({ error: `A fix task is already open for ${freeze.sha.slice(0, 8)} (#${open.num ?? open.id})` }, 409);
-    const what = freeze.verdict === 'needs-fixes' || freeze.verdict === 'reject' ? 'the review findings' : 'the failed release';
-    const prompt = [
-      `${fixMarker(freeze.sha)} Fix ${what} on lane ${freeze.lane ?? '?'}${freeze.desk ? ` (Desk #${freeze.desk})` : ''}, frozen at exact SHA ${freeze.sha}.`,
-      freeze.verdict_path ? `Verdict: ${freeze.verdict_path}` : null,
-      freeze.freeze_path ? `Freeze note: ${freeze.freeze_path}` : null,
-      typeof body.note === 'string' && body.note.trim() ? `From ${user.name}: ${body.note.trim().slice(0, 1000)}` : null,
-      'Address every finding, run the touched tests, then refreeze with a new freeze note and ask the same reviewer for a verdict on the new exact SHA (agent-operating-rules §3a).',
-    ].filter(Boolean).join('\n');
-    const task = insertTask({ prompt, agent_id: agent.data.id, priority: 1, ...(freeze.project ? { room: freeze.project } : {}), ...(freeze.reviewer_agent_id && freeze.reviewer_agent_id !== agent.data.id ? { reviewer: freeze.reviewer_agent_id } : {}) });
-    if (!task.ok) return c.json({ error: task.error }, 400);
-    emit('task.created', 'task', task.data.id, { agent_id: agent.data.id, prompt: prompt.slice(0, 300), fix_sha: freeze.sha, run_id: body.run_id, via: 'overview_fix' });
-    setTimeout(() => { void taskDispatcher.dispatchNext().catch(() => { /* dispatcher logs */ }); }, 500);
-    return c.json({ task: task.data, sha: freeze.sha, agent: { id: agent.data.id, name: agent.data.name } }, 201);
+    const made = assignFixTask({
+      runId: body.run_id,
+      agentId: body.agent_id,
+      note: typeof body.note === 'string' ? body.note : null,
+      user,
+      via: 'overview_fix',
+      enforceLease: true,
+    });
+    if (!made.ok) {
+      const status = made.status === 403 || made.status === 404 || made.status === 409 ? made.status : 400;
+      return c.json({ error: made.error }, status);
+    }
+    try { reconcileOverview(); } catch { /* the assignment is stored; the next reconcile fills the snapshot */ }
+    return c.json({ task: made.task, sha: made.sha, agent: made.agent }, 201);
+  });
+
+  // Abandon pending review runs older than 7 days that nobody reviewed. Rows stay.
+  app.post('/api/overview/reviews/purge', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ days?: unknown; dry_run?: unknown }>().catch(() => ({} as { days?: unknown; dry_run?: unknown }));
+    const days = body.days === undefined ? 7 : Number(body.days);
+    if (!Number.isFinite(days) || days < 1) return c.json({ error: 'days must be a positive number' }, 400);
+    const result = purgeStalePendingReviews({ days, dryRun: body.dry_run === true });
+    return c.json({ abandoned: result.abandoned.length, ids: result.abandoned, dry_run: result.dry_run, days: result.days });
   });
 
   // Ask the overlord now (admin): bypasses the debounce, not the hourly cap unless force=true

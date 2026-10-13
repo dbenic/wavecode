@@ -11,7 +11,7 @@ const projects: Record<string, { repo?: string; workspace_match?: string; lane_g
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, setLaneAlertNowForTest, withRefMemo } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, reconcileBehindFreezes, setLaneAlertNowForTest, withRefMemo } from './lane-main.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -234,5 +234,48 @@ describe('lane main ancestry', () => {
       lane: 'wc-codex1', project: 'wave', mainSha, kind: 'freeze', authorAgentId: seat.data.id,
     })).toBe(false);
     expect(db.listAgentMessages({ to_agent_id: seat.data.id }).map((row) => row.message).join('\n')).not.toMatch(/behind main|Merged latest main/);
+  });
+
+  it('a merge-only tip is not a nudge, and the same lane is not nudged twice inside 30 minutes', () => {
+    ensureReleaseFreezeTable();
+    const ales = db.listAgents().find((a) => a.name === 'ales')!;
+    const oldSha = git(repo, 'rev-parse', 'wc-ales');
+    db.getDb().prepare(
+      `INSERT INTO release_freezes (sha, project, lane, status, author_agent_id, author_name, created_at) VALUES (?, 'wave', 'wc-ales', 'open', ?, 'ales', '2026-10-01 00:00:00')`,
+    ).run(oldSha, ales.id);
+
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'm.txt'), 'main-only');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main feature');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    git(repo, 'checkout', '-q', 'wc-ales');
+    git(repo, '-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', 'merge main', 'origin/main');
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-ales', git(repo, 'rev-parse', 'HEAD'));
+
+    const pings = () => db.getDb().prepare('SELECT entity_id FROM events WHERE type = ?').all(MAIN_PING) as { entity_id: string }[];
+    const status = () => (db.getDb().prepare('SELECT status FROM release_freezes WHERE sha = ?').get(oldSha) as { status: string }).status;
+    reconcileBehindFreezes();
+    expect(status()).toBe('open');
+    expect(pings()).toEqual([]);
+
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-ales', oldSha);
+    let now = 1_700_000_000_000;
+    setLaneAlertNowForTest(() => now);
+    reconcileBehindFreezes();
+    expect(status()).toBe('behind-main');
+    expect(pings()).toHaveLength(1);
+
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'm2.txt'), 'later');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main moved again');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    reconcileBehindFreezes();
+    expect(pings()).toHaveLength(1);
+
+    now += 30 * 60 * 1000;
+    reconcileBehindFreezes();
+    expect(pings()).toHaveLength(2);
   });
 });
