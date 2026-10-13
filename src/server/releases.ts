@@ -29,9 +29,9 @@ import { peerGetJson, peerPostJson } from './peers.js';
 import { getFreeze, releaseBehindMain, staleStageBlock, viewShaChecks } from './release-freezes.js';
 import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
-import { alertBehind, alertLanesPastStaging } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, projectRepo } from './lane-main.js';
 import { productionPrereqGate, stepsPrompt, type GoStep } from './prereqs.js';
-import { evaluateForward, readStagingHealth, type StagingTip } from './staging-forward.js';
+import { evaluateForward, isMissingAncestor, readStagingHealth, type StagingTip } from './staging-forward.js';
 import { setStagingTipStatuses, stagingTipStatuses, type StagingTipStatus } from './staging-tip-status.js';
 import { testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
@@ -300,11 +300,6 @@ function expireStuckReleases(): number {
   return rows.length;
 }
 
-/** Failed only because the send expired or an admin cleared it. A later deploy is still the truth. */
-function releaseWithdrawn(row: ReleaseRequest): boolean {
-  return row.status === 'failed' && (row.error === 'expired' || row.error === 'cleared');
-}
-
 /** An admin ends a stuck staging lock. The reason is required and written to the audit. */
 export function clearStuckRelease(id: string, by: { name: string; id?: string | null }, reason: string): Result<ReleaseRequest> {
   const why = reason.trim();
@@ -320,12 +315,52 @@ export function clearStuckRelease(id: string, by: { name: string; id?: string | 
     report: why.slice(0, 1000),
     reported_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
   });
+  stopStagingCommand(id);
+  cancelDeployAgent(row);
   const done = getRelease(id)!;
   emit('release.cleared', 'release', id, {
     reason: why, who: by.name, sha: done.sha, project: done.project, lane: done.lane, target: done.target,
   }, by.id ?? null);
   logger.info({ releaseId: id, by: by.name, reason: why }, 'Stuck staging request cleared');
   return { ok: true, data: done };
+}
+
+/** Stop the local staging command for this row, if one is still running. */
+function stopStagingCommand(id: string): void {
+  const handle = stagingChildren.get(id);
+  if (!handle) return;
+  handle.abandoned = true;
+  stagingChildren.delete(id);
+  try {
+    handle.child.kill('SIGTERM');
+    logger.info({ releaseId: id }, 'Stopped the staging command for a cleared request');
+  } catch (err) {
+    logger.warn({ releaseId: id, err: (err as Error).message }, 'Could not stop the staging command');
+  }
+}
+
+/** Ask the deploy agent to stop. A missing agent or a failed send does not undo the clear. */
+function cancelDeployAgent(row: ReleaseRequest): void {
+  let agent: Agent | null = null;
+  if (row.deploy_agent_id) {
+    const named = getAgent(row.deploy_agent_id);
+    if (named.ok) agent = named.data;
+  }
+  if (!agent) {
+    const configured = deployAgent();
+    if (configured.ok) agent = configured.data;
+  }
+  if (!agent) {
+    logger.info({ releaseId: row.id }, 'No deploy agent to cancel');
+    return;
+  }
+  const text = `[Cancel release ${row.id}: stop the staging deploy of ${row.sha}${row.project ? ` (${row.project})` : ''}. Do not report RELEASED for this id.]`;
+  try {
+    deliverSystemLine(agent, text, { kind: 'info', source: 'release:cancel' });
+    logger.info({ releaseId: row.id, agent: agent.name }, 'Sent a cancel line to the deploy agent');
+  } catch (err) {
+    logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Could not send the cancel line');
+  }
 }
 
 type ReleaseInsert = Parameters<typeof insert>[0];
@@ -949,7 +984,8 @@ function applyProgress(id: string, raw: string): boolean {
     return line.phase === 'done' || line.phase === 'failed';
   }
   if (row.status === 'failed') {
-    if (!(releaseWithdrawn(row) && line.phase === 'done')) return line.phase === 'done' || line.phase === 'failed';
+    if (line.phase === 'done') noteLateResult(row, line.staging_sha ?? row.sha);
+    return line.phase === 'done' || line.phase === 'failed';
   }
   // Keep the phase that failed (build, verify, …) so the chip can name it.
   // Later rollback / failed lines still update pin, url, version and rollback.
@@ -1129,17 +1165,55 @@ export interface ReleaseReport {
   failed_step?: string | null;
 }
 
+/**
+ * A failed row stays failed. A deploy that lands anyway is recorded as an event
+ * so the board can refresh, and it does not change the row or the tip.
+ */
+function noteLateResult(row: ReleaseRequest, sha: string | null | undefined): void {
+  const raw = sha?.trim().toLowerCase() ?? '';
+  const recorded = /^[0-9a-f]{40}$/.test(raw) ? raw : row.sha.toLowerCase();
+  emit('release.late_result', 'release', row.id, { sha: recorded, id: row.id }, null);
+  logger.warn({ releaseId: row.id, sha: recorded, error: row.error }, 'Late release result ignored; the row is already final');
+  reconcileAfterDeploy();
+}
+
+/**
+ * Staging only moves forward. A deployed SHA that git can show is not the
+ * current tip and not a descendant of it is refused. No tip, or no repo,
+ * leaves the report alone — a box without git still records its first deploys.
+ */
+function stagingRewindRefusal(project: string | null, sha: string): string | null {
+  if (!project) return null;
+  const tip = currentStagingTip(project);
+  if (!tip?.sha) return null;
+  const tipSha = tip.sha.toLowerCase();
+  const next = sha.toLowerCase();
+  if (tipSha === next) return null;
+  const repo = projectRepo(project);
+  if (!repo) return null;
+  if (!isMissingAncestor(repo, tipSha, next)) return null;
+  const error = `refusing to move staging backwards: ${next.slice(0, 8)} is not a descendant of ${tipSha.slice(0, 8)}`;
+  logger.warn({ project, sha: next, tip: tipSha }, error);
+  return error;
+}
+
 /** The deploy agent's outcome (MCP tool, API, or a RELEASED / RELEASE FAILED line). */
 export function reportRelease(id: string, report: ReleaseReport): Result<ReleaseRequest> {
   const r = getRelease(id);
   if (!r) return { ok: false, error: `Release ${id} not found` };
   if (r.status === 'deployed' || r.status === 'rejected') return { ok: true, data: r }; // final: a repeat is a no-op
-  // A real failure stays final. Expiry and an admin clear do not, once the deploy actually lands.
-  if (r.status === 'failed' && !(report.status === 'deployed' && releaseWithdrawn(r))) return { ok: true, data: r };
+  if (r.status === 'failed') {
+    if (report.status === 'deployed') noteLateResult(r, report.sha ?? r.sha);
+    return { ok: true, data: r };
+  }
   if (!['deployed', 'failed', 'rejected'].includes(report.status)) return { ok: false, error: "status must be 'deployed', 'failed' or 'rejected'" };
   const deployedSha = report.sha ? report.sha.trim().toLowerCase() : null;
   if (report.status === 'deployed' && deployedSha && deployedSha !== r.sha && !r.sha.startsWith(deployedSha)) {
     return { ok: false, error: `Reported SHA ${deployedSha.slice(0, 8)} is not the requested ${r.sha.slice(0, 8)}; report a failure instead` };
+  }
+  if (report.status === 'deployed' && r.target === 'staging') {
+    const rewind = stagingRewindRefusal(r.project, r.sha);
+    if (rewind) return { ok: false, error: rewind };
   }
   patch(id, {
     status: report.status,
@@ -1320,8 +1394,7 @@ const pollers = new Map<string, { stop: boolean }>();
 function openForwarded(peer: string): ReleaseRequest[] {
   return withTable(() => getDb().prepare(
     `SELECT * FROM release_requests
-     WHERE origin = 'local' AND peer = ? AND peer_request_id IS NOT NULL
-       AND (status = 'sent' OR (status = 'failed' AND error IN ('expired', 'cleared')))`,
+     WHERE origin = 'local' AND peer = ? AND peer_request_id IS NOT NULL AND status = 'sent'`,
   ).all(peer) as ReleaseRequest[]);
 }
 
@@ -1394,14 +1467,21 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   if (!remote.ok || !remote.data) return;
   if (!pollers.has(peer)) return; // stopped while the request was in flight
   const local = getRelease(r.id) ?? r;
-  if (releaseWithdrawn(local)) {
-    if (remote.data.status !== 'deployed') return;
-  } else {
-    mirrorProgress(local, remote.data);
+  if (local.status === 'failed' || local.status === 'rejected' || local.status === 'deployed') {
+    if (local.status === 'failed' && remote.data.status === 'deployed') {
+      noteLateResult(local, remote.data.deployed_sha ?? remote.data.sha ?? local.sha);
+    }
+    return;
   }
+  mirrorProgress(local, remote.data);
   const s = remote.data.status;
   if (s !== 'deployed' && s !== 'failed' && s !== 'rejected') return;
   const fresh = getRelease(r.id) ?? local;
+  if (s === 'deployed' && fresh.target === 'staging') {
+    const tipSha = remote.data.deployed_sha || fresh.sha;
+    const rewind = stagingRewindRefusal(fresh.project, tipSha);
+    if (rewind) return;
+  }
   patch(r.id, {
     status: s,
     version: remote.data.version ?? fresh.version ?? null,

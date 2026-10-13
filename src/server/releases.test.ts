@@ -676,7 +676,7 @@ describe('releases.ts', () => {
       expect(again.ok).toBe(true);
     });
 
-    it('a 30-minute sent handoff stays a lock until an admin clears it, and a late RELEASED still deploys', async () => {
+    it('a 30-minute sent handoff stays a lock until an admin clears it, and a late RELEASED does not move the tip', async () => {
       const fable = agent('fable');
       cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
       cfg.releases = { deploy_agent: 'fable' };
@@ -712,12 +712,26 @@ describe('releases.ts', () => {
       expect(cleared.status).toBe(200);
       expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared', report: 'agent never started' });
       expect(vi.mocked(emit)).toHaveBeenCalledWith('release.cleared', 'release', id, expect.objectContaining({ reason: 'agent never started', who: 'denis', sha: SHA }), 'u-admin');
+      expect(typedInto(fable.id).some((line) => line.includes(`Cancel release ${id}`) && line.includes(SHA))).toBe(true);
+
       const next = await rel.requestRelease({ project: 'wavepulse', sha: SHA_B, lane: 'wc-next', target: 'staging', actorName: 'denis' });
       expect(next.ok).toBe(true);
+      if (!next.ok) return;
 
+      const deployState = await import('./deploy-state.js');
+      const reconcile = vi.spyOn(deployState, 'scheduleReconcile').mockImplementation(() => {});
       expect(rel.detectReleaseLines(fable.id, `RELEASED ${id}: deployed ${SHA} version 1.4.0 to staging`)).toBe(1);
-      expect(rel.getRelease(id)).toMatchObject({ status: 'deployed', version: '1.4.0', deployed_sha: SHA });
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(SHA);
+      expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared', deployed_sha: null });
+      expect(rel.getRelease(next.data.id)?.status).toBe('sent');
+      expect(rel.currentStagingTip('wavepulse')).toBeNull();
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.late_result', 'release', id, expect.objectContaining({ sha: SHA, id }), null);
+      for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
+      expect(reconcile).toHaveBeenCalledWith('deploy');
+
+      const deployed = rel.reportRelease(next.data.id, { status: 'deployed', sha: SHA_B, version: '2.0.0' });
+      expect(deployed.ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(SHA_B);
+      expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared' });
     });
 
     it('two overlapping Stage calls insert one staging request', async () => {
@@ -984,6 +998,70 @@ describe('releases.ts', () => {
       rel.resumeStagingDeploys();
       for (let i = 0; i < 50 && rel.getRelease(staged.data.id)?.status !== 'deployed'; i++) await flush(20);
       expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'deployed', version: '1.2.3', staging_url: 'https://staging.example/app' });
+    });
+
+    it('clear kills a running staging command', async () => {
+      const hold = path.join(tmp, 'hold-clear.cjs');
+      const pidFile = path.join(tmp, 'hold.pid');
+      fs.writeFileSync(hold, "require('fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 60000);\n");
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*' };
+      cfg.releases = { staging_command: ['node', hold, pidFile, '{sha}'] };
+      const staged = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'denis', fromPeer: false });
+      expect(staged.ok).toBe(true);
+      if (!staged.ok) return;
+      for (let i = 0; i < 50 && !fs.existsSync(pidFile); i++) await flush(20);
+      const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+      expect(pid).toBeGreaterThan(0);
+      const cleared = rel.clearStuckRelease(staged.data.id, { name: 'denis', id: 'u-admin' }, 'command stuck');
+      expect(cleared.ok).toBe(true);
+      let gone = false;
+      for (let i = 0; i < 50; i++) {
+        try { process.kill(pid, 0); } catch { gone = true; break; }
+        await flush(20);
+      }
+      expect(gone).toBe(true);
+      expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'failed', error: 'cleared' });
+    });
+
+    it('refuses a deployed result that is not a descendant of the staging tip', () => {
+      const repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: gitEnv }).trim();
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-q', '-m', 'parent');
+      const parent = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-q', '-m', 'child');
+      const child = git('rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'c');
+      git('add', '.');
+      git('commit', '-q', '-m', 'grandchild');
+      const grandchild = git('rev-parse', 'HEAD');
+      cfg.projects.wavepulse = { workspace_match: '**/ws/*', repo };
+      const insert = (id: string, sha: string, age: string) => {
+        db.getDb().prepare(
+          `INSERT INTO release_requests (id, project, sha, lane, target, origin, status, created_at, updated_at)
+           VALUES (?, 'wavepulse', ?, 'wc-lane', 'staging', 'local', 'sent', datetime('now', ?), datetime('now', ?))`,
+        ).run(id, sha, age, age);
+      };
+      insert('01CHILDROW0000000000000001', child, '-2 minutes');
+      insert('01GRANDROW0000000000000001', grandchild, '-1 minutes');
+
+      expect(rel.reportRelease('01CHILDROW0000000000000001', { status: 'deployed', sha: child, version: '1.0.0' }).ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(child);
+      expect(rel.reportRelease('01GRANDROW0000000000000001', { status: 'deployed', sha: grandchild, version: '1.1.0' }).ok).toBe(true);
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
+      insert('01PARENTROW000000000000001', parent, '-3 minutes');
+
+      const refused = rel.reportRelease('01PARENTROW000000000000001', { status: 'deployed', sha: parent, version: '0.9.0' });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.error).toMatch(/not a descendant/);
+      expect(rel.getRelease('01PARENTROW000000000000001')?.status).toBe('sent');
+      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
     });
 
     it('GET /api/releases/staging-tip returns the deployed staging tip', async () => {
