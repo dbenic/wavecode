@@ -818,18 +818,21 @@ function attachHooks(): void {
   hooked = true;
   const prevMain = pipelineHooks.onMain;
   pipelineHooks.onMain = (project, sha) => {
-    prevMain?.(project, sha);
+    const pending = prevMain?.(project, sha);
     scheduleReconcile('merge');
+    return pending;
   };
   const prevDeployed = pipelineHooks.onDeployed;
   pipelineHooks.onDeployed = (id) => {
-    prevDeployed?.(id);
+    const pending = prevDeployed?.(id);
     scheduleReconcile('deploy');
+    return pending;
   };
   const prevVerified = pipelineHooks.onVerified;
   pipelineHooks.onVerified = (project) => {
-    prevVerified?.(project);
+    const pending = prevVerified?.(project);
     scheduleReconcile('deploy');
+    return pending;
   };
 }
 

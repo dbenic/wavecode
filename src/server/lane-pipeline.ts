@@ -543,6 +543,19 @@ function enqueue(freeze: ReleaseFreeze, kind: 'stage' | 'dump'): void {
 
 /** One staging slot per project. The next lane waits for Ready for prod or pin expiry. */
 export async function drainStagingQueue(project: string): Promise<void> {
+  try {
+    await drainStagingQueueBody(project);
+  } catch (e) {
+    const message = (e as Error).message ?? '';
+    if (/no such table: pipeline_queue/i.test(message)) {
+      logger.debug({ project, error: message }, 'Staging queue drain skipped');
+      return;
+    }
+    throw e;
+  }
+}
+
+async function drainStagingQueueBody(project: string): Promise<void> {
   if (!project || slotBusy(project)) return;
   ensureQueue();
   const row = getDb().prepare(
@@ -558,6 +571,7 @@ export async function drainStagingQueue(project: string): Promise<void> {
     note(row.project, row.lane, row.sha, 'hold', `auto: waiting for GREEN on ${row.sha.slice(0, 8)}`);
     return;
   }
+  if (slotBusy(project)) return;
   const { stageEligibility } = await import('./sha-stage-block.js');
   const eligible = await stageEligibility(row.sha, row.project, { markStale: true });
   if (eligible.error) {
@@ -566,6 +580,7 @@ export async function drainStagingQueue(project: string): Promise<void> {
     logger.warn({ sha: row.sha, error: eligible.error }, 'Auto-stage refused');
     return;
   }
+  if (slotBusy(project)) return;
   const dump = row.kind === 'dump';
   // Staging only. This function has no production target.
   const sent = await requestRelease({
@@ -755,10 +770,10 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
   if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
   try { await queueFullGate(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'); }
   try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
-  void considerAutoStage(sha).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'));
+  try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
 }
 
-export function onStagingDeployed(releaseId: string): void {
+export async function onStagingDeployed(releaseId: string): Promise<void> {
   const release = getRelease(releaseId);
   if (!release || release.target !== 'staging' || release.status !== 'deployed' || release.requested_by !== 'auto') return;
   if (acted(release.sha, LIVE)) return;
@@ -770,11 +785,15 @@ export function onStagingDeployed(releaseId: string): void {
   void notify({ title: 'Live on staging', body: text, url: '/release', tag: `live-${release.sha}` }).catch(() => {});
   emit(LIVE, 'run', release.sha, { sha: release.sha, project: release.project, lane: release.lane, text }, null);
   if (release.project && release.lane) note(release.project, release.lane, release.sha, 'live', text);
-  if (release.project) void drainStagingQueue(release.project);
+  if (release.project) await drainStagingQueue(release.project);
 }
 
 pipelineHooks.onFreeze = onFreezeRecorded;
-pipelineHooks.onAuthorDone = (agentId) => { onAuthorDone(agentId); };
-pipelineHooks.onMain = (project, sha) => { onMainAdvanced(project, sha); };
+pipelineHooks.onAuthorDone = (agentId) => {
+  void onAuthorDone(agentId).catch((e) => logger.debug({ agentId, error: (e as Error).message }, 'Auto-freeze skipped'));
+};
+pipelineHooks.onMain = (project, sha) => {
+  void onMainAdvanced(project, sha).catch((e) => logger.debug({ project, error: (e as Error).message }, 'Auto-merge skipped'));
+};
 pipelineHooks.onDeployed = onStagingDeployed;
-pipelineHooks.onVerified = (project) => { if (project) void drainStagingQueue(project); };
+pipelineHooks.onVerified = (project) => (project ? drainStagingQueue(project) : undefined);

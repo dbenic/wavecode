@@ -57,8 +57,10 @@ vi.mock('./logger.js', () => ({
 
 import { capturePane } from './session-manager.js';
 import {
+  IDLE_CAPTURE_MS,
   IDLE_CLOSE_GRACE_MS,
   IDLE_OVERRIDE_THRESHOLD,
+  runWatcherBatchForTest,
   startWatching,
   stopWatching,
   tickForTest,
@@ -193,6 +195,68 @@ describe('output-watcher — idle-complete', () => {
       0,
       'Idle close without a parseable RESULT file',
     );
+  });
+
+  it('captures an idle seat on a slow interval instead of skipping it forever', async () => {
+    const db = await import('./db.js');
+    const agent = makeAgent({ mode: 'adopted', status: 'idle' });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.listTasks).mockReturnValue([]);
+    vi.mocked(capturePane).mockReturnValue({ ok: true, data: 'adopted pane\n❯ \n' });
+
+    const start = Date.now();
+    startWatching(agent.id);
+    await tickForTest(agent.id, start + 1_000);
+    await tickForTest(agent.id, start + 15_000);
+    expect(capturePane).toHaveBeenCalledTimes(2);
+
+    await tickForTest(agent.id, start + 21_000);
+    expect(capturePane).toHaveBeenCalledTimes(2);
+
+    await tickForTest(agent.id, start + 15_000 + IDLE_CAPTURE_MS);
+    expect(capturePane).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the fast capture for a working seat and for an idle seat with a running run', async () => {
+    const db = await import('./db.js');
+    const agent = makeAgent({ status: 'working' });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.listTasks).mockReturnValue([]);
+    vi.mocked(capturePane).mockReturnValue({ ok: true, data: CODEX_WORKING });
+
+    const start = Date.now();
+    startWatching(agent.id);
+    await tickForTest(agent.id, start + 15_000);
+    await tickForTest(agent.id, start + 21_000);
+    expect(capturePane).toHaveBeenCalledTimes(2);
+
+    agent.status = 'idle';
+    vi.mocked(db.listRuns).mockReturnValue([makeRun()]);
+    await tickForTest(agent.id, start + 22_000);
+    expect(capturePane).toHaveBeenCalledTimes(3);
+  });
+
+  it('the watcher batch uses the same idle skip', async () => {
+    const db = await import('./db.js');
+    const agent = makeAgent({ mode: 'adopted', status: 'idle' });
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.listTasks).mockReturnValue([]);
+    vi.mocked(capturePane).mockReturnValue({ ok: true, data: '❯ \n' });
+
+    vi.setSystemTime(0);
+    startWatching(agent.id);
+    vi.setSystemTime(15_000);
+    await runWatcherBatchForTest();
+    expect(capturePane).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(21_000);
+    await runWatcherBatchForTest();
+    expect(capturePane).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(15_000 + IDLE_CAPTURE_MS);
+    await runWatcherBatchForTest();
+    expect(capturePane).toHaveBeenCalledTimes(2);
   });
 
   it('closes the older stuck run when Codex is already on a later task', async () => {

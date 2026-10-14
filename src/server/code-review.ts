@@ -760,7 +760,9 @@ function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
 
     clearInterval(timer);
     finalizeReview(reviewId, review);
-  })(); }, REVIEW_POLL_INTERVAL_MS);
+  })().catch((err) => {
+    logger.warn({ reviewId, error: (err as Error).message }, 'Reviewer poll failed');
+  }); }, REVIEW_POLL_INTERVAL_MS);
 }
 
 // --- Send fixes back to original agent ---

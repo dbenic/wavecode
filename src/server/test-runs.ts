@@ -470,7 +470,11 @@ export function watchTestRuns(targets: Array<{ project: string; lane: string; sh
     return;
   }
   if (timer) return;
-  timer = setInterval(() => { void pollOnce(); }, POLL_MS);
+  timer = setInterval(() => {
+    void pollOnce().catch((err) => {
+      logger.debug({ error: (err as Error).message }, 'Test-run poll failed');
+    });
+  }, POLL_MS);
   timer.unref?.();
 }
 

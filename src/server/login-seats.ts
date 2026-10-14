@@ -129,7 +129,11 @@ export async function openLoginSeat(opts: {
   setAgentLease(inserted.data.id, { owner_id: user.id, reason: 'reserved', expires_at: expiresAt });
 
   const deadline = Date.now() + LOGIN_SEAT_TTL_MS;
-  const timer = setInterval(() => { void checkLoginSeat(inserted.data.id); }, LOGIN_SEAT_POLL_MS);
+  const timer = setInterval(() => {
+    void checkLoginSeat(inserted.data.id).catch((err) => {
+      logger.debug({ agentId: inserted.data.id, error: (err as Error).message }, 'Login seat check failed');
+    });
+  }, LOGIN_SEAT_POLL_MS);
   timer.unref?.();
   watches.set(inserted.data.id, { agentId: inserted.data.id, session, profile, runtime, deadline, timer });
 
@@ -291,7 +295,11 @@ export async function sweepLoginSeats(agents: Agent[], now = Date.now()): Promis
     const profile = agent.profile ?? m?.[1] ?? '';
     const runtime = agent.runtime;
     const deadline = Date.parse(agent.lease_expires_at!);
-    const timer = setInterval(() => { void checkLoginSeat(agent.id); }, LOGIN_SEAT_POLL_MS);
+    const timer = setInterval(() => {
+      void checkLoginSeat(agent.id).catch((err) => {
+        logger.debug({ agentId: agent.id, error: (err as Error).message }, 'Login seat check failed');
+      });
+    }, LOGIN_SEAT_POLL_MS);
     timer.unref?.();
     watches.set(agent.id, { agentId: agent.id, session: agent.tmux_session, profile, runtime, deadline, timer });
     logger.info({ agentId: agent.id, profile, runtime }, 'Login seat re-watched after restart');

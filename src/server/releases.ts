@@ -1081,7 +1081,9 @@ function spawnStaging(row: ReleaseRequest, argv: string[]): void {
   try {
     child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (err) {
-    void reportRelease(row.id, { status: 'failed', note: (err as Error).message });
+    void reportRelease(row.id, { status: 'failed', note: (err as Error).message }).catch((e) => {
+      logger.warn({ releaseId: row.id, error: (e as Error).message }, 'Failed to record staging spawn failure');
+    });
     return;
   }
   const handle: StagingChild = { child, abandoned: false };
@@ -1119,6 +1121,8 @@ function spawnStaging(row: ReleaseRequest, argv: string[]): void {
           await reportRelease(row.id, { status: 'failed', note: err.message });
         }
       } catch { /* db already closed */ }
+    }).catch((e) => {
+      logger.warn({ releaseId: row.id, error: (e as Error).message }, 'Staging command error handler failed');
     });
   });
   child.on('close', (code) => {
@@ -1139,6 +1143,8 @@ function spawnStaging(row: ReleaseRequest, argv: string[]): void {
       } catch (err) {
         logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging command close handler failed');
       }
+    }).catch((e) => {
+      logger.warn({ releaseId: row.id, error: (e as Error).message }, 'Staging command close handler failed');
     });
   });
   logger.info({ releaseId: row.id, command: argv[0], sha: row.sha }, 'Staging deploy command started');
@@ -1461,7 +1467,9 @@ export function ensureReleasePoller(peer: string): void {
   if (pollers.has(peer)) return;
   const handle = { stop: false };
   pollers.set(peer, handle);
-  void pollLoop(peer, handle).finally(() => { if (pollers.get(peer) === handle) pollers.delete(peer); });
+  void pollLoop(peer, handle).catch((e) => {
+    logger.warn({ peer, error: (e as Error).message }, 'Release poller failed');
+  }).finally(() => { if (pollers.get(peer) === handle) pollers.delete(peer); });
 }
 
 async function pollLoop(peer: string, handle: { stop: boolean }): Promise<void> {
@@ -1568,7 +1576,9 @@ export function startReleasePollers(): void {
   expireStuckReleases();
   const peers = withTable(() => getDb().prepare("SELECT DISTINCT peer FROM release_requests WHERE origin = 'local' AND status = 'sent' AND peer IS NOT NULL").all() as Array<{ peer: string }>);
   for (const { peer } of peers) ensureReleasePoller(peer);
-  void resumeStagingDeploys();
+  void resumeStagingDeploys().catch((e) => {
+    logger.warn({ error: (e as Error).message }, 'Staging deploy resume failed');
+  });
 }
 
 export function stopReleasePollers(): void {

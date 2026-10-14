@@ -39,22 +39,35 @@ async function isAncestor(repo: string, ancestor: string, descendant: string): P
   return gitAncestor(repo, ancestor, descendant);
 }
 
-/** One fetch per repo per minute: a reconcile pass asks about every freeze, not every freeze about origin. */
+/** One successful fetch per repo per minute: a reconcile pass asks about every freeze, not every freeze about origin. */
 const FETCH_MEMO_MS = 60_000;
 const lastFetchAt = new Map<string, number>();
+const inflightFetch = new Map<string, Promise<void>>();
 
 export function resetFetchMemoForTest(): void {
   lastFetchAt.clear();
+  inflightFetch.clear();
 }
 
 /** Best-effort refresh. A missing remote or a failed fetch leaves the refs we already have. Exported for tests. */
-export async function fetchOrigin(repo: string): Promise<void> {
+export function fetchOrigin(repo: string): Promise<void> {
   const at = lastFetchAt.get(repo);
-  if (at !== undefined && Date.now() - at < FETCH_MEMO_MS) return;
-  lastFetchAt.set(repo, Date.now());
-  try {
-    await execFileAsync('git', ['-C', repo, 'fetch', '--no-tags', 'origin'], { timeout: 4000 });
-  } catch { /* offline or no remote */ }
+  if (at !== undefined && Date.now() - at < FETCH_MEMO_MS) return Promise.resolve();
+  const existing = inflightFetch.get(repo);
+  if (existing) return existing;
+  const slot: { current: Promise<void> | null } = { current: null };
+  const job = (async () => {
+    try {
+      await execFileAsync('git', ['-C', repo, 'fetch', '--no-tags', 'origin'], { timeout: 4000 });
+      lastFetchAt.set(repo, Date.now());
+    } catch { /* offline or no remote — a failure is not a successful fetch */ }
+    finally {
+      if (inflightFetch.get(repo) === slot.current) inflightFetch.delete(repo);
+    }
+  })();
+  slot.current = job;
+  inflightFetch.set(repo, job);
+  return job;
 }
 
 /** Stage and the snapshot both refuse with this when the peer tip could not be read. */

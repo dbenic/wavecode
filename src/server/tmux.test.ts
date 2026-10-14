@@ -296,6 +296,49 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
     }
   });
 
+  it('names each paste buffer with the session, a counter, and a random, and holds a raw key behind that paste', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sendRawKey, sendTextAndEnter } = await import('./tmux.js');
+      vi.mocked(child_process.execFile).mockClear();
+      scripted((a) => (a[0] === 'capture-pane' ? '❯ \n' : ''));
+      const session = 'wc-claude1';
+      const text = 'please review the spec now';
+      const lists = () => vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
+      const bufferNames = () => lists()
+        .filter((a) => a.includes('load-buffer'))
+        .map((a) => a[a.indexOf('-b') + 1]);
+
+      const first = sendTextAndEnter(session, text);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bufferNames()[0]).toMatch(/^wc-wc-claude1-\d+-[a-z0-9]+$/);
+      const raw = sendRawKey(session, 'Enter');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lists().some((a) => a[0] === 'send-keys' && a.includes('Enter'))).toBe(false);
+
+      const second = sendTextAndEnter('wc-other', text);
+      await vi.advanceTimersByTimeAsync(0);
+      const names = bufferNames();
+      expect(names).toHaveLength(2);
+      expect(names[1]).toMatch(/^wc-wc-other-\d+-[a-z0-9]+$/);
+      expect(names[0]).not.toBe(names[1]);
+      expect(lists().some((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(session))).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1900);
+      await first;
+      await raw;
+      const after = lists();
+      const pasteAt = after.findIndex((a) => a.includes('paste-buffer') && a.includes(session));
+      const enterAt = after.findIndex((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(session));
+      expect(pasteAt).toBeGreaterThanOrEqual(0);
+      expect(enterAt).toBeGreaterThan(pasteAt);
+      await vi.advanceTimersByTimeAsync(2000);
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('adds -L only for a session bound to a socket, including load-buffer', async () => {
     expect(isValidSocketName('fable')).toBe(true);
     expect(isValidSocketName('../fable')).toBe(false);

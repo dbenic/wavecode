@@ -214,11 +214,11 @@ export async function sendLiteralText(sessionName: string, text: string): Promis
  * Send a raw tmux key name (C-c, Escape, Enter, etc.).
  * Only allows keys from the ALLOWED_RAW_KEYS set.
  */
-export async function sendRawKey(sessionName: string, key: string): Promise<void> {
+export function sendRawKey(sessionName: string, key: string): Promise<void> {
   if (!isAllowedRawKey(key)) {
     throw new Error(`Disallowed raw key: ${key}`);
   }
-  await tmuxExec(['send-keys', '-t', sessionName, key]);
+  return enqueueSession(sessionName, () => tmuxExec(['send-keys', '-t', sessionName, key]));
 }
 
 export type SendMode = 'paste' | 'type';
@@ -244,18 +244,37 @@ const TYPE_ENTER_DELAY_MS = 300;
 const MAX_ENTER_RETRIES = 2;
 /** Pending send per session so two messages never interleave inside one input box. */
 const sendChains = new Map<string, Promise<void>>();
+/** Paste buffer names are server-global, so each call needs its own. */
+let pasteBufferSeq = 0;
+
+/**
+ * Serialize pane mutations for one session. A rejection does not stick the
+ * chain; the derived finally promise is caught so it cannot crash the daemon.
+ */
+function enqueueSession(sessionName: string, job: () => Promise<unknown>): Promise<void> {
+  const prev = sendChains.get(sessionName);
+  const next = (prev ? prev.catch(() => undefined).then(job) : job()).then(() => undefined);
+  sendChains.set(sessionName, next);
+  void next.finally(() => {
+    if (sendChains.get(sessionName) === next) sendChains.delete(sessionName);
+  }).catch(() => undefined);
+  return next;
+}
+
+function pasteBufferName(sessionName: string): string {
+  pasteBufferSeq += 1;
+  const session = sessionName.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24) || 's';
+  const rand = Math.random().toString(36).slice(2, 10).padEnd(6, '0');
+  return `wc-${session}-${pasteBufferSeq}-${rand}`;
+}
 
 /** Exported for tests: timers are real setTimeouts, tests use fake timers. */
 export function sendTextAndEnter(sessionName: string, text: string, opts: SendOptions = {}): Promise<void> {
   const mode = opts.mode ?? 'paste';
   // A send that arrives while a previous one is still waiting for its Enter is
-  // chained behind it so the two never share an input box.
-  const prev = sendChains.get(sessionName);
-  const run = () => (mode === 'type' ? typeAndSubmit(sessionName, text) : pasteAndSubmit(sessionName, text));
-  const next = prev ? prev.catch(() => undefined).then(run) : run();
-  sendChains.set(sessionName, next);
-  void next.finally(() => { if (sendChains.get(sessionName) === next) sendChains.delete(sessionName); });
-  return next;
+  // chained behind it so the two never share an input box. Raw keys (watcher
+  // dismiss) join the same chain.
+  return enqueueSession(sessionName, () => (mode === 'type' ? typeAndSubmit(sessionName, text) : pasteAndSubmit(sessionName, text)));
 }
 
 async function typeAndSubmit(sessionName: string, text: string): Promise<void> {
@@ -269,7 +288,7 @@ async function pasteAndSubmit(sessionName: string, text: string): Promise<void> 
   // Clear whatever is in the input box, then one atomic bracketed paste.
   // Enter is never in this argv: it is a later send-keys, after the TUI has the text.
   await tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
-  const buf = `wc-${process.pid}-${Date.now()}`;
+  const buf = pasteBufferName(sessionName);
   await runTmux([...socketPrefix(sessionName), 'load-buffer', '-b', buf, '-'], { input: text });
   await tmuxExec(['paste-buffer', '-p', '-d', '-b', buf, '-t', sessionName]);
   await delay(PASTE_ENTER_DELAY_MS);

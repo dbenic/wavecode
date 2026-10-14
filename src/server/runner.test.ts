@@ -382,9 +382,7 @@ describe('runner.ts', () => {
       ok: true,
       data: makeRun({ id: 'run-error', task_id: 'task-error', agent_id: 'agent-error' }),
     } as never);
-    vi.mocked(tmux.sendTextAndEnter).mockImplementation(() => {
-      throw new Error('tmux unavailable');
-    });
+    vi.mocked(tmux.sendTextAndEnter).mockImplementation(() => Promise.reject(new Error('tmux unavailable')));
 
     const runner = await import('./runner.js');
     runner.startRunner('agent-error', 'wc-error', 'codex');

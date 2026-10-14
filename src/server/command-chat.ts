@@ -18,16 +18,20 @@ import { mirrorDecision } from './rooms.js';
 /** Git status for a pane directory. Filled off the request path; a chat turn never waits on git. */
 export const PANE_GIT_TTL_MS = 15_000;
 
-interface PaneGitSnap { at: number; status: string; recent: string }
+interface PaneGitSnap { at: number; status: string; recent: string; error: string | null }
 
 const paneGitCache = new Map<string, PaneGitSnap>();
-const paneGitInflight = new Set<string>();
+const paneGitInflight = new Map<string, Promise<void>>();
 
 export function paneGitCached(dir: string): PaneGitSnap | null {
   const hit = paneGitCache.get(dir);
-  if (!hit) return null;
+  if (!hit || hit.error) return null;
   if (Date.now() - hit.at > PANE_GIT_TTL_MS) return null;
   return hit;
+}
+
+export function paneGitFailure(dir: string): string | null {
+  return paneGitCache.get(dir)?.error ?? null;
 }
 
 export function resetPaneGitCacheForTest(): void {
@@ -35,24 +39,60 @@ export function resetPaneGitCacheForTest(): void {
   paneGitInflight.clear();
 }
 
+function rememberGitFailure(dir: string, message: string): void {
+  paneGitCache.set(dir, { at: 0, status: '', recent: '', error: message });
+}
+
 function schedulePaneGit(dir: string): void {
   if (paneGitCached(dir) || paneGitInflight.has(dir)) return;
-  paneGitInflight.add(dir);
-  void (async () => {
+  const slot: { current: Promise<void> | null } = { current: null };
+  const job = (async () => {
     try {
       let status = '';
       let recent = '';
       try {
         status = (await execFileAsync('git', ['-C', dir, 'status', '--short'], { timeout: 5000 })).trim();
-      } catch { /* not a git repo */ }
+      } catch (e) {
+        rememberGitFailure(dir, `git status failed: ${(e as Error).message || 'git status failed'}`);
+        return;
+      }
       try {
         recent = (await execFileAsync('git', ['-C', dir, 'log', '--name-only', '--pretty=format:', '-5'], { timeout: 5000 })).trim();
-      } catch { /* no history */ }
-      paneGitCache.set(dir, { at: Date.now(), status, recent });
+      } catch (e) {
+        rememberGitFailure(dir, `git log failed: ${(e as Error).message || 'git log failed'}`);
+        return;
+      }
+      paneGitCache.set(dir, { at: Date.now(), status, recent, error: null });
     } finally {
-      paneGitInflight.delete(dir);
+      if (paneGitInflight.get(dir) === slot.current) paneGitInflight.delete(dir);
     }
   })();
+  slot.current = job;
+  paneGitInflight.set(dir, job);
+  void job.catch((e) => {
+    rememberGitFailure(dir, `git status failed: ${(e as Error).message || 'git status failed'}`);
+    if (paneGitInflight.get(dir) === slot.current) paneGitInflight.delete(dir);
+  });
+}
+
+/** Wait for the off-request refresh. Tests only. */
+export function refreshPaneGitForTest(dir: string): Promise<void> {
+  schedulePaneGit(dir);
+  return paneGitInflight.get(dir) ?? Promise.resolve();
+}
+
+/** What get_agent_files prints for a pane directory. A git failure is an error, never "(clean)". */
+export function formatAgentFiles(paneDir: string): string {
+  const git = paneGitCached(paneDir);
+  const failure = paneGitFailure(paneDir);
+  schedulePaneGit(paneDir);
+  if (failure && !git) {
+    return `Working dir: ${paneDir}\n\nModified/new files:\n${failure}\n\nRecently committed:\n${failure}`;
+  }
+  const gitStatus = git?.status ?? '';
+  const recentFiles = git?.recent ?? '';
+  const pending = git ? '' : '\n\n(git status is refreshing off this request)';
+  return `Working dir: ${paneDir}\n\nModified/new files:\n${gitStatus || (git ? '(clean)' : '(not loaded yet)')}\n\nRecently committed:\n${recentFiles || (git ? '(none)' : '(not loaded yet)')}${pending}`;
 }
 
 // --- DB helpers for chat ---
@@ -568,13 +608,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
         const paneDir = await tmux.getPaneDir(agentResult.data.tmux_session);
         if (!paneDir) return 'Error: cannot determine agent working directory';
 
-        const git = paneGitCached(paneDir);
-        schedulePaneGit(paneDir);
-        const gitStatus = git?.status ?? '';
-        const recentFiles = git?.recent ?? '';
-        const pending = git ? '' : '\n\n(git status is refreshing off this request)';
-
-        return `Working dir: ${paneDir}\n\nModified/new files:\n${gitStatus || (git ? '(clean)' : '(not loaded yet)')}\n\nRecently committed:\n${recentFiles || (git ? '(none)' : '(not loaded yet)')}${pending}`;
+        return formatAgentFiles(paneDir);
       } catch (e) {
         return `Error getting files: ${(e as Error).message}`;
       }

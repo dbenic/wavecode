@@ -24,7 +24,7 @@ import { startLaneBoard, stopLaneBoard } from './dev-lanes.js';
 import { startPerfMonitor } from './perf-monitor.js';
 import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
-import logger from './logger.js';
+import logger, { installUnhandledRejectionLogger } from './logger.js';
 
 /** Pick up out-of-band pending inserts (CLI fallback, scripts) that skipped HTTP. */
 export const DISPATCH_POLL_MS = 10_000;
@@ -38,6 +38,7 @@ export interface BootstrapResult {
 }
 
 export async function bootstrapApplication(): Promise<BootstrapResult> {
+  installUnhandledRejectionLogger();
   ensureArtifactPruning();
   ensureDispatchPolling();
 

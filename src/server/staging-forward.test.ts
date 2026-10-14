@@ -237,4 +237,50 @@ describe('fetchOrigin memo', () => {
       fs.rmSync(base, { recursive: true, force: true });
     }
   });
+
+  it('shares one in-flight fetch across concurrent callers and records success only after it finishes', async () => {
+    const mod = await import('./staging-forward.js');
+    const proc = await import('./proc.js');
+    mod.resetFetchMemoForTest();
+    let entered = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const spy = vi.spyOn(proc, 'execFileAsync').mockImplementation(async (file, args) => {
+      const argv = Array.isArray(args) ? args : [];
+      if (file === 'git' && argv.includes('fetch')) {
+        entered += 1;
+        await gate;
+        throw new Error('offline');
+      }
+      return '';
+    });
+    try {
+      const first = mod.fetchOrigin('/repo-shared');
+      const second = mod.fetchOrigin('/repo-shared');
+      await Promise.resolve();
+      expect(entered).toBe(1);
+      let secondSettled = false;
+      void second.then(() => { secondSettled = true; });
+      await Promise.resolve();
+      expect(secondSettled).toBe(false);
+      release();
+      await Promise.all([first, second]);
+      entered = 0;
+      await mod.fetchOrigin('/repo-shared');
+      expect(entered).toBe(1);
+
+      spy.mockImplementation(async () => {
+        entered += 1;
+        return '';
+      });
+      mod.resetFetchMemoForTest();
+      entered = 0;
+      await mod.fetchOrigin('/repo-ok');
+      await mod.fetchOrigin('/repo-ok');
+      expect(entered).toBe(1);
+    } finally {
+      spy.mockRestore();
+      mod.resetFetchMemoForTest();
+    }
+  });
 });

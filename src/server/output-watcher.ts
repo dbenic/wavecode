@@ -118,8 +118,10 @@ interface WatcherState {
   idleOverrideCounter: number;
   /** Epoch ms of the last pane that detected working (for dispatch grace). */
   lastWorkingAt: number | null;
-  /** Keep capturing a new seat through its first-run screens, then skip it while idle. */
+  /** Keep capturing a new seat through its first-run screens, then slow down while idle. */
   watchedAt: number;
+  /** Epoch ms of the last capture. Idle seats use this to wait out the slow interval. */
+  lastCapturedAt: number;
 }
 
 /** How many consecutive idle detections before we override DB 'working' -> 'idle'.
@@ -140,14 +142,20 @@ const watchers = new Map<string, WatcherState>();
 /** One batch for every watched seat. A tick is ~2s, so 4 idle ticks ~= 8 seconds. */
 export const WATCH_INTERVAL_MS = 2000;
 /** A just-started seat is still captured while idle so first-run dialogs clear. */
-const WATCH_STARTUP_MS = 20_000;
+export const WATCH_STARTUP_MS = 20_000;
+/** Idle seats with no running work are still captured, just not on every batch. */
+export const IDLE_CAPTURE_MS = 10_000;
 
 let batchTimer: ReturnType<typeof setTimeout> | null = null;
 let batchRunning = false;
 
 function armBatch(): void {
   if (batchTimer || batchRunning || watchers.size === 0) return;
-  batchTimer = setTimeout(() => { void runBatch(); }, WATCH_INTERVAL_MS);
+  batchTimer = setTimeout(() => {
+    void runBatch().catch((err) => {
+      logger.debug({ error: (err as Error).message }, 'Watcher batch failed');
+    });
+  }, WATCH_INTERVAL_MS);
   batchTimer.unref?.();
 }
 
@@ -156,13 +164,18 @@ function stopBatch(): void {
   batchTimer = null;
 }
 
-/** Idle seats with no running work are not captured. Working seats and fresh seats are. */
+/**
+ * Working seats, fresh seats, and seats with a running run are captured every
+ * batch. An idle seat with nothing running is still captured, on a slower
+ * interval, so an adopted pane and a late first-run dialog are seen.
+ */
 function shouldCapture(agentId: string, state: WatcherState, now = Date.now()): boolean {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return false;
   if (agentResult.data.status !== 'idle') return true;
   if (now - state.watchedAt < WATCH_STARTUP_MS) return true;
-  return listRuns({ agent_id: agentId, status: 'running' }).length > 0;
+  if (listRuns({ agent_id: agentId, status: 'running' }).length > 0) return true;
+  return now - state.lastCapturedAt >= IDLE_CAPTURE_MS;
 }
 
 async function runBatch(): Promise<void> {
@@ -174,6 +187,7 @@ async function runBatch(): Promise<void> {
       const state = watchers.get(agentId);
       if (!state) continue;
       if (!shouldCapture(agentId, state)) continue;
+      state.lastCapturedAt = Date.now();
       await tick(agentId);
     }
   } finally {
@@ -194,6 +208,7 @@ export function startWatching(agentId: string): void {
     idleOverrideCounter: 0,
     lastWorkingAt: null,
     watchedAt: Date.now(),
+    lastCapturedAt: 0,
   };
 
   watchers.set(agentId, state);
@@ -223,8 +238,12 @@ export function isWatching(agentId: string): boolean {
   return watchers.has(agentId);
 }
 
-/** Drive one watcher tick without waiting on the interval. Tests only. */
-export function tickForTest(agentId: string): Promise<void> {
+/** Drive one watcher tick without waiting on the interval. Tests only. Honors the idle skip. */
+export function tickForTest(agentId: string, now = Date.now()): Promise<void> {
+  const state = watchers.get(agentId);
+  if (!state) return Promise.resolve();
+  if (!shouldCapture(agentId, state, now)) return Promise.resolve();
+  state.lastCapturedAt = now;
   return tick(agentId);
 }
 
