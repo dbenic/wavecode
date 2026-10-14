@@ -162,8 +162,7 @@ describe('task-dispatcher.ts', () => {
     dispatcher.resetDispatcherForTest();
 
     await dispatcher.dispatchNext({ manual: true });
-    vi.runAllTimers();
-    await Promise.resolve();
+    await vi.runAllTimersAsync();
 
     expect(vi.mocked(runner.executeRun)).toHaveBeenCalledWith(
       'agent-1',
@@ -253,8 +252,7 @@ describe('task-dispatcher.ts', () => {
     const dispatcher = await import('./task-dispatcher.js');
     dispatcher.resetDispatcherForTest();
     await dispatcher.dispatchNext({ manual: true });
-    vi.runAllTimers();
-    await Promise.resolve();
+    await vi.runAllTimersAsync();
 
     expect(fileRunner.executeFileRun).toHaveBeenCalledWith(
       'agent-file',
@@ -323,7 +321,7 @@ describe('task-dispatcher.ts', () => {
     const dispatcher = await import('./task-dispatcher.js');
     dispatcher.resetDispatcherForTest();
     await dispatcher.dispatchNext({ manual: true });
-    vi.runAllTimers();
+    await vi.runAllTimersAsync();
 
     expect(vi.mocked(runner.executeRun)).not.toHaveBeenCalled();
   });
@@ -394,7 +392,7 @@ describe('task-dispatcher.ts', () => {
       'run-1',
       expect.objectContaining({ exit_code: 1, result: 'FAIL' }),
     );
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     expect(db.updateTaskStatus).toHaveBeenCalledWith('task-1', 'failed');
     expect(db.updateTaskStatus).not.toHaveBeenCalledWith('task-1', 'pending');
     expect(events.emit).toHaveBeenCalledWith(
@@ -482,7 +480,7 @@ describe('task-dispatcher.ts', () => {
       'run-pass',
       expect.objectContaining({ exit_code: 0, result: 'PASS' }),
     );
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     expect(db.updateTaskStatus).toHaveBeenCalledWith('task-pass', 'done');
     expect(events.emit).not.toHaveBeenCalledWith(
       'task.retrying',
@@ -558,7 +556,7 @@ describe('task-dispatcher.ts', () => {
     expect(db.finishRun).toHaveBeenCalledWith('run-late', 1);
     expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe('RESULT: FAIL');
 
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     vi.mocked(db.getTask).mockReturnValue({
       ok: true,
       data: { id: 'task-late', status: 'failed', prompt: 'Review', agent_id: 'agent-1' },
@@ -567,8 +565,7 @@ describe('task-dispatcher.ts', () => {
     writeRunResult(resultPath, 'PASS', 'Reviewed auth.ts; no issues');
     expect(fs.readFileSync(resultPath, 'utf8').trim().split('\n').at(-1)).toBe(RESULT_PASS_LINE);
 
-    vi.advanceTimersByTime(1000);
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1000);
 
     expect(db.reconcileFailedRunToPass).toHaveBeenCalledWith('run-late');
     expect(db.updateTaskStatus).toHaveBeenCalledWith('task-late', 'done');

@@ -104,10 +104,10 @@ describe('agent reprobe', () => {
     expect(res.json.status).toBe('error');
   });
 
-  it('clears error on adopt of an existing session and on rebind', () => {
+  it('clears error on adopt of an existing session and on rebind', async () => {
     const agent = insertError('fable');
     tmuxState.pane = WORKING;
-    const adopted = sessionManager.adopt('wc-fable', 'claude-code', 'fable', 'fable');
+    const adopted = (await sessionManager.adopt('wc-fable', 'claude-code', 'fable', 'fable'));
     expect(adopted.ok).toBe(true);
     if (!adopted.ok) return;
     expect(adopted.data.id).toBe(agent.id);
@@ -116,7 +116,7 @@ describe('agent reprobe', () => {
 
     db.updateAgentStatus(agent.id, 'error');
     tmuxState.pane = '❯ \n';
-    sessionManager.rebindAgentSockets();
+    (await sessionManager.rebindAgentSockets());
     const fresh = db.getAgent(agent.id);
     expect(fresh.ok && fresh.data.status).toBe('idle');
   });

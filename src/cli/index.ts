@@ -33,10 +33,10 @@ program
   .command('scan')
   .description('List all tmux sessions on this server')
   .option('--socket <name>', 'tmux server socket (-L); default server when omitted')
-  .action((opts: { socket?: string }) => {
+  .action(async (opts: { socket?: string }) => {
     initDb();
     loadInstalledConfig();
-    const result = sessionManager.scan(opts.socket);
+    const result = await sessionManager.scan(opts.socket);
     if (!result.ok) {
       console.error('Error:', result.error);
       process.exit(1);
@@ -65,10 +65,10 @@ program
   .requiredOption('--runtime <type>', 'Agent runtime: claude-code, codex, aider')
   .option('--name <name>', 'Custom agent name')
   .option('--socket <name>', 'tmux server socket (-L) this session runs on')
-  .action((session, opts) => {
+  .action(async (session, opts) => {
     initDb();
     loadInstalledConfig();
-    const result = sessionManager.adopt(session, opts.runtime, opts.name, opts.socket);
+    const result = await sessionManager.adopt(session, opts.runtime, opts.name, opts.socket);
     if (!result.ok) {
       console.error('Error:', result.error);
       process.exit(1);
@@ -150,7 +150,7 @@ program
   .command('logs <agent>')
   .description('Tail captured output from an agent')
   .option('-n, --lines <n>', 'Number of lines', '50')
-  .action((agent, opts) => {
+  .action(async (agent, opts) => {
     initDb();
     loadInstalledConfig();
 
@@ -160,7 +160,7 @@ program
       process.exit(1);
     }
 
-    const result = sessionManager.capturePane(agentResult.data.tmux_session, parseInt(opts.lines, 10));
+    const result = await sessionManager.capturePane(agentResult.data.tmux_session, parseInt(opts.lines, 10));
     if (!result.ok) {
       console.error('Error:', result.error);
       process.exit(1);
@@ -177,11 +177,11 @@ program
   .option('--repo <path>', 'Repository path (creates git worktree)')
   .option('--branch <name>', 'Branch name for worktree')
   .option('--runner <kind>', 'tmux (default) or file (Claude file-runner, no send-keys)')
-  .action((opts) => {
+  .action(async (opts) => {
     initDb();
     loadInstalledConfig();
 
-    const result = sessionManager.spawnAgent({
+    const result = await sessionManager.spawnAgent({
       name: opts.name,
       runtime: opts.runtime,
       repo: opts.repo,
@@ -295,7 +295,7 @@ program
   .command('upgrade <agent>')
   .description('Upgrade an adopted agent to spawned mode')
   .option('--repo <path>', 'Repository path for worktree')
-  .action((agent, opts) => {
+  .action(async (agent, opts) => {
     initDb();
     loadInstalledConfig();
 
@@ -305,7 +305,7 @@ program
       process.exit(1);
     }
 
-    const result = sessionManager.upgrade(agentResult.data.id, opts.repo);
+    const result = await sessionManager.upgrade(agentResult.data.id, opts.repo);
     if (!result.ok) {
       console.error('Error:', result.error);
       process.exit(1);

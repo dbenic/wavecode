@@ -121,7 +121,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(db.updateAgentStatus).toHaveBeenCalledWith(agent.id, 'idle');
@@ -156,7 +156,7 @@ describe('output-watcher — idle-complete', () => {
     });
 
     startWatching(agent.id);
-    tickForTest(agent.id);
+    (await tickForTest(agent.id));
 
     expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
       grokRunId,
@@ -185,7 +185,7 @@ describe('output-watcher — idle-complete', () => {
     });
 
     startWatching(agent.id);
-    tickForTest(agent.id);
+    (await tickForTest(agent.id));
 
     expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
       grokRunId,
@@ -232,7 +232,7 @@ describe('output-watcher — idle-complete', () => {
     });
 
     startWatching(agent.id);
-    tickForTest(agent.id);
+    (await tickForTest(agent.id));
 
     expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
       oldRunId,
@@ -261,7 +261,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
@@ -285,7 +285,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
@@ -304,7 +304,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
@@ -324,7 +324,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(dispatcher.finalizeRun).not.toHaveBeenCalled();
@@ -345,7 +345,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
@@ -371,9 +371,9 @@ describe('output-watcher — idle-complete', () => {
       .mockReturnValue({ ok: true, data: CODEX_IDLE_PROMPT });
 
     startWatching(agent.id);
-    tickForTest(agent.id);
+    (await tickForTest(agent.id));
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
@@ -396,7 +396,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(db.updateAgentStatus).toHaveBeenCalledWith(agent.id, 'idle');
@@ -420,7 +420,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(dispatcher.finalizeRun).toHaveBeenCalledWith(
@@ -441,7 +441,7 @@ describe('output-watcher — idle-complete', () => {
 
     startWatching(agent.id);
     for (let i = 0; i < IDLE_OVERRIDE_THRESHOLD + 2; i++) {
-      tickForTest(agent.id);
+      (await tickForTest(agent.id));
     }
 
     expect(capturePane).not.toHaveBeenCalled();

@@ -31,7 +31,7 @@ function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
 }
 
-export function detectWireLines(senderId: string, output: string): void {
+export async function detectWireLines(senderId: string, output: string): Promise<void> {
   const sender = getAgent(senderId);
   if (!sender.ok) return;
   const lines = stripAnsi(output).split('\n').slice(-SCAN_LINES);
@@ -46,11 +46,11 @@ export function detectWireLines(senderId: string, output: string): void {
     if (set.has(key)) continue;
     set.add(key);
     seen.set(senderId, set);
-    handOff(sender.data, handle, body);
+    await handOff(sender.data, handle, body);
   }
 }
 
-function handOff(sender: Agent, handle: string, body: string): void {
+async function handOff(sender: Agent, handle: string, body: string): Promise<void> {
   const target = resolveAgent(handle);
   if (!target.ok) {
     sessionManager.sendKeys(sender.id, `[TO @${handle} failed: no such agent — use an alias or name from the roster]`);
@@ -81,11 +81,11 @@ function handOff(sender: Agent, handle: string, body: string): void {
     pending.set(target.data.id, list);
     return;
   }
-  deliver(target.data, text);
+  await deliver(target.data, text);
 }
 
-function deliver(agent: Agent, text: string): void {
-  const sent = sessionManager.sendKeys(agent.id, text);
+async function deliver(agent: Agent, text: string): Promise<void> {
+  const sent = await sessionManager.sendKeys(agent.id, text);
   if (!sent.ok) logger.warn({ agentId: agent.id, error: sent.error }, 'TO line: could not type the message into the recipient');
 }
 
@@ -94,7 +94,7 @@ function deliver(agent: Agent, text: string): void {
  * so the thread shows it, typed into the pane when the agent is idle. Used by
  * the hand-off folder watcher.
  */
-export function deliverSystemLine(agent: Agent, text: string, opts: { kind?: 'handoff' | 'info'; source?: string } = {}): void {
+export async function deliverSystemLine(agent: Agent, text: string, opts: { kind?: 'handoff' | 'info'; source?: string } = {}): Promise<void> {
   const stored = insertAgentMessage({ from_agent_id: null, to_agent_id: agent.id, workspace: agent.workspace ?? null, message: text, message_type: opts.kind ?? 'info' });
   if (stored.ok) {
     emit('message.created', 'agent_message', stored.data.id, { from_agent_id: null, to_agent_id: agent.id, message_type: opts.kind ?? 'info', via: 'system', source: opts.source ?? null }, null);
@@ -107,17 +107,17 @@ export function deliverSystemLine(agent: Agent, text: string, opts: { kind?: 'ha
     pending.set(target.id, list);
     return;
   }
-  deliver(target, text);
+  await deliver(target, text);
 }
 
 /** Output-watcher hook: the recipient went idle — deliver what waited for it. */
-export function onAgentIdle(agentId: string): void {
+export async function onAgentIdle(agentId: string): Promise<void> {
   const list = pending.get(agentId);
   if (!list?.length) return;
   pending.delete(agentId);
   const agent = getAgent(agentId);
   if (!agent.ok) return;
-  for (const text of list) deliver(agent.data, text);
+  for (const text of list) await deliver(agent.data, text);
 }
 
 export function resetWireLinesForTest(): void {

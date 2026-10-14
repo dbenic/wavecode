@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const execFileSyncMock = vi.fn();
+const execFileMock = vi.fn((...args: unknown[]) => {
+  const cb = args[args.length - 1];
+  if (typeof cb === 'function') (cb as (err: null, stdout: string, stderr: string) => void)(null, '', '');
+  return { stdin: { end: () => undefined } };
+});
 const existsSyncMock = vi.fn();
 const mkdirSyncMock = vi.fn();
 
 vi.mock('node:child_process', () => ({
-  execFileSync: execFileSyncMock,
+  execFile: execFileMock,
 }));
 
 vi.mock('node:fs', () => ({
@@ -111,17 +115,18 @@ describe('session-manager.ts', () => {
 
     existsSyncMock.mockReturnValue(false);
 
-    const result = sessionManager.spawnAgent({
+    const result = await sessionManager.spawnAgent({
       name: 'co-ops-dev',
       runtime: 'codex',
     });
 
     expect(result.ok).toBe(true);
     expect(mkdirSyncMock).toHaveBeenCalledWith('/tmp/projects/co-ops-dev', { recursive: true });
-    expect(childProcess.execFileSync).toHaveBeenCalledWith(
+    expect(childProcess.execFile).toHaveBeenCalledWith(
       'git',
       ['init', '-b', 'main'],
-      { cwd: '/tmp/projects/co-ops-dev', timeout: 5000 },
+      expect.objectContaining({ cwd: '/tmp/projects/co-ops-dev', timeout: 5000 }),
+      expect.any(Function),
     );
     expect(vi.mocked(runtimeLauncher.launchRuntimeInNewSession)).toHaveBeenCalledWith({
       sessionName: 'wc-co-ops-dev',
@@ -157,7 +162,7 @@ describe('session-manager.ts', () => {
     } as ReturnType<typeof config.getConfig>);
     existsSyncMock.mockReturnValue(false);
 
-    const result = sessionManager.spawnAgent({
+    const result = await sessionManager.spawnAgent({
       name: 'opus-file',
       runtime: 'claude-code',
       runner: 'file',
@@ -185,7 +190,7 @@ describe('session-manager.ts', () => {
 
     existsSyncMock.mockReturnValue(false);
 
-    const result = sessionManager.spawnAgent({
+    const result = await sessionManager.spawnAgent({
       name: 'grok-fe',
       runtime: 'codex',
       model: 'grok-4.6',
@@ -206,7 +211,7 @@ describe('session-manager.ts', () => {
     const runtimeLauncher = await import('./runtime-launcher.js');
     const sessionManager = await import('./session-manager.js');
 
-    const result = sessionManager.spawnAgent({
+    const result = await sessionManager.spawnAgent({
       name: 'evil',
       runtime: 'codex',
       model: 'x; rm -rf /',
@@ -234,7 +239,7 @@ describe('session-manager.ts', () => {
     });
     vi.mocked(db.deleteAgent).mockReturnValue({ ok: true, data: undefined });
 
-    const result = sessionManager.kill('agent-9');
+    const result = await sessionManager.kill('agent-9');
 
     expect(result.ok).toBe(true);
     expect(vi.mocked(runner.stopRunner)).toHaveBeenCalledWith('agent-9');
@@ -256,7 +261,7 @@ describe('session-manager.ts', () => {
       },
     });
 
-    const result = sessionManager.kill('agent-a');
+    const result = await sessionManager.kill('agent-a');
 
     expect(result.ok).toBe(false);
     expect(vi.mocked(tmux.killSession)).not.toHaveBeenCalled();
@@ -307,7 +312,7 @@ describe('session-manager.ts', () => {
     vi.mocked(db.deleteAgent).mockReturnValueOnce({ ok: true, data: undefined });
     vi.mocked(tmux.hasSession).mockReturnValueOnce(true);
 
-    const summary = sessionManager.stopAll();
+    const summary = await sessionManager.stopAll();
 
     expect(summary.killed).toEqual(['agent-s']);
     expect(summary.interrupted).toEqual(['agent-o']);
@@ -332,7 +337,7 @@ describe('session-manager.ts', () => {
       throw new Error('tmux exploded');
     });
 
-    const summary = sessionManager.stopAll();
+    const summary = await sessionManager.stopAll();
 
     expect(summary.killed).toEqual([]);
     expect(summary.interrupted).toEqual([]);
@@ -358,7 +363,7 @@ describe('session-manager.ts', () => {
       },
     } as ReturnType<typeof config.getConfig>);
 
-    const result = sessionManager.spawnAgent({
+    const result = await sessionManager.spawnAgent({
       name: 'builder',
       runtime: 'codex',
     });

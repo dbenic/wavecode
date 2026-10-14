@@ -90,12 +90,12 @@ describe('login seats', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function open(profile = 'ana', runtime = 'claude-code', user = ana.user) {
-    return seats.openLoginSeat({ profile, runtime, user });
+  async function open(profile = 'ana', runtime = 'claude-code', user = ana.user) {
+    return (await seats.openLoginSeat({ profile, runtime, user }));
   }
 
-  it('opens wc-login-<profile>-<runtime> with the profile env and `; exit`, as an adopted agent reserved for the requester', () => {
-    const res = open();
+  it('opens wc-login-<profile>-<runtime> with the profile env and `; exit`, as an adopted agent reserved for the requester', async () => {
+    const res = (await open());
     if (!res.ok) throw new Error(res.error);
     expect(res.data.session).toBe('wc-login-ana-claude-code');
     expect(tmuxHarness.launched[0]).toEqual({
@@ -112,69 +112,69 @@ describe('login seats', () => {
     expect(db.listEvents().map((e) => e.type)).toContain('profile.login_started');
   });
 
-  it('per-runtime login commands', () => {
-    expect(open('ana', 'codex').ok).toBe(true);
+  it('per-runtime login commands', async () => {
+    expect((await open('ana', 'codex')).ok).toBe(true);
     expect(tmuxHarness.launched.at(-1)?.command).toBe(`env CODEX_HOME=${root}/ana/codex codex login; exit`);
-    expect(open('ana', 'grok').ok).toBe(true);
+    expect((await open('ana', 'grok')).ok).toBe(true);
     expect(tmuxHarness.launched.at(-1)?.command).toBe(`env HOME=${root}/ana/grok-home grok; exit`);
   });
 
   it('only the profile owner or an admin; shared profiles admin-only', async () => {
     const { OWNER_USER } = await import('./users.js');
-    expect(open('ana', 'claude-code', bob.user)).toMatchObject({ ok: false, code: 'forbidden' });
-    expect(open('service', 'claude-code', ana.user)).toMatchObject({ ok: false, code: 'forbidden' });
-    expect(open('service', 'claude-code', OWNER_USER).ok).toBe(true);
-    expect(open('bob', 'codex', OWNER_USER).ok).toBe(true);
+    expect((await open('ana', 'claude-code', bob.user))).toMatchObject({ ok: false, code: 'forbidden' });
+    expect((await open('service', 'claude-code', ana.user))).toMatchObject({ ok: false, code: 'forbidden' });
+    expect((await open('service', 'claude-code', OWNER_USER)).ok).toBe(true);
+    expect((await open('bob', 'codex', OWNER_USER)).ok).toBe(true);
   });
 
-  it('rejects unknown profiles/runtimes and a second open seat', () => {
-    expect(open('carol')).toMatchObject({ ok: false, code: 'invalid' });
-    expect(open('ana', 'aider')).toMatchObject({ ok: false, code: 'invalid', error: expect.stringMatching(/login_command/) });
-    expect(open().ok).toBe(true);
-    expect(open()).toMatchObject({ ok: false, code: 'conflict' });
+  it('rejects unknown profiles/runtimes and a second open seat', async () => {
+    expect((await open('carol'))).toMatchObject({ ok: false, code: 'invalid' });
+    expect((await open('ana', 'aider'))).toMatchObject({ ok: false, code: 'invalid', error: expect.stringMatching(/login_command/) });
+    expect((await open()).ok).toBe(true);
+    expect((await open())).toMatchObject({ ok: false, code: 'conflict' });
   });
 
-  it('is reaped when the login command exits (session gone)', () => {
-    const res = open();
+  it('is reaped when the login command exits (session gone)', async () => {
+    const res = (await open());
     if (!res.ok) throw new Error(res.error);
-    vi.advanceTimersByTime(seats.LOGIN_SEAT_POLL_MS);
+    await vi.advanceTimersByTimeAsync(seats.LOGIN_SEAT_POLL_MS);
     expect(db.getAgent(res.data.agent.id).ok).toBe(true); // still running
 
     tmuxHarness.sessions.delete(res.data.session); // `; exit` after login
-    vi.advanceTimersByTime(seats.LOGIN_SEAT_POLL_MS);
+    await vi.advanceTimersByTimeAsync(seats.LOGIN_SEAT_POLL_MS);
     expect(db.getAgent(res.data.agent.id).ok).toBe(false);
     const finished = db.listEvents().find((e) => e.type === 'profile.login_finished');
     expect(JSON.parse(finished!.payload_json!)).toMatchObject({ profile: 'ana', runtime: 'claude-code', reason: 'exited', logged_in: false });
   });
 
-  it('is killed after 15 minutes and reports whether a credential now exists', () => {
-    const res = open();
+  it('is killed after 15 minutes and reports whether a credential now exists', async () => {
+    const res = (await open());
     if (!res.ok) throw new Error(res.error);
     fs.writeFileSync(path.join(root, 'ana', 'claude', '.credentials.json'), '{}');
 
-    vi.advanceTimersByTime(seats.LOGIN_SEAT_TTL_MS - seats.LOGIN_SEAT_POLL_MS);
+    await vi.advanceTimersByTimeAsync(seats.LOGIN_SEAT_TTL_MS - seats.LOGIN_SEAT_POLL_MS);
     expect(tmuxHarness.sessions.has(res.data.session)).toBe(true);
-    vi.advanceTimersByTime(seats.LOGIN_SEAT_POLL_MS);
+    await vi.advanceTimersByTimeAsync(seats.LOGIN_SEAT_POLL_MS);
     expect(tmuxHarness.sessions.has(res.data.session)).toBe(false);
     expect(db.getAgent(res.data.agent.id).ok).toBe(false);
     const finished = db.listEvents().find((e) => e.type === 'profile.login_finished');
     expect(JSON.parse(finished!.payload_json!)).toMatchObject({ reason: 'timeout', logged_in: true });
   });
 
-  it('sweeps orphaned seats after a daemon restart (no watcher)', () => {
-    const res = open();
+  it('sweeps orphaned seats after a daemon restart (no watcher)', async () => {
+    const res = (await open());
     if (!res.ok) throw new Error(res.error);
     seats.resetLoginSeatsForTest(); // watcher lost
-    expect(seats.sweepLoginSeats(db.listAgents())).toEqual([]); // still within its lease, session alive → watched again
-    expect(seats.checkLoginSeat(res.data.agent.id)).toBe('open');
+    expect((await seats.sweepLoginSeats(db.listAgents()))).toEqual([]); // still within its lease, session alive → watched again
+    expect((await seats.checkLoginSeat(res.data.agent.id))).toBe('open');
     tmuxHarness.sessions.delete(res.data.session);
-    expect(seats.checkLoginSeat(res.data.agent.id)).toBe('exited'); // the re-attached watcher reaps it
+    expect((await seats.checkLoginSeat(res.data.agent.id))).toBe('exited'); // the re-attached watcher reaps it
     expect(db.listAgents()).toHaveLength(0);
-    expect(seats.sweepLoginSeats(db.listAgents())).toEqual([]);
+    expect((await seats.sweepLoginSeats(db.listAgents()))).toEqual([]);
   });
 
   it('the dispatcher never sends work to a login seat', async () => {
-    const res = open();
+    const res = (await open());
     if (!res.ok) throw new Error(res.error);
     const task = db.insertTask({ prompt: 'work', created_by: ana.id });
     if (!task.ok) throw new Error(task.error);
@@ -290,14 +290,14 @@ describe('login seats', () => {
       // the trust check on the profile dir: "No, exit" ends the seat, which is what we want
       expect(loginAutoAdvanceKey(' Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm')).toBe('Enter');
       const tmuxMod = await import('./tmux.js');
-      const res = openLoginSeat({ profile: 'ana', runtime: 'claude-code', user: { id: 'u-ana', role: 'developer', profile: 'ana' } });
+      const res = (await openLoginSeat({ profile: 'ana', runtime: 'claude-code', user: { id: 'u-ana', role: 'developer', profile: 'ana' } }));
       if (!res.ok) throw new Error(res.error);
       vi.mocked(tmuxMod.capturePaneJoined).mockReturnValueOnce({ ok: true, data: ' Select login method:\n ❯ 1. Claude account with subscription' });
-      expect(checkLoginSeat(res.data.agent.id)).toBe('open');
+      expect((await checkLoginSeat(res.data.agent.id))).toBe('open');
       expect(vi.mocked(tmuxMod.sendRawKey)).toHaveBeenCalledWith(res.data.session, 'Enter');
       vi.mocked(tmuxMod.sendRawKey).mockClear();
       vi.mocked(tmuxMod.capturePaneJoined).mockReturnValueOnce({ ok: true, data: ' Paste code here if prompted >' });
-      expect(checkLoginSeat(res.data.agent.id)).toBe('open');
+      expect((await checkLoginSeat(res.data.agent.id))).toBe('open');
       expect(vi.mocked(tmuxMod.sendRawKey)).not.toHaveBeenCalled();
     });
 

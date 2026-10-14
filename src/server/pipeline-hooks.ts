@@ -12,27 +12,27 @@ export const pipelineHooks = {
   onVerified: null as ((project: string | null) => void) | null,
 };
 
-function fire(fn: (() => void) | null): void {
+async function fire(fn: (() => void | Promise<void>) | null): Promise<void> {
   if (!fn) return;
-  try { fn(); } catch { /* the pipeline logs its own failures */ }
+  try { await fn(); } catch { /* the pipeline logs its own failures */ }
 }
 
-export function fireFreeze(sha: string): void {
-  fire(pipelineHooks.onFreeze ? () => pipelineHooks.onFreeze!(sha) : null);
+export function fireFreeze(sha: string): Promise<void> {
+  return fire(pipelineHooks.onFreeze ? () => pipelineHooks.onFreeze!(sha) : null);
 }
 
-export function fireAuthorDone(agentId: string): void {
-  fire(pipelineHooks.onAuthorDone ? () => pipelineHooks.onAuthorDone!(agentId) : null);
+export function fireAuthorDone(agentId: string): Promise<void> {
+  return fire(pipelineHooks.onAuthorDone ? () => pipelineHooks.onAuthorDone!(agentId) : null);
 }
 
-export function fireMainAdvanced(project: string, sha: string): void {
-  fire(pipelineHooks.onMain ? () => pipelineHooks.onMain!(project, sha) : null);
+export function fireMainAdvanced(project: string, sha: string): Promise<void> {
+  return fire(pipelineHooks.onMain ? () => pipelineHooks.onMain!(project, sha) : null);
 }
 
-export function fireStagingDeployed(releaseId: string): void {
-  fire(pipelineHooks.onDeployed ? () => pipelineHooks.onDeployed!(releaseId) : null);
+export function fireStagingDeployed(releaseId: string): Promise<void> {
+  return fire(pipelineHooks.onDeployed ? () => pipelineHooks.onDeployed!(releaseId) : null);
 }
 
-export function fireStagingVerified(project: string | null): void {
-  fire(pipelineHooks.onVerified ? () => pipelineHooks.onVerified!(project) : null);
+export function fireStagingVerified(project: string | null): Promise<void> {
+  return fire(pipelineHooks.onVerified ? () => pipelineHooks.onVerified!(project) : null);
 }

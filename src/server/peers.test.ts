@@ -148,7 +148,7 @@ describe('answers', () => {
     expect(vi.mocked(sessionManager.sendKeys)).not.toHaveBeenCalled();
 
     db.updateAgentStatus(asker.id, 'idle');
-    peers.onAgentIdle(asker.id);
+    (await peers.onAgentIdle(asker.id));
     expect(vi.mocked(sessionManager.sendKeys)).toHaveBeenCalledTimes(1);
     expect(peers.getPeerQuestion(r.data.id)!.status).toBe('delivered');
   });

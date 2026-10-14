@@ -104,8 +104,8 @@ const LAUNCH_ECHO = /[\w.-]+@[\w.-]+(?::[^\s]*|\s+\S+)\s?[$#%]\s+\S/;
  * True when the pane shows a runtime TUI that is idle and not sitting on a
  * first-run dialog. Exported for tests.
  */
-export function isSeatReady(agent: Pick<Agent, 'tmux_session'>, pane: string): boolean {
-  if (getRuntimeState(agent) !== 'alive') return false;
+export async function isSeatReady(agent: Pick<Agent, 'tmux_session'>, pane: string): Promise<boolean> {
+  if (await getRuntimeState(agent) !== 'alive') return false;
   const lines = pane.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
   const last = lines[lines.length - 1] ?? '';
   if (LAUNCH_ECHO.test(last)) return false;
@@ -122,11 +122,11 @@ async function waitForSeatReady(
   const pollMs = opts.pollMs ?? 2_000;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const pane = sessionManager.capturePane(agent.tmux_session, 40);
-    if (pane.ok && isSeatReady(agent, pane.data)) return true;
+    const pane = await sessionManager.capturePane(agent.tmux_session, 40);
+    if (pane.ok && await isSeatReady(agent, pane.data)) return true;
     if (Date.now() >= deadline) return false;
     // A bare shell means the runtime exited — let the liveness layer relaunch it
-    if (getRuntimeState(agent) === 'dead') {
+    if (await getRuntimeState(agent) === 'dead') {
       const settled = await waitForRuntimeSettled(agent, { timeoutMs: Math.max(0, deadline - Date.now()), pollMs });
       if (!settled) return false;
       continue;
@@ -165,7 +165,7 @@ export async function briefOrchestratorSeat(
   // Spec §5e: every seat learns where the project rooms are and to keep ROOM.md current
   // Spec §5f: the seat's next session starts from the feedback its answers got
   const brief = buildOrchestratorBrief(undefined, [roomsBriefLine(), codeBriefLine(), feedbackBriefLine(agent), opts.extra].filter(Boolean).join(' ') || null);
-  const sent = sessionManager.sendKeys(agent.id, brief);
+  const sent = await sessionManager.sendKeys(agent.id, brief);
   if (!sent.ok) return { ok: false, error: sent.error };
 
   const event = emit('agent.prompt_sent', 'agent', agent.id, { text: brief.slice(0, 2000), via: 'orchestrator_brief' }, actorId);

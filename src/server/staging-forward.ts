@@ -7,9 +7,9 @@
  * A resolved tip that is simply empty (nothing deployed yet) is not unknown.
  */
 
-import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
-import { gitAncestor, gitAncestorSync, gitText } from './git-memo.js';
+import { gitAncestor, gitText } from './git-memo.js';
+import { execFileAsync } from './proc.js';
 import { behindMainLine } from './lane-status.js';
 import { commitsBehind, projectRepo } from './lane-main.js';
 
@@ -30,17 +30,13 @@ export interface ForwardNo {
   error: string;
 }
 
-function git(repo: string, args: string[]): string | null {
-  try {
-    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000 }).trim();
-  } catch {
-    return null;
-  }
+async function git(repo: string, args: string[]): Promise<string | null> {
+  return gitText(repo, args);
 }
 
 /** Memoised for full-SHA pairs (see git-memo). */
-function isAncestor(repo: string, ancestor: string, descendant: string): boolean | null {
-  return gitAncestorSync(repo, ancestor, descendant);
+async function isAncestor(repo: string, ancestor: string, descendant: string): Promise<boolean | null> {
+  return gitAncestor(repo, ancestor, descendant);
 }
 
 /** One fetch per repo per minute: a reconcile pass asks about every freeze, not every freeze about origin. */
@@ -52,12 +48,12 @@ export function resetFetchMemoForTest(): void {
 }
 
 /** Best-effort refresh. A missing remote or a failed fetch leaves the refs we already have. Exported for tests. */
-export function fetchOrigin(repo: string): void {
+export async function fetchOrigin(repo: string): Promise<void> {
   const at = lastFetchAt.get(repo);
   if (at !== undefined && Date.now() - at < FETCH_MEMO_MS) return;
   lastFetchAt.set(repo, Date.now());
   try {
-    execFileSync('git', ['-C', repo, 'fetch', '--no-tags', 'origin'], { timeout: 4000, stdio: 'ignore' });
+    await execFileAsync('git', ['-C', repo, 'fetch', '--no-tags', 'origin'], { timeout: 4000 });
   } catch { /* offline or no remote */ }
 }
 
@@ -73,16 +69,16 @@ export function rollbackRefusal(requestedSha: string, missing: number, version: 
 }
 
 /** True when `ancestor` is not contained in `descendant` and git can say so. */
-export function isMissingAncestor(repo: string, ancestor: string, descendant: string): boolean {
-  return isAncestor(repo, ancestor, descendant) === false;
+export async function isMissingAncestor(repo: string, ancestor: string, descendant: string): Promise<boolean> {
+  return (await isAncestor(repo, ancestor, descendant)) === false;
 }
 
-function readHealthCommand(argv: string[] | undefined, project: string): { sha: string; version: string | null } | null {
+async function readHealthCommand(argv: string[] | undefined, project: string): Promise<{ sha: string; version: string | null } | null> {
   if (!argv?.length) return null;
   const filled = argv.map((part) => part.replaceAll('{project}', project));
   let out = '';
   try {
-    out = execFileSync(filled[0], filled.slice(1), { encoding: 'utf8', timeout: 8000, maxBuffer: 1_000_000 });
+    out = await execFileAsync(filled[0], filled.slice(1), { timeout: 8000, maxBuffer: 1_000_000 });
   } catch {
     return null;
   }
@@ -93,16 +89,16 @@ function readHealthCommand(argv: string[] | undefined, project: string): { sha: 
 }
 
 /** Optional staging probe. A printed 40-character SHA wins over the release record. */
-export function readStagingHealth(project: string): { sha: string; version: string | null } | null {
+export function readStagingHealth(project: string): Promise<{ sha: string; version: string | null } | null> {
   return readHealthCommand(getConfig().releases?.staging_health_command, project);
 }
 
 /** Optional production probe. A printed 40-character SHA wins over the release record. */
-export function readProdHealth(project: string): { sha: string; version: string | null } | null {
+export function readProdHealth(project: string): Promise<{ sha: string; version: string | null } | null> {
   return readHealthCommand(getConfig().releases?.prod_health_command, project);
 }
 
-export function evaluateForward(opts: {
+export async function evaluateForward(opts: {
   project: string;
   requestedSha: string;
   staging: StagingTip | null;
@@ -111,10 +107,10 @@ export function evaluateForward(opts: {
   forceRollback?: boolean;
   forceReason?: string | null;
   actorIsAdmin?: boolean;
-}): ForwardOk | ForwardNo {
+}): Promise<ForwardOk | ForwardNo> {
   const repo = projectRepo(opts.project);
-  if (repo) fetchOrigin(repo);
-  const behind = commitsBehind(opts.project, opts.requestedSha);
+  if (repo) await fetchOrigin(repo);
+  const behind = await commitsBehind(opts.project, opts.requestedSha);
   // No repo keeps the old allow (a box that does not have the git checkout).
   // A repo that does not contain the SHA, or cannot compare it with main, refuses.
   if (repo && behind == null) return { ok: false, error: CANNOT_VERIFY_MAIN };
@@ -127,11 +123,11 @@ export function evaluateForward(opts: {
   const unproven = `cannot prove ${opts.requestedSha.slice(0, 8)} contains staging ${staging.sha.slice(0, 8)}`;
   if (!repo) return { ok: false, error: unproven };
 
-  const contains = isAncestor(repo, staging.sha, opts.requestedSha);
+  const contains = await isAncestor(repo, staging.sha, opts.requestedSha);
   if (contains === null) return { ok: false, error: unproven };
   if (contains) return { ok: true, rollback: false, reason: null };
 
-  const count = git(repo, ['rev-list', '--count', `${opts.requestedSha}..${staging.sha}`]);
+  const count = await git(repo, ['rev-list', '--count', `${opts.requestedSha}..${staging.sha}`]);
   const missing = count && /^\d+$/.test(count) ? Number(count) : 0;
   const error = rollbackRefusal(opts.requestedSha, missing, staging.version, staging.lane);
   if (opts.forceRollback === true) {

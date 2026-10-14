@@ -76,7 +76,7 @@ export async function checkAll(): Promise<void> {
 
   const agents = listAgents();
   try {
-    sweepLoginSeats(agents);
+    await sweepLoginSeats(agents);
   } catch (e) {
     logger.error({ error: (e as Error).message }, 'Login seat sweep error');
   }
@@ -101,7 +101,7 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
   if (isLoginSeat(agent)) return;
 
   // Check if tmux session is still alive
-  const alive = isSessionAlive(agent.tmux_session);
+  const alive = await isSessionAlive(agent.tmux_session);
 
   if (!alive) {
     if (agent.mode === 'spawned' && config.autonomy.auto_restart) {
@@ -123,11 +123,11 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
   // adopted sessions belong to a human and must never be typed into.
   // Dispatch waits for it to settle; the tick does not.
   try {
-    const state = getRuntimeState(agent);
+    const state = await getRuntimeState(agent);
     if (state === 'alive') {
       noteRuntimeAlive(agent.id);
     } else if (state === 'dead' && agent.mode === 'spawned') {
-      const relaunch = relaunchRuntime(agent, 'health_check');
+      const relaunch = await relaunchRuntime(agent, 'health_check');
       if (!relaunch.ok && agent.status !== 'error') {
         updateAgentStatus(agent.id, 'error');
         emit('agent.runtime_relaunch_exhausted', 'agent', agent.id, {
@@ -143,7 +143,7 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
   }
 
   // Check for hang (no output change for hang_timeout_min)
-  const captureResult = sessionManager.capturePane(agent.tmux_session, 20);
+  const captureResult = await sessionManager.capturePane(agent.tmux_session, 20);
   if (!captureResult.ok) return;
 
   const outputHash = simpleHash(captureResult.data);
@@ -208,7 +208,7 @@ async function handleCrashedSpawnedAgent(agent: Agent): Promise<void> {
     // Re-queue any running tasks for this agent
     const recoveredRuns = reQueueRunningTasks(agent.id);
 
-    const restartResult = sessionManager.ensureSpawnedAgentSession(agent.id);
+    const restartResult = await sessionManager.ensureSpawnedAgentSession(agent.id);
     if (!restartResult.ok) {
       logger.error({ agentId: agent.id, error: restartResult.error }, 'Failed to restart agent');
       return;
@@ -231,7 +231,7 @@ async function handleHungSpawnedAgent(agent: Agent): Promise<void> {
   logger.warn({ agentId: agent.id, name: agent.name }, 'Killing hung spawned agent');
 
   // Kill the tmux session (safe — no-op if already dead)
-  tmux.killSession(agent.tmux_session);
+  await tmux.killSession(agent.tmux_session);
 
   // Will be detected as crashed on next check cycle → auto-restart
   updateAgentStatus(agent.id, 'error');
@@ -288,7 +288,7 @@ function reQueueRunningTasks(agentId: string): number {
   return requeued;
 }
 
-function isSessionAlive(sessionName: string): boolean {
+async function isSessionAlive(sessionName: string): Promise<boolean> {
   return tmux.hasSession(sessionName);
 }
 

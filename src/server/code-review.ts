@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import {
   getDb,
   generateId,
@@ -147,12 +147,9 @@ export function getReview(reviewId: string): CodeReview | null {
 
 // --- Diff capture ---
 
-function gitOutput(dir: string, args: string[]): string | null {
+async function gitOutput(dir: string, args: string[]): Promise<string | null> {
   try {
-    const output = execFileSync('git', ['-C', dir, ...args], {
-      encoding: 'utf-8',
-      timeout: 10000,
-    }).trim();
+    const output = (await execFileAsync('git', ['-C', dir, ...args], { timeout: 10000 })).trim();
     return output || null;
   } catch {
     return null;
@@ -177,13 +174,14 @@ function formatChangedFiles(changedFiles: string | null | undefined): string | n
  * workspace; if the working tree is clean, fall back to `git show HEAD`
  * (the agent may have committed) and finally `run.changed_files`.
  */
-export function captureGitDiff(opts: {
+export async function captureGitDiff(opts: {
   tmuxSession: string;
   workspace?: string | null;
   changedFiles?: string | null;
-}): string | null {
+}): Promise<string | null> {
+  const paneDir = await tmux.getPaneDir(opts.tmuxSession);
   const dirs = [...new Set(
-    [tmux.getPaneDir(opts.tmuxSession), opts.workspace]
+    [paneDir, opts.workspace]
       .filter((dir): dir is string => typeof dir === 'string' && dir.trim().length > 0),
   )];
 
@@ -192,19 +190,19 @@ export function captureGitDiff(opts: {
   // committed and uncommitted alike. Fall back to the old behaviour when no
   // shared branch can be resolved (detached checkouts, non-branch workspaces).
   for (const dir of dirs) {
-    const base = resolveLaneBase(dir);
+    const base = await resolveLaneBase(dir);
     if (!base) continue;
-    const lane = gitOutput(dir, ['diff', base]);
+    const lane = await gitOutput(dir, ['diff', base]);
     if (lane) return lane;
   }
 
   for (const dir of dirs) {
-    const working = gitOutput(dir, ['diff', 'HEAD']) ?? gitOutput(dir, ['diff']);
+    const working = (await gitOutput(dir, ['diff', 'HEAD'])) ?? (await gitOutput(dir, ['diff']));
     if (working) return working;
   }
 
   for (const dir of dirs) {
-    const committed = gitOutput(dir, ['show', 'HEAD', '--format=', '--']);
+    const committed = await gitOutput(dir, ['show', 'HEAD', '--format=', '--']);
     if (committed) return committed;
   }
 
@@ -217,12 +215,12 @@ const LANE_BASE_CANDIDATES = ['origin/main', 'main', 'origin/master', 'master'];
  * The merge-base between the workspace's HEAD and the first shared branch
  * that exists, or null when none resolves or HEAD *is* the shared branch.
  */
-export function resolveLaneBase(dir: string): string | null {
-  const head = gitOutput(dir, ['rev-parse', 'HEAD']);
+export async function resolveLaneBase(dir: string): Promise<string | null> {
+  const head = await gitOutput(dir, ['rev-parse', 'HEAD']);
   if (!head) return null;
 
   for (const candidate of LANE_BASE_CANDIDATES) {
-    const base = gitOutput(dir, ['merge-base', candidate, 'HEAD']);
+    const base = await gitOutput(dir, ['merge-base', candidate, 'HEAD']);
     if (base && base !== head) return base;
   }
   return null;
@@ -241,7 +239,7 @@ export async function requestSelfReview(runId: string): Promise<Result<CodeRevie
   const agent = agentResult.data;
 
   // Capture diff
-  const diff = captureGitDiff({
+  const diff = await captureGitDiff({
     tmuxSession: agent.tmux_session,
     workspace: agent.workspace,
     changedFiles: run.changed_files,
@@ -265,7 +263,7 @@ export async function requestSelfReview(runId: string): Promise<Result<CodeRevie
 If you find issues, fix them now. If everything looks good, say "REVIEW PASS: no issues found."
 Start your review with "REVIEW:" so I can capture the results.`;
 
-  const sendResult = sessionManager.sendKeys(agent.id, reviewPrompt);
+  const sendResult = await sessionManager.sendKeys(agent.id, reviewPrompt);
   if (!sendResult.ok) {
     finalizeReview(reviewId, systemReviewFeedback(`failed to send review prompt: ${sendResult.error}`), {
       allowFixLoop: false,
@@ -316,7 +314,7 @@ export async function requestCrossModelReview(
   }
 
   const runtime = reviewerRuntime ?? config.review.default_reviewer;
-  const diff = captureGitDiff({
+  const diff = await captureGitDiff({
     tmuxSession: agent.tmux_session,
     workspace: agent.workspace,
     changedFiles: run.changed_files,
@@ -339,7 +337,7 @@ export async function requestCrossModelReview(
       : { ok: false, error: 'Review row missing after empty-diff finalize' };
   }
 
-  const outputResult = sessionManager.capturePane(agent.tmux_session, 30);
+  const outputResult = await sessionManager.capturePane(agent.tmux_session, 30);
   const agentOutput = outputResult.ok ? outputResult.data : '';
 
   const taskResult = getTask(run.task_id);
@@ -384,7 +382,7 @@ VERDICT: [PASS / NEEDS FIXES / REJECT]`;
   logger.info({ reviewId, runId, runtime, reviewer: reviewerAgent?.name ?? 'llm' }, 'Cross-model review started');
 
   if (reviewerAgent) {
-    const sendResult = sessionManager.sendKeys(reviewerAgent.id, reviewPrompt);
+    const sendResult = await sessionManager.sendKeys(reviewerAgent.id, reviewPrompt);
     if (!sendResult.ok) {
       finalizeReview(reviewId, systemReviewFeedback(`failed to send review prompt: ${sendResult.error}`), {
         allowFixLoop: false,
@@ -469,7 +467,9 @@ export function finalizeReview(
   recordReviewInRoom(review, verdict, issuesFound, feedback);
 
   if (opts.allowFixLoop !== false) {
-    maybeContinueFixLoop(review, verdict);
+    void maybeContinueFixLoop(review, verdict).catch((err) => {
+      logger.warn({ reviewId, error: (err as Error).message }, 'Fix loop failed');
+    });
   }
 }
 
@@ -640,7 +640,7 @@ export function resolveReviewerAgentId(authorAgentId: string): string | null {
  * push the feedback back to the author. The next round's review is
  * triggered by onAuthorAgentIdle once the author finishes fixing.
  */
-function maybeContinueFixLoop(review: CodeReview, verdict: ReviewVerdict): void {
+async function maybeContinueFixLoop(review: CodeReview, verdict: ReviewVerdict): Promise<void> {
   const config = getConfig();
   if (!config.review.auto_review) return;
   if (verdict === 'pass') return;
@@ -654,7 +654,7 @@ function maybeContinueFixLoop(review: CodeReview, verdict: ReviewVerdict): void 
     return;
   }
 
-  const result = sendFixesToAgent(review.id);
+  const result = await sendFixesToAgent(review.id);
   if (!result.ok) {
     logger.warn({ reviewId: review.id, error: result.error }, 'Auto fix-loop could not send fixes');
   }
@@ -735,7 +735,7 @@ function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
   let attempts = 0;
   const maxAttempts = (REVIEW_POLL_TIMEOUT_MIN * 60_000) / REVIEW_POLL_INTERVAL_MS;
 
-  const timer = setInterval(() => {
+  const timer = setInterval(() => { void (async () => {
     attempts++;
     const current = getReview(reviewId);
     if (!current || current.status !== 'reviewing') {
@@ -752,7 +752,7 @@ function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
       return;
     }
 
-    const captureResult = sessionManager.capturePane(tmuxSession, 300);
+    const captureResult = await sessionManager.capturePane(tmuxSession, 300);
     if (!captureResult.ok) return;
 
     const review = extractReviewFromPane(captureResult.data);
@@ -760,12 +760,12 @@ function pollForReviewCompletion(reviewId: string, tmuxSession: string): void {
 
     clearInterval(timer);
     finalizeReview(reviewId, review);
-  }, REVIEW_POLL_INTERVAL_MS);
+  })(); }, REVIEW_POLL_INTERVAL_MS);
 }
 
 // --- Send fixes back to original agent ---
 
-export function sendFixesToAgent(reviewId: string): Result<void> {
+export async function sendFixesToAgent(reviewId: string): Promise<Result<void>> {
   const review = getReview(reviewId);
   if (!review) return { ok: false, error: 'Review not found' };
   if (!review.feedback) return { ok: false, error: 'No feedback to send' };
@@ -783,7 +783,7 @@ ${review.feedback}
 Fix all HIGH and MED severity issues. For LOW severity, fix if quick, otherwise note them.
 After fixing, run the relevant tests to verify your fixes work.`;
 
-  const sendResult = sessionManager.sendKeys(agentResult.data.id, fixPrompt);
+  const sendResult = await sessionManager.sendKeys(agentResult.data.id, fixPrompt);
   if (!sendResult.ok) return sendResult;
 
   getDb().prepare(`UPDATE code_reviews SET fixes_sent_at = datetime('now') WHERE id = ?`).run(reviewId);

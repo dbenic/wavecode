@@ -20,7 +20,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
 import {
@@ -43,7 +42,8 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
 import { behindMainLine } from './lane-status.js';
-import { gitText } from './git-memo.js';
+import { gitAncestor, gitText } from './git-memo.js';
+import { execFileAsync } from './proc.js';
 import { commitsBehind, laneAutomationDenied, observeRepo, pingLaneAboutMain, mainTip, projectRepo } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured, type TestRun } from './test-runs.js';
@@ -368,14 +368,14 @@ function isRecordLane(name: string): boolean {
   return /^[\w./~+-]+$/.test(t);
 }
 
-function workspaceBranch(agentId: string | null): string | null {
+async function workspaceBranch(agentId: string | null): Promise<string | null> {
   if (!agentId) return null;
   const agent = getAgent(agentId);
   if (!agent.ok || !agent.data.workspace || !fs.existsSync(agent.data.workspace)) return null;
   try {
-    const name = execFileSync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], {
-      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    const name = (await execFileAsync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], {
+      timeout: 5000,
+    })).trim();
     return name && isRecordLane(name) ? name : null;
   } catch {
     return null;
@@ -417,20 +417,20 @@ function runAgentId(row: { run_id?: string | null; author_agent_id: string | nul
  * The lane recorded for this SHA: the run's checkout, else the author's, else
  * the release request for this SHA. A seat name found in prose is not a record.
  */
-export function laneFromRunRecord(row: { sha: string; author_agent_id: string | null; run_id?: string | null }): string | null {
+export async function laneFromRunRecord(row: { sha: string; author_agent_id: string | null; run_id?: string | null }): Promise<string | null> {
   const agentId = runAgentId(row);
-  const branch = workspaceBranch(agentId);
+  const branch = await workspaceBranch(agentId);
   if (branch && !namesOtherSeat(branch, agentId)) return branch;
   const requested = releaseRequestLane(row.sha);
   if (requested && !namesOtherSeat(requested, agentId)) return requested;
   return null;
 }
 
-function chooseLane(noteLane: string | null, noteBranch: string | null, row: LaneSource): string | null {
+async function chooseLane(noteLane: string | null, noteBranch: string | null, row: LaneSource): Promise<string | null> {
   const agentId = runAgentId(row);
   if (noteLane && !namesOtherSeat(noteLane, agentId)) return noteLane;
   if (noteBranch && !namesOtherSeat(noteBranch, agentId)) return noteBranch;
-  const recorded = laneFromRunRecord(row);
+  const recorded = await laneFromRunRecord(row);
   if (recorded) return recorded;
   // A lane already stored stays, unless it is filler, a hex SHA, or another seat.
   const stored = row.lane;
@@ -445,7 +445,7 @@ function chooseLane(noteLane: string | null, noteBranch: string | null, row: Lan
  * name are not a lane.
  * Pass `noteText` to avoid a second read; pass null when there is no note.
  */
-export function attributedLane(row: LaneSource, noteText?: string | null): string | null {
+export async function attributedLane(row: LaneSource, noteText?: string | null): Promise<string | null> {
   let text = noteText;
   if (text === undefined && row.freeze_path) {
     try { text = fs.readFileSync(row.freeze_path, 'utf8'); } catch { text = null; }
@@ -503,11 +503,11 @@ export function labelsFromFreezeNote(text: string, filename: string): FreezeLabe
  * A bundle drops a single desk number. A missing desk on a non-bundle note
  * leaves the stored desk alone.
  */
-export function applyNoteLabels(sha: string, text: string, filename: string): FreezeLabels {
+export async function applyNoteLabels(sha: string, text: string, filename: string): Promise<FreezeLabels> {
   const labels = labelsFromFreezeNote(text, filename);
   const row = getFreeze(sha);
   if (!row) return labels;
-  const lane = attributedLane(row, text);
+  const lane = await attributedLane(row, text);
   const desk = labels.bundle ? null : (labels.desk ?? row.desk);
   const fields: Partial<ReleaseFreeze> = {};
   if (lane !== row.lane) fields.lane = lane;
@@ -637,18 +637,18 @@ function readFreezeNote(filePath: string | null | undefined): string | null {
  * a latest command event of GREEN for this SHA. A stored column GREEN is not
  * enough once the note was read and does not confirm this SHA.
  */
-export function viewShaChecks(freeze: {
+export async function viewShaChecks(freeze: {
   project: string | null;
   sha: string;
   lane: string | null;
   gate: string | null;
   freeze_path?: string | null;
-}, runs?: TestRun[]): ShaView {
+}, runs?: TestRun[]): Promise<ShaView> {
   const note = readFreezeNote(freeze.freeze_path);
   const parsed = note != null ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
   const configured = !!(freeze.project && testsConfigured(freeze.project));
   const live = configured
-    ? shaChecks(runs ?? readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project))
+    ? shaChecks(runs ?? await readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project))
     : null;
   const sawNote = parsed.quick != null || parsed.full != null;
   const pick = (liveState: 'green' | 'red' | 'pending' | 'missing' | undefined, noteWord: 'green' | 'red' | null): ShaView['quick'] => {
@@ -800,19 +800,19 @@ export interface IngestOptions {
  * Ingest one freeze note or verdict file. Idempotent: the same file delivered
  * twice (or a re-write with the same SHA + verdict + reviewer) changes nothing.
  */
-export function ingestFreezeFile(filePath: string, opts: IngestOptions = {}): Result<IngestOutcome> {
+export async function ingestFreezeFile(filePath: string, opts: IngestOptions = {}): Promise<Result<IngestOutcome>> {
   let text: string;
   try {
     text = fs.readFileSync(filePath, 'utf-8');
   } catch (e) {
     return { ok: false, error: `cannot read ${filePath}: ${(e as Error).message}` };
   }
-  const result = ingestFreezeText(text, filePath, opts);
-  if (result.ok) fireFreeze(result.data.sha);
+  const result = await ingestFreezeText(text, filePath, opts);
+  if (result.ok) await fireFreeze(result.data.sha);
   return result;
 }
 
-export function ingestFreezeText(text: string, filePath: string, opts: IngestOptions = {}): Result<IngestOutcome> {
+export async function ingestFreezeText(text: string, filePath: string, opts: IngestOptions = {}): Promise<Result<IngestOutcome>> {
   const parsed = parseFreezeFile(text, filePath);
   if (!parsed) return { ok: false, error: `${path.basename(filePath)}: not a freeze note or verdict file` };
   if (!parsed.sha) return { ok: false, error: `${path.basename(filePath)}: no exact (40-char) SHA found` };
@@ -825,7 +825,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   const authorLabel = author ?? (parsed.authorCandidates[0] ? { name: parsed.authorCandidates[0] } : null);
   const existingEarly = getFreeze(sha);
   const notes = noteLanes(text.replace(/\r/g, '').split('\n').slice(0, 40));
-  const lane = chooseLane(notes.lane, notes.branch, {
+  const lane = await chooseLane(notes.lane, notes.branch, {
     sha,
     lane: existingEarly?.lane ?? null,
     author_agent_id: author?.id ?? existingEarly?.author_agent_id ?? null,
@@ -892,12 +892,12 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
         .run(sha, project, parsed.desk, lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
           parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       supersedeOlder(sha, project, lane, parsed.desk);
-      settleBehind(sha, project);
+      await settleBehind(sha, project);
       return { ok: true, data: { sha, effect: 'stored', run_id: null } };
     }
     const changed = Object.keys(enrich).some((k) => (existing as unknown as Record<string, unknown>)[k] !== (enrich as Record<string, unknown>)[k]);
     patch(sha, enrich);
-    settleBehind(sha, project ?? existing.project);
+    await settleBehind(sha, project ?? existing.project);
     return { ok: true, data: { sha, effect: changed ? 'updated' : 'noop', run_id: existing.run_id } };
   }
 
@@ -916,14 +916,14 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
     // Backfill keeps the queue to what can be promoted; the freeze is still recorded so a later PASS completes it.
     if (existing) {
       patch(sha, enrich);
-      settleBehind(sha, project ?? existing.project);
+      await settleBehind(sha, project ?? existing.project);
       return { ok: true, data: { sha, effect: 'noop', run_id: null } };
     }
     getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, freeze_path, verdict_path, gate, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
       .run(sha, project, parsed.desk, lane, authorId, authorName, reviewer?.id ?? null, reviewerName,
         parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
-    settleBehind(sha, project);
+    await settleBehind(sha, project);
     return { ok: true, data: { sha, effect: 'stored', run_id: null } };
   }
 
@@ -984,7 +984,7 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
   }
   supersedeOlder(sha, project ?? existing?.project ?? null, lane ?? existing?.lane ?? null, parsed.desk ?? existing?.desk ?? null);
   logger.info({ sha, runId, verdict, reviewer: reviewerName, author: authorName, file: filePath }, 'Release freeze ingested');
-  settleBehind(sha, project ?? existing?.project ?? null);
+  await settleBehind(sha, project ?? existing?.project ?? null);
   if (verdict === 'needs-fixes' && (parsed.gate ?? existing?.gate) === 'GREEN') {
     try { pingReviewersForGreenSha(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Gate ping skipped'); }
   }
@@ -996,17 +996,17 @@ export function ingestFreezeText(text: string, filePath: string, opts: IngestOpt
  * the project's current main, the card is `behind-main` and the author is
  * told once to merge (not rebase) and refreeze.
  */
-function settleBehind(sha: string, project: string | null): void {
+async function settleBehind(sha: string, project: string | null): Promise<void> {
   try {
-    const n = commitsBehind(project, sha);
+    const n = await commitsBehind(project, sha);
     if (n == null || n <= 0) return;
     const row = getFreeze(sha);
     if (!row || (row.status !== 'open' && row.status !== 'behind-main')) return;
     if (row.status === 'open') patch(sha, { status: 'behind-main' });
     const repo = project ? getConfig().projects?.[project]?.repo : undefined;
-    const tip = repo ? mainTip(repo, project) : null;
+    const tip = repo ? await mainTip(repo, project) : null;
     if (!tip || !row.lane) return;
-    pingLaneAboutMain({
+    await pingLaneAboutMain({
       lane: row.lane, project, mainSha: tip.sha, subject: tip.subject,
       authorAgentId: row.author_agent_id, authorName: row.author_name, kind: 'freeze',
     });
@@ -1044,24 +1044,23 @@ const fetchedAt = new Map<string, number>();
 const FETCH_TTL_MS = 10 * 60_000;
 
 /** Best-effort `git fetch --prune origin` on the base clone (main and candidate branches), at most every 10 minutes per repo. */
-function refreshMain(repo: string, now: number): void {
+async function refreshMain(repo: string, now: number): Promise<void> {
   const last = fetchedAt.get(repo) ?? 0;
   if (now - last < FETCH_TTL_MS) return;
   fetchedAt.set(repo, now);
   if (!fetchDisabled) {
     try {
-      execFileSync('git', ['-C', repo, 'fetch', '--quiet', '--prune', 'origin'], { stdio: 'ignore', timeout: 30_000 });
+      await execFileAsync('git', ['-C', repo, 'fetch', '--quiet', '--prune', 'origin'], { timeout: 30_000 });
     } catch (e) {
       logger.debug({ repo, error: (e as Error).message }, 'Base clone fetch skipped');
     }
   }
-  try { observeRepo(repo); } catch (e) { logger.debug({ repo, error: (e as Error).message }, 'Main tip not observed'); }
+  try { await observeRepo(repo); } catch (e) { logger.debug({ repo, error: (e as Error).message }, 'Main tip not observed'); }
 }
 
 /** Fetch (unless tests disabled it) and notice a moved main. Used before lane listing. */
-export function refreshProject(project: string, now = Date.now()): void {
-  const repo = getConfig().projects?.[project]?.repo;
-  if (repo) refreshMain(repo, now);
+export async function refreshProject(project: string, now = Date.now()): Promise<void> {
+  await refreshProjectAsync(project, now);
 }
 
 /** One fetch per repo per TTL, without blocking the event loop. The review board uses this. */
@@ -1078,7 +1077,7 @@ export async function refreshProjectAsync(project: string, now = Date.now()): Pr
       logger.debug({ repo, error: (e as Error).message }, 'Base clone fetch skipped');
     }
   }
-  try { observeRepo(repo); } catch (e) { logger.debug({ repo, error: (e as Error).message }, 'Main tip not observed'); }
+  try { await observeRepo(repo); } catch (e) { logger.debug({ repo, error: (e as Error).message }, 'Main tip not observed'); }
 }
 
 /** Test hook: a repo may be probed without fetching (no remote). */
@@ -1094,22 +1093,23 @@ function globToRe(glob: string): RegExp {
 const candidateCache = new Map<string, { at: number; refs: Array<{ ref: string; name: string }> }>();
 
 /** Unreleased candidate branches (newest first) matching projects.<p>.candidate_refs, as remote-tracking refs. */
-function candidateRefs(project: string, repo: string, now: number): Array<{ ref: string; name: string }> {
+async function candidateRefs(project: string, repo: string, now: number): Promise<Array<{ ref: string; name: string }>> {
   const glob = getConfig().projects?.[project]?.candidate_refs;
   if (!glob) return [];
   const hit = candidateCache.get(repo);
   if (hit && now - hit.at < MERGED_TTL_MS) return hit.refs;
   const re = globToRe(glob);
-  let refs: Array<{ ref: string; name: string }> = [];
+  const refs: Array<{ ref: string; name: string }> = [];
   try {
-    const out = execFileSync('git', ['-C', repo, 'for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/remotes/origin'], { encoding: 'utf-8', timeout: 5000 });
-    refs = out.split('\n').map((l) => l.trim()).filter(Boolean)
+    const out = await gitText(repo, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/remotes/origin'], 5000);
+    const listed = (out ?? '').split('\n').map((l) => l.trim()).filter(Boolean)
       .map((short) => ({ ref: short, name: short.replace(/^origin\//, '') }))
-      .filter((r) => re.test(r.name))
-      .filter((r) => {
-        // released candidates are already on main: not "in candidate" any more
-        try { execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', r.ref, 'origin/main'], { stdio: 'ignore', timeout: 5000 }); return false; } catch { return true; }
-      });
+      .filter((r) => re.test(r.name));
+    for (const r of listed) {
+      // released candidates are already on main: not "in candidate" any more
+      if (await gitAncestor(repo, r.ref, 'origin/main') === true) continue;
+      refs.push(r);
+    }
   } catch (e) {
     logger.debug({ repo, error: (e as Error).message }, 'Candidate refs unavailable');
   }
@@ -1120,55 +1120,51 @@ function candidateRefs(project: string, repo: string, now: number): Array<{ ref:
 export interface CandidateRef { ref: string; name: string; tip: string; committed_at: string | null }
 
 /** Unreleased candidate branches of a project with their tip SHA (newest first). */
-export function listCandidates(project: string, now = Date.now()): CandidateRef[] {
+export async function listCandidates(project: string, now = Date.now()): Promise<CandidateRef[]> {
   const repo = getConfig().projects?.[project]?.repo;
   if (!repo) return [];
-  if (!fetchDisabled) refreshMain(repo, now);
-  return candidateRefs(project, repo, now).map((c) => {
+  if (!fetchDisabled) await refreshMain(repo, now);
+  const out: CandidateRef[] = [];
+  for (const c of await candidateRefs(project, repo, now)) {
     let tip = '';
     let committed: string | null = null;
-    try {
-      const out = execFileSync('git', ['-C', repo, 'log', '-1', '--format=%H %cI', c.ref], { encoding: 'utf-8', timeout: 5000 }).trim();
-      [tip, committed] = out.split(' ') as [string, string];
-    } catch { /* unreadable ref */ }
-    return { ref: c.ref, name: c.name, tip, committed_at: committed };
-  }).filter((c) => c.tip);
+    const log = await gitText(repo, ['log', '-1', '--format=%H %cI', c.ref], 5000);
+    if (log) {
+      const parts = log.split(' ');
+      tip = parts[0] ?? '';
+      committed = parts[1] ?? null;
+    }
+    if (tip) out.push({ ref: c.ref, name: c.name, tip, committed_at: committed });
+  }
+  return out;
 }
 
 /** The newest unreleased candidate that contains `sha`, or null. */
-export function candidateFor(project: string | null, sha: string, now = Date.now()): { ref: string; name: string } | null {
+export async function candidateFor(project: string | null, sha: string, now = Date.now()): Promise<{ ref: string; name: string } | null> {
   const repo = project ? getConfig().projects?.[project]?.repo : undefined;
   if (!repo || !project) return null;
-  if (!fetchDisabled) refreshMain(repo, now);
-  if (isOnMain(project, sha, now) === true) return null; // released: on main, not "in candidate"
-  for (const c of candidateRefs(project, repo, now)) {
-    try {
-      execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', sha, c.ref], { stdio: 'ignore', timeout: 5000 });
-      return c;
-    } catch { /* not in this one */ }
+  if (!fetchDisabled) await refreshMain(repo, now);
+  if (await isOnMain(project, sha, now) === true) return null; // released: on main, not "in candidate"
+  for (const c of await candidateRefs(project, repo, now)) {
+    if (await gitAncestor(repo, sha, c.ref) === true) return c;
   }
   return null;
 }
 
 /** Is `sha` an ancestor of the project's main (per the local base clone)? null = cannot tell. */
-export function isOnMain(project: string | null, sha: string, now = Date.now()): boolean | null {
+export async function isOnMain(project: string | null, sha: string, now = Date.now()): Promise<boolean | null> {
   const repo = project ? getConfig().projects?.[project]?.repo : undefined;
   if (!repo) return null;
   const key = `${repo}:${sha}`;
   const hit = mergedCache.get(key);
   if (hit && now - hit.at < MERGED_TTL_MS) return hit.merged;
-  if (!fetchDisabled) refreshMain(repo, now);
+  if (!fetchDisabled) await refreshMain(repo, now);
   let merged: boolean | null = null;
   for (const ref of ['origin/main', 'main']) {
-    try {
-      execFileSync('git', ['-C', repo, 'merge-base', '--is-ancestor', sha, ref], { stdio: 'ignore', timeout: 5000 });
-      merged = true;
-      break;
-    } catch (e) {
-      const status = (e as { status?: number }).status;
-      if (status === 1) { merged = false; break; } // known commit, not an ancestor
-      // 128: unknown sha or ref — try the next ref, else unknown
-    }
+    const ancestor = await gitAncestor(repo, sha, ref);
+    if (ancestor === true) { merged = true; break; }
+    if (ancestor === false) { merged = false; break; } // known commit, not an ancestor
+    // null: unknown sha or ref — try the next ref, else unknown
   }
   mergedCache.set(key, { at: now, merged });
   return merged;
@@ -1178,11 +1174,11 @@ export function isOnMain(project: string | null, sha: string, now = Date.now()):
  * Close freezes whose SHA already sits on main (deployed or merged by other means):
  * status 'merged', the queue card approved, a review.superseded event with superseded_by 'main'.
  */
-export function reconcileMerged(now = Date.now()): number {
+export async function reconcileMerged(now = Date.now()): Promise<number> {
   let n = reconcileSuperseded();
   const open = getDb().prepare("SELECT * FROM release_freezes WHERE status IN ('open', 'stale')").all() as ReleaseFreeze[];
   for (const f of open) {
-    if (isOnMain(f.project, f.sha, now) !== true) continue;
+    if (await isOnMain(f.project, f.sha, now) !== true) continue;
     patch(f.sha, { status: 'merged', superseded_by: 'main' });
     if (f.run_id) {
       getDb().prepare("UPDATE runs SET review_status = 'approved' WHERE id = ? AND review_status = 'pending'").run(f.run_id);
@@ -1229,15 +1225,13 @@ export function resetMergedCacheForTest(): void {
 // --- promote / reject rules --------------------------------------------------------
 
 /** Current tip of the lane as git knows it from the author's workspace; null when unknowable. */
-function laneHead(freeze: ReleaseFreeze): string | null {
+async function laneHead(freeze: ReleaseFreeze): Promise<string | null> {
   if (!freeze.lane || !freeze.author_agent_id) return null;
   const agent = getAgent(freeze.author_agent_id);
   if (!agent.ok || !agent.data.workspace || !fs.existsSync(agent.data.workspace)) return null;
   for (const ref of [freeze.lane, `origin/${freeze.lane}`]) {
-    try {
-      const out = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      if (SHA40.test(out)) return out;
-    } catch { /* try the next ref */ }
+    const out = await gitText(agent.data.workspace, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], 5000);
+    if (out && SHA40.test(out)) return out;
   }
   return null;
 }
@@ -1266,15 +1260,15 @@ export function staleStageMessage(freeze: { sha: string; lane: string | null }, 
  * Write the attributed lane onto the row. A stale mark that blamed a different
  * lane is cleared when this lane's tip is still the freeze SHA.
  */
-export function syncAttributedLane(freeze: ReleaseFreeze, noteText?: string | null): ReleaseFreeze {
-  const lane = attributedLane(freeze, noteText);
+export async function syncAttributedLane(freeze: ReleaseFreeze, noteText?: string | null): Promise<ReleaseFreeze> {
+  const lane = await attributedLane(freeze, noteText);
   let next = freeze;
   if (lane !== freeze.lane) {
     patch(freeze.sha, { lane });
     next = { ...next, lane };
   }
   if (next.status === 'stale') {
-    const head = laneHead(next);
+    const head = await laneHead(next);
     if (head && head === next.sha) {
       patch(next.sha, { status: 'open', superseded_by: null });
       next = { ...next, status: 'open', superseded_by: null };
@@ -1283,10 +1277,10 @@ export function syncAttributedLane(freeze: ReleaseFreeze, noteText?: string | nu
   return next;
 }
 
-export function staleStageBlock(freeze: ReleaseFreeze): string | null {
-  const judged = syncAttributedLane(freeze);
+export async function staleStageBlock(freeze: ReleaseFreeze): Promise<string | null> {
+  const judged = await syncAttributedLane(freeze);
   if (judged.status === 'stale') return staleStageMessage(judged, judged.superseded_by);
-  const head = laneHead(judged);
+  const head = await laneHead(judged);
   if (head && head !== judged.sha) {
     patch(judged.sha, { status: 'stale', superseded_by: head });
     if (judged.run_id) emit('review.superseded', 'run', judged.run_id, { sha: judged.sha, superseded_by: head, lane: judged.lane }, null);
@@ -1295,15 +1289,16 @@ export function staleStageBlock(freeze: ReleaseFreeze): string | null {
   return null;
 }
 
-export function behindMainBlock(freeze: ReleaseFreeze): string | null {
-  const n = freeze.status === 'behind-main' ? (commitsBehind(freeze.project, freeze.sha) ?? 0) : commitsBehind(freeze.project, freeze.sha);
+export async function behindMainBlock(freeze: ReleaseFreeze): Promise<string | null> {
+  const counted = await commitsBehind(freeze.project, freeze.sha);
+  const n = freeze.status === 'behind-main' ? (counted ?? 0) : counted;
   if (freeze.status !== 'behind-main' && (n == null || n <= 0)) return null;
   if (n != null && n > 0 && freeze.status === 'open') patch(freeze.sha, { status: 'behind-main' });
   if (n != null && n > 0) {
     const repo = projectRepo(freeze.project);
-    const tip = repo ? mainTip(repo, freeze.project) : null;
+    const tip = repo ? await mainTip(repo, freeze.project) : null;
     if (tip && freeze.lane) {
-      pingLaneAboutMain({
+      await pingLaneAboutMain({
         lane: freeze.lane, project: freeze.project, mainSha: tip.sha, subject: tip.subject,
         authorAgentId: freeze.author_agent_id, authorName: freeze.author_name, kind: 'freeze',
       });
@@ -1320,29 +1315,29 @@ export function behindMainBlock(freeze: ReleaseFreeze): string | null {
  * or a freeze table that cannot be read) still uses git. Null ancestry does
  * not block: a box with no repo keeps today's behavior.
  */
-export function releaseBehindMain(project: string, sha: string): string | null {
+export async function releaseBehindMain(project: string, sha: string): Promise<string | null> {
   try {
     const freeze = getFreeze(sha);
     if (freeze) {
-      const blocked = behindMainBlock(freeze);
+      const blocked = await behindMainBlock(freeze);
       if (blocked) return blocked;
     }
   } catch { /* freeze table unavailable: the sha check below still runs */ }
-  const n = commitsBehind(project, sha);
+  const n = await commitsBehind(project, sha);
   if (n != null && n > 0) return behindMainLine(n);
   return null;
 }
 
-export function checkPromotable(freeze: ReleaseFreeze, opts: { overrideReason?: string | null } = {}): Result<ReleaseFreeze> {
+export async function checkPromotable(freeze: ReleaseFreeze, opts: { overrideReason?: string | null } = {}): Promise<Result<ReleaseFreeze>> {
   const short = freeze.sha.slice(0, 8);
   if (freeze.status === 'promoted') return { ok: false, error: `Freeze ${short} was already promoted` };
   if (freeze.status === 'rejected') return { ok: false, error: `Freeze ${short} was rejected` };
-  const behind = behindMainBlock(freeze);
+  const behind = await behindMainBlock(freeze);
   if (behind) return { ok: false, error: `Promotion refused: ${behind}` };
   if (freeze.status === 'stale') {
     return { ok: false, error: `Promotion refused: freeze ${short} is stale — lane ${freeze.lane ?? '?'} moved on to ${freeze.superseded_by?.slice(0, 8) ?? 'a newer commit'}. Freeze and review the new SHA.` };
   }
-  const head = laneHead(freeze);
+  const head = await laneHead(freeze);
   if (head && head !== freeze.sha) {
     patch(freeze.sha, { status: 'stale', superseded_by: head });
     if (freeze.run_id) emit('review.superseded', 'run', freeze.run_id, { sha: freeze.sha, superseded_by: head, lane: freeze.lane }, null);
@@ -1373,6 +1368,8 @@ export function markRejected(runId: string, actorName: string | null, reason: st
 const watchers = new Map<string, fs.FSWatcher>();
 const seen = new Map<string, number>(); // path → mtimeMs ingested
 const timers = new Set<NodeJS.Timeout>();
+/** In-flight inbox ingests started by onInboxEvent. Tests drain these after the settle timer. */
+const inboxInflight = new Set<Promise<void>>();
 
 function expand(p: string): string {
   return p === '~' || p.startsWith('~/') ? path.join(os.homedir(), p.slice(1)) : p;
@@ -1387,7 +1384,7 @@ export function isFreezeFileName(name: string): boolean {
   return !name.startsWith('.') && FILE_NAME_RE.test(name) && TEXT_EXT_RE.test(name);
 }
 
-function ingestIfChanged(file: string, opts: IngestOptions = {}): void {
+async function ingestIfChanged(file: string, opts: IngestOptions = {}): Promise<void> {
   let mtime: number;
   try {
     mtime = fs.statSync(file).mtimeMs;
@@ -1397,7 +1394,7 @@ function ingestIfChanged(file: string, opts: IngestOptions = {}): void {
   if (seen.get(file) === mtime) return;
   seen.set(file, mtime);
   try {
-    const r = ingestFreezeFile(file, opts);
+    const r = await ingestFreezeFile(file, opts);
     if (!r.ok) logger.info({ file, reason: r.error }, 'Freeze file skipped');
   } catch (e) {
     logger.warn({ file, error: (e as Error).message }, 'Freeze file could not be ingested');
@@ -1411,7 +1408,7 @@ export function startOfLocalDay(now = new Date()): number {
 }
 
 /** First run: import today's freezes and PASS verdicts so an already-reviewed lane shows up (spec §6). */
-export function backfillFreezes(dirs = freezeInboxDirs(), now = new Date()): number {
+export async function backfillFreezes(dirs = freezeInboxDirs(), now = new Date()): Promise<number> {
   const since = startOfLocalDay(now);
   let n = 0;
   for (const dir of dirs) {
@@ -1429,7 +1426,7 @@ export function backfillFreezes(dirs = freezeInboxDirs(), now = new Date()): num
       .filter((x): x is { file: string; mtime: number } => !!x && x.mtime >= since)
       .sort((a, b) => a.mtime - b.mtime);
     for (const { file } of files) {
-      ingestIfChanged(file, { passOnly: true });
+      await ingestIfChanged(file, { passOnly: true });
       n++;
     }
   }
@@ -1440,11 +1437,20 @@ export function backfillFreezes(dirs = freezeInboxDirs(), now = new Date()): num
 export function onInboxEvent(dir: string, filename: string | Buffer | null, settleMs = SETTLE_MS): void {
   if (!filename || typeof filename !== 'string' || !isFreezeFileName(filename)) return;
   const file = path.join(dir, filename);
-  const t = setTimeout(() => { timers.delete(t); ingestIfChanged(file); }, settleMs);
+  const t = setTimeout(() => {
+    timers.delete(t);
+    const job = ingestIfChanged(file).finally(() => { inboxInflight.delete(job); });
+    inboxInflight.add(job);
+  }, settleMs);
   timers.add(t);
 }
 
-export function startFreezeWatchers(): void {
+/** Wait for inbox ingests that onInboxEvent has already started. Tests only. */
+export async function pendingInboxForTest(): Promise<void> {
+  while (inboxInflight.size > 0) await Promise.allSettled([...inboxInflight]);
+}
+
+export async function startFreezeWatchers(): Promise<void> {
   for (const dir of freezeInboxDirs()) {
     if (watchers.has(dir)) continue;
     if (!fs.existsSync(dir)) {
@@ -1460,7 +1466,7 @@ export function startFreezeWatchers(): void {
       logger.warn({ dir, error: (e as Error).message }, 'Freeze watcher could not start');
     }
   }
-  const imported = backfillFreezes();
+  const imported = await backfillFreezes();
   if (imported > 0) logger.info({ imported }, 'Freeze inbox backfill done');
 }
 

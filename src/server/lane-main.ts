@@ -4,9 +4,9 @@
  * origin/main). Pings are one per lane per main SHA.
  */
 
-import { execFileSync } from 'node:child_process';
 import { getConfig } from './config.js';
-import { gitAncestor, gitText, gitAncestorSync } from './git-memo.js';
+import { gitAncestor, gitText } from './git-memo.js';
+import { execFileAsync } from './proc.js';
 import { getAgent, getDb, listAgents, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
@@ -56,15 +56,10 @@ function isRefLookup(args: string[]): boolean {
   return args.length === 4 && args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === '--quiet';
 }
 
-function git(repo: string, args: string[]): string | null {
+async function git(repo: string, args: string[]): Promise<string | null> {
   const key = refMemoDepth > 0 && isRefLookup(args) ? `${repo}\0${args[3]}` : null;
   if (key && refMemo.has(key)) return refMemo.get(key) ?? null;
-  let value: string | null;
-  try {
-    value = execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024 }).trim();
-  } catch {
-    value = null;
-  }
+  const value = await gitText(repo, args);
   if (key) refMemo.set(key, value);
   return value;
 }
@@ -117,66 +112,66 @@ export function projectRepo(project: string | null): string | null {
   return getConfig().projects?.[project]?.repo ?? null;
 }
 
-export function resolveMainRef(repo: string, project: string | null): string | null {
+export async function resolveMainRef(repo: string, project: string | null): Promise<string | null> {
   const spec = mainSpec(project);
   for (const ref of [spec.ref, spec.branch]) {
-    const sha = git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    const sha = await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
     if (sha && /^[0-9a-f]{40}$/i.test(sha)) return ref;
   }
   return null;
 }
 
 /** Memoised for full-SHA pairs (see git-memo); a ref name is asked every time. */
-function isAncestor(repo: string, ancestor: string, descendant: string): boolean | null {
-  return gitAncestorSync(repo, ancestor, descendant);
+async function isAncestor(repo: string, ancestor: string, descendant: string): Promise<boolean | null> {
+  return gitAncestor(repo, ancestor, descendant);
 }
 
-function mainTipSha(repo: string, ref: string): string | null {
-  const sha = git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+async function mainTipSha(repo: string, ref: string): Promise<string | null> {
+  const sha = await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
   return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
 }
 
 /** How many commits on main this SHA does not contain. Null when git cannot tell. */
-export function commitsBehind(project: string | null, sha: string): number | null {
+export async function commitsBehind(project: string | null, sha: string): Promise<number | null> {
   const repo = projectRepo(project);
   if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return null;
-  const main = resolveMainRef(repo, project);
+  const main = await resolveMainRef(repo, project);
   if (!main) return null;
-  const mainSha = mainTipSha(repo, main);
+  const mainSha = await mainTipSha(repo, main);
   if (mainSha) {
     const hit = recallBehind(mainSha, sha);
     if (hit !== undefined) return hit;
   }
-  const contains = isAncestor(repo, mainSha ?? main, sha);
+  const contains = await isAncestor(repo, mainSha ?? main, sha);
   if (contains === null) return null;
   if (contains) {
     if (mainSha) rememberBehind(mainSha, sha, 0);
     return 0;
   }
-  const n = git(repo, ['rev-list', '--count', `${sha}..${mainSha ?? main}`]);
+  const n = await git(repo, ['rev-list', '--count', `${sha}..${mainSha ?? main}`]);
   if (n == null || !/^\d+$/.test(n)) return null;
   const value = Number(n);
   if (mainSha) rememberBehind(mainSha, sha, value);
   return value;
 }
 
-export function mainTip(repo: string, project: string | null): { sha: string; subject: string; ref: string } | null {
-  const ref = resolveMainRef(repo, project);
+export async function mainTip(repo: string, project: string | null): Promise<{ sha: string; subject: string; ref: string } | null> {
+  const ref = await resolveMainRef(repo, project);
   if (!ref) return null;
-  const out = git(repo, ['log', '-1', '--format=%H%x00%s', ref]);
+  const out = await git(repo, ['log', '-1', '--format=%H%x00%s', ref]);
   if (!out) return null;
   const [sha, subject] = out.split('\0');
   if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) return null;
   return { sha, subject: (subject ?? '').replace(/\s+/g, ' ').slice(0, 120), ref };
 }
 
-/** Diff of the lane's own changes against the merge-base with main. */
-export function laneOnlyDiff(repo: string, sha: string, mainRef: string): string | null {
-  const base = git(repo, ['merge-base', mainRef, sha]);
+/** Diff of the lane's own changes against the merge-base with main. Stdout is not trimmed. */
+export async function laneOnlyDiff(repo: string, sha: string, mainRef: string): Promise<string | null> {
+  const base = await git(repo, ['merge-base', mainRef, sha]);
   if (!base) return null;
   try {
-    return execFileSync('git', ['-C', repo, 'diff', '--no-color', '--find-renames', base, sha], {
-      encoding: 'utf8', timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+    return await execFileAsync('git', ['-C', repo, 'diff', '--no-color', '--find-renames', base, sha], {
+      timeout: 8000, maxBuffer: 8 * 1024 * 1024,
     });
   } catch {
     return null;
@@ -187,34 +182,34 @@ export function laneOnlyDiff(repo: string, sha: string, mainRef: string): string
  * True when `newSha` contains main and its lane-only diff equals `oldSha`'s.
  * A clean merge of main does not change the lane's own patch.
  */
-export function isMergeOnlyDelta(repo: string, oldSha: string, newSha: string, mainRef: string): boolean {
-  const mainSha = /^[0-9a-f]{40}$/i.test(mainRef) ? mainRef : mainTipSha(repo, mainRef);
+export async function isMergeOnlyDelta(repo: string, oldSha: string, newSha: string, mainRef: string): Promise<boolean> {
+  const mainSha = /^[0-9a-f]{40}$/i.test(mainRef) ? mainRef : await mainTipSha(repo, mainRef);
   if (mainSha) {
     const hit = recallDelta(mainSha, oldSha, newSha);
     if (hit !== undefined) return hit;
   }
-  if (isAncestor(repo, mainSha ?? mainRef, newSha) !== true) {
+  if (await isAncestor(repo, mainSha ?? mainRef, newSha) !== true) {
     if (mainSha) rememberDelta(mainSha, oldSha, newSha, false);
     return false;
   }
-  const before = laneOnlyDiff(repo, oldSha, mainSha ?? mainRef);
-  const after = laneOnlyDiff(repo, newSha, mainSha ?? mainRef);
+  const before = await laneOnlyDiff(repo, oldSha, mainSha ?? mainRef);
+  const after = await laneOnlyDiff(repo, newSha, mainSha ?? mainRef);
   if (before == null || after == null) return false;
   const value = before === after;
   if (mainSha) rememberDelta(mainSha, oldSha, newSha, value);
   return value;
 }
 
-export function changedFiles(repo: string, ref: string, mainRef: string): string[] {
+export async function changedFiles(repo: string, ref: string, mainRef: string): Promise<string[]> {
   const mainSha = /^[0-9a-f]{40}$/i.test(mainRef) ? mainRef : null;
   const refSha = /^[0-9a-f]{40}$/i.test(ref) ? ref : null;
   if (mainSha && refSha) {
     const hit = recallFiles(mainSha, refSha);
     if (hit) return hit;
   }
-  const base = git(repo, ['merge-base', mainSha ?? mainRef, refSha ?? ref]);
+  const base = await git(repo, ['merge-base', mainSha ?? mainRef, refSha ?? ref]);
   if (!base) return [];
-  const out = git(repo, ['diff', '--name-only', base, refSha ?? ref]);
+  const out = await git(repo, ['diff', '--name-only', base, refSha ?? ref]);
   const files = out ? out.split('\n').map((l) => l.trim()).filter(Boolean) : [];
   if (mainSha && refSha) rememberFiles(mainSha, refSha, files);
   return files;
@@ -326,25 +321,25 @@ export function alreadyMainPinged(lane: string, mainSha: string): boolean {
   return nowMs() - latest.at < REPEAT_MS;
 }
 
-function laneTipSha(project: string | null, lane: string): string | null {
+async function laneTipSha(project: string | null, lane: string): Promise<string | null> {
   const repo = projectRepo(project);
   if (!repo) return null;
   const spec = mainSpec(project);
-  const remote = git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${spec.remote}/${lane}^{commit}`]);
+  const remote = await git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${spec.remote}/${lane}^{commit}`]);
   if (remote && /^[0-9a-f]{40}$/i.test(remote)) return remote;
-  const local = git(repo, ['rev-parse', '--verify', '--quiet', `${lane}^{commit}`]);
+  const local = await git(repo, ['rev-parse', '--verify', '--quiet', `${lane}^{commit}`]);
   return local && /^[0-9a-f]{40}$/i.test(local) ? local : null;
 }
 
-function stillBehind(project: string | null, lane: string): boolean {
-  const tip = laneTipSha(project, lane);
+async function stillBehind(project: string | null, lane: string): Promise<boolean> {
+  const tip = await laneTipSha(project, lane);
   if (!tip) return false;
-  const n = commitsBehind(project, tip);
+  const n = await commitsBehind(project, tip);
   return n != null && n > 0;
 }
 
 /** A PASS on a SHA that does not contain this main still counts as unreviewed. */
-function stillUnreviewed(project: string | null, lane: string, mainSha: string): boolean {
+async function stillUnreviewed(project: string | null, lane: string, mainSha: string): Promise<boolean> {
   const repo = projectRepo(project);
   let rows: { sha: string }[] = [];
   try {
@@ -356,7 +351,7 @@ function stillUnreviewed(project: string | null, lane: string, mainSha: string):
   }
   if (!repo) return true;
   for (const row of rows) {
-    if (isAncestor(repo, mainSha, row.sha) === true) return false;
+    if (await isAncestor(repo, mainSha, row.sha) === true) return false;
   }
   return true;
 }
@@ -454,7 +449,7 @@ export function resetMainPingMemoForTest(): void {
   caughtUp.clear();
 }
 
-export function pingLaneAboutMain(opts: {
+export async function pingLaneAboutMain(opts: {
   lane: string;
   project: string | null;
   mainSha: string;
@@ -462,7 +457,7 @@ export function pingLaneAboutMain(opts: {
   authorAgentId?: string | null;
   authorName?: string | null;
   kind: 'freeze' | 'moved' | 'merged';
-}): boolean {
+}): Promise<boolean> {
   if (!opts.lane || !opts.mainSha) return false;
   if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
   const key = pingKey(opts.lane, opts.mainSha);
@@ -473,7 +468,7 @@ export function pingLaneAboutMain(opts: {
     // the git questions are asked once per lane and main, not on every board refresh.
     const settled = caughtUp.get(key);
     if (settled !== undefined && nowMs() - settled < REPEAT_MS) return false;
-    if (!stillBehind(opts.project, opts.lane) || !stillUnreviewed(opts.project, opts.lane, opts.mainSha)) {
+    if (!(await stillBehind(opts.project, opts.lane)) || !(await stillUnreviewed(opts.project, opts.lane, opts.mainSha))) {
       caughtUp.set(key, nowMs());
       return false;
     }
@@ -489,15 +484,15 @@ export function pingLaneAboutMain(opts: {
 }
 
 /** The behind-main sentence, deduped per lane per current main SHA. */
-export function alertBehind(opts: {
+export async function alertBehind(opts: {
   lane: string;
   project: string | null;
   authorAgentId?: string | null;
   authorName?: string | null;
-}): boolean {
+}): Promise<boolean> {
   if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
   const repo = projectRepo(opts.project);
-  const tip = repo ? mainTip(repo, opts.project) : null;
+  const tip = repo ? await mainTip(repo, opts.project) : null;
   if (!tip) return false;
   return pingLaneAboutMain({
     lane: opts.lane, project: opts.project, mainSha: tip.sha, subject: tip.subject,
@@ -506,13 +501,13 @@ export function alertBehind(opts: {
 }
 
 /** Clean auto-merge sentence. Same dedupe key as the behind alert. */
-export function alertMerged(opts: {
+export async function alertMerged(opts: {
   lane: string;
   project: string | null;
   mainSha: string;
   authorAgentId?: string | null;
   authorName?: string | null;
-}): boolean {
+}): Promise<boolean> {
   if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
   return pingLaneAboutMain({ ...opts, kind: 'merged' });
 }
@@ -546,12 +541,12 @@ interface FreezeRow {
 }
 
 /** After a fetch, if main's tip changed, tell every developer lane that is now behind. The first tip seen is stored quietly. */
-export function observeRepo(repo: string): void {
+export async function observeRepo(repo: string): Promise<void> {
   let projects: Record<string, { repo?: string; lane_glob?: string }> = {};
   try { projects = getConfig().projects ?? {}; } catch { return; }
   for (const [name, project] of Object.entries(projects)) {
     if (project.repo !== repo) continue;
-    const tip = mainTip(repo, name);
+    const tip = await mainTip(repo, name);
     if (!tip) continue;
     const key = `main_tip:${name}`;
     const prev = kvGet(key);
@@ -559,16 +554,16 @@ export function observeRepo(repo: string): void {
     if (!prev || prev === tip.sha) continue;
     void import('./deploy-state.js').then((m) => m.scheduleReconcile('push')).catch(() => {});
     const switches = (project as { pipeline?: { auto_merge_main?: boolean } }).pipeline;
-    if (switches?.auto_merge_main === true) fireMainAdvanced(name, tip.sha);
-    else notifyBehindLanes(name, repo, tip.sha, tip.subject, project.lane_glob || 'wc-*');
+    if (switches?.auto_merge_main === true) await fireMainAdvanced(name, tip.sha);
+    else await notifyBehindLanes(name, repo, tip.sha, tip.subject, project.lane_glob || 'wc-*');
   }
 }
 
-function notifyBehindLanes(project: string, repo: string, mainSha: string, subject: string, glob: string): void {
-  const main = resolveMainRef(repo, project);
+async function notifyBehindLanes(project: string, repo: string, mainSha: string, subject: string, glob: string): Promise<void> {
+  const main = await resolveMainRef(repo, project);
   if (!main) return;
   const re = laneGlobRe(glob);
-  const listed = git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes']);
+  const listed = await git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes']);
   const names = new Set<string>();
   for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
     const name = short.replace(/^[^/]+\//, '');
@@ -583,12 +578,12 @@ function notifyBehindLanes(project: string, repo: string, mainSha: string, subje
   } catch { /* table missing */ }
   for (const lane of names) {
     if (laneAutomationDenied(project, null, lane)) continue;
-    const ref = git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${mainSpec(project).remote}/${lane}^{commit}`])
-      ?? git(repo, ['rev-parse', '--verify', '--quiet', `${lane}^{commit}`]);
+    const ref = await git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${mainSpec(project).remote}/${lane}^{commit}`])
+      ?? await git(repo, ['rev-parse', '--verify', '--quiet', `${lane}^{commit}`]);
     if (!ref || !/^[0-9a-f]{40}$/i.test(ref)) continue;
-    const behind = isAncestor(repo, main, ref);
+    const behind = await isAncestor(repo, main, ref);
     if (behind !== false) continue;
-    pingLaneAboutMain({ lane, project, mainSha, subject, kind: 'moved' });
+    await pingLaneAboutMain({ lane, project, mainSha, subject, kind: 'moved' });
     try {
       getDb().prepare(
         "UPDATE release_freezes SET status = 'behind-main', updated_at = datetime('now') WHERE project = ? AND lane = ? AND status = 'open'",
@@ -602,15 +597,15 @@ function notifyBehindLanes(project: string, repo: string, mainSha: string, subje
  * staging SHA. The dedupe key is still the lane plus current main, so a
  * staging-only move does not send a second message inside 30 minutes.
  */
-export function alertLanesPastStaging(project: string | null, stagingSha: string): void {
+export async function alertLanesPastStaging(project: string | null, stagingSha: string): Promise<void> {
   if (!project || !/^[0-9a-f]{40}$/i.test(stagingSha)) return;
   const repo = projectRepo(project);
-  const tip = repo ? mainTip(repo, project) : null;
+  const tip = repo ? await mainTip(repo, project) : null;
   if (!repo || !tip) return;
   const glob = getConfig().projects?.[project]?.lane_glob || 'wc-*';
   const re = laneGlobRe(glob);
   const names = new Set<string>();
-  const listed = git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes']);
+  const listed = await git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes']);
   for (const short of (listed ?? '').split('\n').map((l) => l.trim()).filter(Boolean)) {
     const name = short.replace(/^[^/]+\//, '');
     if (name === 'HEAD' || name === mainSpec(project).branch) continue;
@@ -627,10 +622,10 @@ export function alertLanesPastStaging(project: string | null, stagingSha: string
   } catch { /* table missing */ }
   for (const lane of names) {
     if (laneAutomationDenied(project, null, lane)) continue;
-    const ref = laneTipSha(project, lane);
+    const ref = await laneTipSha(project, lane);
     if (!ref) continue;
-    if (isAncestor(repo, stagingSha, ref) !== false) continue;
-    pingLaneAboutMain({ lane, project, mainSha: tip.sha, subject: tip.subject, kind: 'moved' });
+    if (await isAncestor(repo, stagingSha, ref) !== false) continue;
+    await pingLaneAboutMain({ lane, project, mainSha: tip.sha, subject: tip.subject, kind: 'moved' });
   }
 }
 
@@ -665,7 +660,7 @@ function laneNudgedRecently(lane: string): boolean {
  * what left one lane with a pile of stale freezes. The same lane is not
  * nudged again inside 30 minutes, even when main moves again.
  */
-export function reconcileBehindFreezes(): void {
+export async function reconcileBehindFreezes(): Promise<void> {
   let rows: Array<FreezeRow & { created_at: string }> = [];
   try {
     rows = getDb().prepare(
@@ -681,19 +676,19 @@ export function reconcileBehindFreezes(): void {
     seen.add(key);
     if (laneAutomationDenied(f.project, { name: f.author_name }, f.lane)) continue;
     const repo = projectRepo(f.project);
-    const mainRef = repo ? resolveMainRef(repo, f.project) : null;
-    const tip = f.lane ? laneTipSha(f.project, f.lane) : null;
-    if (repo && mainRef && tip && tip !== f.sha && isMergeOnlyDelta(repo, f.sha, tip, mainRef)) continue;
-    const n = commitsBehind(f.project, f.sha);
+    const mainRef = repo ? await resolveMainRef(repo, f.project) : null;
+    const tip = f.lane ? await laneTipSha(f.project, f.lane) : null;
+    if (repo && mainRef && tip && tip !== f.sha && await isMergeOnlyDelta(repo, f.sha, tip, mainRef)) continue;
+    const n = await commitsBehind(f.project, f.sha);
     if (n == null || n <= 0) continue;
     if (f.status === 'open') {
       try {
         getDb().prepare("UPDATE release_freezes SET status = 'behind-main', updated_at = datetime('now') WHERE sha = ? AND status = 'open'").run(f.sha);
       } catch { /* ignore */ }
     }
-    const main = repo ? mainTip(repo, f.project) : null;
+    const main = repo ? await mainTip(repo, f.project) : null;
     if (!main || !f.lane || laneNudgedRecently(f.lane)) continue;
-    pingLaneAboutMain({
+    await pingLaneAboutMain({
       lane: f.lane, project: f.project, mainSha: main.sha, subject: main.subject,
       authorAgentId: f.author_agent_id, authorName: f.author_name, kind: 'freeze',
     });

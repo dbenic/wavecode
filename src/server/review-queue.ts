@@ -70,7 +70,7 @@ export function getReview(runId: string): Result<ReviewItem> {
  * have a 'pass' verdict — otherwise promotion is blocked unless the caller
  * supplies an explicit override reason, which is stored in the audit event.
  */
-export function promote(runId: string, opts: { overrideReason?: string } = {}): Result<Run> {
+export async function promote(runId: string, opts: { overrideReason?: string } = {}): Promise<Result<Run>> {
   const runResult = getRun(runId);
   if (!runResult.ok) return runResult;
 
@@ -82,13 +82,13 @@ export function promote(runId: string, opts: { overrideReason?: string } = {}): 
   // reviewer, lane unchanged); the referee result file belongs to WaveCode runs.
   const freeze = freezes.getFreezeByRun(runId);
   if (freeze) {
-    const rule = freezes.checkPromotable(freeze, { overrideReason });
+    const rule = await freezes.checkPromotable(freeze, { overrideReason });
     if (!rule.ok) return rule;
     // A green full gate is required even when an admin overrides a non-PASS verdict.
-    const full = releases.promoteFullBlock(freeze);
+    const full = await releases.promoteFullBlock(freeze);
     if (full) return { ok: false, error: `Promotion blocked: ${full}` };
     if (freeze.project && currentActorIsAdmin()) {
-      const gate = productionPrereqGate(freeze.project, freeze.sha, null);
+      const gate = await productionPrereqGate(freeze.project, freeze.sha, null);
       if (!gate.ok) return { ok: false, error: gate.error };
     }
   } else {
@@ -257,10 +257,10 @@ export function handOff(runId: string, targetAgentId: string): Result<Run> {
  * A non-pass freeze may still be staged when its SHA already sits in a composed
  * candidate the deploy agent has deployed to staging.
  */
-function coveredByDeployedCandidate(freeze: { project: string | null; sha: string }): boolean {
-  const cand = freezes.candidateFor(freeze.project, freeze.sha);
+async function coveredByDeployedCandidate(freeze: { project: string | null; sha: string }): Promise<boolean> {
+  const cand = await freezes.candidateFor(freeze.project, freeze.sha);
   if (!cand || !freeze.project) return false;
-  const tip = freezes.listCandidates(freeze.project).find((c) => c.name === cand.name)?.tip;
+  const tip = (await freezes.listCandidates(freeze.project)).find((c) => c.name === cand.name)?.tip;
   if (!tip) return false;
   return releases.listReleases({ sha: tip, target: 'staging', limit: 10 }).some((r) => r.status === 'deployed');
 }
@@ -273,10 +273,10 @@ function coveredByDeployedCandidate(freeze: { project: string | null; sha: strin
 export async function stage(runId: string, opts: { actorIsAdmin?: boolean } = {}): Promise<Result<releases.ReleaseRequest>> {
   let freeze = freezes.getFreezeByRun(runId);
   if (!freeze) return { ok: false, error: 'Only a release freeze can be staged (the card must carry an exact SHA)' };
-  const stale = freezes.staleStageBlock(freeze);
+  const stale = await freezes.staleStageBlock(freeze);
   if (stale) return { ok: false, error: stale };
   freeze = freezes.getFreezeByRun(runId) ?? freeze;
-  const behind = freezes.behindMainBlock(freeze);
+  const behind = await freezes.behindMainBlock(freeze);
   if (behind) return { ok: false, error: behind };
   // Behind main, rollback, nothing new, superseded, rejected, and the gate.
   // The same sentence is what the card shows before the button is pressed.
@@ -285,7 +285,7 @@ export async function stage(runId: string, opts: { actorIsAdmin?: boolean } = {}
   if (blocked) return { ok: false, error: blocked };
   if (!freeze.project) return { ok: false, error: 'The freeze names no project, so no release peer can be chosen' };
   const admin = opts.actorIsAdmin === true || currentActorIsAdmin();
-  if (freeze.verdict !== 'pass' && !admin && !coveredByDeployedCandidate(freeze)) {
+  if (freeze.verdict !== 'pass' && !admin && !await coveredByDeployedCandidate(freeze)) {
     return { ok: false, error: releases.STAGE_NEEDS_PASS };
   }
   const actor = currentActorId();

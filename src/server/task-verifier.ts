@@ -89,7 +89,7 @@ export async function verifyTaskCompletion(
   }
 
   // Capture last 30 lines of terminal output
-  const captureResult = capturePane(agent.tmux_session, 30);
+  const captureResult = await capturePane(agent.tmux_session, 30);
   if (!captureResult.ok) return null;
 
   const output = captureResult.data

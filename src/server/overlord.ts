@@ -91,7 +91,7 @@ export async function autoStage(board: Board): Promise<number> {
       const eligible = await stageEligibility(l.sha, l.project, { markStale: true, includeGate: true });
       if (eligible.error) continue;
     } catch { /* freeze table unavailable */ }
-    const block = releases.stageGateBlock({ project: l.project, sha: l.sha, lane: l.lane, gate: l.gate });
+    const block = await releases.stageGateBlock({ project: l.project, sha: l.sha, lane: l.lane, gate: l.gate });
     if (block) continue;
     const r = await releases.requestRelease({ project: l.project, sha: l.sha, lane: l.lane, target: 'staging', desk: l.desk != null ? String(l.desk) : null, reviewer: l.reviewer, actorName: 'overlord', runId: l.run_id });
     if (r.ok) n++;

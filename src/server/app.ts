@@ -84,6 +84,8 @@ export function createApp(): Hono<NodeAppEnv> {
   registerDiagramRoutes(app);
   registerMcpHttpRoutes(app);
 
+  // Static files and the index fallback never await tmux, git, or the watcher.
+  // They are registered after /api and are not behind the API auth middleware.
   app.use('/*', serveStatic({ root: './src/ui/dist' }));
   app.get('/*', serveStatic({ root: './src/ui/dist', path: 'index.html' }));
 

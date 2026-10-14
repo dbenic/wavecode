@@ -249,7 +249,7 @@ describe('releases.ts', () => {
       agent('claude2'); agent('codex3');
       const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
       fs.writeFileSync(path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`), `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${laneSha}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
-      expect(rf.ingestFreezeFile(path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`)).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`))).ok).toBe(true);
 
       const ov = await import('./overview.js');
       const board = await ov.buildBoard();
@@ -352,7 +352,7 @@ describe('releases.ts', () => {
       const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
       const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
       fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       const [card] = rq.listPendingReviews();
 
       const staged = await rq.stage(card.run.id);
@@ -361,7 +361,7 @@ describe('releases.ts', () => {
       expect(box.state.posts[0]).toMatchObject({ target: 'staging', sha: SHA, lane: 'wc-claude2', desk: '91', reviewer: 'codex3', requested_by: null });
 
       const { runWithActor } = await import('./request-context.js');
-      const promoted = await runWithActor('owner', async () => rq.promote(card.run.id), { admin: true });
+      const promoted = await runWithActor('owner', async () => (await rq.promote(card.run.id)), { admin: true });
       expect(promoted.ok).toBe(true);
       const prod = () => rel.listReleases({ sha: SHA, target: 'production' })[0];
       for (let i = 0; i < 40 && prod()?.status !== 'sent'; i++) await flush(10);
@@ -373,10 +373,10 @@ describe('releases.ts', () => {
       const SHA_D = 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4';
       const other = fs.readFileSync(note, 'utf-8').replaceAll(SHA, SHA_C).replace('wc-claude2', 'wc-other');
       fs.writeFileSync(path.join(inbox, `desk92-freeze-${SHA_C.slice(0, 8)}.md`), other);
-      expect(rf.ingestFreezeFile(path.join(inbox, `desk92-freeze-${SHA_C.slice(0, 8)}.md`)).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(path.join(inbox, `desk92-freeze-${SHA_C.slice(0, 8)}.md`))).ok).toBe(true);
       const cardC = rq.listPendingReviews().find((i) => i.freeze?.sha === SHA_C)!;
       fs.writeFileSync(path.join(inbox, `desk92-freeze-${SHA_D.slice(0, 8)}.md`), other.replaceAll(SHA_C, SHA_D));
-      expect(rf.ingestFreezeFile(path.join(inbox, `desk92-freeze-${SHA_D.slice(0, 8)}.md`)).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(path.join(inbox, `desk92-freeze-${SHA_D.slice(0, 8)}.md`))).ok).toBe(true);
       const stale = await rq.stage(cardC.run.id);
       expect(stale.ok).toBe(false);
       expect(!stale.ok && stale.error).toMatch(/stale/);
@@ -412,7 +412,7 @@ describe('releases.ts', () => {
       db.insertAgent({ name: 'codex3', runtime: 'claude-code', tmux_session: 'wc-codex3', workspace: repo, mode: 'adopted', status: 'idle' });
       const note = path.join(tmp, `lane-freeze-${frozen.slice(0, 8)}.md`);
       fs.writeFileSync(note, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${frozen}\`\n- Review: @codex3 **VERDICT: PASS (gate pending)** on this exact SHA: /r/v.md\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       const card = rq.listPendingReviews().find((i) => i.freeze?.sha === frozen);
       expect(card?.freeze?.verdict).toBe('pass');
       const { runWithActor } = await import('./request-context.js');
@@ -434,7 +434,7 @@ describe('releases.ts', () => {
       const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
       const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
       fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       const [card] = rq.listPendingReviews();
       const report = (rows: unknown[]) => JSON.stringify({ v: 1, runs: rows });
       runs.setTestRunExecForTest(() => report([{ id: 'q', sha: SHA, who: 'wave.runner.example.wc-claude2', kind: 'dev', suite: 'tier1', state: 'running', host: 'runner.example' }]));
@@ -446,7 +446,7 @@ describe('releases.ts', () => {
       const staged = await rq.stage(card.run.id);
       expect(staged.ok).toBe(true);
       const { runWithActor } = await import('./request-context.js');
-      const blocked = await runWithActor('owner', async () => rq.promote(card.run.id), { admin: true });
+      const blocked = await runWithActor('owner', async () => (await rq.promote(card.run.id)), { admin: true });
       expect(blocked.ok).toBe(false);
       if (!blocked.ok) expect(blocked.error).toMatch(/needs green full gate on/);
 
@@ -454,7 +454,7 @@ describe('releases.ts', () => {
         { id: 'q', sha: SHA, who: 'wave.runner.example.wc-claude2', kind: 'dev', suite: 'quick', state: 'pass', ended_at: '2026-10-12T12:00:00.000+02:00' },
         { id: 'g', sha: SHA, who: 'unknown', kind: 'gate', suite: 'full-tuned', state: 'pass', ended_at: '2026-10-12T13:00:00.000+02:00' },
       ]));
-      const promoted = await runWithActor('owner', async () => rq.promote(card.run.id), { admin: true });
+      const promoted = await runWithActor('owner', async () => (await rq.promote(card.run.id)), { admin: true });
       expect(promoted.ok).toBe(true);
       runs.setTestRunExecForTest(null);
     });
@@ -468,7 +468,7 @@ describe('releases.ts', () => {
       const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
       const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
       fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       const [card] = rq.listPendingReviews();
       const { createUser } = await import('./users.js');
       const { runWithActor } = await import('./request-context.js');
@@ -482,7 +482,7 @@ describe('releases.ts', () => {
       expect(box.state.posts).toHaveLength(1);
       expect(box.state.posts[0]).toMatchObject({ target: 'staging', requested_by: 'antonio' });
 
-      const promoted = await runWithActor(dev.data.user.id, async () => rq.promote(card.run.id));
+      const promoted = await runWithActor(dev.data.user.id, async () => (await rq.promote(card.run.id)));
       expect(promoted.ok).toBe(true);
       if (promoted.ok) expect(promoted.data.review_status).toBe('approved');
       await flush(40);
@@ -518,7 +518,7 @@ describe('releases.ts', () => {
       const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
       const note = path.join(inbox, `desk91-freeze-${laneSha.slice(0, 8)}.md`);
       fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${laneSha}\`\n- Review: @codex3 **VERDICT: NEEDS FIXES** on this exact SHA: /r/v.md\n\nR1 — P1 balance\nR2 (P2) rounding\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       const [card] = rq.listPendingReviews();
       expect(card.latestReview).toMatchObject({ verdict: 'needs-fixes', issues_found: 2 });
       const { createUser } = await import('./users.js');
@@ -544,7 +544,7 @@ describe('releases.ts', () => {
       }));
       expect(candAdmin.status).toBe(202);
       const staged = rel.listReleases({ sha: tip, target: 'staging' })[0];
-      expect(rel.reportRelease(staged.id, { status: 'deployed', sha: tip, version: '0.1.0' }).ok).toBe(true);
+      expect((await rel.reportRelease(staged.id, { status: 'deployed', sha: tip, version: '0.1.0' })).ok).toBe(true);
       box.state.stagingTip = { sha: tip, version: '0.1.0', lane: 'fable/rc-0443-2' };
       rel.resetStagingTipCacheForTest();
 
@@ -580,7 +580,7 @@ describe('releases.ts', () => {
       const { runWithActor } = await import('./request-context.js');
       const dev = createUser({ name: 'antonio', role: 'developer' });
       if (!dev.ok) throw new Error(dev.error);
-      const promoted = await runWithActor(dev.data.user.id, async () => rq.promote(run.data.id));
+      const promoted = await runWithActor(dev.data.user.id, async () => (await rq.promote(run.data.id)));
       expect(promoted.ok).toBe(true);
       await flush(30);
       expect(urls).toEqual([]);
@@ -592,7 +592,7 @@ describe('releases.ts', () => {
       const run2 = db.insertRun({ task_id: task2.data.id, agent_id: author.id });
       if (!run2.ok) throw new Error(run2.error);
       db.finishRun(run2.data.id, 0);
-      const asAdmin = await runWithActor('owner', async () => rq.promote(run2.data.id), { admin: true });
+      const asAdmin = await runWithActor('owner', async () => (await rq.promote(run2.data.id)), { admin: true });
       expect(asAdmin.ok).toBe(true);
       await flush(40);
       expect(urls.some((u) => u.includes('/api/agents'))).toBe(true);
@@ -720,17 +720,17 @@ describe('releases.ts', () => {
 
       const deployState = await import('./deploy-state.js');
       const reconcile = vi.spyOn(deployState, 'scheduleReconcile').mockImplementation(() => {});
-      expect(rel.detectReleaseLines(fable.id, `RELEASED ${id}: deployed ${SHA} version 1.4.0 to staging`)).toBe(1);
+      expect(await rel.detectReleaseLines(fable.id, `RELEASED ${id}: deployed ${SHA} version 1.4.0 to staging`)).toBe(1);
       expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared', deployed_sha: null });
       expect(rel.getRelease(next.data.id)?.status).toBe('sent');
-      expect(rel.currentStagingTip('wavepulse')).toBeNull();
+      expect((await rel.currentStagingTip('wavepulse'))).toBeNull();
       expect(vi.mocked(emit)).toHaveBeenCalledWith('release.late_result', 'release', id, expect.objectContaining({ sha: SHA, id }), null);
       for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
       expect(reconcile).toHaveBeenCalledWith('deploy');
 
-      const deployed = rel.reportRelease(next.data.id, { status: 'deployed', sha: SHA_B, version: '2.0.0' });
+      const deployed = (await rel.reportRelease(next.data.id, { status: 'deployed', sha: SHA_B, version: '2.0.0' }));
       expect(deployed.ok).toBe(true);
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(SHA_B);
+      expect((await rel.currentStagingTip('wavepulse'))?.sha).toBe(SHA_B);
       expect(rel.getRelease(id)).toMatchObject({ status: 'failed', error: 'cleared' });
     });
 
@@ -801,14 +801,14 @@ describe('releases.ts', () => {
       expect(typedInto(fable.id)).toHaveLength(1);
 
       // the report: a different SHA is refused, the right one closes it
-      const bad = rel.reportRelease(r.id, { status: 'deployed', sha: SHA_B, version: '1.0.0' });
+      const bad = (await rel.reportRelease(r.id, { status: 'deployed', sha: SHA_B, version: '1.0.0' }));
       expect(bad.ok).toBe(false);
       const ok = await app.fetch(new Request(`http://x/api/releases/${r.id}/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 'deployed', sha: SHA, version: '0.442.10', note: 'deployed and verified' }) }));
       expect(ok.status).toBe(200);
       expect(rel.getRelease(r.id)).toMatchObject({ status: 'deployed', version: '0.442.10', deployed_sha: SHA, report: 'deployed and verified' });
       expect(vi.mocked(emit)).toHaveBeenCalledWith('release.reported', 'release', r.id, expect.objectContaining({ status: 'deployed', origin: 'peer', origin_id: 'L1' }), null);
       // final: a second report is a no-op
-      expect(rel.reportRelease(r.id, { status: 'failed', note: 'late' }).ok).toBe(true);
+      expect((await rel.reportRelease(r.id, { status: 'failed', note: 'late' })).ok).toBe(true);
       expect(rel.getRelease(r.id)!.status).toBe('deployed');
     });
 
@@ -820,7 +820,7 @@ describe('releases.ts', () => {
       const accepted = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse', requested_by: 'antonio' }, { userName: 'antonio', fromPeer: false });
       expect(accepted.ok).toBe(true);
       if (!accepted.ok) return;
-      const reported = rel.reportRelease(accepted.data.id, { status: 'deployed', version: '1.2.3' });
+      const reported = (await rel.reportRelease(accepted.data.id, { status: 'deployed', version: '1.2.3' }));
       expect(reported.ok).toBe(true);
       for (let i = 0; i < 20 && reconcile.mock.calls.length === 0; i++) await flush(25);
       expect(reconcile).toHaveBeenCalledWith('deploy');
@@ -893,7 +893,7 @@ describe('releases.ts', () => {
       const a = await rel.acceptRelease({ sha: SHA, target: 'staging', project: 'wavepulse' }, { userName: 'peer', fromPeer: true });
       const b = await rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'peer', fromPeer: true });
       if (!a.ok || !b.ok) throw new Error('accept failed');
-      expect(rel.detectReleaseLines(other.id, `• RELEASED ${a.data.id}: deployed ${SHA.slice(0, 8)} version 0.442.10 to staging\n`)).toBe(0);
+      expect(await rel.detectReleaseLines(other.id, `• RELEASED ${a.data.id}: deployed ${SHA.slice(0, 8)} version 0.442.10 to staging\n`)).toBe(0);
       expect(rel.getRelease(a.data.id)!.status).toBe('sent');
       const pane = [
         '• Gated the SHA; full-tuned GREEN.',
@@ -901,10 +901,10 @@ describe('releases.ts', () => {
         `  RELEASE FAILED ${b.data.id}: migration 0442 refused on prod replica`,
         '❯ ',
       ].join('\n');
-      expect(rel.detectReleaseLines(fable.id, pane)).toBe(2);
+      expect(await rel.detectReleaseLines(fable.id, pane)).toBe(2);
       expect(rel.getRelease(a.data.id)).toMatchObject({ status: 'deployed', version: '0.442.10', deployed_sha: SHA });
       expect(rel.getRelease(b.data.id)).toMatchObject({ status: 'failed', error: 'migration 0442 refused on prod replica' });
-      expect(rel.detectReleaseLines(fable.id, pane)).toBe(0); // same lines again: nothing new
+      expect(await rel.detectReleaseLines(fable.id, pane)).toBe(0); // same lines again: nothing new
     });
 
     it('a staging command streams progress and closes the release; production still prompts the agent', async () => {
@@ -917,7 +917,7 @@ describe('releases.ts', () => {
       const failed = success.replace('success.ndjson', 'failed.ndjson');
       const note = path.join(tmp, 'freeze-pass.md');
       fs.writeFileSync(note, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${FIXTURE_SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- gate: GREEN\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'], staging_command: ['node', replay, success, '0', '{sha}', '--lane', '{lane}', '--desk', '{desk}'] };
       const staged = await rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging', lane: 'lane-a', desk: '7', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
       expect(staged.ok).toBe(true);
@@ -961,7 +961,7 @@ describe('releases.ts', () => {
       cfg.releases = { staging_command: ['node', touch, marker, '{sha}'] };
       const needs = path.join(tmp, 'freeze-needs.md');
       fs.writeFileSync(needs, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${FIXTURE_SHA}\`\n- Review: @codex3 **VERDICT: NEEDS FIXES** on this exact SHA: /r/v.md\n`);
-      expect(rf.ingestFreezeFile(needs).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(needs)).ok).toBe(true);
       const blocked = await rel.acceptRelease({ sha: FIXTURE_SHA, target: 'staging' }, { userName: 'antonio', fromPeer: true });
       expect(blocked.ok).toBe(false);
       if (!blocked.ok) expect(blocked.error).toBe(rel.STAGE_NEEDS_PASS);
@@ -970,7 +970,7 @@ describe('releases.ts', () => {
 
       const redSha = SHA;
       fs.writeFileSync(path.join(tmp, 'freeze-red.md'), `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane-a\`\n- Freeze SHA: \`${redSha}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- gate: RED\n`);
-      expect(rf.ingestFreezeFile(path.join(tmp, 'freeze-red.md')).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(path.join(tmp, 'freeze-red.md'))).ok).toBe(true);
       const red = await rel.acceptRelease({ sha: redSha, target: 'staging' }, { userName: 'antonio', fromPeer: true });
       expect(red.ok).toBe(false);
       if (!red.ok) expect(red.error).toBe(rel.stageNeedsGreen('RED'));
@@ -995,7 +995,7 @@ describe('releases.ts', () => {
       rel.stopStagingDeploys();
       await flush(30);
       expect(rel.getRelease(staged.data.id)?.status).toBe('sent');
-      rel.resumeStagingDeploys();
+      (await rel.resumeStagingDeploys());
       for (let i = 0; i < 50 && rel.getRelease(staged.data.id)?.status !== 'deployed'; i++) await flush(20);
       expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'deployed', version: '1.2.3', staging_url: 'https://staging.example/app' });
     });
@@ -1023,7 +1023,7 @@ describe('releases.ts', () => {
       expect(rel.getRelease(staged.data.id)).toMatchObject({ status: 'failed', error: 'cleared' });
     });
 
-    it('refuses a deployed result that is not a descendant of the staging tip', () => {
+    it('refuses a deployed result that is not a descendant of the staging tip', async () => {
       const repo = path.join(tmp, 'repo');
       fs.mkdirSync(repo);
       const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -1051,17 +1051,17 @@ describe('releases.ts', () => {
       insert('01CHILDROW0000000000000001', child, '-2 minutes');
       insert('01GRANDROW0000000000000001', grandchild, '-1 minutes');
 
-      expect(rel.reportRelease('01CHILDROW0000000000000001', { status: 'deployed', sha: child, version: '1.0.0' }).ok).toBe(true);
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(child);
-      expect(rel.reportRelease('01GRANDROW0000000000000001', { status: 'deployed', sha: grandchild, version: '1.1.0' }).ok).toBe(true);
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
+      expect((await rel.reportRelease('01CHILDROW0000000000000001', { status: 'deployed', sha: child, version: '1.0.0' })).ok).toBe(true);
+      expect((await rel.currentStagingTip('wavepulse'))?.sha).toBe(child);
+      expect((await rel.reportRelease('01GRANDROW0000000000000001', { status: 'deployed', sha: grandchild, version: '1.1.0' })).ok).toBe(true);
+      expect((await rel.currentStagingTip('wavepulse'))?.sha).toBe(grandchild);
       insert('01PARENTROW000000000000001', parent, '-3 minutes');
 
-      const refused = rel.reportRelease('01PARENTROW000000000000001', { status: 'deployed', sha: parent, version: '0.9.0' });
+      const refused = (await rel.reportRelease('01PARENTROW000000000000001', { status: 'deployed', sha: parent, version: '0.9.0' }));
       expect(refused.ok).toBe(false);
       if (!refused.ok) expect(refused.error).toMatch(/not a descendant/);
       expect(rel.getRelease('01PARENTROW000000000000001')?.status).toBe('sent');
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(grandchild);
+      expect((await rel.currentStagingTip('wavepulse'))?.sha).toBe(grandchild);
     });
 
     it('an admin force_rollback deploy becomes the tip locally, and the forwarding box refuses it', async () => {
@@ -1098,9 +1098,9 @@ describe('releases.ts', () => {
       expect(accepted.ok).toBe(true);
       if (!accepted.ok) return;
       expect(accepted.data).toMatchObject({ status: 'sent', force_rollback: 1, rollback_reason: 'staging was bad', rollback_by: 'denis' });
-      const reported = rel.reportRelease(accepted.data.id, { status: 'deployed', sha: parent, version: '0.9.0' });
+      const reported = (await rel.reportRelease(accepted.data.id, { status: 'deployed', sha: parent, version: '0.9.0' }));
       expect(reported.ok).toBe(true);
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(parent);
+      expect((await rel.currentStagingTip('wavepulse'))?.sha).toBe(parent);
 
       db.getDb().prepare('DELETE FROM release_requests').run();
       tip(child);
@@ -1118,7 +1118,7 @@ describe('releases.ts', () => {
       if (!forwarded.ok) expect(forwarded.error).toBe(rel.rollbackOnDeployBox('wavecode-countix'));
       expect(box.state.posts).toEqual([]);
       expect(rel.listReleases({ sha: parent, target: 'staging' })).toEqual([]);
-      expect(rel.currentStagingTip('wavepulse')?.sha).toBe(child);
+      expect((await rel.currentStagingTip('wavepulse'))?.sha).toBe(child);
     });
 
     it('a peer token cannot authorize a rollback by claiming to be an admin', async () => {
@@ -1173,7 +1173,7 @@ describe('releases.ts', () => {
       db.insertAgent({ name: 'codex3', runtime: 'claude-code', tmux_session: 'wc-codex3', workspace: repo, mode: 'adopted', status: 'idle' });
       const note = path.join(tmp, `rollback-freeze-${frozen.slice(0, 8)}.md`);
       fs.writeFileSync(note, `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`lane\`\n- Freeze SHA: \`${frozen}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       // Ingest may already record behind-main. The forwarding refusal must not
       // depend on that, and must not run the stale or behind-main checks.
       db.getDb().prepare(`UPDATE release_freezes SET status = 'open', superseded_by = NULL WHERE sha = ?`).run(frozen);
@@ -1196,7 +1196,7 @@ describe('releases.ts', () => {
       const sent = await rel.requestRelease({ project: 'wavepulse', sha: SHA, target: 'staging', actorName: 'denis' });
       expect(sent.ok).toBe(true);
       if (!sent.ok) return;
-      expect(rel.reportRelease(sent.data.id, { status: 'deployed', sha: SHA, version: '9.9.9' }).ok).toBe(true);
+      expect((await rel.reportRelease(sent.data.id, { status: 'deployed', sha: SHA, version: '9.9.9' })).ok).toBe(true);
       const res = await app.fetch(new Request('http://x/api/releases/staging-tip?project=wavepulse'));
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ sha: SHA, version: '9.9.9', source: 'local' });

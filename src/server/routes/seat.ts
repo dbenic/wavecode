@@ -29,7 +29,7 @@ export function registerSeatRoutes(app: Hono<NodeAppEnv>): void {
 
   app.post('/api/users/me/seat', async (c) => {
     const body = await c.req.json<{ runtime?: unknown }>().catch(() => ({} as { runtime?: unknown }));
-    const result = createSeat(getActingUser(c), { runtime: body?.runtime });
+    const result = await createSeat(getActingUser(c), { runtime: body?.runtime });
     if (!result.ok) return c.json({ error: result.error }, seatErrorStatus(result.code));
     outputWatcher.startWatching(result.data.agent.id);
     return c.json({

@@ -93,7 +93,7 @@ describe('overview board + overlord', () => {
     const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
     const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
     fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n- Remote full-tuned: GREEN\n`);
-    expect(rf.ingestFreezeFile(note).ok).toBe(true);
+    expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
 
     const board = await ov.buildBoard();
     const c2 = board.agents.find((a) => a.name === 'claude2')!;
@@ -115,7 +115,7 @@ describe('overview board + overlord', () => {
     const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
     agent('codex3');
     fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
-    expect(rf.ingestFreezeFile(note).ok).toBe(true);
+    expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
     const runId = (await ov.buildBoard()).lanes[0].run_id!;
 
     vi.mocked(completeText).mockResolvedValueOnce({ ok: true, data: '```json\n' + JSON.stringify({
@@ -190,7 +190,7 @@ describe('overview board + overlord', () => {
     const SHA_B = 'e65a2ab5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     const verdict = path.join(inbox, `claude1-verdict-codex2-desk43-${SHA_B.slice(0, 8)}.md`);
     fs.writeFileSync(verdict, `# Verdict: Codex2 Desk #43 settlement (exact SHA ${SHA_B})\nProject: wavepulse · reviewer Claude1 · Author: codex2\n\n- [HIGH] rounding wrong\n\nVERDICT: NEEDS FIXES\n`);
-    expect(rf.ingestFreezeFile(verdict).ok).toBe(true);
+    expect((await rf.ingestFreezeFile(verdict)).ok).toBe(true);
 
     let board = await ov.buildBoard();
     expect(board.fixes).toHaveLength(1);
@@ -294,7 +294,7 @@ describe('overview board + overlord', () => {
     const inbox = path.join(tmp, 'inbox'); fs.mkdirSync(inbox);
     const note = path.join(inbox, `desk91-freeze-${SHA.slice(0, 8)}.md`);
     fs.writeFileSync(note, `# Desk #91 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\n`);
-    expect(rf.ingestFreezeFile(note).ok).toBe(true);
+    expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
     vi.mocked(completeText).mockResolvedValue({ ok: true, data: JSON.stringify({ agents: [], recommendations: [], plan: [], digest: null }) });
     await ol.wake('review.ai_completed');
     expect(fp.state.releases).toHaveLength(1);

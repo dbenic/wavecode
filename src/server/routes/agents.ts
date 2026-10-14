@@ -55,7 +55,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/agents/scan', async (c) => {
     const body = await c.req.json<{ socket?: unknown }>().catch(() => ({} as { socket?: unknown }));
     const socket = typeof body.socket === 'string' && body.socket.trim() ? body.socket.trim() : null;
-    const result = sessionManager.scan(socket);
+    const result = await sessionManager.scan(socket);
     if (!result.ok) return c.json({ error: result.error }, 500);
 
     const adoptedSessions = new Set(listAgents().map((a) => a.tmux_session));
@@ -80,7 +80,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const role = parseAgentRole(body.role);
     if (!role.ok) return c.json({ error: role.error }, 400);
 
-    const result = sessionManager.adopt(body.sessionName, body.runtime, body.name, body.tmux_socket ?? null);
+    const result = await sessionManager.adopt(body.sessionName, body.runtime, body.name, body.tmux_socket ?? null);
     if (!result.ok) return c.json({ error: result.error }, 400);
 
     const agent = result.data;
@@ -115,18 +115,18 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       if (isRestrictedUser(user) || user.via_seat) {
         return c.json({ error: 'Forbidden: raw keys need a person\'s own unrestricted token' }, 403);
       }
-      const result = sessionManager.sendRawKeys(agentResult.data.id, body.text);
+      const result = await sessionManager.sendRawKeys(agentResult.data.id, body.text);
       if (!result.ok) return c.json({ error: result.error }, 500);
     } else {
       // T0: a prompt typed into a bare shell executes as commands; an unknown
       // state (no session, capture failed) is not a running runtime either.
-      const state = runtimeLiveness.getRuntimeState(agentResult.data);
+      const state = await runtimeLiveness.getRuntimeState(agentResult.data);
       if (state !== 'alive') {
         return c.json({ error: `${runtimeLiveness.RUNTIME_NOT_RUNNING} (${state}) — relaunch it (or send raw keys) first` }, 409);
       }
       // Spec §5c: `[you are @toni — frontend lead] …` when the agent has a persona
       typed = withPersona(agentResult.data, body.text);
-      const result = sessionManager.sendKeys(agentResult.data.id, typed);
+      const result = await sessionManager.sendKeys(agentResult.data.id, typed);
       if (!result.ok) return c.json({ error: result.error }, 500);
     }
 
@@ -159,7 +159,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const useAnsi = c.req.query('ansi') === 'true';
 
     if (useAnsi) {
-      const result = sessionManager.capturePaneAnsi(agentResult.data.tmux_session, lines);
+      const result = await sessionManager.capturePaneAnsi(agentResult.data.tmux_session, lines);
       if (!result.ok) return c.json({ error: result.error }, 500);
 
       const cleaned = cleanCapturedOutput(result.data);
@@ -169,7 +169,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       });
     }
 
-    const result = sessionManager.capturePane(agentResult.data.tmux_session, lines);
+    const result = await sessionManager.capturePane(agentResult.data.tmux_session, lines);
     if (!result.ok) return c.json({ error: result.error }, 500);
 
     return c.json({ output: cleanCapturedOutput(result.data) });
@@ -182,10 +182,10 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const session = agentResult.data.tmux_session;
     const start = validate.validateIntParam(c.req.query('start'), { min: -10000, max: 0, default: -200 });
     const end = validate.validateIntParam(c.req.query('end'), { min: -10000, max: 0, default: -100 });
-    const sizeResult = sessionManager.getScrollbackSize(session);
+    const sizeResult = await sessionManager.getScrollbackSize(session);
     const totalLines = sizeResult.ok ? sizeResult.data : 0;
 
-    const result = sessionManager.capturePaneRange(session, start, end);
+    const result = await sessionManager.capturePaneRange(session, start, end);
     if (!result.ok) return c.json({ error: result.error }, 500);
 
     const cleaned = cleanCapturedOutput(result.data);
@@ -215,7 +215,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     return c.json({ ok: true });
   });
 
-  app.post('/api/agents/:id/kill', (c) => {
+  app.post('/api/agents/:id/kill', async (c) => {
     const agentResult = sessionManager.get(c.req.param('id'));
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
 
@@ -224,7 +224,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!access.ok) return c.json({ error: access.error }, 403);
     outputWatcher.stopWatching(agent.id);
 
-    const result = sessionManager.kill(agent.id);
+    const result = await sessionManager.kill(agent.id);
     if (!result.ok) return c.json({ error: result.error }, 400);
 
     emit('agent.killed', 'agent', agent.id, {
@@ -242,7 +242,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
    * runtime relaunched in place (T0). Adopted agents with a dead session
    * cannot be restarted — WaveCode never owned their launch command.
    */
-  app.post('/api/agents/:id/restart', (c) => {
+  app.post('/api/agents/:id/restart', async (c) => {
     const agentResult = sessionManager.get(c.req.param('id'));
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
     const agent = agentResult.data;
@@ -250,7 +250,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!access.ok) return c.json({ error: access.error }, 403);
 
     if (agent.mode === 'spawned') {
-      const ensured = sessionManager.ensureSpawnedAgentSession(agent.id);
+      const ensured = await sessionManager.ensureSpawnedAgentSession(agent.id);
       if (!ensured.ok) return c.json({ error: ensured.error }, 400);
       if (ensured.data.createdSession) {
         outputWatcher.startWatching(agent.id);
@@ -259,9 +259,9 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       }
     }
 
-    const state = runtimeLiveness.getRuntimeState(agent);
+    const state = await runtimeLiveness.getRuntimeState(agent);
     if (state === 'dead') {
-      const relaunched = runtimeLiveness.relaunchRuntime(agent, 'manual');
+      const relaunched = await runtimeLiveness.relaunchRuntime(agent, 'manual');
       if (!relaunched.ok) return c.json({ error: relaunched.error }, 400);
       return c.json({ ok: true, action: relaunched.data.sent ? 'runtime_relaunched' : 'relaunch_in_progress' });
     }
@@ -368,7 +368,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       const updated = updateAgentSocket(agent.id, socket);
       if (!updated.ok) return c.json({ error: updated.error }, 500);
       bindSessionSocket(updated.data.tmux_session, socket);
-      agent = sessionManager.reprobeAgent(updated.data);
+      agent = await sessionManager.reprobeAgent(updated.data);
     }
     if (body.model === undefined && body.effort === undefined) {
       if (!hasIdentity && role.role === undefined && body.tmux_socket === undefined) {
@@ -396,7 +396,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       { agentId: result.data.id, model: result.data.model, effort: result.data.effort },
       'Agent pin updated',
     );
-    return c.json(enrichAgent(sessionManager.reprobeAgent(result.data), getActingUser(c)));
+    return c.json(enrichAgent(await sessionManager.reprobeAgent(result.data), getActingUser(c)));
   });
 
   app.post('/api/agents/spawn', async (c) => {
@@ -441,7 +441,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const login = requireProfileLogin(profile.data, body.runtime);
     if (!login.ok) return c.json({ error: login.error }, 409);
 
-    const result = sessionManager.spawnAgent({ ...body, profile: profile.data });
+    const result = await sessionManager.spawnAgent({ ...body, profile: profile.data });
     if (!result.ok) return c.json({ error: result.error }, 400);
 
     const agent = role.role ? assignRole(result.data, role.role, getActingUser(c).id) : result.data;

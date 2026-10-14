@@ -23,13 +23,19 @@ describe('PerfPanel', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     const api = await import('../hooks/useApi');
-    vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p === '/me' ? { id: 'u', name: 'denis', role: 'admin' } : SNAP) as never);
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => {
+      if (p === '/me') return { id: 'u', name: 'denis', role: 'admin' } as never;
+      if (p === '/health') return { event_loop: { p99_ms: 4, max_ms: 18 } } as never;
+      return SNAP as never;
+    });
   });
 
   it('shows an admin the loop lag flagged against the threshold, forks by command, job durations and journal size; REFRESH reads again', async () => {
     const api = await import('../hooks/useApi');
     render(<PerfPanel />);
     await waitFor(() => expect(screen.getByTestId('perf-loop').textContent).toContain('p99 820 ms'));
+    expect(screen.getByTestId('health-panel').textContent).toContain('p99 4 ms');
+    expect(screen.getByTestId('health-loop').textContent).toContain('max 18 ms');
     expect(screen.getByTestId('perf-loop').className).toContain('amber');
     expect(screen.getByTestId('perf-spawns').textContent).toContain('2012 forks');
     expect(screen.getByTestId('perf-spawns').textContent).toContain('9.8 s');

@@ -75,11 +75,11 @@ export function firstRunDialogKeys(output: string): { keys: string[]; what: stri
  * check, "Press Enter to continue"). Returns true when keys were sent (or
  * attempted). Cooldown is ~8s per agent.
  */
-export function maybeDismissFirstRunDialog(
+export async function maybeDismissFirstRunDialog(
   agentId: string,
   output: string,
   now = Date.now(),
-): boolean {
+): Promise<boolean> {
   const dialog = firstRunDialogKeys(output);
   if (!dialog) return false;
 
@@ -89,7 +89,7 @@ export function maybeDismissFirstRunDialog(
   lastDialogDismissAt.set(agentId, now);
 
   for (const key of dialog.keys) {
-    const r = sendRawKeys(agentId, key);
+    const r = await sendRawKeys(agentId, key);
     if (!r.ok) {
       logger.warn({ agentId, key, error: r.error }, 'Failed to dismiss Claude first-run dialog');
       return true;
@@ -107,11 +107,9 @@ function notifyReviewLoopAgentIdle(agentId: string): void {
 }
 
 interface WatcherState {
-  timer: ReturnType<typeof setInterval>;
   previousOutput: string;
   lastOutputLine: string;
   outputVersion: number;
-  tickInProgress: boolean; // Guard against overlapping ticks
   /**
    * Counts consecutive ticks where the output-detected status is 'idle'
    * but the DB says 'working'. We wait a few ticks before overriding
@@ -120,6 +118,8 @@ interface WatcherState {
   idleOverrideCounter: number;
   /** Epoch ms of the last pane that detected working (for dispatch grace). */
   lastWorkingAt: number | null;
+  /** Keep capturing a new seat through its first-run screens, then skip it while idle. */
+  watchedAt: number;
 }
 
 /** How many consecutive idle detections before we override DB 'working' -> 'idle'.
@@ -137,36 +137,78 @@ export const IDLE_CLOSE_GRACE_MS = 60_000;
 
 const watchers = new Map<string, WatcherState>();
 
+/** One batch for every watched seat. A tick is ~2s, so 4 idle ticks ~= 8 seconds. */
+export const WATCH_INTERVAL_MS = 2000;
+/** A just-started seat is still captured while idle so first-run dialogs clear. */
+const WATCH_STARTUP_MS = 20_000;
+
+let batchTimer: ReturnType<typeof setTimeout> | null = null;
+let batchRunning = false;
+
+function armBatch(): void {
+  if (batchTimer || batchRunning || watchers.size === 0) return;
+  batchTimer = setTimeout(() => { void runBatch(); }, WATCH_INTERVAL_MS);
+  batchTimer.unref?.();
+}
+
+function stopBatch(): void {
+  if (batchTimer) clearTimeout(batchTimer);
+  batchTimer = null;
+}
+
+/** Idle seats with no running work are not captured. Working seats and fresh seats are. */
+function shouldCapture(agentId: string, state: WatcherState, now = Date.now()): boolean {
+  const agentResult = getAgent(agentId);
+  if (!agentResult.ok) return false;
+  if (agentResult.data.status !== 'idle') return true;
+  if (now - state.watchedAt < WATCH_STARTUP_MS) return true;
+  return listRuns({ agent_id: agentId, status: 'running' }).length > 0;
+}
+
+async function runBatch(): Promise<void> {
+  batchTimer = null;
+  if (batchRunning) return;
+  batchRunning = true;
+  try {
+    for (const agentId of [...watchers.keys()]) {
+      const state = watchers.get(agentId);
+      if (!state) continue;
+      if (!shouldCapture(agentId, state)) continue;
+      await tick(agentId);
+    }
+  } finally {
+    batchRunning = false;
+    if (watchers.size > 0) armBatch();
+  }
+}
+
 export function startWatching(agentId: string): void {
   const agentResult = getAgent(agentId);
   if (agentResult.ok && isFileRunnerSeat(agentResult.data)) return;
   if (watchers.has(agentId)) return;
 
   const state: WatcherState = {
-    timer: setInterval(() => tick(agentId), 2000),
     previousOutput: '',
     lastOutputLine: '',
     outputVersion: 0,
-    tickInProgress: false,
     idleOverrideCounter: 0,
     lastWorkingAt: null,
+    watchedAt: Date.now(),
   };
 
   watchers.set(agentId, state);
+  armBatch();
 }
 
 export function stopWatching(agentId: string): void {
-  const state = watchers.get(agentId);
-  if (state) {
-    clearInterval(state.timer);
-    watchers.delete(agentId);
-  }
+  if (!watchers.has(agentId)) return;
+  watchers.delete(agentId);
+  if (watchers.size === 0) stopBatch();
 }
 
 export function stopAll(): void {
-  for (const [id] of watchers) {
-    stopWatching(id);
-  }
+  watchers.clear();
+  stopBatch();
 }
 
 export function getLastOutputLine(agentId: string): string {
@@ -182,28 +224,26 @@ export function isWatching(agentId: string): boolean {
 }
 
 /** Drive one watcher tick without waiting on the interval. Tests only. */
-export function tickForTest(agentId: string): void {
-  tick(agentId);
+export function tickForTest(agentId: string): Promise<void> {
+  return tick(agentId);
 }
 
-function tick(agentId: string): void {
+/** One non-overlapping pass. Tests use this to prove a slow capture does not stall the loop. */
+export function runWatcherBatchForTest(): Promise<void> {
+  return runBatch();
+}
+
+async function tick(agentId: string): Promise<void> {
   const state = watchers.get(agentId);
   if (!state) return;
-
-  // Guard against overlapping ticks (capture-pane can be slow)
-  if (state.tickInProgress) return;
-  state.tickInProgress = true;
-
   try {
-    tickInner(agentId, state);
+    await tickInner(agentId, state);
   } catch {
     // Swallow errors to prevent watcher from dying
-  } finally {
-    state.tickInProgress = false;
   }
 }
 
-function tickInner(agentId: string, state: WatcherState): void {
+async function tickInner(agentId: string, state: WatcherState): Promise<void> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) {
     stopWatching(agentId);
@@ -215,11 +255,11 @@ function tickInner(agentId: string, state: WatcherState): void {
     stopWatching(agentId);
     return;
   }
-  const captureResult = capturePane(agent.tmux_session);
+  const captureResult = await capturePane(agent.tmux_session);
   if (!captureResult.ok) return;
 
   const output = captureResult.data;
-  maybeDismissFirstRunDialog(agentId, output);
+  await maybeDismissFirstRunDialog(agentId, output);
   if (output !== state.previousOutput && /^\s*(?:DONE|FROZEN)\b/im.test(output)) {
     void import('./pipeline-hooks.js').then((hooks) => hooks.fireAuthorDone(agentId)).catch(() => {});
   }

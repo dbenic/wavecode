@@ -72,11 +72,11 @@ export function canLoginProfile(user: Pick<User, 'role' | 'profile'>, profile: s
   return !isSharedProfile(profile) && user.profile === profile;
 }
 
-export function openLoginSeat(opts: {
+export async function openLoginSeat(opts: {
   profile: string;
   runtime: string;
   user: Pick<User, 'id' | 'role' | 'profile'>;
-}): LoginSeatResult<{ agent: Agent; session: string; expires_at: string }> {
+}): Promise<LoginSeatResult<{ agent: Agent; session: string; expires_at: string }>> {
   const { profile, runtime, user } = opts;
   if (!isValidProfileName(profile) || !isProfileConfigured(profile)) {
     return { ok: false, code: 'invalid', error: `Profile '${profile}' is not configured` };
@@ -90,7 +90,7 @@ export function openLoginSeat(opts: {
 
   const session = loginSessionName(profile, runtime);
   if (!tmux.isValidSessionName(session)) return { ok: false, code: 'invalid', error: `Invalid session name '${session}'` };
-  if (tmux.hasSession(session)) {
+  if (await tmux.hasSession(session)) {
     return { ok: false, code: 'conflict', error: `A login seat for ${profile}/${runtime} is already open` };
   }
 
@@ -99,14 +99,14 @@ export function openLoginSeat(opts: {
 
   // A stale record from a seat whose watcher was lost (daemon restart)
   const stale = getAgentByName(`login-${profile}-${runtime}`);
-  if (stale.ok) closeLoginSeat(stale.data.id, 'replaced');
+  if (stale.ok) await closeLoginSeat(stale.data.id, 'replaced');
 
   const dir = profileDir(profile);
   try {
     ensureProfileDirs(profile, env.data);
     // `; exit` ends the session when the login finishes — the watcher reaps it.
     const command = `${buildRuntimeCommand({ command: rc.login_command, idle_pattern: '' }, { env: env.data })}; exit`;
-    tmux.newSession(session, dir, command);
+    await tmux.newSession(session, dir, command);
   } catch (e) {
     return { ok: false, code: 'failed', error: `Failed to open login seat: ${(e as Error).message}` };
   }
@@ -121,7 +121,7 @@ export function openLoginSeat(opts: {
     profile,
   });
   if (!inserted.ok) {
-    tmux.killSession(session);
+    await tmux.killSession(session);
     return { ok: false, code: 'failed', error: inserted.error };
   }
 
@@ -129,7 +129,7 @@ export function openLoginSeat(opts: {
   setAgentLease(inserted.data.id, { owner_id: user.id, reason: 'reserved', expires_at: expiresAt });
 
   const deadline = Date.now() + LOGIN_SEAT_TTL_MS;
-  const timer = setInterval(() => checkLoginSeat(inserted.data.id), LOGIN_SEAT_POLL_MS);
+  const timer = setInterval(() => { void checkLoginSeat(inserted.data.id); }, LOGIN_SEAT_POLL_MS);
   timer.unref?.();
   watches.set(inserted.data.id, { agentId: inserted.data.id, session, profile, runtime, deadline, timer });
 
@@ -204,22 +204,22 @@ export function loginAutoAdvanceKey(paneText: string): 'Enter' | null {
 }
 
 /** The hint for an open login seat, or null when the seat is gone. */
-export function loginHint(agentId: string): LoginHint | null {
+export async function loginHint(agentId: string): Promise<LoginHint | null> {
   const agent = getAgent(agentId);
   if (!agent.ok || !isLoginSeat(agent.data)) return null;
-  const cap = tmux.capturePaneJoined(agent.data.tmux_session, 60);
+  const cap = await tmux.capturePaneJoined(agent.data.tmux_session, 60);
   if (!cap.ok) return null;
   return parseLoginPane(cap.data);
 }
 
 /** Type the code the browser showed into the seat (Claude's "Paste code here"). */
-export function submitLoginCode(agentId: string, code: string): LoginSeatResult<void> {
+export async function submitLoginCode(agentId: string, code: string): Promise<LoginSeatResult<void>> {
   const agent = getAgent(agentId);
   if (!agent.ok || !isLoginSeat(agent.data)) return { ok: false, error: 'No open login for that profile and runtime', code: 'invalid' };
   const clean = code.trim();
   if (!/^[A-Za-z0-9_#.-]{4,200}$/.test(clean)) return { ok: false, error: 'That does not look like a login code', code: 'invalid' };
   try {
-    tmux.sendTextAndEnter(agent.data.tmux_session, clean, { mode: 'type' });
+    await tmux.sendTextAndEnter(agent.data.tmux_session, clean, { mode: 'type' });
   } catch (e) {
     return { ok: false, error: (e as Error).message, code: 'failed' };
   }
@@ -227,29 +227,29 @@ export function submitLoginCode(agentId: string, code: string): LoginSeatResult<
 }
 
 /** Watcher tick: reap on exit, kill after the TTL. Exported for tests. */
-export function checkLoginSeat(agentId: string, now = Date.now()): 'open' | 'exited' | 'timeout' | 'unknown' {
+export async function checkLoginSeat(agentId: string, now = Date.now()): Promise<'open' | 'exited' | 'timeout' | 'unknown'> {
   const watch = watches.get(agentId);
   if (!watch) return 'unknown';
-  if (!tmux.hasSession(watch.session)) {
-    closeLoginSeat(agentId, 'exited');
+  if (!(await tmux.hasSession(watch.session))) {
+    await closeLoginSeat(agentId, 'exited');
     return 'exited';
   }
   if (now >= watch.deadline) {
-    closeLoginSeat(agentId, 'timeout');
+    await closeLoginSeat(agentId, 'timeout');
     return 'timeout';
   }
-  const cap = tmux.capturePaneJoined(watch.session, 40);
+  const cap = await tmux.capturePaneJoined(watch.session, 40);
   if (cap.ok) {
     const key = loginAutoAdvanceKey(cap.data);
     if (key) {
-      try { tmux.sendRawKey(watch.session, key); } catch { /* the seat may have just exited */ }
+      try { await tmux.sendRawKey(watch.session, key); } catch { /* the seat may have just exited */ }
     }
   }
   return 'open';
 }
 
 /** Kill the session (if still up), drop the agent record, report credential presence. */
-export function closeLoginSeat(agentId: string, reason: 'exited' | 'timeout' | 'replaced' | 'orphaned'): void {
+export async function closeLoginSeat(agentId: string, reason: 'exited' | 'timeout' | 'replaced' | 'orphaned'): Promise<void> {
   const watch = watches.get(agentId);
   if (watch) {
     clearInterval(watch.timer);
@@ -260,7 +260,7 @@ export function closeLoginSeat(agentId: string, reason: 'exited' | 'timeout' | '
 
   // Dynamic: output-watcher → task-dispatcher → login-seats would be a cycle.
   void import('./output-watcher.js').then((ow) => ow.stopWatching(agentId)).catch(() => undefined);
-  if (tmux.hasSession(agent.data.tmux_session)) tmux.killSession(agent.data.tmux_session);
+  if (await tmux.hasSession(agent.data.tmux_session)) await tmux.killSession(agent.data.tmux_session);
   deleteAgent(agentId);
 
   const profile = agent.data.profile ?? watch?.profile ?? null;
@@ -276,13 +276,13 @@ export function closeLoginSeat(agentId: string, reason: 'exited' | 'timeout' | '
 }
 
 /** Health-monitor tick: reap seats nobody is watching (lost on restart) once they exit or expire. */
-export function sweepLoginSeats(agents: Agent[], now = Date.now()): string[] {
+export async function sweepLoginSeats(agents: Agent[], now = Date.now()): Promise<string[]> {
   const reaped: string[] = [];
   for (const agent of agents) {
     if (!isLoginSeat(agent) || watches.has(agent.id)) continue;
     const expired = agent.lease_expires_at ? Date.parse(agent.lease_expires_at) <= now : true;
-    if (!tmux.hasSession(agent.tmux_session) || expired) {
-      closeLoginSeat(agent.id, 'orphaned');
+    if (!(await tmux.hasSession(agent.tmux_session)) || expired) {
+      await closeLoginSeat(agent.id, 'orphaned');
       reaped.push(agent.id);
       continue;
     }
@@ -291,7 +291,7 @@ export function sweepLoginSeats(agents: Agent[], now = Date.now()): string[] {
     const profile = agent.profile ?? m?.[1] ?? '';
     const runtime = agent.runtime;
     const deadline = Date.parse(agent.lease_expires_at!);
-    const timer = setInterval(() => checkLoginSeat(agent.id), LOGIN_SEAT_POLL_MS);
+    const timer = setInterval(() => { void checkLoginSeat(agent.id); }, LOGIN_SEAT_POLL_MS);
     timer.unref?.();
     watches.set(agent.id, { agentId: agent.id, session: agent.tmux_session, profile, runtime, deadline, timer });
     logger.info({ agentId: agent.id, profile, runtime }, 'Login seat re-watched after restart');

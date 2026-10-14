@@ -70,25 +70,25 @@ describe('freeze note checks', () => {
     expect(parseNoteChecks(note(`- RESULT GREEN ${SHA.slice(0, 7)}`), SHA).full).toBe('green');
   });
 
-  it('does not keep a stored GREEN when the note for this SHA is missing or conflicting', () => {
+  it('does not keep a stored GREEN when the note for this SHA is missing or conflicting', async () => {
     const file = path.join(os.tmpdir(), `wc-stale-${SHA.slice(0, 8)}.md`);
     projects.demo = { workspace_match: '**/*', tests: { status_command: ['status', '{sha}'] } };
     setTestRunExecForTest(() => JSON.stringify({ v: 1, runs: [] }));
     fs.writeFileSync(file, note(`- RESULT GREEN sha=${OTHER} ${SHA.slice(0, 8)}`));
     const conflicting = { ...lane, gate: 'GREEN', freeze_path: file };
-    expect(viewShaChecks(conflicting)).toMatchObject({ full: 'missing', gate: null });
-    expect(promoteFullBlock(conflicting)).toMatch(/needs green full gate/);
+    expect((await viewShaChecks(conflicting))).toMatchObject({ full: 'missing', gate: null });
+    expect((await promoteFullBlock(conflicting))).toMatch(/needs green full gate/);
 
     fs.writeFileSync(file, note('- reviewed, no result on this SHA'));
     const missing = { ...lane, gate: 'GREEN', freeze_path: file };
-    expect(viewShaChecks(missing)).toMatchObject({ full: 'missing', gate: null });
-    expect(promoteFullBlock(missing)).toMatch(/needs green full gate/);
+    expect((await viewShaChecks(missing))).toMatchObject({ full: 'missing', gate: null });
+    expect((await promoteFullBlock(missing))).toMatch(/needs green full gate/);
 
-    expect(viewShaChecks({ ...lane, gate: 'GREEN', freeze_path: null }).gate).toBe('GREEN');
+    expect((await viewShaChecks({ ...lane, gate: 'GREEN', freeze_path: null })).gate).toBe('GREEN');
     fs.rmSync(file, { force: true });
   });
 
-  it('prefers a status command that names the SHA, and keeps quick and full apart', () => {
+  it('prefers a status command that names the SHA, and keeps quick and full apart', async () => {
     const file = path.join(os.tmpdir(), `wc-note-${SHA.slice(0, 8)}.md`);
     fs.writeFileSync(file, note('- RESULT RED\n- quick check RED'));
     projects.demo = { workspace_match: '**/*', tests: { status_command: ['status', '{sha}'] } };
@@ -96,34 +96,34 @@ describe('freeze note checks', () => {
       v: 1,
       runs: [{ id: 'q1', sha: SHA, state: 'pass', kind: 'dev', suite: 'quick', who: 'wave.h.wc-a' }],
     }));
-    const view = viewShaChecks({ ...lane, freeze_path: file });
+    const view = (await viewShaChecks({ ...lane, freeze_path: file }));
     expect(view.quick).toBe('green');
     expect(view.full).toBe('red');
     expect(view.gate).toBe('RED');
-    expect(stageGateBlock({ ...lane, freeze_path: file })).toBeNull();
-    expect(promoteFullBlock({ ...lane, freeze_path: file })).toMatch(/needs green full gate/);
+    expect((await stageGateBlock({ ...lane, freeze_path: file }))).toBeNull();
+    expect((await promoteFullBlock({ ...lane, freeze_path: file }))).toMatch(/needs green full gate/);
 
     setTestRunExecForTest(() => JSON.stringify({
       v: 1,
       runs: [{ id: 'g1', sha: SHA, state: 'pass', kind: 'gate', suite: 'full' }],
     }));
-    const full = viewShaChecks({ ...lane, freeze_path: file });
+    const full = (await viewShaChecks({ ...lane, freeze_path: file }));
     expect(full.full).toBe('green');
     expect(full.gate).toBe('GREEN');
-    expect(promoteFullBlock({ ...lane, freeze_path: file })).toBeNull();
+    expect((await promoteFullBlock({ ...lane, freeze_path: file }))).toBeNull();
     fs.rmSync(file, { force: true });
   });
 
-  it('a quick GREEN in the note stages, and only a full GREEN promotes', () => {
+  it('a quick GREEN in the note stages, and only a full GREEN promotes', async () => {
     const file = path.join(os.tmpdir(), `wc-quick-${SHA.slice(0, 8)}.md`);
     fs.writeFileSync(file, note('- quick check: GREEN'));
     const row = { ...lane, freeze_path: file };
-    expect(stageGateBlock(row)).toBeNull();
-    expect(promoteFullBlock(row)).toMatch(/needs green full gate/);
+    expect((await stageGateBlock(row))).toBeNull();
+    expect((await promoteFullBlock(row))).toMatch(/needs green full gate/);
     fs.writeFileSync(file, note('- RESULT GREEN'));
-    expect(stageGateBlock(row)).toBeNull();
-    expect(promoteFullBlock(row)).toBeNull();
-    expect(viewShaChecks(row).gate).toBe('GREEN');
+    expect((await stageGateBlock(row))).toBeNull();
+    expect((await promoteFullBlock(row))).toBeNull();
+    expect((await viewShaChecks(row)).gate).toBe('GREEN');
     fs.rmSync(file, { force: true });
   });
 });

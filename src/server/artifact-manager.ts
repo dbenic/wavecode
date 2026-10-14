@@ -104,12 +104,12 @@ function ensureWavecodeGitignore(workspace: string): void {
   }
 }
 
-function resolveAgentWorkspace(targetAgentId: string): Result<{ workspace: string; agentId: string }> {
+async function resolveAgentWorkspace(targetAgentId: string): Promise<Result<{ workspace: string; agentId: string }>> {
   const agentResult = getAgentByIdOrName(targetAgentId);
   if (!agentResult.ok) return { ok: false, error: agentResult.error };
 
   const agent = agentResult.data;
-  const workspace = agent.workspace ?? tmux.getPaneDir(agent.tmux_session);
+  const workspace = agent.workspace ?? await tmux.getPaneDir(agent.tmux_session);
   if (!workspace) {
     return { ok: false, error: `Agent '${agent.name}' has no workspace directory` };
   }
@@ -147,15 +147,15 @@ function getAvailableAttachmentPath(dir: string, filename: string): string {
   return candidate;
 }
 
-function copyArtifactToAgentWorkspace(
+async function copyArtifactToAgentWorkspace(
   artifact: Artifact,
   targetAgentId: string,
-): Result<{ attachedPath: string }> {
+): Promise<Result<{ attachedPath: string }>> {
   if (!fs.existsSync(artifact.storage_path)) {
     return { ok: false, error: 'Artifact file not found on disk' };
   }
 
-  const workspaceResult = resolveAgentWorkspace(targetAgentId);
+  const workspaceResult = await resolveAgentWorkspace(targetAgentId);
   if (!workspaceResult.ok) return workspaceResult;
 
   const dirResult = ensureAgentArtifactsDir(workspaceResult.data.workspace);
@@ -347,15 +347,15 @@ export function normalizeDesk(raw: string): string | null {
 /**
  * Attach an artifact to an agent by copying it into that agent's workspace.
  */
-export function attachArtifactToAgent(
+export async function attachArtifactToAgent(
   artifactId: string,
   targetAgentId: string,
-): Result<{ attachedPath: string }> {
+): Promise<Result<{ attachedPath: string }>> {
   const artifactResult = getArtifact(artifactId);
   if (!artifactResult.ok) return { ok: false, error: artifactResult.error };
 
   const artifact = artifactResult.data;
-  const attachResult = copyArtifactToAgentWorkspace(artifact, targetAgentId);
+  const attachResult = await copyArtifactToAgentWorkspace(artifact, targetAgentId);
   if (!attachResult.ok) return attachResult;
 
   emit('artifact.shared', 'artifact', artifactId, {
@@ -373,15 +373,15 @@ export function attachArtifactToAgent(
  * The file landing is the success condition — notify failure is non-fatal
  * so orchestrators can still put attached_path in a create_task prompt.
  */
-export function shareArtifact(
+export async function shareArtifact(
   artifactId: string,
   targetAgentId: string,
-): Result<{ attachedPath: string; notified: boolean }> {
+): Promise<Result<{ attachedPath: string; notified: boolean }>> {
   const artifactResult = getArtifact(artifactId);
   if (!artifactResult.ok) return { ok: false, error: artifactResult.error };
 
   const artifact = artifactResult.data;
-  const attachResult = copyArtifactToAgentWorkspace(artifact, targetAgentId);
+  const attachResult = await copyArtifactToAgentWorkspace(artifact, targetAgentId);
   if (!attachResult.ok) return attachResult;
 
   const attachedPath = attachResult.data.attachedPath;
@@ -392,9 +392,9 @@ export function shareArtifact(
   });
 
   const promptText = `I've shared a file with you: "${artifact.filename}" (${formatBytes(artifact.size_bytes)}). It's copied into your workspace at: ${attachedPath}. Please review it.`;
-  const resolved = resolveAgentWorkspace(targetAgentId);
+  const resolved = await resolveAgentWorkspace(targetAgentId);
   const notifyId = resolved.ok ? resolved.data.agentId : targetAgentId;
-  const sendResult = sendKeys(notifyId, promptText);
+  const sendResult = await sendKeys(notifyId, promptText);
   if (!sendResult.ok) {
     logger.warn(
       { artifactId, targetAgentId, error: sendResult.error, attachedPath },

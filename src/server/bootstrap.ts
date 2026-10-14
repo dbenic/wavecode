@@ -16,6 +16,7 @@ import * as notifications from './notifications.js';
 import * as outputWatcher from './output-watcher.js';
 import * as taskDispatcher from './task-dispatcher.js';
 import { startHealthMonitor, stopHealthMonitor } from './health-monitor.js';
+import { startEventLoopMonitor, stopEventLoopMonitor } from './event-loop.js';
 import { pruneOldArtifacts } from './artifact-manager.js';
 import { reconcileStartupState, type StartupReconcileResult } from './startup-reconcile.js';
 import { rebindAgentSockets } from './session-manager.js';
@@ -52,7 +53,8 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   teamManager.startAllCommsWatchers();
   notifications.getVapidPublicKey();
 
-  rebindAgentSockets();
+  await rebindAgentSockets();
+  startEventLoopMonitor();
   startPerfMonitor();
   startEventRetention();
   startLaneBoard();
@@ -78,6 +80,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
 }
 
 export function shutdownApplication(): void {
+  stopEventLoopMonitor();
   stopHealthMonitor();
   peers.stopPeerPollers();
   inboxWatch.stopInboxWatchers();

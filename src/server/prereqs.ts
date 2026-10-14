@@ -11,12 +11,12 @@
  * refuses Promote.
  */
 
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import yaml from 'js-yaml';
 import { getConfig, type PrereqCheckConfig } from './config.js';
 import { emit } from './event-bus.js';
-import { gitAncestorSync } from './git-memo.js';
+import { gitAncestor } from './git-memo.js';
+import { execFileAsync } from './proc.js';
 import { listFreezes } from './release-freezes.js';
 
 export interface PrereqDecl {
@@ -83,9 +83,9 @@ export function stepsPrompt(steps: GoStep[]): string {
   ].join('\n');
 }
 
-function contained(repo: string, ancestor: string, descendant: string): boolean {
+async function contained(repo: string, ancestor: string, descendant: string): Promise<boolean> {
   if (ancestor === descendant) return true;
-  return gitAncestorSync(repo, ancestor, descendant) === true;
+  return (await gitAncestor(repo, ancestor, descendant)) === true;
 }
 
 function readFreezePrereqs(filePath: string | null): PrereqDecl[] {
@@ -94,7 +94,7 @@ function readFreezePrereqs(filePath: string | null): PrereqDecl[] {
 }
 
 /** Union of freeze-note prereqs whose SHA is contained in `sha` (the lane itself, or every lane inside a candidate). */
-export function declaredPrereqs(project: string, sha: string): PrereqDecl[] {
+export async function declaredPrereqs(project: string, sha: string): Promise<PrereqDecl[]> {
   const repo = getConfig().projects?.[project]?.repo ?? null;
   let rows: Array<{ sha: string; project: string | null; freeze_path: string | null }> = [];
   try { rows = listFreezes(); } catch { rows = []; }
@@ -104,7 +104,7 @@ export function declaredPrereqs(project: string, sha: string): PrereqDecl[] {
     // read the note first: most freezes declare nothing, and git is only asked about the ones that do
     const decls = readFreezePrereqs(row.freeze_path);
     if (!decls.length) continue;
-    const inside = row.sha === sha || (!!repo && contained(repo, row.sha, sha));
+    const inside = row.sha === sha || (!!repo && await contained(repo, row.sha, sha));
     if (inside) groups.push(decls);
   }
   return unionPrereqs(groups);
@@ -155,15 +155,15 @@ export interface CheckFailure {
   output: string;
 }
 
-function runOne(project: string, sha: string, id: string, spec: PrereqCheckConfig | undefined): CheckFailure | { ok: true } {
+async function runOne(project: string, sha: string, id: string, spec: PrereqCheckConfig | undefined): Promise<CheckFailure | { ok: true }> {
   if (!spec?.command?.length) return { ok: false, error: `prereq ${id} has no check`, id, output: '' };
   const argv = fill(spec.command, sha, project);
   let stdout = '';
   let code = 0;
   try {
-    stdout = execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 20000, maxBuffer: 1_000_000 });
+    stdout = await execFileAsync(argv[0], argv.slice(1), { timeout: 20000, maxBuffer: 1_000_000 });
   } catch (e) {
-    const err = e as { status?: number; stdout?: string | Buffer };
+    const err = e as { status?: number | null; stdout?: string };
     code = typeof err.status === 'number' ? err.status : 1;
     stdout = err.stdout == null ? '' : String(err.stdout);
   }
@@ -185,23 +185,23 @@ function runOne(project: string, sha: string, id: string, spec: PrereqCheckConfi
 }
 
 /** Run check steps in order. Stops at the first failure. `kind: code` is not a check. */
-export function runPrereqChecks(project: string, sha: string, decls: PrereqDecl[]): { ok: true } | CheckFailure {
+export async function runPrereqChecks(project: string, sha: string, decls: PrereqDecl[]): Promise<{ ok: true } | CheckFailure> {
   const checks = getConfig().projects?.[project]?.prereq_checks ?? {};
   for (const decl of decls.filter((d) => d.kind !== 'code')) {
-    const result = runOne(project, sha, decl.id, checks[decl.id]);
+    const result = await runOne(project, sha, decl.id, checks[decl.id]);
     if (!result.ok) return result;
   }
   return { ok: true };
 }
 
-export function productionPrereqGate(
+export async function productionPrereqGate(
   project: string,
   sha: string,
   who: string | null,
-): { ok: true; steps: GoStep[] | null } | CheckFailure {
-  const decls = declaredPrereqs(project, sha);
+): Promise<{ ok: true; steps: GoStep[] | null } | CheckFailure> {
+  const decls = await declaredPrereqs(project, sha);
   if (decls.length === 0) return { ok: true, steps: null };
-  const result = runPrereqChecks(project, sha, decls);
+  const result = await runPrereqChecks(project, sha, decls);
   if (!result.ok) {
     emit('release.prereq', 'release', sha, {
       who: who ?? 'unknown', project, sha, id: result.id, output: result.output, error: result.error,
@@ -212,9 +212,9 @@ export function productionPrereqGate(
 }
 
 /** What's-missing text. Does not write the audit (Promote does). */
-export function prereqStatusNote(project: string, sha: string): string | null {
-  const decls = declaredPrereqs(project, sha);
+export async function prereqStatusNote(project: string, sha: string): Promise<string | null> {
+  const decls = await declaredPrereqs(project, sha);
   if (!decls.some((d) => d.kind !== 'code')) return null;
-  const result = runPrereqChecks(project, sha, decls);
+  const result = await runPrereqChecks(project, sha, decls);
   return result.ok ? null : result.error;
 }

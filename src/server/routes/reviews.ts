@@ -62,7 +62,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(codeReview.getReviewsForRun(c.req.param('runId')));
   });
 
-  app.post('/api/ai-reviews/:reviewId/send-fixes', (c) => {
+  app.post('/api/ai-reviews/:reviewId/send-fixes', async (c) => {
     // Sending fixes types a prompt into the run's agent — same ownership
     // rule as a direct send (spec §2 rule 2).
     const review = codeReview.getReview(c.req.param('reviewId'));
@@ -74,7 +74,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const access = leases.checkAgentAccess(agent.data, getActingUser(c));
     if (!access.ok) return c.json({ error: access.error }, 403);
 
-    const result = codeReview.sendFixesToAgent(review.id);
+    const result = await codeReview.sendFixesToAgent(review.id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json({ ok: true });
   });
@@ -97,11 +97,11 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result.data);
   });
 
-  app.get('/api/reviews/test-log', (c) => {
+  app.get('/api/reviews/test-log', async (c) => {
     const project = c.req.query('project') ?? '';
     const id = c.req.query('id') ?? '';
     if (!project || !id) return c.json({ error: 'project and id are required' }, 400);
-    const result = devLanes.laneTestLog(project, id);
+    const result = await devLanes.laneTestLog(project, id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
   });
@@ -167,7 +167,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
         error: `Forbidden: override-promote is admin only (you are ${user.name}, ${user.role}). Promote without override_reason, or ask an admin.`,
       }, 403);
     }
-    const result = reviewQueue.promote(c.req.param('runId'), {
+    const result = await reviewQueue.promote(c.req.param('runId'), {
       overrideReason: typeof body.overrideReason === 'string' ? body.overrideReason : undefined,
     });
     if (!result.ok) return c.json({ error: result.error }, 400);
@@ -213,7 +213,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     if (!file || !inside) {
       return c.json({ error: `path must be a file inside the freeze inbox (${dirs.join(', ') || 'review.freeze_inbox is not configured'})` }, 400);
     }
-    const result = freezes.ingestFreezeFile(file);
+    const result = await freezes.ingestFreezeFile(file);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
   });

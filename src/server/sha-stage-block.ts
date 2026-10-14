@@ -108,9 +108,9 @@ function newerInLane(freeze: ReleaseFreeze): string | null {
   return newer;
 }
 
-function behindLine(project: string, sha: string, freeze: ReleaseFreeze | null): string | null {
+async function behindLine(project: string, sha: string, freeze: ReleaseFreeze | null): Promise<string | null> {
   let n: number | null = null;
-  try { n = commitsBehind(project, sha); } catch { n = null; }
+  try { n = await commitsBehind(project, sha); } catch { n = null; }
   if (freeze?.status === 'behind-main') {
     if (n != null && n > 0) return behindMainLine(n);
     return 'behind main: merge main';
@@ -132,7 +132,7 @@ export async function stageEligibility(sha: string, project: string | null, opts
     const closed = closedStatus(freeze);
     if (closed) return refused(closed);
     if (opts.markStale) {
-      const stale = staleStageBlock(freeze);
+      const stale = await staleStageBlock(freeze);
       if (stale) return refused(stale);
       try { freeze = getFreeze(sha) ?? freeze; } catch { /* keep the row we had */ }
     } else if (freeze.status === 'stale') {
@@ -144,16 +144,16 @@ export async function stageEligibility(sha: string, project: string | null, opts
 
   if (opts.recordBehind) {
     try {
-      const behind = releaseBehindMain(project, sha);
+      const behind = await releaseBehindMain(project, sha);
       if (behind) return refused(behind);
     } catch { /* the count below still runs */ }
   }
-  const behind = behindLine(project, sha, freeze);
+  const behind = await behindLine(project, sha, freeze);
   if (behind) return refused(behind);
 
   let tip: StagingTip | null = null;
   let tipUnknown = opts.tipUnknown === true;
-  if (opts.localTip) tip = currentStagingTip(project);
+  if (opts.localTip) tip = await currentStagingTip(project);
   else if (opts.tipResolved) tip = opts.tip ?? null;
   else {
     try {
@@ -163,7 +163,7 @@ export async function stageEligibility(sha: string, project: string | null, opts
     } catch { tipUnknown = true; }
   }
 
-  const forward = evaluateForward({
+  const forward = await evaluateForward({
     project,
     requestedSha: sha,
     staging: tip,
@@ -177,7 +177,7 @@ export async function stageEligibility(sha: string, project: string | null, opts
 
   if (opts.includeGate && freeze) {
     try {
-      const gate = stageGateBlock(freeze);
+      const gate = await stageGateBlock(freeze);
       if (gate) return refused(gate);
     } catch { /* unreadable gate: do not invent a lock */ }
   }

@@ -174,7 +174,7 @@ export async function onRunComplete(runId: string, agentId: string): Promise<voi
   const task = taskResult.data;
   const config = getConfig();
   // Spec §5b: keep what the agent said about this run (pane prose) on the run.
-  captureRunSummary(runId, agentId);
+  await captureRunSummary(runId, agentId);
   // Spec §5e: the RESULT file and the run's prose land in the room's REPORTS/ + LEDGER.md
   recordRunInRoom(runId, agentId);
   const seatStillBusy = listOpenRuns(agentId).some((r) => r.id !== runId);
@@ -484,7 +484,7 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
     const room = resolveTaskRoom({ explicit: task.room ?? null, agent, creatorId: task.created_by ?? null });
     if (room) {
       if (!task.room) updateTaskRoom(task.id, room.project);
-      linkRoomIntoWorkspace(agent.workspace, room);
+      await linkRoomIntoWorkspace(agent.workspace, room);
       const kind = isTemplateKind(task.template) ? task.template : 'build';
       // Spec §5f: record which template the task ran with (per-template metrics)
       if (task.template !== kind) updateTaskTemplate(task.id, kind);
@@ -556,7 +556,7 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
 
   // A chat reply still pending on this agent can no longer be told apart
   // from the task's output — close it out before the task prompt goes in.
-  clearPendingForDispatch(agent);
+  await clearPendingForDispatch(agent);
 
   if (agent.mode === 'spawned') {
     const run = await executeRun(agent.id, task.id, prompt);
@@ -602,7 +602,7 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       }
     }
 
-    const sendResult = sessionManager.sendKeys(agent.id, prompt);
+    const sendResult = await sessionManager.sendKeys(agent.id, prompt);
     if (!sendResult.ok) {
       if (runResult.ok) {
         finalizeRun(runResult.data.id, agent.id, 1, 'Failed to send prompt to agent');

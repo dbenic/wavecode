@@ -191,8 +191,8 @@ describe('one orchestrator seat per user (spec §5d)', () => {
       tmuxHarness.panes.set('wc-pm-ana', '> what is @builder doing?\n\n● Builder is on T10 (seats), tests green so far.\n\n❯ ');
       tmuxHarness.panes.set('wc-pm-denis', '> what is @builder doing?\n\n● builder dela na T10, testi so zeleni.\n\n❯ ');
       const rc = await import('./reply-capture.js');
-      expect(rc.onAgentIdle(anaSeat.id, { transitioned: true, outputChanged: true })).toBe(true);
-      expect(rc.onAgentIdle(denisSeat.id, { transitioned: true, outputChanged: true })).toBe(true);
+      expect((await rc.onAgentIdle(anaSeat.id, { transitioned: true, outputChanged: true }))).toBe(true);
+      expect((await rc.onAgentIdle(denisSeat.id, { transitioned: true, outputChanged: true }))).toBe(true);
 
       // (the seats' briefs were superseded unanswered — dropped quietly, no placeholder bubbles)
       const replies = db.listAgentMessages({}).filter((m) => m.message_type === 'reply');

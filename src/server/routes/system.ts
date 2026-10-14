@@ -36,7 +36,7 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
     if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
 
     const agent = agentResult.data;
-    const outputResult = sessionManager.capturePane(agent.tmux_session, 30);
+    const outputResult = await sessionManager.capturePane(agent.tmux_session, 30);
     let lastOutput: string | undefined;
     if (outputResult.ok) {
       lastOutput = outputResult.data
@@ -137,13 +137,13 @@ export function registerSystemRoutes(app: Hono<NodeAppEnv>): void {
    * one, and disable auto-dispatch so nothing new starts until the human
    * re-enables it.
    */
-  app.post('/api/system/stop-all', (c) => {
+  app.post('/api/system/stop-all', async (c) => {
     // Emergency brake for everyone — admin only (spec §2 rule 7)
     const user = getActingUser(c);
     if (!isAdmin(user)) {
       return c.json({ error: `Forbidden: stop-all is admin only (you are ${user.name}, ${user.role})` }, 403);
     }
-    const summary = sessionManager.stopAll();
+    const summary = await sessionManager.stopAll();
 
     for (const agentId of summary.killed) {
       outputWatcher.stopWatching(agentId);

@@ -252,7 +252,7 @@ describe('agent runtime integration', () => {
     tmuxHarness.killSession('wc-builder');
     expect(tmuxHarness.hasSession('wc-builder')).toBe(false);
 
-    const recovered = sessionManager.ensureSpawnedAgentSession(spawnedAgent.id);
+    const recovered = (await sessionManager.ensureSpawnedAgentSession(spawnedAgent.id));
     expect(recovered.ok).toBe(true);
     if (!recovered.ok) return;
 
@@ -260,7 +260,7 @@ describe('agent runtime integration', () => {
     expect(recovered.data.agent.workspace).toBe(spawnedAgent.workspace);
     expect(tmuxHarness.hasSession('wc-builder')).toBe(true);
 
-    const secondCheck = sessionManager.ensureSpawnedAgentSession(spawnedAgent.id);
+    const secondCheck = (await sessionManager.ensureSpawnedAgentSession(spawnedAgent.id));
     expect(secondCheck.ok).toBe(true);
     if (!secondCheck.ok) return;
     expect(secondCheck.data.createdSession).toBe(false);

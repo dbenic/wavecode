@@ -136,7 +136,8 @@ describe('release-freezes.ts', () => {
     agent('claude1', 'claude-code');
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await rf.pendingInboxForTest();
     rf.resetFreezesForTest();
     peers.stopPeerPollers();
     peers.setPeerFetchForTest(null);
@@ -167,10 +168,10 @@ describe('release-freezes.ts', () => {
       expect(p!.reviewerCandidates[0]).toBe('claude1');
     });
 
-    it('"Project: Countix" (the company) maps to the configured project mentioned in the text', () => {
+    it('"Project: Countix" (the company) maps to the configured project mentioned in the text', async () => {
       const text = VERDICT_PASS.replace('Countix / wavepulse', 'Project: Countix · WavePulse 0.442.9');
       const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, text);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.project).toBe('wavepulse');
     });
 
@@ -216,9 +217,9 @@ describe('release-freezes.ts', () => {
   });
 
   describe('ingest', () => {
-    it('a PASS verdict file creates a Review-queue card with Promote (an independent PASS on the exact SHA)', () => {
+    it('a PASS verdict file creates a Review-queue card with Promote (an independent PASS on the exact SHA)', async () => {
       const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
-      const r = rf.ingestFreezeFile(file);
+      const r = (await rf.ingestFreezeFile(file));
       expect(r.ok && r.data.effect).toBe('card');
       const items = rq.listPendingReviews();
       expect(items).toHaveLength(1);
@@ -230,9 +231,9 @@ describe('release-freezes.ts', () => {
         expect.objectContaining({ verdict: 'pass', reviewer_agent: 'codex3', freeze: expect.objectContaining({ sha: SHA_A }) }), null);
     });
 
-    it('every ingested freeze note or verdict is archived as a library document, linked from the event', () => {
+    it('every ingested freeze note or verdict is archived as a library document, linked from the event', async () => {
       const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       const docs = db.listArtifacts({ kind: 'document' });
       expect(docs).toHaveLength(1);
       expect(docs[0]).toMatchObject({ filename: path.basename(file), desk: '91', room: 'wavepulse' });
@@ -243,37 +244,37 @@ describe('release-freezes.ts', () => {
       const call = vi.mocked(emit).mock.calls.find((c) => c[0] === 'review.ai_completed');
       expect((call?.[3] as { freeze: { archive: string } }).freeze.archive).toBe(docs[0].storage_path);
       // the same file again: still one document
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(db.listArtifacts({ kind: 'document' })).toHaveLength(1);
     });
 
-    it('re-ingesting a freeze note recomputes the gate and clears a stale GREEN', () => {
+    it('re-ingesting a freeze note recomputes the gate and clears a stale GREEN', async () => {
       const green = `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA_A}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\nRESULT GREEN\n`;
       const file = write(`desk7-freeze-${SHA_A.slice(0, 8)}.md`, green);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
 
       fs.writeFileSync(file, green.replace('RESULT GREEN', `RESULT GREEN sha=${SHA_B} ${SHA_A.slice(0, 8)}`));
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.gate).toBeNull();
-      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).gate).toBeNull();
+      expect((await rf.viewShaChecks(rf.getFreeze(SHA_A)!)).gate).toBeNull();
 
       fs.writeFileSync(file, green);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
 
       fs.writeFileSync(file, green.replace('RESULT GREEN\n', ''));
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       const cleared = rf.getFreeze(SHA_A);
       expect(cleared?.gate).toBeNull();
-      expect(rf.viewShaChecks(cleared!).gate).toBeNull();
-      expect(rf.viewShaChecks(cleared!).full).not.toBe('green');
+      expect((await rf.viewShaChecks(cleared!)).gate).toBeNull();
+      expect((await rf.viewShaChecks(cleared!)).full).not.toBe('green');
     });
 
-    it('a retracted note GREEN follows the latest command word, and only a GREEN command stays green', () => {
+    it('a retracted note GREEN follows the latest command word, and only a GREEN command stays green', async () => {
       const green = `# Desk #7 freeze note\n\nProject: wavepulse · Author: claude2\n- Lane: \`wc-claude2\`\n- Freeze SHA: \`${SHA_A}\`\n- Review: @codex3 **VERDICT: PASS** on this exact SHA: /r/v.md\nRESULT GREEN\n`;
       const file = write(`desk7-events-${SHA_A.slice(0, 8)}.md`, green);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
       const retracted = green.replace('RESULT GREEN\n', '');
       const event = (gate: string) => {
@@ -284,66 +285,66 @@ describe('release-freezes.ts', () => {
       };
       fs.writeFileSync(file, retracted);
       event('QUEUED');
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.gate).toBe('QUEUED');
-      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).not.toBe('green');
+      expect((await rf.viewShaChecks(rf.getFreeze(SHA_A)!)).full).not.toBe('green');
 
       event('RED');
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.gate).toBe('RED');
-      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).not.toBe('green');
+      expect((await rf.viewShaChecks(rf.getFreeze(SHA_A)!)).full).not.toBe('green');
 
       event('GREEN');
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       expect(rf.getFreeze(SHA_A)?.gate).toBe('GREEN');
-      expect(rf.viewShaChecks(rf.getFreeze(SHA_A)!).full).toBe('green');
+      expect((await rf.viewShaChecks(rf.getFreeze(SHA_A)!)).full).toBe('green');
     });
 
-    it('a freeze note carrying the reviewer PASS inline (Desk #91) creates the card and links both files', () => {
+    it('a freeze note carrying the reviewer PASS inline (Desk #91) creates the card and links both files', async () => {
       const file = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
-      const r = rf.ingestFreezeFile(file);
+      const r = (await rf.ingestFreezeFile(file));
       expect(r.ok && r.data.effect).toBe('card');
       const [item] = rq.listPendingReviews();
       expect(item.freeze).toMatchObject({ sha: SHA_A, verdict: 'pass', reviewer_name: 'codex3', author_name: 'claude2', lane: 'wc-claude2', gate: 'GREEN', freeze_path: file });
       expect(item.freeze!.verdict_path).toContain('code-review-codex3.md');
     });
 
-    it('a verdict file stores R#/P# findings as issues and keeps the needs-fixes verdict', () => {
+    it('a verdict file stores R#/P# findings as issues and keeps the needs-fixes verdict', async () => {
       const text = `# Verdict: Codex2 Desk (exact SHA ${SHA_C})\nProject: wavepulse · reviewer Claude1 · Author: codex2\n\nR1 — P1 the balance check ignores sign\nR2 (P2) rounding on the credit note\n\nVERDICT: NEEDS FIXES\n`;
-      expect(rf.ingestFreezeFile(write(`claude1-verdict-rp-${SHA_C.slice(0, 8)}.md`, text)).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(write(`claude1-verdict-rp-${SHA_C.slice(0, 8)}.md`, text))).ok).toBe(true);
       const [item] = rq.listPendingReviews();
       expect(item.latestReview).toMatchObject({ verdict: 'needs-fixes', issues_found: 2 });
       expect(item.freeze?.verdict).toBe('needs-fixes');
     });
 
-    it('NEEDS FIXES creates a card without Promote: the server refuses to promote it', () => {
+    it('NEEDS FIXES creates a card without Promote: the server refuses to promote it', async () => {
       const file = write(`claude1-verdict-codex2-si-aop-${SHA_C.slice(0, 8)}-20261009.md`, VERDICT_NEEDS_FIXES);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       const [item] = rq.listPendingReviews();
       expect(item.freeze).toMatchObject({ sha: SHA_C, verdict: 'needs-fixes', reviewer_name: 'claude1', author_name: 'codex2' });
-      const promoted = rq.promote(item.run.id);
+      const promoted = (await rq.promote(item.run.id));
       expect(promoted.ok).toBe(false);
       expect(!promoted.ok && promoted.error).toMatch(/Promotion blocked: verdict is 'needs-fixes'/);
       expect(vi.mocked(emit).mock.calls.some((c) => c[0] === 'review.promoted')).toBe(false);
     });
 
-    it('a self-review is refused: no card when the reviewer is the author', () => {
+    it('a self-review is refused: no card when the reviewer is the author', async () => {
       const text = VERDICT_PASS.replace('reviewer Codex3', 'reviewer Claude2');
       const file = write(`claude2-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, text);
-      const r = rf.ingestFreezeFile(file);
+      const r = (await rf.ingestFreezeFile(file));
       expect(r.ok).toBe(false);
       expect(!r.ok && r.error).toMatch(/self-review refused/);
       expect(rq.listPendingReviews()).toHaveLength(0);
       expect(rf.getFreeze(SHA_A)).toBeNull();
     });
 
-    it('a freeze note without a verdict is stored, and the later verdict file completes the card with both links', () => {
+    it('a freeze note without a verdict is stored, and the later verdict file completes the card with both links', async () => {
       const note = write(`codex2-freeze-si-aop-retained-${SHA_C.slice(0, 8)}-20261009.md`, FREEZE_REQUEST_ONLY);
-      const stored = rf.ingestFreezeFile(note);
+      const stored = (await rf.ingestFreezeFile(note));
       expect(stored.ok && stored.data.effect).toBe('stored');
       expect(rq.listPendingReviews()).toHaveLength(0);
       const verdict = write(`claude1-verdict-codex2-si-aop-retained-${SHA_C.slice(0, 8)}-20261009.md`, VERDICT_NEEDS_FIXES.replace('VERDICT: NEEDS FIXES', 'VERDICT: PASS'));
-      const r = rf.ingestFreezeFile(verdict);
+      const r = (await rf.ingestFreezeFile(verdict));
       expect(r.ok && r.data.effect).toBe('card');
       const [item] = rq.listPendingReviews();
       expect(item.freeze).toMatchObject({ sha: SHA_C, verdict: 'pass', freeze_path: note, verdict_path: verdict, lane: 'wc-codex2-wavenetic-04420-composition', author_name: 'codex2', reviewer_name: 'claude1' });
@@ -365,21 +366,21 @@ describe('release-freezes.ts', () => {
 
       const stolen = 'cab9ffe2' + 'ab'.repeat(16);
       const prose = `# Freeze note\n\nProject: wavepulse · Author: codex2\nThe changes were reviewed with wc-ales-claude1, held separately.\nLane: \`changes\`\n- Exact SHA: \`${stolen}\`\n`;
-      expect(rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md').ok).toBe(true);
+      expect((await rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md')).ok).toBe(true);
       expect(rf.getFreeze(stolen)?.lane).toBe('wc-codex2-desk');
-      expect(rf.laneFromRunRecord({ sha: stolen, author_agent_id: codex2.id, run_id: null })).toBe('wc-codex2-desk');
+      expect((await rf.laneFromRunRecord({ sha: stolen, author_agent_id: codex2.id, run_id: null }))).toBe('wc-codex2-desk');
 
       db.getDb().prepare('UPDATE release_freezes SET lane = ? WHERE sha = ?').run('wc-ales-claude1', stolen);
-      expect(rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md').ok).toBe(true);
+      expect((await rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md')).ok).toBe(true);
       expect(rf.getFreeze(stolen)?.lane).toBe('wc-codex2-desk');
 
       const feature = 'f00dcafe' + 'cd'.repeat(16);
       const explicit = `# Freeze note\n\nProject: wavepulse · Author: codex2\nLane: \`wc-feature\`\nAlso mentioned wc-ales-claude1.\n- Exact SHA: \`${feature}\`\n`;
-      expect(rf.ingestFreezeText(explicit, 'feature-freeze.md').ok).toBe(true);
+      expect((await rf.ingestFreezeText(explicit, 'feature-freeze.md')).ok).toBe(true);
       expect(rf.getFreeze(feature)?.lane).toBe('wc-feature');
 
       const other = `# Freeze note\n\nProject: wavepulse · Author: codex2\nLane: \`wc-ales-claude1\`\n- Exact SHA: \`${stolen}\`\n`;
-      expect(rf.ingestFreezeText(other, 'other-seat-freeze.md').ok).toBe(true);
+      expect((await rf.ingestFreezeText(other, 'other-seat-freeze.md')).ok).toBe(true);
       expect(rf.getFreeze(stolen)?.lane).toBe('wc-codex2-desk');
 
       const recorded = 'a1b2c3d4' + 'ef'.repeat(16);
@@ -390,15 +391,15 @@ describe('release-freezes.ts', () => {
         `INSERT INTO release_requests (id, sha, lane, target, origin, status) VALUES ('rel-1', ?, 'wc-codex2-record', 'staging', 'local', 'sent')`,
       ).run(recorded);
       const fromRecord = `# Freeze note\n\nProject: wavepulse · Author: codex2\nSource of the commits is held separately.\n- Exact SHA: \`${recorded}\`\n`;
-      expect(rf.ingestFreezeText(fromRecord, 'record-freeze.md').ok).toBe(true);
+      expect((await rf.ingestFreezeText(fromRecord, 'record-freeze.md')).ok).toBe(true);
       expect(rf.getFreeze(recorded)?.lane).toBe('wc-codex2-record');
     });
 
-    it('uses Branch: when there is no Lane:, and a Fable run instead of a seat named in prose', () => {
+    it('uses Branch: when there is no Lane:, and a Fable run instead of a seat named in prose', async () => {
       const canary = '336a5008' + 'aa'.repeat(16);
       const note = `# Freeze\n\nProject: wavepulse · Author: codex2\nReviewed next to wc-codex3.\nBranch: canary-e2e-stage-v5\n- Exact SHA: \`${canary}\`\n`;
       expect(rf.laneFromLines(note.split('\n'))).toBe('canary-e2e-stage-v5');
-      expect(rf.ingestFreezeText(note, '336a5008-freeze.md').ok).toBe(true);
+      expect((await rf.ingestFreezeText(note, '336a5008-freeze.md')).ok).toBe(true);
       expect(rf.getFreeze(canary)?.lane).toBe('canary-e2e-stage-v5');
       expect(rf.isShaLane('6ed9192e')).toBe(true);
       expect(rf.laneFromLines(['Lane: `6ed9192e`'])).toBeNull();
@@ -424,20 +425,20 @@ describe('release-freezes.ts', () => {
       if (!run.ok) throw new Error(run.error);
       const stolen = 'cab9ffe2' + 'cd'.repeat(16);
       const prose = `# Freeze note\n\nProject: wavepulse · Author: ales-claude1\nThe changes were reviewed with wc-ales-claude1, held separately.\nLane: \`changes\`\n- Exact SHA: \`${stolen}\`\n`;
-      expect(rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md').ok).toBe(true);
+      expect((await rf.ingestFreezeText(prose, 'cab9ffe2-freeze.md')).ok).toBe(true);
       db.getDb().prepare(
         `UPDATE release_freezes SET lane = ?, author_agent_id = ?, run_id = ? WHERE sha = ?`,
       ).run('wc-ales-claude1', ales.data.id, run.data.id, stolen);
-      expect(rf.attributedLane(rf.getFreeze(stolen)!)).toBe('wc-fable');
-      expect(rf.applyNoteLabels(stolen, prose, 'cab9ffe2-freeze.md').lane).toBe('wc-fable');
+      expect((await rf.attributedLane(rf.getFreeze(stolen)!))).toBe('wc-fable');
+      expect((await rf.applyNoteLabels(stolen, prose, 'cab9ffe2-freeze.md')).lane).toBe('wc-fable');
       expect(rf.getFreeze(stolen)?.lane).toBe('wc-fable');
       fs.rmSync(fableDir, { recursive: true, force: true });
     });
 
-    it('a re-delivered file is idempotent: one card, one review row, no second event', () => {
+    it('a re-delivered file is idempotent: one card, one review row, no second event', async () => {
       const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
-      const again = rf.ingestFreezeFile(file);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
+      const again = (await rf.ingestFreezeFile(file));
       expect(again.ok && again.data.effect).toBe('noop');
       const items = rq.listPendingReviews();
       expect(items).toHaveLength(1);
@@ -445,11 +446,11 @@ describe('release-freezes.ts', () => {
       expect(vi.mocked(emit).mock.calls.filter((c) => c[0] === 'review.ai_completed')).toHaveLength(1);
     });
 
-    it('a changed verdict on the same SHA (second reviewer, or a re-review) adds a review row, same card', () => {
+    it('a changed verdict on the same SHA (second reviewer, or a re-review) adds a review row, same card', async () => {
       write(`claude1-verdict-x-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES);
-      expect(rf.ingestFreezeFile(path.join(inbox, `claude1-verdict-x-${SHA_C.slice(0, 8)}.md`)).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(path.join(inbox, `claude1-verdict-x-${SHA_C.slice(0, 8)}.md`))).ok).toBe(true);
       const file = write(`claude1-verdict-x-r2-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES.replace('VERDICT: NEEDS FIXES', 'VERDICT: PASS'));
-      const r = rf.ingestFreezeFile(file);
+      const r = (await rf.ingestFreezeFile(file));
       expect(r.ok && r.data.effect).toBe('updated');
       const items = rq.listPendingReviews();
       expect(items).toHaveLength(1);
@@ -460,38 +461,38 @@ describe('release-freezes.ts', () => {
   });
 
   describe('rules', () => {
-    it('a newer commit on the same lane invalidates the older PASS: stale SHA is refused, even with an override reason', () => {
+    it('a newer commit on the same lane invalidates the older PASS: stale SHA is refused, even with an override reason', async () => {
       const old = write(`desk91-freeze-${SHA_B.slice(0, 8)}.md`, DESK91_FREEZE.replaceAll(SHA_A, SHA_B));
-      expect(rf.ingestFreezeFile(old).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(old)).ok).toBe(true);
       const [oldItem] = rq.listPendingReviews();
       const newer = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
-      expect(rf.ingestFreezeFile(newer).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(newer)).ok).toBe(true);
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.superseded', 'run', oldItem.run.id, expect.objectContaining({ sha: SHA_B, superseded_by: SHA_A }), null);
-      const r = rq.promote(oldItem.run.id, { overrideReason: 'ship it anyway' });
+      const r = (await rq.promote(oldItem.run.id, { overrideReason: 'ship it anyway' }));
       expect(r.ok).toBe(false);
       expect(!r.ok && r.error).toMatch(/stale/);
       const items = rq.listPendingReviews();
       expect(items.map((i) => i.freeze?.status).sort()).toEqual(['open', 'stale']);
     });
 
-    it('a verdict-only row (no lane line) is superseded by a newer freeze for the same desk', () => {
+    it('a verdict-only row (no lane line) is superseded by a newer freeze for the same desk', async () => {
       // claude2's verdict file for Desk #108 carries no Lane: line → lane null
       const v = write(`claude2-verdict-pd108-s1-${SHA_B.slice(0, 8)}.md`, `# Verdict: Codex2 PD-108 S1 (exact SHA ${SHA_B})\nProject: wavepulse · reviewer Claude2 · Author: codex2\n\n- [HIGH] renumber the migrations\n\nVERDICT: NEEDS FIXES\n`);
-      expect(rf.ingestFreezeFile(v).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(v)).ok).toBe(true);
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'open', lane: null, desk: 108, verdict: 'needs-fixes' });
       // codex2's newer freeze for Desk #108 on its lane
       const note = write(`codex2-pd108-s1-freeze-${SHA_A.slice(0, 8)}.md`, `# Codex2 freeze — PD-108 S1 r2\n\nProject: wavepulse · Author: codex2 · Desk #108\n- Branch: \`wc-codex2-pd108\`\n- Exact SHA: \`${SHA_A}\`\n\nIndependent reviewer: Claude2.\n`);
-      expect(rf.ingestFreezeFile(note).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(note)).ok).toBe(true);
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.superseded', 'run', expect.any(String), expect.objectContaining({ sha: SHA_B, superseded_by: SHA_A, by: 'desk' }), null);
     });
 
-    it('reconcile marks older open freezes per desk stale even when the newer one was ingested before the rule', () => {
+    it('reconcile marks older open freezes per desk stale even when the newer one was ingested before the rule', async () => {
       const old = write(`claude2-verdict-pd108-${SHA_B.slice(0, 8)}.md`, `# Verdict: Codex2 PD-108 (exact SHA ${SHA_B})\nProject: wavepulse · reviewer Claude2 · Author: codex2\n\nVERDICT: NEEDS FIXES\n`);
-      expect(rf.ingestFreezeFile(old).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(old)).ok).toBe(true);
       const newer = write(`codex2-pd108-freeze-${SHA_A.slice(0, 8)}.md`, `# Codex2 freeze PD-108 r2\nProject: wavepulse · Author: codex2 · Desk #108\n- Exact SHA: \`${SHA_A}\`\n`);
-      expect(rf.ingestFreezeFile(newer).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(newer)).ok).toBe(true);
       // simulate rows that predate the rule: reopen the old one
       db.getDb().prepare("UPDATE release_freezes SET status = 'open', superseded_by = NULL WHERE sha = ?").run(SHA_B);
       expect(rf.getFreeze(SHA_B)!.status).toBe('open');
@@ -501,7 +502,7 @@ describe('release-freezes.ts', () => {
       expect(rf.reconcileSuperseded()).toBe(0);
     });
 
-    it('a SHA inside an unreleased candidate branch is "in candidate"; a released candidate (on main) no longer counts', () => {
+    it('a SHA inside an unreleased candidate branch is "in candidate"; a released candidate (on main) no longer counts', async () => {
       const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
       const repo = path.join(tmp, 'repo-rc');
       fs.mkdirSync(repo);
@@ -523,15 +524,15 @@ describe('release-freezes.ts', () => {
       projectsConfig.wavepulse.candidate_refs = 'fable/rc-*';
       rf.resetMergedCacheForTest();
       rf.setFetchDisabledForTest(true);
-      expect(rf.candidateFor('wavepulse', laneSha)).toEqual({ ref: 'origin/fable/rc-0443-2', name: 'fable/rc-0443-2' });
-      expect(rf.candidateFor('wavepulse', base)).toBeNull(); // on main already (released candidate ignored)
-      expect(rf.isOnMain('wavepulse', laneSha)).toBe(false);
+      expect((await rf.candidateFor('wavepulse', laneSha))).toEqual({ ref: 'origin/fable/rc-0443-2', name: 'fable/rc-0443-2' });
+      expect((await rf.candidateFor('wavepulse', base))).toBeNull(); // on main already (released candidate ignored)
+      expect((await rf.isOnMain('wavepulse', laneSha))).toBe(false);
       rf.setFetchDisabledForTest(false);
       delete projectsConfig.wavepulse.repo;
       delete projectsConfig.wavepulse.candidate_refs;
     });
 
-    it('a SHA that is already on the project main is closed as merged, its queue card approved', () => {
+    it('a SHA that is already on the project main is closed as merged, its queue card approved', async () => {
       const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
       const repo = path.join(tmp, 'repo');
       fs.mkdirSync(repo);
@@ -550,12 +551,12 @@ describe('release-freezes.ts', () => {
 
       for (const [sha, name] of [[merged, 'merged'], [unmerged, 'open']] as const) {
         const f = write(`desk91-freeze-${name}.md`, DESK91_FREEZE.replaceAll(SHA_A, sha).replace('wc-claude2', `wc-${name}`).replace('Desk #91', `Desk #9${name.length}`));
-        expect(rf.ingestFreezeFile(f).ok).toBe(true);
+        expect((await rf.ingestFreezeFile(f)).ok).toBe(true);
       }
-      expect(rf.isOnMain('wavepulse', merged)).toBe(true);
-      expect(rf.isOnMain('wavepulse', unmerged)).toBe(false);
-      expect(rf.isOnMain('wavepulse', 'f'.repeat(40))).toBeNull();
-      expect(rf.reconcileMerged()).toBe(1);
+      expect((await rf.isOnMain('wavepulse', merged))).toBe(true);
+      expect((await rf.isOnMain('wavepulse', unmerged))).toBe(false);
+      expect((await rf.isOnMain('wavepulse', 'f'.repeat(40)))).toBeNull();
+      expect((await rf.reconcileMerged())).toBe(1);
       expect(rf.getFreeze(merged)).toMatchObject({ status: 'merged', superseded_by: 'main' });
       expect(rf.getFreeze(unmerged)).toMatchObject({ status: 'open' });
       const cards = rq.listPendingReviews();
@@ -564,9 +565,9 @@ describe('release-freezes.ts', () => {
       delete projectsConfig.wavepulse.repo;
     });
 
-    it('retry and hand-off do not apply to a freeze card', () => {
+    it('retry and hand-off do not apply to a freeze card', async () => {
       const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       const [item] = rq.listPendingReviews();
       expect(rq.retry(item.run.id).ok).toBe(false);
       expect(rq.handOff(item.run.id, 'codex2').ok).toBe(false);
@@ -580,11 +581,11 @@ describe('release-freezes.ts', () => {
       const fp = fakePeer();
       peers.setPeerFetchForTest(fp.fetchImpl);
       const file = write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       const [item] = rq.listPendingReviews();
 
       const { runWithActor } = await import('./request-context.js');
-      const r = await runWithActor('owner', async () => rq.promote(item.run.id), { admin: true });
+      const r = await runWithActor('owner', async () => (await rq.promote(item.run.id)), { admin: true });
       expect(r.ok).toBe(true);
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.promoted', 'run', item.run.id,
         expect.objectContaining({ verdict: 'pass', override_reason: null, freeze: expect.objectContaining({ sha: SHA_A, reviewer: 'codex3', author: 'claude2', desk: 91 }) }));
@@ -602,41 +603,41 @@ describe('release-freezes.ts', () => {
       releases.stopReleasePollers();
     });
 
-    it('Promote never bypasses the rules through require_pass_to_promote=false', () => {
+    it('Promote never bypasses the rules through require_pass_to_promote=false', async () => {
       reviewConfig.require_pass_to_promote = false;
       const file = write(`claude1-verdict-codex2-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       const [item] = rq.listPendingReviews();
-      expect(rq.promote(item.run.id).ok).toBe(false);
+      expect((await rq.promote(item.run.id)).ok).toBe(false);
       // an admin override with a stored reason still works for a non-PASS (the route checks the role)
-      const r = rq.promote(item.run.id, { overrideReason: 'hotfix agreed with Denis' });
+      const r = (await rq.promote(item.run.id, { overrideReason: 'hotfix agreed with Denis' }));
       expect(r.ok).toBe(true);
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.promoted', 'run', item.run.id, expect.objectContaining({ override_reason: 'hotfix agreed with Denis' }));
     });
 
-    it('Reject removes the card with a reason, and a re-delivered file does not revive it', () => {
+    it('Reject removes the card with a reason, and a re-delivered file does not revive it', async () => {
       const file = write(`codex3-verdict-desk91-${SHA_A.slice(0, 8)}-20261009.md`, VERDICT_PASS);
-      expect(rf.ingestFreezeFile(file).ok).toBe(true);
+      expect((await rf.ingestFreezeFile(file)).ok).toBe(true);
       const [item] = rq.listPendingReviews();
       const r = rq.reject(item.run.id, { reason: 'wrong base, refreeze on main' });
       expect(r.ok).toBe(true);
       expect(vi.mocked(emit)).toHaveBeenCalledWith('review.rejected', 'run', item.run.id, expect.objectContaining({ reason: 'wrong base, refreeze on main', freeze: expect.objectContaining({ sha: SHA_A }) }));
       expect(rf.getFreeze(SHA_A)).toMatchObject({ status: 'rejected', decision_reason: 'wrong base, refreeze on main' });
       expect(rq.listPendingReviews()).toHaveLength(0);
-      const again = rf.ingestFreezeFile(file);
+      const again = (await rf.ingestFreezeFile(file));
       expect(again.ok && again.data.effect).toBe('noop');
       expect(rq.listPendingReviews()).toHaveLength(0);
     });
   });
 
   describe('inbox watcher and backfill', () => {
-    it('backfill imports today\'s PASS verdicts and freezes only: yesterday\'s files and NEEDS FIXES stay out', () => {
+    it('backfill imports today\'s PASS verdicts and freezes only: yesterday\'s files and NEEDS FIXES stay out', async () => {
       const yesterday = Date.now() - 36 * 3600 * 1000;
       write(`desk91-freeze-${SHA_B.slice(0, 8)}.md`, DESK91_FREEZE.replaceAll(SHA_A, SHA_B).replace('wc-claude2', 'wc-old-lane'), yesterday);
       write(`claude1-verdict-codex2-${SHA_C.slice(0, 8)}.md`, VERDICT_NEEDS_FIXES);
       write(`desk91-freeze-${SHA_A.slice(0, 8)}.md`, DESK91_FREEZE);
       write('notes.md', 'unrelated');
-      rf.backfillFreezes();
+      (await rf.backfillFreezes());
       const items = rq.listPendingReviews();
       expect(items.map((i) => i.freeze?.sha)).toEqual([SHA_A]);
       expect(rf.getFreeze(SHA_B)).toBeNull();
@@ -650,19 +651,21 @@ describe('release-freezes.ts', () => {
       rf.onInboxEvent(inbox, 'notes.md', 10);         // not a freeze/verdict file
       rf.onInboxEvent(inbox, '.swp-' + name, 10);     // editor temp file
       await new Promise((res) => setTimeout(res, 60));
+      await rf.pendingInboxForTest();
       const items = rq.listPendingReviews();
       expect(items).toHaveLength(1);
       expect(items[0].freeze?.sha).toBe(SHA_A);
       rf.onInboxEvent(inbox, name, 10);               // fs.watch fires several events per write
       await new Promise((res) => setTimeout(res, 60));
+      await rf.pendingInboxForTest();
       expect(reviewRows(items[0].run.id)).toHaveLength(1);
     });
 
-    it('startFreezeWatchers watches the configured inbox and stops cleanly', () => {
-      rf.startFreezeWatchers();
+    it('startFreezeWatchers watches the configured inbox and stops cleanly', async () => {
+      (await rf.startFreezeWatchers());
       rf.stopFreezeWatchers();
       reviewConfig.freeze_inbox = [path.join(tmp, 'missing')];
-      rf.startFreezeWatchers(); // missing dir: warns, no throw
+      (await rf.startFreezeWatchers()); // missing dir: warns, no throw
     });
   });
 });

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import { glob } from 'tinyglobby';
 import {
   type Result,
@@ -137,9 +137,8 @@ export async function addGitSource(opts: {
   }
 
   try {
-    execFileSync('git', ['clone', '--depth', '1', opts.url, cloneTarget], {
+    await execFileAsync('git', ['clone', '--depth', '1', opts.url, cloneTarget], {
       timeout: 120_000,
-      stdio: 'pipe',
     });
   } catch (e) {
     return { ok: false, error: `git clone failed: ${(e as Error).message}` };
@@ -247,10 +246,9 @@ export async function syncSource(sourceId: string): Promise<Result<{ indexed: nu
     const root = getConfig().paths.guides_root;
     const sourceDir = path.join(root, source.path);
     try {
-      execFileSync('git', ['pull', '--ff-only'], {
+      await execFileAsync('git', ['pull', '--ff-only'], {
         cwd: sourceDir,
         timeout: 60_000,
-        stdio: 'pipe',
       });
     } catch (e) {
       return { ok: false, error: `git pull failed: ${(e as Error).message}` };

@@ -13,7 +13,7 @@
  * Agent workspaces get `.wavecode/room` → the room folder.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from './config.js';
@@ -568,7 +568,7 @@ export function roomBriefing(room: Room, kind: TemplateKind, task: string, viewe
 }
 
 /** `<workspace>/.wavecode/room` → the room folder (replaced if it points elsewhere). */
-export function linkRoomIntoWorkspace(workspace: string | null | undefined, room: Room): boolean {
+export async function linkRoomIntoWorkspace(workspace: string | null | undefined, room: Room): Promise<boolean> {
   if (!workspace || !fs.existsSync(workspace)) return false;
   const dir = path.join(workspace, '.wavecode');
   const link = path.join(dir, 'room');
@@ -583,7 +583,7 @@ export function linkRoomIntoWorkspace(workspace: string | null | undefined, room
       // no link yet
     }
     fs.symlinkSync(room.root, link, 'dir');
-    excludeFromGit(workspace, '.wavecode/');
+    await excludeFromGit(workspace, '.wavecode/');
     return true;
   } catch (e) {
     logger.warn({ workspace, error: (e as Error).message }, 'Room link failed');
@@ -596,10 +596,10 @@ export function linkRoomIntoWorkspace(workspace: string | null | undefined, room
  * also works in worktrees (where `.git` is a file and info/exclude lives in
  * the common dir). Not a repo / no git → nothing to do.
  */
-export function excludeFromGit(workspace: string, pattern: string): boolean {
+export async function excludeFromGit(workspace: string, pattern: string): Promise<boolean> {
   let exclude: string;
   try {
-    const out = execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const out = (await execFileAsync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], { timeout: 5000 })).trim();
     exclude = path.resolve(workspace, out);
   } catch {
     return false;

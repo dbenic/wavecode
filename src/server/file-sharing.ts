@@ -47,7 +47,7 @@ export function ensureFileSharingTable(): void {
 
 // --- Get agent working directory ---
 
-function getAgentDir(agentId: string): string | null {
+async function getAgentDir(agentId: string): Promise<string | null> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return null;
   return tmux.getPaneDir(agentResult.data.tmux_session);
@@ -127,13 +127,13 @@ function updateManifest(projectDir: string, agentId: string): void {
 
 // --- Share a file between agents ---
 
-export function shareFile(opts: {
+export async function shareFile(opts: {
   fromAgentId: string;
   toAgentId: string;
   filePath: string;        // relative or absolute path to the file
   category: 'spec' | 'review' | 'context' | 'output';
   purpose: string;
-}): Result<SharedFile> {
+}): Promise<Result<SharedFile>> {
   const fromAgent = getAgent(opts.fromAgentId);
   if (!fromAgent.ok) return { ok: false, error: `Source agent: ${fromAgent.error}` };
 
@@ -143,7 +143,7 @@ export function shareFile(opts: {
   // Resolve source file path
   let sourcePath = opts.filePath;
   if (!sourcePath.startsWith('/')) {
-    const fromDir = getAgentDir(opts.fromAgentId);
+    const fromDir = await getAgentDir(opts.fromAgentId);
     if (fromDir) sourcePath = path.join(fromDir, sourcePath);
   }
   sourcePath = sourcePath.replace(/^~/, os.homedir());
@@ -153,7 +153,7 @@ export function shareFile(opts: {
   }
 
   // Get target agent's project directory
-  const toDir = getAgentDir(opts.toAgentId);
+  const toDir = await getAgentDir(opts.toAgentId);
   if (!toDir) return { ok: false, error: `Cannot determine ${toAgent.data.name}'s working directory` };
 
   // Ensure .wavecode directory

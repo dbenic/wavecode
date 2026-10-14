@@ -140,13 +140,13 @@ describe('hands-free lane pipeline', () => {
     return file;
   }
 
-  it('aborts a dirty merge and tells the author the conflicting files', () => {
+  it('aborts a dirty merge and tells the author the conflicting files', async () => {
     const sha = branch('wc-ales', 'a.txt', 'lane');
     const author = agent('ales', repo);
     moveMain('a.txt', 'main');
     git(repo, 'checkout', '-q', 'wc-ales');
     pipe.auto_freeze = true;
-    const result = onAuthorDone(author.id);
+    const result = (await onAuthorDone(author.id));
     expect(result.ok).toBe(false);
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(git(repo, 'status', '--porcelain')).toBe('');
@@ -157,17 +157,17 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('merges a clean main, pushes only the lane, and freezes the new SHA', () => {
+  it('merges a clean main, pushes only the lane, and freezes the new SHA', async () => {
     branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', repo);
     moveMain('main.txt', 'moved');
     git(repo, 'checkout', '-q', 'wc-ales');
     pipe.auto_freeze = true;
-    const result = onAuthorDone(author.id);
+    const result = (await onAuthorDone(author.id));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.sha).not.toBe('');
-    expect(commitsBehind('wave', result.data.sha)).toBe(0);
+    expect((await commitsBehind('wave', result.data.sha))).toBe(0);
     expect(getFreeze(result.data.sha)?.lane).toBe('wc-ales');
     const push = calls.find((argv) => argv[0] === 'push-lane');
     expect(push?.[1]).toBe('wc-ales');
@@ -176,19 +176,19 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('does not freeze when the quick check fails', () => {
+  it('does not freeze when the quick check fails', async () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', repo);
     pipe.auto_freeze = true;
     pipe.quick_check_command = ['quick-fail', '{sha}'];
-    const result = onAuthorDone(author.id);
+    const result = (await onAuthorDone(author.id));
     expect(result.ok).toBe(false);
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(messages(author.id).join('\n')).toMatch(/quick check failed/);
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('does not merge or push main, a non-lane branch, or an unsafe ref', () => {
+  it('does not merge or push main, a non-lane branch, or an unsafe ref', async () => {
     const localMain = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'checkout', '-q', '-B', 'side');
     fs.writeFileSync(path.join(repo, 'later.txt'), 'later');
@@ -199,11 +199,11 @@ describe('hands-free lane pipeline', () => {
     const maintainer = agent('maintainer', repo);
     pipe.auto_merge_main = true;
     pipe.auto_freeze = true;
-    onMainAdvanced('wave');
+    (await onMainAdvanced('wave'));
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(localMain);
     expect(git(repo, 'branch', '--show-current')).toBe('main');
     expect(calls.some((argv) => argv.join(' ').includes('main'))).toBe(false);
-    expect(onAuthorDone(maintainer.id).ok).toBe(false);
+    expect((await onAuthorDone(maintainer.id)).ok).toBe(false);
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(localMain);
 
     git(repo, 'checkout', '-q', '-B', 'topic');
@@ -212,8 +212,8 @@ describe('hands-free lane pipeline', () => {
     git(repo, 'commit', '-q', '-m', 'topic');
     const topic = git(repo, 'rev-parse', 'HEAD');
     const topicAuthor = agent('topic', repo);
-    expect(onAuthorDone(topicAuthor.id)).toMatchObject({ ok: false, error: 'refusing topic: not a developer lane' });
-    onMainAdvanced('wave');
+    expect((await onAuthorDone(topicAuthor.id))).toMatchObject({ ok: false, error: 'refusing topic: not a developer lane' });
+    (await onMainAdvanced('wave'));
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(topic);
 
     git(repo, 'checkout', '-q', '-B', 'wc-$(id)');
@@ -222,31 +222,31 @@ describe('hands-free lane pipeline', () => {
     git(repo, 'commit', '-q', '-m', 'unsafe');
     const unsafe = git(repo, 'rev-parse', 'HEAD');
     const unsafeAuthor = agent('unsafe', repo);
-    const refused = onAuthorDone(unsafeAuthor.id);
+    const refused = (await onAuthorDone(unsafeAuthor.id));
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.error).toMatch(/not a safe branch name/);
-    onMainAdvanced('wave');
+    (await onMainAdvanced('wave'));
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(unsafe);
     expect(calls.filter((argv) => argv[0] === 'push-lane')).toEqual([]);
   });
 
-  it('does nothing while auto-freeze is off', () => {
+  it('does nothing while auto-freeze is off', async () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', repo);
     moveMain('main.txt', 'moved');
     git(repo, 'checkout', '-q', 'wc-ales');
-    expect(onAuthorDone(author.id)).toMatchObject({ ok: false, error: 'auto-freeze off' });
+    expect((await onAuthorDone(author.id))).toMatchObject({ ok: false, error: 'auto-freeze off' });
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
   });
 
-  it('refuses the author and a denied reviewer, then uses the ladder', () => {
+  it('refuses the author and a denied reviewer, then uses the ladder', async () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', path.join(tmp, 'ales'));
     agent('codex1', path.join(tmp, 'codex1'));
     const reviewer = agent('codex3', path.join(tmp, 'codex3'));
     pipe.auto_review = true;
     pipe.review_routes = { ales: 'codex1' };
-    const ingested = ingestFreezeFile(passNote('ales', 'wc-ales', sha));
+    const ingested = (await ingestFreezeFile(passNote('ales', 'wc-ales', sha)));
     expect(ingested.ok).toBe(true);
     const sent = messages(reviewer.id).join('\n');
     expect(sent).toMatch(/Please review freeze/);
@@ -256,7 +256,7 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('does not assign a reviewer when the only candidate is the author', () => {
+  it('does not assign a reviewer when the only candidate is the author', async () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', path.join(tmp, 'ales'));
     const pick = review.auto_pick;
@@ -266,7 +266,7 @@ describe('hands-free lane pipeline', () => {
     pipe.review_routes = { ales: 'ales' };
     pipe.review_deny = [];
     try {
-      ingestFreezeFile(passNote('ales', 'wc-ales', sha));
+      (await ingestFreezeFile(passNote('ales', 'wc-ales', sha)));
       expect(messages(author.id).join('\n')).toMatch(/author or a denied name/);
       expect(messages(author.id).join('\n')).not.toMatch(/Please review/);
     } finally {
@@ -281,7 +281,7 @@ describe('hands-free lane pipeline', () => {
     agent('codex3', path.join(tmp, 'codex3'));
     moveMain('main.txt', 'later');
     git(repo, 'checkout', '-q', 'wc-ales');
-    ingestFreezeFile(passNote('ales', 'wc-ales', sha));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', sha)));
     pipe.auto_stage = true;
     await considerAutoStage(sha);
     expect(listReleases({ project: 'wave' })).toEqual([]);
@@ -294,7 +294,7 @@ describe('hands-free lane pipeline', () => {
     agent('ales', path.join(tmp, 'ales'));
     agent('codex3', path.join(tmp, 'codex3'));
     projects.wave.protected_paths = ['src/version.ts'];
-    ingestFreezeFile(passNote('ales', 'wc-ales', protectedSha));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', protectedSha)));
     pipe.auto_stage = true;
     await considerAutoStage(protectedSha);
     expect(listReleases({ sha: protectedSha })).toEqual([]);
@@ -311,7 +311,7 @@ describe('hands-free lane pipeline', () => {
       `INSERT INTO release_requests (id, project, sha, lane, target, status, origin, requested_by, verified_by, verified_at)
        VALUES ('rel-other', 'wave', ?, 'wc-other', 'staging', 'deployed', 'local', 'human', 'dev', datetime('now'))`,
     ).run(other);
-    ingestFreezeFile(passNote('ben', 'wc-ben', sha, '/reviews/ben.md'));
+    (await ingestFreezeFile(passNote('ben', 'wc-ben', sha, '/reviews/ben.md')));
     await considerAutoStage(sha);
     expect(listReleases({ sha })).toEqual([]);
     expect(latestPipelineNote('wave', 'wc-ben')).toMatch(/overlaps lane wc-other/);
@@ -323,7 +323,7 @@ describe('hands-free lane pipeline', () => {
     agent('ales', path.join(tmp, 'ales'));
     agent('codex3', path.join(tmp, 'codex3'));
     const file = passNote('ales', 'wc-ales', sha);
-    ingestFreezeFile(file);
+    (await ingestFreezeFile(file));
     expect(getFreeze(sha)?.gate).toBe('GREEN');
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('gate GREEN\n', ''));
     const event = (gate: string) => {
@@ -333,7 +333,7 @@ describe('hands-free lane pipeline', () => {
       expect(saved.ok).toBe(true);
     };
     event('QUEUED');
-    ingestFreezeFile(file);
+    (await ingestFreezeFile(file));
     expect(getFreeze(sha)?.gate).toBe('QUEUED');
     pipe.auto_stage = true;
     await considerAutoStage(sha);
@@ -341,13 +341,13 @@ describe('hands-free lane pipeline', () => {
     expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/waiting for GREEN/);
 
     event('RED');
-    ingestFreezeFile(file);
+    (await ingestFreezeFile(file));
     expect(getFreeze(sha)?.gate).toBe('RED');
     await considerAutoStage(sha);
     expect(listReleases({ sha })).toEqual([]);
 
     event('GREEN');
-    ingestFreezeFile(file);
+    (await ingestFreezeFile(file));
     expect(getFreeze(sha)?.gate).toBe('GREEN');
     await considerAutoStage(sha);
     expect(listReleases({ project: 'wave', target: 'staging' })).toHaveLength(1);
@@ -359,7 +359,7 @@ describe('hands-free lane pipeline', () => {
     agent('ales', path.join(tmp, 'ales'));
     agent('codex3', path.join(tmp, 'codex3'));
     projects.wave.migrations_dir = 'db/migrations';
-    ingestFreezeFile(passNote('ales', 'wc-ales', sha));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', sha)));
     pipe.auto_stage = true;
     await considerAutoStage(sha);
     const rows = listReleases({ project: 'wave', target: 'staging' });
@@ -378,15 +378,15 @@ describe('hands-free lane pipeline', () => {
     agent('ales', path.join(tmp, 'ales'));
     agent('ben', path.join(tmp, 'ben'));
     agent('codex3', path.join(tmp, 'codex3'));
-    ingestFreezeFile(passNote('ales', 'wc-ales', first));
-    ingestFreezeFile(passNote('ben', 'wc-ben', second, '/reviews/ben.md'));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', first)));
+    (await ingestFreezeFile(passNote('ben', 'wc-ben', second, '/reviews/ben.md')));
     pipe.auto_stage = true;
     await considerAutoStage(first);
     await considerAutoStage(second);
     expect(listReleases({ project: 'wave', target: 'staging' })).toHaveLength(1);
     const held = listReleases({ sha: first })[0];
     expect(held.requested_by).toBe('auto');
-    reportRelease(held.id, { status: 'deployed', version: '1.4.0', sha: first, note: 'up' });
+    (await reportRelease(held.id, { status: 'deployed', version: '1.4.0', sha: first, note: 'up' }));
     db.getDb().prepare(`UPDATE release_requests SET pin_until = '2099-01-01T00:00:00Z', staging_url = 'https://staging.example/app' WHERE id = ?`).run(held.id);
     await drainStagingQueue('wave');
     expect(listReleases({ project: 'wave', target: 'staging' })).toHaveLength(1);
@@ -407,14 +407,14 @@ describe('hands-free lane pipeline', () => {
     agent('ales', path.join(tmp, 'ales'));
     agent('ben', path.join(tmp, 'ben'));
     agent('codex3', path.join(tmp, 'codex3'));
-    ingestFreezeFile(passNote('ales', 'wc-ales', first));
-    ingestFreezeFile(passNote('ben', 'wc-ben', second, '/reviews/ben.md'));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', first)));
+    (await ingestFreezeFile(passNote('ben', 'wc-ben', second, '/reviews/ben.md')));
     pipe.auto_stage = true;
     await considerAutoStage(first);
     await considerAutoStage(second);
     const held = listReleases({ sha: first })[0];
     db.getDb().prepare(`UPDATE release_requests SET staging_url = 'https://staging.example/app', pin_until = '2099-01-01T00:00:00Z' WHERE id = ?`).run(held.id);
-    reportRelease(held.id, { status: 'deployed', version: '1.4.0', sha: first, note: 'up' });
+    (await reportRelease(held.id, { status: 'deployed', version: '1.4.0', sha: first, note: 'up' }));
     expect(listReleases({ project: 'wave', target: 'staging' })).toHaveLength(1);
     const verified = verifyStaging(held.id, { name: 'ales' }, 'looks good');
     expect(verified.ok).toBe(true);
@@ -424,19 +424,19 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('merges main into an open lane and asks for a delta review', () => {
+  it('merges main into an open lane and asks for a delta review', async () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', repo);
     const reviewer = agent('codex3', path.join(tmp, 'codex3'));
-    ingestFreezeFile(passNote('ales', 'wc-ales', sha, '/reviews/prev.md'));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', sha, '/reviews/prev.md')));
     moveMain('main.txt', 'later');
     git(repo, 'checkout', '-q', 'wc-ales');
     pipe.auto_merge_main = true;
     pipe.auto_review = true;
-    onMainAdvanced('wave');
+    (await onMainAdvanced('wave'));
     const head = git(repo, 'rev-parse', 'HEAD');
     expect(head).not.toBe(sha);
-    expect(commitsBehind('wave', head)).toBe(0);
+    expect((await commitsBehind('wave', head))).toBe(0);
     const text = messages(reviewer.id).join('\n');
     expect(text).toMatch(/delta review: merge only/);
     expect(text).toContain('/reviews/prev.md');
@@ -445,7 +445,7 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('does not auto-merge or ping a review_deny agent', () => {
+  it('does not auto-merge or ping a review_deny agent', async () => {
     const sha = branch('wc-codex1', 'codex.txt', 'lane');
     const seat = agent('chatgpt-countix', repo);
     db.updateAgentIdentity(seat.id, { alias: 'codex1' });
@@ -453,11 +453,11 @@ describe('hands-free lane pipeline', () => {
     git(repo, 'checkout', '-q', 'wc-codex1');
     pipe.auto_merge_main = true;
     pipe.auto_freeze = true;
-    onMainAdvanced('wave');
+    (await onMainAdvanced('wave'));
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(git(repo, 'status', '--porcelain')).toBe('');
     expect(fs.existsSync(path.join(repo, '.git', 'MERGE_HEAD'))).toBe(false);
-    expect(mergeMainClean(repo, 'origin/main')).toMatchObject({ ok: false, skipped: true });
+    expect((await mergeMainClean(repo, 'origin/main'))).toMatchObject({ ok: false, skipped: true });
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(messages(seat.id).join('\n')).not.toMatch(/behind main|Merged latest main/);
     expect(latestPipelineNote('wave', 'wc-codex1')).toBeNull();
@@ -467,16 +467,16 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('sends a main-move conflict back to the author seat', () => {
+  it('sends a main-move conflict back to the author seat', async () => {
     branch('wc-ales', 'a.txt', 'lane');
     const author = agent('ales', repo);
     agent('codex3', path.join(tmp, 'codex3'));
     const sha = git(repo, 'rev-parse', 'HEAD');
-    ingestFreezeFile(passNote('ales', 'wc-ales', sha));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', sha)));
     moveMain('a.txt', 'main');
     git(repo, 'checkout', '-q', 'wc-ales');
     pipe.auto_merge_main = true;
-    onMainAdvanced('wave');
+    (await onMainAdvanced('wave'));
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(messages(author.id).join('\n')).toMatch(/Your lane wc-ales is behind main\./);
     expect(listReleases({ target: 'production' })).toEqual([]);
@@ -496,20 +496,20 @@ describe('hands-free lane pipeline', () => {
     moveMain('main.txt', 'later');
     git(repo, 'checkout', '-q', 'wc-codex1');
     const mainSha = git(repo, 'rev-parse', 'origin/main');
-    onMainAdvanced('wave');
+    (await onMainAdvanced('wave'));
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
     expect(messages(author.id)).toEqual([]);
-    expect(pingLaneAboutMain({ lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved', authorName: 'codex1' })).toBe(false);
-    expect(alertBehind({ lane: 'wc-codex1', project: 'wave', authorName: 'codex1' })).toBe(false);
-    expect(alertMerged({ lane: 'wc-codex1', project: 'wave', mainSha, authorName: 'codex1' })).toBe(false);
+    expect((await pingLaneAboutMain({ lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved', authorName: 'codex1' }))).toBe(false);
+    expect((await alertBehind({ lane: 'wc-codex1', project: 'wave', authorName: 'codex1' }))).toBe(false);
+    expect((await alertMerged({ lane: 'wc-codex1', project: 'wave', mainSha, authorName: 'codex1' }))).toBe(false);
     expect(messages(author.id)).toEqual([]);
 
-    const frozen = onAuthorDone(author.id);
+    const frozen = (await onAuthorDone(author.id));
     expect(frozen.ok).toBe(false);
     if (!frozen.ok) expect(frozen.error).toMatch(/denied/);
     const written = fs.existsSync(freezeDir) ? fs.readdirSync(freezeDir).filter((name) => name.includes('auto-freeze')) : [];
     expect(written).toEqual([]);
-    const ingested = ingestFreezeFile(passNote('codex1', 'wc-codex1', sha));
+    const ingested = (await ingestFreezeFile(passNote('codex1', 'wc-codex1', sha)));
     expect(ingested.ok).toBe(false);
     expect(getFreeze(sha)).toBeNull();
     expect(listPendingReviews()).toEqual([]);
@@ -521,12 +521,12 @@ describe('hands-free lane pipeline', () => {
     ).run(sha);
     expect(listReviewFreezes().some((row) => row.lane === 'wc-codex1')).toBe(false);
     projects.wave.lane_glob = 'wc-ales';
-    alertLanesPastStaging('wave', mainSha);
+    (await alertLanesPastStaging('wave', mainSha));
     expect(messages(author.id)).toEqual([]);
 
     const other = branch('wc-ales', 'ales.txt', 'ales');
     const ales = agent('ales', path.join(tmp, 'ales'));
-    const allowed = ingestFreezeFile(passNote('ales', 'wc-ales', other));
+    const allowed = (await ingestFreezeFile(passNote('ales', 'wc-ales', other)));
     expect(allowed.ok).toBe(true);
     expect(listPendingReviews().some((item) => item.freeze?.lane === 'wc-ales')).toBe(true);
     expect(listPendingReviews().some((item) => item.freeze?.lane === 'wc-codex1')).toBe(false);
@@ -546,7 +546,7 @@ describe('hands-free lane pipeline', () => {
     setFetchDisabledForTest(false);
   });
 
-  it('queues one full gate for a new freeze SHA', () => {
+  it('queues one full gate for a new freeze SHA', async () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     agent('ales', path.join(tmp, 'ales'));
     pipe.auto_gate = true;
@@ -560,8 +560,8 @@ describe('hands-free lane pipeline', () => {
       `- Freeze SHA: \`${sha}\``,
       '',
     ].join('\n'));
-    ingestFreezeFile(file);
-    ingestFreezeFile(file);
+    (await ingestFreezeFile(file));
+    (await ingestFreezeFile(file));
     const gates = calls.filter((argv) => argv[0] === 'gate-run');
     expect(gates).toHaveLength(1);
     expect(gates[0]).toContain(sha);
@@ -584,7 +584,7 @@ describe('hands-free lane pipeline', () => {
     return file;
   }
 
-  it('assigns the least-loaded preferred reviewer and reassigns a busy seat', () => {
+  it('assigns the least-loaded preferred reviewer and reassigns a busy seat', async () => {
     const sha = branch('wc-claude1', 'lane.txt', 'lane');
     const author = agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
     const codex1 = agent('codex1', path.join(tmp, 'codex1'));
@@ -595,7 +595,7 @@ describe('hands-free lane pipeline', () => {
     db.updateAgentStatus(codex2.id, 'working');
     pipe.auto_review = true;
     pipe.reviewer_prefer = { claude: ['codex2', 'codex3', 'codex1', 'claude1-codex'] };
-    const ingested = ingestFreezeFile(openNote('claude1', 'wc-claude1', sha));
+    const ingested = (await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha)));
     expect(ingested.ok).toBe(true);
     expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
     expect(getFreeze(sha)?.verdict).toBeNull();
@@ -628,7 +628,7 @@ describe('hands-free lane pipeline', () => {
     expect(messages(codex1.id).join('\n')).not.toMatch(/Please review/);
   });
 
-  it('does not reassign when review_reassign_minutes is 0', () => {
+  it('does not reassign when review_reassign_minutes is 0', async () => {
     const sha = branch('wc-claude1', 'lane.txt', 'lane');
     agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
     const codex2 = agent('codex2', path.join(tmp, 'codex2'));
@@ -637,7 +637,7 @@ describe('hands-free lane pipeline', () => {
     pipe.auto_review = true;
     pipe.review_reassign_minutes = 0;
     pipe.reviewer_prefer = { claude: ['codex2', 'codex3'] };
-    ingestFreezeFile(openNote('claude1', 'wc-claude1', sha));
+    (await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha)));
     expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
     db.updateAgentStatus(codex3.id, 'working');
     db.updateAgentStatus(codex2.id, 'idle');

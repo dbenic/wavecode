@@ -11,7 +11,7 @@ const projects: Record<string, { repo?: string; workspace_match?: string; lane_g
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, reconcileBehindFreezes, setLaneAlertNowForTest, withRefMemo } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, reconcileBehindFreezes, setLaneAlertNowForTest, withRefMemoAsync } from './lane-main.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -51,34 +51,34 @@ describe('lane main ancestry', () => {
     delete projects.wave;
   });
 
-  it('counts zero when the lane contains main, then the commits main gained', () => {
+  it('counts zero when the lane contains main, then the commits main gained', async () => {
     const lane = git(repo, 'rev-parse', 'wc-ales');
-    expect(commitsBehind('wave', lane)).toBe(0);
+    expect((await commitsBehind('wave', lane))).toBe(0);
     git(repo, 'checkout', '-q', 'main');
     fs.writeFileSync(path.join(repo, 'm.txt'), 'm');
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'main moved');
     const mainSha = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
-    expect(commitsBehind('wave', lane)).toBe(1);
+    expect((await commitsBehind('wave', lane))).toBe(1);
   });
 
-  it('inside one board pass the main tip is resolved once, so every card sees the same main; outside a pass a move is seen at once', () => {
+  it('inside one board pass the main tip is resolved once, so every card sees the same main; outside a pass a move is seen at once', async () => {
     const lane = git(repo, 'rev-parse', 'wc-ales');
-    const seen = withRefMemo(() => {
-      const before = commitsBehind('wave', lane);
+    const seen = await withRefMemoAsync(async () => {
+      const before = (await commitsBehind('wave', lane));
       git(repo, 'checkout', '-q', 'main');
       fs.writeFileSync(path.join(repo, 'm.txt'), 'm');
       git(repo, 'add', '.');
       git(repo, 'commit', '-q', '-m', 'main moved');
       git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
-      return { before, during: commitsBehind('wave', lane) };
+      return { before, during: (await commitsBehind('wave', lane)) };
     });
     expect(seen).toEqual({ before: 0, during: 0 });
-    expect(commitsBehind('wave', lane)).toBe(1);
+    expect((await commitsBehind('wave', lane))).toBe(1);
   });
 
-  it('pings an author once per main SHA', () => {
+  it('pings an author once per main SHA', async () => {
     const lane = git(repo, 'rev-parse', 'wc-ales');
     git(repo, 'checkout', '-q', 'main');
     fs.writeFileSync(path.join(repo, 'm.txt'), 'm1');
@@ -87,19 +87,19 @@ describe('lane main ancestry', () => {
     const first = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', first);
     db.getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?)').run('main_tip:wave', lane);
-    observeRepo(repo);
+    (await observeRepo(repo));
     const pings = () => db.getDb().prepare('SELECT entity_id, payload_json FROM events WHERE type = ?').all(MAIN_PING) as { entity_id: string; payload_json: string }[];
     expect(pings()).toHaveLength(1);
     expect(pings()[0].entity_id).toBe(`wc-ales:${first}`);
     expect(JSON.parse(pings()[0].payload_json).kind).toBe('moved');
     const messages = db.listAgentMessages({ limit: 10 });
     expect(messages.some((m) => m.message.includes('Your lane wc-ales is behind main.'))).toBe(true);
-    observeRepo(repo);
+    (await observeRepo(repo));
     expect(pings()).toHaveLength(1);
-    expect(pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: first, kind: 'freeze' })).toBe(false);
+    expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: first, kind: 'freeze' }))).toBe(false);
   });
 
-  it('treats a clean merge of main as a merge-only delta, and a further lane commit as not', () => {
+  it('treats a clean merge of main as a merge-only delta, and a further lane commit as not', async () => {
     const oldSha = git(repo, 'rev-parse', 'wc-ales');
     git(repo, 'checkout', '-q', 'main');
     fs.writeFileSync(path.join(repo, 'm.txt'), 'main-only');
@@ -110,14 +110,14 @@ describe('lane main ancestry', () => {
     git(repo, 'checkout', '-q', 'wc-ales');
     git(repo, '-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', 'merge main', 'origin/main');
     const merged = git(repo, 'rev-parse', 'HEAD');
-    expect(isMergeOnlyDelta(repo, oldSha, merged, 'origin/main')).toBe(true);
+    expect((await isMergeOnlyDelta(repo, oldSha, merged, 'origin/main'))).toBe(true);
     fs.writeFileSync(path.join(repo, 'extra.txt'), 'more');
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'more lane work');
-    expect(isMergeOnlyDelta(repo, oldSha, git(repo, 'rev-parse', 'HEAD'), 'origin/main')).toBe(false);
+    expect((await isMergeOnlyDelta(repo, oldSha, git(repo, 'rev-parse', 'HEAD'), 'origin/main'))).toBe(false);
   });
 
-  it('repeats the behind alert after 30 minutes only while the lane is still behind and unreviewed', () => {
+  it('repeats the behind alert after 30 minutes only while the lane is still behind and unreviewed', async () => {
     let now = 1_700_000_000_000;
     setLaneAlertNowForTest(() => now);
     git(repo, 'checkout', '-q', 'main');
@@ -127,11 +127,11 @@ describe('lane main ancestry', () => {
     const mainSha = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
     const oldLane = git(repo, 'rev-parse', 'wc-ales');
-    const ping = () => pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' });
-    expect(ping()).toBe(true);
-    expect(ping()).toBe(false);
+    const ping = async () => (await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' }));
+    expect((await ping())).toBe(true);
+    expect((await ping())).toBe(false);
     now += 30 * 60 * 1000;
-    expect(ping()).toBe(true);
+    expect((await ping())).toBe(true);
     const rows = () => db.getDb().prepare('SELECT payload_json FROM events WHERE type = ?').all(MAIN_PING) as { payload_json: string }[];
     expect(rows()).toHaveLength(2);
     expect(rows().every((row) => JSON.parse(row.payload_json).kind === 'moved')).toBe(true);
@@ -143,17 +143,17 @@ describe('lane main ancestry', () => {
       `INSERT INTO release_freezes (sha, project, lane, verdict, status) VALUES (?, 'wave', 'wc-ales', 'pass', 'open')`,
     ).run(oldLane);
     now += 30 * 60 * 1000;
-    expect(ping()).toBe(true);
+    expect((await ping())).toBe(true);
 
     db.getDb().prepare('DELETE FROM release_freezes').run();
     db.getDb().prepare(
       `INSERT INTO release_freezes (sha, project, lane, verdict, status) VALUES (?, 'wave', 'wc-ales', 'pass', 'open')`,
     ).run(mainSha);
     now += 30 * 60 * 1000;
-    expect(ping()).toBe(false);
+    expect((await ping())).toBe(false);
   });
 
-  it('does not ping a denied lane or its agent', () => {
+  it('does not ping a denied lane or its agent', async () => {
     git(repo, 'checkout', '-q', 'main');
     git(repo, 'checkout', '-q', '-b', 'wc-codex1');
     fs.writeFileSync(path.join(repo, 'codex.txt'), 'codex');
@@ -171,14 +171,14 @@ describe('lane main ancestry', () => {
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
     projects.wave.pipeline = { lane_deny: ['wc-codex1'], agent_deny: ['codex1'] };
     projects.wave.lane_glob = 'wc-ales';
-    expect(pingLaneAboutMain({ lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved' })).toBe(false);
-    expect(alertBehind({ lane: 'wc-codex1', project: 'wave' })).toBe(false);
-    expect(alertMerged({ lane: 'wc-codex1', project: 'wave', mainSha })).toBe(false);
+    expect((await pingLaneAboutMain({ lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved' }))).toBe(false);
+    expect((await alertBehind({ lane: 'wc-codex1', project: 'wave' }))).toBe(false);
+    expect((await alertMerged({ lane: 'wc-codex1', project: 'wave', mainSha }))).toBe(false);
     ensureReleaseFreezeTable();
     db.getDb().prepare(
       `INSERT INTO release_freezes (sha, project, lane, author_name, status) VALUES (?, 'wave', 'wc-codex1', 'codex1', 'open')`,
     ).run(laneSha);
-    alertLanesPastStaging('wave', mainSha);
+    (await alertLanesPastStaging('wave', mainSha));
     const pings = db.getDb().prepare('SELECT entity_id FROM events WHERE type = ?').all(MAIN_PING) as { entity_id: string }[];
     expect(pings.some((row) => row.entity_id.startsWith('wc-codex1:'))).toBe(false);
     expect(pings.some((row) => row.entity_id.startsWith('wc-ales:'))).toBe(true);
@@ -186,16 +186,16 @@ describe('lane main ancestry', () => {
     expect(sent).toEqual([]);
   });
 
-  it('uses the auto-merge sentence and does not also send the behind alert', () => {
+  it('uses the auto-merge sentence and does not also send the behind alert', async () => {
     const mainSha = git(repo, 'rev-parse', 'origin/main');
-    expect(alertMerged({ lane: 'wc-ales', project: 'wave', mainSha })).toBe(true);
+    expect((await alertMerged({ lane: 'wc-ales', project: 'wave', mainSha }))).toBe(true);
     const messages = db.listAgentMessages({ limit: 5 }).map((m) => m.message);
     expect(messages).toContain(mergedMainAlert('wc-ales'));
     expect(messages.some((m) => m.includes('behind main'))).toBe(false);
-    expect(pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' })).toBe(false);
+    expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' }))).toBe(false);
   });
 
-  it('does not ping a review_deny agent by name or alias', () => {
+  it('does not ping a review_deny agent by name or alias', async () => {
     git(repo, 'checkout', '-q', 'main');
     git(repo, 'checkout', '-q', '-b', 'wc-codex1');
     fs.writeFileSync(path.join(repo, 'codex.txt'), 'lane');
@@ -216,27 +216,27 @@ describe('lane main ancestry', () => {
     const mainSha = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
     db.getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?)').run('main_tip:wave', git(repo, 'rev-parse', 'wc-ales'));
-    observeRepo(repo);
+    (await observeRepo(repo));
 
     const pings = db.getDb().prepare('SELECT entity_id FROM events WHERE type = ?').all(MAIN_PING) as { entity_id: string }[];
     expect(pings.map((row) => row.entity_id)).toEqual([`wc-ales:${mainSha}`]);
     const seatText = db.listAgentMessages({ to_agent_id: seat.data.id }).map((row) => row.message).join('\n');
     expect(seatText).not.toMatch(/behind main|Merged latest main/);
-    expect(pingLaneAboutMain({
+    expect((await pingLaneAboutMain({
       lane: 'wc-codex1', project: 'wave', mainSha, kind: 'moved', authorAgentId: seat.data.id, authorName: 'codex1',
-    })).toBe(false);
-    expect(pingLaneAboutMain({
+    }))).toBe(false);
+    expect((await pingLaneAboutMain({
       lane: 'wc-codex1', project: 'wave', mainSha, kind: 'merged', authorName: 'chatgpt-countix',
-    })).toBe(false);
+    }))).toBe(false);
 
     projects.wave.pipeline = { review_deny: ['chatgpt-countix'] };
-    expect(pingLaneAboutMain({
+    expect((await pingLaneAboutMain({
       lane: 'wc-codex1', project: 'wave', mainSha, kind: 'freeze', authorAgentId: seat.data.id,
-    })).toBe(false);
+    }))).toBe(false);
     expect(db.listAgentMessages({ to_agent_id: seat.data.id }).map((row) => row.message).join('\n')).not.toMatch(/behind main|Merged latest main/);
   });
 
-  it('a merge-only tip is not a nudge, and the same lane is not nudged twice inside 30 minutes', () => {
+  it('a merge-only tip is not a nudge, and the same lane is not nudged twice inside 30 minutes', async () => {
     ensureReleaseFreezeTable();
     const ales = db.listAgents().find((a) => a.name === 'ales')!;
     const oldSha = git(repo, 'rev-parse', 'wc-ales');
@@ -255,14 +255,14 @@ describe('lane main ancestry', () => {
 
     const pings = () => db.getDb().prepare('SELECT entity_id FROM events WHERE type = ?').all(MAIN_PING) as { entity_id: string }[];
     const status = () => (db.getDb().prepare('SELECT status FROM release_freezes WHERE sha = ?').get(oldSha) as { status: string }).status;
-    reconcileBehindFreezes();
+    (await reconcileBehindFreezes());
     expect(status()).toBe('open');
     expect(pings()).toEqual([]);
 
     git(repo, 'update-ref', 'refs/remotes/origin/wc-ales', oldSha);
     let now = 1_700_000_000_000;
     setLaneAlertNowForTest(() => now);
-    reconcileBehindFreezes();
+    (await reconcileBehindFreezes());
     expect(status()).toBe('behind-main');
     expect(pings()).toHaveLength(1);
 
@@ -271,11 +271,11 @@ describe('lane main ancestry', () => {
     git(repo, 'add', '.');
     git(repo, 'commit', '-q', '-m', 'main moved again');
     git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
-    reconcileBehindFreezes();
+    (await reconcileBehindFreezes());
     expect(pings()).toHaveLength(1);
 
     now += 30 * 60 * 1000;
-    reconcileBehindFreezes();
+    (await reconcileBehindFreezes());
     expect(pings()).toHaveLength(2);
   });
 });

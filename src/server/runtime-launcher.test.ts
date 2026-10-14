@@ -2,7 +2,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as child_process from 'node:child_process';
 
 vi.mock('node:child_process', () => ({
-  execFileSync: vi.fn(() => ''),
+  execFile: vi.fn((...args: unknown[]) => {
+    const cb = args[args.length - 1];
+    if (typeof cb === 'function') (cb as (err: null, stdout: string, stderr: string) => void)(null, '', '');
+    return { stdin: { end: () => undefined } };
+  }),
 }));
 
 vi.mock('./config.js', () => ({
@@ -40,11 +44,22 @@ describe('runtime-launcher.ts', () => {
 
   /** git as the launcher sees it: no worktree registered, the branch does not exist. */
   function gitFresh(opts: { registered?: string; branchExists?: boolean } = {}) {
-    vi.mocked(child_process.execFileSync).mockImplementation(((cmd: string, args: string[]) => {
-      if (cmd !== 'git') return '';
-      if (args.includes('--porcelain')) return opts.registered ? `worktree ${opts.registered}\nHEAD abc\nbranch refs/heads/x\n` : '';
-      if (args.includes('rev-parse')) { if (opts.branchExists) return 'abc'; throw new Error('not a branch'); }
-      return '';
+    vi.mocked(child_process.execFile).mockImplementation(((cmd: string, args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+      const callback = typeof _opts === 'function' ? _opts as typeof cb : cb;
+      try {
+        let stdout = '';
+        if (cmd === 'git') {
+          if (args.includes('--porcelain')) stdout = opts.registered ? `worktree ${opts.registered}\nHEAD abc\nbranch refs/heads/x\n` : '';
+          else if (args.includes('rev-parse')) {
+            if (opts.branchExists) stdout = 'abc';
+            else throw new Error('not a branch');
+          }
+        }
+        callback(null, stdout, '');
+      } catch (err) {
+        callback(err as Error, '', '');
+      }
+      return { stdin: { end: () => undefined } };
     }) as never);
   }
 
@@ -52,34 +67,25 @@ describe('runtime-launcher.ts', () => {
     gitFresh();
     const { createWorktree } = await import('./runtime-launcher.js');
 
-    const result = createWorktree('agent-a', '/repo/project', 'wc-agent-a');
+    const result = await createWorktree('agent-a', '/repo/project', 'wc-agent-a');
 
     expect(result.ok).toBe(true);
-    expect(vi.mocked(child_process.execFileSync)).toHaveBeenCalledWith(
-      'mkdir',
-      ['-p', '/tmp/wavecode/worktrees'],
-      { timeout: 5000 },
-    );
-    expect(vi.mocked(child_process.execFileSync)).toHaveBeenCalledWith(
-      'git',
-      ['-C', '/repo/project', 'worktree', 'add', '/tmp/wavecode/worktrees/agent-a', '-b', 'wc-agent-a'],
-      expect.objectContaining({ timeout: 15000 }),
-    );
+    const calls = vi.mocked(child_process.execFile).mock.calls;
+    expect(calls.some((c) => c[0] === 'mkdir' && JSON.stringify(c[1]) === JSON.stringify(['-p', '/tmp/wavecode/worktrees']) && (c[2] as { timeout?: number }).timeout === 5000)).toBe(true);
+    expect(calls.some((c) => c[0] === 'git' && JSON.stringify(c[1]) === JSON.stringify(['-C', '/repo/project', 'worktree', 'add', '/tmp/wavecode/worktrees/agent-a', '-b', 'wc-agent-a']) && (c[2] as { timeout?: number }).timeout === 15000)).toBe(true);
   });
 
   it('spawning a name again reuses the branch a killed agent left behind, and the worktree when it still exists', async () => {
     const fs = await import('node:fs');
     gitFresh({ branchExists: true });
     const { createWorktree } = await import('./runtime-launcher.js');
-    expect(createWorktree('agent-a', '/repo/project', 'wc-agent-a')).toEqual({ ok: true, data: '/tmp/wavecode/worktrees/agent-a' });
-    expect(vi.mocked(child_process.execFileSync)).toHaveBeenCalledWith(
-      'git', ['-C', '/repo/project', 'worktree', 'add', '/tmp/wavecode/worktrees/agent-a', 'wc-agent-a'], expect.anything(),
-    );
-    vi.mocked(child_process.execFileSync).mockClear();
+    expect(await createWorktree('agent-a', '/repo/project', 'wc-agent-a')).toEqual({ ok: true, data: '/tmp/wavecode/worktrees/agent-a' });
+    expect(vi.mocked(child_process.execFile).mock.calls.some((c) => c[0] === 'git' && JSON.stringify(c[1]) === JSON.stringify(['-C', '/repo/project', 'worktree', 'add', '/tmp/wavecode/worktrees/agent-a', 'wc-agent-a']))).toBe(true);
+    vi.mocked(child_process.execFile).mockClear();
     gitFresh({ registered: '/tmp/wavecode/worktrees/agent-a', branchExists: true });
     const exists = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
-    expect(createWorktree('agent-a', '/repo/project', 'wc-agent-a')).toEqual({ ok: true, data: '/tmp/wavecode/worktrees/agent-a' });
-    expect(vi.mocked(child_process.execFileSync).mock.calls.some((c) => c[0] === 'git' && (c[1] as string[]).includes('add'))).toBe(false);
+    expect(await createWorktree('agent-a', '/repo/project', 'wc-agent-a')).toEqual({ ok: true, data: '/tmp/wavecode/worktrees/agent-a' });
+    expect(vi.mocked(child_process.execFile).mock.calls.some((c) => c[0] === 'git' && (c[1] as string[]).includes('add'))).toBe(false);
     exists.mockRestore();
   });
 
@@ -87,7 +93,7 @@ describe('runtime-launcher.ts', () => {
     const tmux = await import('./tmux.js');
     const { launchRuntimeInNewSession } = await import('./runtime-launcher.js');
 
-    const result = launchRuntimeInNewSession({
+    const result = await launchRuntimeInNewSession({
       sessionName: 'wc-codex',
       workDir: '/repo/project',
       runtime: 'codex',
@@ -105,7 +111,7 @@ describe('runtime-launcher.ts', () => {
     const tmux = await import('./tmux.js');
     const { launchRuntimeInNewSession } = await import('./runtime-launcher.js');
 
-    const result = launchRuntimeInNewSession({
+    const result = await launchRuntimeInNewSession({
       sessionName: 'wc-claude',
       workDir: '/repo/project',
       runtime: 'claude-code',
@@ -122,7 +128,7 @@ describe('runtime-launcher.ts', () => {
   it('returns error for unknown runtime', async () => {
     const { launchRuntimeInNewSession } = await import('./runtime-launcher.js');
 
-    const result = launchRuntimeInNewSession({
+    const result = await launchRuntimeInNewSession({
       sessionName: 'wc-unknown',
       workDir: '/repo/project',
       runtime: 'nonexistent',
@@ -135,7 +141,7 @@ describe('runtime-launcher.ts', () => {
     const tmux = await import('./tmux.js');
     const { launchRuntimeInNewSession } = await import('./runtime-launcher.js');
 
-    const result = launchRuntimeInNewSession({
+    const result = await launchRuntimeInNewSession({
       sessionName: 'wc-claude',
       workDir: '/repo/project',
       runtime: 'claude-code',

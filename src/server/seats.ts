@@ -115,7 +115,7 @@ export interface CreatedSeat {
  * register MCP in the seat's own config, spawn on the user's profile, take
  * the never-expiring seat lease, brief it (async, once the runtime is up).
  */
-export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: unknown } = {}): SeatResult<CreatedSeat> {
+export async function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: unknown } = {}): Promise<SeatResult<CreatedSeat>> {
   const guarded = guardUser(user);
   if (!guarded.ok) return guarded;
   const me = guarded.data;
@@ -153,7 +153,7 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
   const mcp = registerSeatMcp({ runtime, profile: profile.data, workspace, token, daemonUrl: daemonUrl() });
   if (!mcp.ok) logger.warn({ userId: me.id, runtime, error: mcp.error }, 'Seat MCP registration failed');
 
-  const spawned = sessionManager.spawnAgent({ name, runtime, workspace, profile: profile.data });
+  const spawned = await sessionManager.spawnAgent({ name, runtime, workspace, profile: profile.data });
   if (!spawned.ok) return { ok: false, code: 'failed', error: spawned.error };
 
   try {
@@ -162,7 +162,7 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
     updateUserSeat(me.id, { seat_agent_id: spawned.data.id, seat_token_hash: hashToken(token) });
   } catch (e) {
     // Never leave a half-made seat behind: it would block the retry
-    sessionManager.kill(spawned.data.id);
+    await sessionManager.kill(spawned.data.id);
     return { ok: false, code: 'failed', error: `Seat setup failed: ${(e as Error).message}` };
   }
   const agent = getAgent(spawned.data.id);
@@ -180,14 +180,14 @@ export function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: un
  * Kill and remove a user's seat (spec §5d) — on user revoke. Returns the
  * removed agent id, or null when there was none.
  */
-export function removeSeatOf(userId: string): string | null {
+export async function removeSeatOf(userId: string): Promise<string | null> {
   const user = freshUser(userId);
   if (!user?.seat_agent_id) return null;
   const agent = getAgent(user.seat_agent_id);
   updateUserSeat(userId, { seat_agent_id: null, seat_token_hash: null });
   if (!agent.ok) return null;
   void import('./output-watcher.js').then((ow) => ow.stopWatching(agent.data.id)).catch(() => undefined);
-  const killed = agent.data.mode === 'adopted' ? sessionManager.detach(agent.data.id) : sessionManager.kill(agent.data.id);
+  const killed = agent.data.mode === 'adopted' ? sessionManager.detach(agent.data.id) : await sessionManager.kill(agent.data.id);
   if (!killed.ok) {
     logger.warn({ agentId: agent.data.id, error: killed.error }, 'Seat removal failed — deleting the record');
     deleteAgent(agent.data.id);

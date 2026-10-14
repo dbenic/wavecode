@@ -10,7 +10,7 @@
  * file's own gate line.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import { getConfig, type ProjectConfig } from './config.js';
 import logger from './logger.js';
 
@@ -391,25 +391,25 @@ export function hasLogCommand(project: string | null): boolean {
   return !!projectTests(project)?.log_command?.length;
 }
 
-function runCommand(argv: string[]): string | null {
+async function runCommand(argv: string[]): Promise<string | null> {
   if (argv.length === 0) return null;
   try {
     if (testExec) return testExec(argv);
-    return execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 8000, maxBuffer: 2 * 1024 * 1024 });
+    return await execFileAsync(argv[0], argv.slice(1), { timeout: 8000, maxBuffer: 2 * 1024 * 1024 });
   } catch (e) {
     logger.debug({ argv: argv[0], error: (e as Error).message }, 'Test runner command failed');
     return null;
   }
 }
 
-function readCommand(project: string, which: 'status_command' | 'history_command', lane: string, sha: string): TestReport | null {
+async function readCommand(project: string, which: 'status_command' | 'history_command', lane: string, sha: string): Promise<TestReport | null> {
   const cmd = projectTests(project)?.[which];
   if (!cmd?.length) return null;
   const key = `${which}:${project}:${lane}:${sha}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < ttlMs) return hit.report;
   const argv = fillTestArgv(cmd, { lane, sha });
-  const text = runCommand(argv);
+  const text = await runCommand(argv);
   const report = text ? parseTestReport(text) : null;
   const stored = report ?? { generated_at: null, runs: [], errors: [] };
   cache.set(key, { at: Date.now(), report: stored });
@@ -422,9 +422,9 @@ export interface LaneTests {
 }
 
 /** Status and history merged by id. Status wins when both name the same run. Host errors are kept. */
-export function readLaneReport(project: string, lane: string, sha: string): LaneTests {
-  const status = readCommand(project, 'status_command', lane, sha);
-  const history = readCommand(project, 'history_command', lane, sha);
+export async function readLaneReport(project: string, lane: string, sha: string): Promise<LaneTests> {
+  const status = await readCommand(project, 'status_command', lane, sha);
+  const history = await readCommand(project, 'history_command', lane, sha);
   const byId = new Map<string, TestRun>();
   for (const run of history?.runs ?? []) byId.set(run.id, run);
   for (const run of status?.runs ?? []) byId.set(run.id, run);
@@ -432,17 +432,17 @@ export function readLaneReport(project: string, lane: string, sha: string): Lane
   return { runs: [...byId.values()], errors };
 }
 
-export function readLaneTests(project: string, lane: string, sha: string): TestRun[] {
-  return readLaneReport(project, lane, sha).runs;
+export async function readLaneTests(project: string, lane: string, sha: string): Promise<TestRun[]> {
+  return (await readLaneReport(project, lane, sha)).runs;
 }
 
-export function liveGateFor(project: string | null, sha: string, lane?: string | null): LiveGate | null {
+export async function liveGateFor(project: string | null, sha: string, lane?: string | null): Promise<LiveGate | null> {
   if (!project || !projectTests(project)?.status_command) return null;
-  const runs = readLaneTests(project, lane ?? '', sha);
+  const runs = await readLaneTests(project, lane ?? '', sha);
   return liveGateForRuns(runs, sha);
 }
 
-export function readTestLog(project: string, run: { id: string; lane?: string | null; sha?: string | null; log?: string | null }): string | null {
+export async function readTestLog(project: string, run: { id: string; lane?: string | null; sha?: string | null; log?: string | null }): Promise<string | null> {
   const cmd = projectTests(project)?.log_command;
   if (!cmd?.length) return null;
   const argv = fillTestArgv(cmd, { id: run.id, lane: run.lane, sha: run.sha, log: run.log });
@@ -451,11 +451,11 @@ export function readTestLog(project: string, run: { id: string; lane?: string | 
 
 const POLL_MS = 20_000;
 
-function pollOnce(): void {
+async function pollOnce(): Promise<void> {
   let hot = false;
   for (const t of pollTargets) {
     cache.delete(`status_command:${t.project}:${t.lane}:${t.sha}`);
-    const runs = readLaneTests(t.project, t.lane, t.sha);
+    const runs = await readLaneTests(t.project, t.lane, t.sha);
     if (runs.some((r) => r.state === 'queued' || r.state === 'running')) hot = true;
   }
   if (!hot) stopTestRunPoller();
@@ -470,7 +470,7 @@ export function watchTestRuns(targets: Array<{ project: string; lane: string; sh
     return;
   }
   if (timer) return;
-  timer = setInterval(pollOnce, POLL_MS);
+  timer = setInterval(() => { void pollOnce(); }, POLL_MS);
   timer.unref?.();
 }
 

@@ -132,17 +132,17 @@ export function pickProbeTargets(agents: Agent[], now = Date.now(), intervalMs =
 export async function probeAgent(agent: Agent): Promise<ProfileUsage | null> {
   const cmd = PROBE_COMMAND[agent.runtime];
   if (!cmd) return null;
-  if (getRuntimeState(agent) !== 'alive') return null;
+  if (await getRuntimeState(agent) !== 'alive') return null;
   const k = key(agent.runtime, agent.profile);
   lastProbe.set(k, Date.now());
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, cmd, { mode: 'type' });
+    await tmux.sendTextAndEnter(agent.tmux_session, cmd, { mode: 'type' });
     await sleep(SCREEN_WAIT_MS);
-    const pane = tmux.capturePane(agent.tmux_session, CAPTURE_LINES);
+    const pane = await tmux.capturePane(agent.tmux_session, CAPTURE_LINES);
     // close the overlay (Claude) / no-op at the prompt (Codex)
-    tmux.sendRawKey(agent.tmux_session, 'Escape');
+    await tmux.sendRawKey(agent.tmux_session, 'Escape');
     await sleep(400);
-    tmux.sendRawKey(agent.tmux_session, 'Escape');
+    await tmux.sendRawKey(agent.tmux_session, 'Escape');
     if (!pane.ok) return null;
     const metrics = agent.runtime === 'codex' ? parseCodexStatus(pane.data) : parseClaudeUsage(pane.data);
     if (metrics.length === 0) {
