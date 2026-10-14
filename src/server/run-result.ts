@@ -49,6 +49,53 @@ export interface PresentedRunResult {
 
 const EXACT_RESULT_LINE = /^RESULT: (PASS|FAIL)$/;
 
+/** Private parent created with mkdtemp when config does not name a data dir. */
+let fallbackRoot: string | null = null;
+let fallbackCleanupHooked = false;
+
+/**
+ * Optional parent for the no-config runs directory.
+ * Set WAVECODE_RUN_RESULTS_DIR to pin it; otherwise each process gets its own mkdtemp.
+ */
+function configuredFallbackParent(): string | null {
+  const fromEnv = process.env.WAVECODE_RUN_RESULTS_DIR?.trim();
+  return fromEnv ? path.resolve(fromEnv) : null;
+}
+
+function hookFallbackCleanup(): void {
+  if (fallbackCleanupHooked) return;
+  fallbackCleanupHooked = true;
+  process.once('exit', () => {
+    if (!fallbackRoot) return;
+    try {
+      fs.rmSync(fallbackRoot, { recursive: true, force: true });
+    } catch {
+      // Already removed.
+    }
+  });
+}
+
+/**
+ * Config-less runs root. A fixed /tmp/wavecode-run-results fails with EACCES
+ * when another user owns it, so this is a per-process directory under os.tmpdir().
+ */
+function fallbackRunsRoot(): string {
+  const configured = configuredFallbackParent();
+  if (configured) return path.join(configured, 'runs');
+  if (!fallbackRoot) {
+    fallbackRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-run-results-'));
+    hookFallbackCleanup();
+  }
+  return path.join(fallbackRoot, 'runs');
+}
+
+/** Drop the private directory. Does not remove WAVECODE_RUN_RESULTS_DIR. */
+export function removeFallbackRunsRootForTest(): void {
+  if (!fallbackRoot) return;
+  fs.rmSync(fallbackRoot, { recursive: true, force: true });
+  fallbackRoot = null;
+}
+
 export function getRunsRoot(): string {
   try {
     const transcripts = getConfig().paths.transcripts_root;
@@ -58,7 +105,7 @@ export function getRunsRoot(): string {
   } catch {
     // Config not loaded (unit tests) — keep leftovers out of the repo.
   }
-  return path.join(os.tmpdir(), 'wavecode-run-results', 'runs');
+  return fallbackRunsRoot();
 }
 
 export function runResultRelPath(runId: string): string {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +15,8 @@ import {
   presentRunResult,
   readParseablePass,
   readRunResult,
+  getRunsRoot,
+  removeFallbackRunsRootForTest,
   resolveRunResultPath,
   runResultRelPath,
   settleRunResultFile,
@@ -24,6 +26,10 @@ import {
 
 describe('run-result', () => {
   const tmpDirs: string[] = [];
+
+  afterAll(() => {
+    removeFallbackRunsRootForTest();
+  });
 
   afterEach(() => {
     for (const dir of tmpDirs) {
@@ -44,6 +50,50 @@ describe('run-result', () => {
     const resolved = resolveRunResultPath(runId, '/ws/agent');
     expect(resolved.endsWith(path.join('runs', runId, 'result.txt'))).toBe(true);
     expect(resolved).not.toContain(`${path.sep}.wavecode${path.sep}`);
+  });
+
+  it('uses a private temp directory instead of a shared /tmp/wavecode-run-results, and removes it', () => {
+    const previous = process.env.WAVECODE_RUN_RESULTS_DIR;
+    delete process.env.WAVECODE_RUN_RESULTS_DIR;
+    removeFallbackRunsRootForTest();
+    try {
+      const root = getRunsRoot();
+      const shared = path.join(os.tmpdir(), 'wavecode-run-results', 'runs');
+      expect(root).not.toBe(shared);
+      expect(root.startsWith(os.tmpdir())).toBe(true);
+      expect(path.basename(path.dirname(root))).toMatch(/^wavecode-run-results-/);
+      const filePath = path.join(root, 'run-private', 'result.txt');
+      writeRunResult(filePath, 'PASS', 'private dir');
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(getRunsRoot()).toBe(root);
+
+      const parent = path.dirname(root);
+      removeFallbackRunsRootForTest();
+      expect(fs.existsSync(parent)).toBe(false);
+      expect(fs.existsSync(filePath)).toBe(false);
+      const again = getRunsRoot();
+      expect(again).not.toBe(root);
+      expect(path.basename(path.dirname(again))).toMatch(/^wavecode-run-results-/);
+    } finally {
+      if (previous === undefined) delete process.env.WAVECODE_RUN_RESULTS_DIR;
+      else process.env.WAVECODE_RUN_RESULTS_DIR = previous;
+    }
+  });
+
+  it('honors WAVECODE_RUN_RESULTS_DIR when config is not loaded', () => {
+    const dir = tmpDir();
+    const previous = process.env.WAVECODE_RUN_RESULTS_DIR;
+    process.env.WAVECODE_RUN_RESULTS_DIR = dir;
+    try {
+      expect(getRunsRoot()).toBe(path.join(dir, 'runs'));
+      const filePath = resolveRunResultPath('run-configured');
+      writeRunResult(filePath, 'FAIL', 'configured dir');
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(filePath.startsWith(dir)).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.WAVECODE_RUN_RESULTS_DIR;
+      else process.env.WAVECODE_RUN_RESULTS_DIR = previous;
+    }
   });
 
   it('overwrites a small RESULT file once; last line is PASS or FAIL plus a reason', () => {
