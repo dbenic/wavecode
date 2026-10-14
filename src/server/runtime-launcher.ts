@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { workspaceMatches } from './project-gate.js';
@@ -6,6 +6,7 @@ import { emit } from './event-bus.js';
 import { getConfig, type RuntimeConfig } from './config.js';
 import { isEffortLevel, type Result } from './db.js';
 import * as tmux from './tmux.js';
+import { execFileAsync } from './proc.js';
 import { isSafeEnvKey, isSafeEnvValue } from './profile-validation.js';
 import { resolveProfileEnv } from './profiles.js';
 
@@ -118,34 +119,34 @@ export function runWorkspaceSetup(workspace: string, agentId: string): string | 
   }
 }
 
-export function createWorktree(agentName: string, repo: string, branch?: string): Result<string> {
+export async function createWorktree(agentName: string, repo: string, branch?: string): Promise<Result<string>> {
   const worktreeBase = getWorktreesRoot();
   const workspace = path.join(worktreeBase, agentName);
 
   try {
-    execFileSync('mkdir', ['-p', worktreeBase], { timeout: 5000 });
+    await execFileAsync('mkdir', ['-p', worktreeBase], { timeout: 5000 });
     // New lanes start from the CURRENT main, not from wherever the base clone was when it was cloned
     // (the base clone sat 403 commits behind for a day). Best effort: offline is not an error.
     try {
-      execFileSync('git', ['-C', repo, 'pull', '--ff-only', '--quiet'], { encoding: 'utf-8', timeout: 60000, stdio: ['ignore', 'ignore', 'ignore'] });
+      await execFileAsync('git', ['-C', repo, 'pull', '--ff-only', '--quiet'], { timeout: 60000 });
     } catch { /* no network or diverged main: the worktree still gets created from what is there */ }
     const branchName = branch ?? `wc-${agentName}`;
-    const git = (args: string[], timeout = 15000) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf-8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
+    const git = (args: string[], timeout = 15000) => execFileAsync('git', ['-C', repo, ...args], { timeout });
     // An agent killed earlier keeps its worktree and branch (its work is not thrown away);
     // spawning the same name again reuses them instead of failing on "branch already exists".
-    const registered = git(['worktree', 'list', '--porcelain']).split('\n').some((l) => l === `worktree ${workspace}`);
+    const registered = (await git(['worktree', 'list', '--porcelain'])).split('\n').some((l) => l === `worktree ${workspace}`);
     if (registered && fs.existsSync(workspace)) return { ok: true, data: workspace };
-    if (registered) git(['worktree', 'prune']);
-    const branchExists = (() => { try { git(['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`]); return true; } catch { return false; } })();
-    if (branchExists) git(['worktree', 'add', workspace, branchName]);
-    else git(['worktree', 'add', workspace, '-b', branchName]);
+    if (registered) await git(['worktree', 'prune']);
+    const branchExists = await git(['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`]).then(() => true).catch(() => false);
+    if (branchExists) await git(['worktree', 'add', workspace, branchName]);
+    else await git(['worktree', 'add', workspace, '-b', branchName]);
     return { ok: true, data: workspace };
   } catch (e) {
     return { ok: false, error: `Failed to create worktree: ${(e as Error).message}` };
   }
 }
 
-export function launchRuntimeInNewSession(opts: {
+export async function launchRuntimeInNewSession(opts: {
   sessionName: string;
   workDir: string;
   runtime: string;
@@ -154,14 +155,14 @@ export function launchRuntimeInNewSession(opts: {
   profile?: string | null;
   /** Session recreated for an agent that ran before: resume its conversation. */
   resume?: boolean;
-}): Result<void> {
+}): Promise<Result<void>> {
   const command = buildLaunchCommand(opts.runtime, opts);
   if (!command.ok) return command;
 
   try {
     // newSession creates a shell first, then sends the command as keystrokes
     // so the session survives even if the command fails
-    tmux.newSession(opts.sessionName, opts.workDir, command.data);
+    await tmux.newSession(opts.sessionName, opts.workDir, command.data);
 
     return { ok: true, data: undefined };
   } catch (e) {

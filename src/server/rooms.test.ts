@@ -146,12 +146,12 @@ describe('project rooms (spec §5e)', () => {
       git(repo, 'worktree', 'add', '-q', ws, '-b', 'wc-fe');
       expect(fs.statSync(path.join(ws, '.git')).isFile()).toBe(true); // a worktree: .git is a file
 
-      expect(rooms.linkRoomIntoWorkspace(ws, room.data)).toBe(true);
+      expect((await rooms.linkRoomIntoWorkspace(ws, room.data))).toBe(true);
       expect(fs.readlinkSync(path.join(ws, '.wavecode', 'room'))).toBe(room.data.root);
       expect(git(ws, 'status', '--porcelain')).toBe(''); // the link does not show up
-      expect(rooms.excludeFromGit('/not/a/repo', '.wavecode/')).toBe(false);
-      expect(rooms.linkRoomIntoWorkspace(ws, room.data)).toBe(true); // idempotent
-      expect(rooms.linkRoomIntoWorkspace('/does/not/exist', room.data)).toBe(false);
+      expect((await rooms.excludeFromGit('/not/a/repo', '.wavecode/'))).toBe(false);
+      expect((await rooms.linkRoomIntoWorkspace(ws, room.data))).toBe(true); // idempotent
+      expect((await rooms.linkRoomIntoWorkspace('/does/not/exist', room.data))).toBe(false);
     });
   });
 

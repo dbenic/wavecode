@@ -161,7 +161,7 @@ export async function runRetro(
     }
   }
 
-  if (getRuntimeState(seat) === 'dead') {
+  if (await getRuntimeState(seat) === 'dead') {
     return { ok: false, code: 'unavailable', error: `${seat.name}'s runtime is not running — relaunch it, then run the retro` };
   }
 
@@ -169,7 +169,7 @@ export async function runRetro(
   const evidence = buildRetroEvidence(room.data, now);
   const evidencePath = addReport(room.data, `${now.toISOString().slice(0, 10)}-retro-evidence`, evidence.markdown);
   const prompt = retroPrompt(room.data, evidencePath);
-  const sent = sessionManager.sendKeys(seat.id, prompt);
+  const sent = await sessionManager.sendKeys(seat.id, prompt);
   if (!sent.ok) return { ok: false, code: 'failed', error: sent.error };
 
   const ev = emit('agent.prompt_sent', 'agent', seat.id, { text: prompt.slice(0, 2000), via: 'retro' }, opts.actorId ?? null);

@@ -102,7 +102,7 @@ type ChildProcessModule = typeof import('node:child_process');
 
 /**
  * Wrap child_process so every fork is counted. CommonJS exports are patched
- * and the ESM facade re-synced, so `import { execFileSync }` sites see it too.
+ * and the ESM facade re-synced, so async child_process imports see the wrappers.
  */
 function patchChildProcess(): void {
   if (patched) return;
@@ -110,13 +110,6 @@ function patchChildProcess(): void {
   const require = createRequire(import.meta.url);
   const cp = require('node:child_process') as ChildProcessModule;
   type AnyFn = (...a: unknown[]) => unknown;
-  const wrapSync = <F>(fn: F, label: (args: unknown[]) => string): F => {
-    const inner = fn as unknown as AnyFn;
-    return (function (this: unknown, ...args: unknown[]) {
-      const t0 = Date.now();
-      try { return inner.apply(this, args); } finally { recordSpawn(label(args), { sync: true, ms: Date.now() - t0 }); }
-    }) as unknown as F;
-  };
   const wrapAsync = <F>(fn: F, label: (args: unknown[]) => string): F => {
     const inner = fn as unknown as AnyFn;
     return (function (this: unknown, ...args: unknown[]) {
@@ -126,9 +119,6 @@ function patchChildProcess(): void {
   };
   const fileArgs = (args: unknown[]) => commandLabel(String(args[0]), Array.isArray(args[1]) ? args[1] : []);
   const shellArgs = (args: unknown[]) => { const cmd = String(args[0]).trim().split(/\s+/); return commandLabel(cmd[0] ?? '', cmd.slice(1)); };
-  cp.execFileSync = wrapSync(cp.execFileSync, fileArgs);
-  cp.spawnSync = wrapSync(cp.spawnSync, fileArgs);
-  cp.execSync = wrapSync(cp.execSync, shellArgs);
   cp.execFile = wrapAsync(cp.execFile, fileArgs);
   cp.spawn = wrapAsync(cp.spawn, fileArgs);
   cp.exec = wrapAsync(cp.exec, shellArgs);

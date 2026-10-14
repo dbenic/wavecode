@@ -492,4 +492,33 @@ describe('command-chat.ts', () => {
     expect(body.model).toBe('gemma4');
     expect(body.tools.some((tool) => tool.function.name === 'list_agents')).toBe(true);
   });
+
+  it('shows a git error instead of a clean tree, and does not cache the failure', async () => {
+    const proc = await import('./proc.js');
+    const chat = await import('./command-chat.js');
+    const spy = vi.spyOn(proc, 'execFileAsync').mockRejectedValue(new Error('not a git repo'));
+    const dir = path.join(tmpDir, 'not-a-repo');
+    try {
+      chat.resetPaneGitCacheForTest();
+      const pending = chat.formatAgentFiles(dir);
+      expect(pending).toContain('(not loaded yet)');
+      expect(pending).not.toContain('(clean)');
+      await chat.refreshPaneGitForTest(dir);
+      expect(chat.paneGitCached(dir)).toBeNull();
+      const failed = chat.formatAgentFiles(dir);
+      expect(failed).toContain('git status failed: not a git repo');
+      expect(failed).not.toContain('(clean)');
+      await chat.refreshPaneGitForTest(dir);
+
+      spy.mockResolvedValue('');
+      chat.resetPaneGitCacheForTest();
+      await chat.refreshPaneGitForTest(dir);
+      const clean = chat.formatAgentFiles(dir);
+      expect(clean).toContain('(clean)');
+      expect(chat.paneGitCached(dir)?.status).toBe('');
+    } finally {
+      spy.mockRestore();
+      chat.resetPaneGitCacheForTest();
+    }
+  });
 });

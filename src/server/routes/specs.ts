@@ -66,7 +66,7 @@ export function registerSpecsRoutes(app: Hono<NodeAppEnv>): void {
     });
     if (!stored.ok) return c.json({ error: stored.error }, 500);
 
-    const shared = shareArtifact(stored.data.id, body.agent_id);
+    const shared = await shareArtifact(stored.data.id, body.agent_id);
     if (!shared.ok) return c.json({ error: shared.error }, 400);
 
     setResearchArtifact(id, stored.data.id, body.agent_id);

@@ -69,7 +69,7 @@ describe('prereqs', () => {
     ]);
   });
 
-  it('stops at the first failing check and reads an ndjson field', () => {
+  it('stops at the first failing check and reads an ndjson field', async () => {
     const sha = 'a'.repeat(40);
     const marker = path.join(tmp, 'later');
     projects.demo = {
@@ -83,29 +83,29 @@ describe('prereqs', () => {
         },
       },
     };
-    const stopped = runPrereqChecks('demo', sha, [
+    const stopped = (await runPrereqChecks('demo', sha, [
       { id: 'first', order: 1, kind: 'check' },
       { id: 'later', order: 2, kind: 'check' },
-    ]);
+    ]));
     expect(stopped.ok).toBe(false);
     if (!stopped.ok) expect(stopped.error).toMatch(/prereq first failed/);
     expect(fs.existsSync(marker)).toBe(false);
 
-    const low = runPrereqChecks('demo', sha, [{ id: 'prod_owner_count>=2', order: 1, kind: 'check' }]);
+    const low = (await runPrereqChecks('demo', sha, [{ id: 'prod_owner_count>=2', order: 1, kind: 'check' }]));
     expect(low.ok).toBe(false);
 
     (projects.demo.prereq_checks as { 'prod_owner_count>=2': { command: string[] } })['prod_owner_count>=2'].command = [
       'node', '-e', 'console.log(JSON.stringify({prod_owner_count:2}))',
     ];
-    expect(runPrereqChecks('demo', sha, [{ id: 'prod_owner_count>=2', order: 1, kind: 'check' }]).ok).toBe(true);
+    expect((await runPrereqChecks('demo', sha, [{ id: 'prod_owner_count>=2', order: 1, kind: 'check' }])).ok).toBe(true);
 
     (projects.demo.prereq_checks as { 'prod_owner_count>=2': { command: string[] } })['prod_owner_count>=2'].command = [
       'node', '-e', 'console.log(JSON.stringify({prod_owner_count:9})); process.exit(21)',
     ];
-    expect(runPrereqChecks('demo', sha, [{ id: 'prod_owner_count>=2', order: 1, kind: 'check' }]).ok).toBe(false);
+    expect((await runPrereqChecks('demo', sha, [{ id: 'prod_owner_count>=2', order: 1, kind: 'check' }])).ok).toBe(false);
   });
 
-  it('refuses Promote when a declared prereq has no check, and allows it when every check passes', () => {
+  it('refuses Promote when a declared prereq has no check, and allows it when every check passes', async () => {
     const sha = 'b'.repeat(40);
     const file = path.join(tmp, 'freeze.md');
     fs.writeFileSync(file, NOTE);
@@ -113,7 +113,7 @@ describe('prereqs', () => {
     db.getDb().prepare(
       `INSERT INTO release_freezes (sha, project, lane, freeze_path, status) VALUES (?, 'demo', 'wc-a', ?, 'open')`,
     ).run(sha, file);
-    const missing = productionPrereqGate('demo', sha, 'denis');
+    const missing = (await productionPrereqGate('demo', sha, 'denis'));
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.error).toBe('prereq prod_owner_count>=2 has no check');
 
@@ -121,14 +121,14 @@ describe('prereqs', () => {
       'prod_owner_count>=2': { command: ['node', '-e', 'process.exit(0)'] },
       db_roles_applied: { command: ['node', '-e', 'process.exit(0)'] },
     };
-    const passed = productionPrereqGate('demo', sha, 'denis');
+    const passed = (await productionPrereqGate('demo', sha, 'denis'));
     expect(passed.ok).toBe(true);
     if (passed.ok) expect(passed.steps?.map((s) => s.id)).toEqual(['prod_owner_count>=2', 'db_roles_applied', 'code_deploy']);
-    expect(productionPrereqGate('demo', 'c'.repeat(40), 'denis')).toEqual({ ok: true, steps: null });
+    expect((await productionPrereqGate('demo', 'c'.repeat(40), 'denis'))).toEqual({ ok: true, steps: null });
   });
 
-  it('gitAncestorSync answers a full-SHA pair from memory after the first call, and never caches a ref', async () => {
-    const { gitAncestorSync, resetGitMemoForTest } = await import('./git-memo.js');
+  it('gitAncestor answers a full-SHA pair from memory after the first call, and never caches a ref', async () => {
+    const { gitAncestor, resetGitMemoForTest } = await import('./git-memo.js');
     resetGitMemoForTest();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-memo-'));
     git(dir, 'init', '-q', '-b', 'main');
@@ -138,16 +138,16 @@ describe('prereqs', () => {
     fs.writeFileSync(path.join(dir, 'a'), '2');
     git(dir, 'commit', '-q', '-am', 'two');
     const second = git(dir, 'rev-parse', 'HEAD');
-    expect(gitAncestorSync(dir, first, second)).toBe(true);
-    expect(gitAncestorSync(dir, second, first)).toBe(false);
-    expect(gitAncestorSync(dir, first, 'main')).toBe(true);
+    expect((await gitAncestor(dir, first, second))).toBe(true);
+    expect((await gitAncestor(dir, second, first))).toBe(false);
+    expect((await gitAncestor(dir, first, 'main'))).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true }); // git can no longer answer anything here
-    expect(gitAncestorSync(dir, first, second)).toBe(true); // remembered
-    expect(gitAncestorSync(dir, second, first)).toBe(false); // remembered
-    expect(gitAncestorSync(dir, first, 'main')).toBeNull(); // a ref is asked again
+    expect((await gitAncestor(dir, first, second))).toBe(true); // remembered
+    expect((await gitAncestor(dir, second, first))).toBe(false); // remembered
+    expect((await gitAncestor(dir, first, 'main'))).toBeNull(); // a ref is asked again
   });
 
-  it('unions freeze notes whose SHAs are contained in a candidate', () => {
+  it('unions freeze notes whose SHAs are contained in a candidate', async () => {
     const repo = path.join(tmp, 'repo');
     fs.mkdirSync(repo);
     git(repo, 'init', '-q', '-b', 'main');
@@ -180,7 +180,7 @@ describe('prereqs', () => {
     insert.run(shaA, 'wc-a', fileA);
     insert.run(shaB, 'wc-b', fileB);
     projects.demo = { workspace_match: '**/*', repo };
-    expect(declaredPrereqs('demo', candidate).map((d) => `${d.id}@${d.order}`)).toEqual([
+    expect((await declaredPrereqs('demo', candidate)).map((d) => `${d.id}@${d.order}`)).toEqual([
       'prod_owner_count>=2@10',
       'db_roles_applied@20',
     ]);

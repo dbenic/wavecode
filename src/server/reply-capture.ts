@@ -70,7 +70,7 @@ function isLoginSeat(agent: Pick<Agent, 'tmux_session'>): boolean {
 }
 
 /** Record that `prompt` was just typed into `agent`. No-op for seats without a pane. */
-export function trackPrompt(opts: {
+export async function trackPrompt(opts: {
   agent: Agent;
   actorId: string | null;
   prompt: string;
@@ -84,7 +84,7 @@ export function trackPrompt(opts: {
    */
   quietIfSuperseded?: boolean;
   now?: number;
-}): void {
+}): Promise<void> {
   const { agent } = opts;
   if (isFileRunnerSeat(agent) || isLoginSeat(agent)) return;
 
@@ -92,7 +92,7 @@ export function trackPrompt(opts: {
   // whatever the agent had answered so far for the old prompt as truncated.
   const superseded = pending.get(agent.id);
   if (superseded) {
-    const pane = capture(agent);
+    const pane = await capture(agent);
     const sofar = pane ? extractReply(agent.runtime, pane, superseded.prompt) : { text: '', anchored: false };
     if (superseded.quietIfSuperseded && !(sofar.anchored && sofar.text)) {
       pending.delete(agent.id);
@@ -104,7 +104,7 @@ export function trackPrompt(opts: {
     );
   }
 
-  const paneNow = capture(agent);
+  const paneNow = await capture(agent);
   pending.set(agent.id, {
     agentId: agent.id,
     actorId: opts.actorId,
@@ -128,16 +128,16 @@ function isNewAnswer(p: PendingReply, reply: { text: string; anchored: boolean }
  * still pending can no longer be answered separately, so close it out as
  * truncated rather than let the task's output be attributed to it.
  */
-export function clearPendingForDispatch(agent: Agent): void {
+export async function clearPendingForDispatch(agent: Agent): Promise<void> {
   const p = pending.get(agent.id);
   if (!p) return;
-  const pane = capture(agent);
+  const pane = await capture(agent);
   const sofar = pane ? extractReply(agent.runtime, pane, p.prompt) : { text: '', anchored: false };
   persist(p, agent, (sofar.anchored && sofar.text) || '(a task was dispatched to the agent before it answered)', true);
 }
 
-function capture(agent: Agent): string | null {
-  const res = capturePane(agent.tmux_session, CAPTURE_LINES);
+async function capture(agent: Agent): Promise<string | null> {
+  const res = await capturePane(agent.tmux_session, CAPTURE_LINES);
   return res.ok ? res.data : null;
 }
 
@@ -176,10 +176,10 @@ function persist(p: PendingReply, agent: Agent, text: string, truncated: boolean
  * seconds after the send resolves too — but only when the prompt echo is
  * found and an answer follows it.
  */
-export function onAgentIdle(
+export async function onAgentIdle(
   agentId: string,
   opts: { transitioned: boolean; outputChanged: boolean; now?: number },
-): boolean {
+): Promise<boolean> {
   const p = pending.get(agentId);
   if (!p) return false;
   const now = opts.now ?? Date.now();
@@ -190,7 +190,7 @@ export function onAgentIdle(
     pending.delete(agentId);
     return false;
   }
-  const pane = capture(agentResult.data);
+  const pane = await capture(agentResult.data);
   if (pane === null) return false;
 
   const reply = extractReply(agentResult.data.runtime, pane, p.prompt);
@@ -210,7 +210,7 @@ export function onAgentIdle(
  * run after the reply) never produces an idle edge, so the anchored answer
  * is accepted once it has stopped changing for QUIET_RESOLVE_MS.
  */
-export function onAgentTick(agentId: string, opts: { now?: number } = {}): boolean {
+export async function onAgentTick(agentId: string, opts: { now?: number } = {}): Promise<boolean> {
   const p = pending.get(agentId);
   if (!p) return false;
   const now = opts.now ?? Date.now();
@@ -220,7 +220,7 @@ export function onAgentTick(agentId: string, opts: { now?: number } = {}): boole
     pending.delete(agentId);
     return false;
   }
-  const pane = capture(agentResult.data);
+  const pane = await capture(agentResult.data);
   if (pane === null) return false;
 
   const reply = extractReply(agentResult.data.runtime, pane, p.prompt);
@@ -244,7 +244,7 @@ export function onAgentTick(agentId: string, opts: { now?: number } = {}): boole
 }
 
 /** Health-monitor tick: post whatever was captured for replies older than 10 minutes. */
-export function sweepExpiredReplies(now = Date.now()): string[] {
+export async function sweepExpiredReplies(now = Date.now()): Promise<string[]> {
   const posted: string[] = [];
   for (const p of [...pending.values()]) {
     if (now - p.sentAt < REPLY_TIMEOUT_MS) continue;
@@ -253,7 +253,7 @@ export function sweepExpiredReplies(now = Date.now()): string[] {
       pending.delete(p.agentId);
       continue;
     }
-    const pane = capture(agentResult.data);
+    const pane = await capture(agentResult.data);
     const text = pane ? extractReply(agentResult.data.runtime, pane, p.prompt).text : '';
     persist(p, agentResult.data, text || '(no reply captured within 10 minutes — open the agent to see its pane)', true);
     posted.push(p.agentId);
@@ -266,13 +266,13 @@ export function sweepExpiredReplies(now = Date.now()): string[] {
  * run so its thread item can answer "what did it do" without the pane.
  * Anchored on the task prompt when its echo is visible.
  */
-export function captureRunSummary(runId: string, agentId: string): string | null {
+export async function captureRunSummary(runId: string, agentId: string): Promise<string | null> {
   try {
     const agentResult = getAgent(agentId);
     if (!agentResult.ok || isFileRunnerSeat(agentResult.data)) return null;
     const run = getRun(runId);
     if (!run.ok) return null;
-    const pane = capture(agentResult.data);
+    const pane = await capture(agentResult.data);
     if (!pane) return null;
     const task = getTask(run.data.task_id);
     const summary = extractReply(agentResult.data.runtime, pane, task.ok ? task.data.prompt : null).text;

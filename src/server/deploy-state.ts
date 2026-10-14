@@ -396,7 +396,7 @@ async function containedIn(repo: string | null, sha: string, tip: string | null)
 async function mergedToMain(project: string | null, sha: string): Promise<Tri> {
   const repo = projectRepo(project);
   if (!repo || !project) return null;
-  const ref = resolveMainRef(repo, project);
+  const ref = await resolveMainRef(repo, project);
   if (!ref) return null;
   const mainSha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
   if (!mainSha || !/^[0-9a-f]{40}$/i.test(mainSha)) return null;
@@ -467,7 +467,7 @@ async function tipsFor(project: string, freshTip = false): Promise<ProjectTips> 
     }
   } catch { /* unknown: do not fall back to a local staging row */ }
   try {
-    const health = readProdHealth(project);
+    const health = await readProdHealth(project);
     const row = listReleases({ project, target: 'production', status: 'deployed', limit: 1 })[0]
       ?? listReleases({ target: 'production', status: 'deployed', limit: 20 }).find((r) => r.project == null || r.project === project)
       ?? null;
@@ -518,7 +518,7 @@ async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<s
   ]);
   let behind: Tri = null;
   try {
-    const n = commitsBehind(project, freeze.sha);
+    const n = await commitsBehind(project, freeze.sha);
     behind = n == null ? null : n > 0;
   } catch { behind = null; }
   let ready: boolean | null = false;
@@ -526,8 +526,8 @@ async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<s
   let quick: TestWord = 'unknown';
   let full: TestWord = 'unknown';
   try {
-    const runs = project ? readLaneTests(project, freeze.lane ?? '', freeze.sha) : [];
-    const view = viewShaChecks({
+    const runs = project ? await readLaneTests(project, freeze.lane ?? '', freeze.sha) : [];
+    const view = await viewShaChecks({
       project, sha: freeze.sha, lane: freeze.lane, gate: freeze.gate, freeze_path: freeze.freeze_path,
     }, runs);
     quick = view.quick;
@@ -592,16 +592,16 @@ function backfillRunReviewStatus(freeze: ReleaseFreeze): void {
  * already in staging or prod) get the merge-and-refreeze checklist once per
  * lane and main SHA. Denied lanes and agents are skipped.
  */
-function pingBehindMain(freeze: ReleaseFreeze, facts: DeriveFacts): void {
+async function pingBehindMain(freeze: ReleaseFreeze, facts: DeriveFacts): Promise<void> {
   if (facts.behindMain !== true || facts.superseded) return;
   if (facts.containedInStaging === true || facts.containedInProd === true) return;
   if (!freeze.project || !freeze.lane) return;
   if (laneAutomationDenied(freeze.project, freeze.author_name ? { name: freeze.author_name } : null, freeze.lane)) return;
   const repo = projectRepo(freeze.project);
-  const tip = repo ? mainTip(repo, freeze.project) : null;
+  const tip = repo ? await mainTip(repo, freeze.project) : null;
   if (!tip) return;
   try {
-    pingLaneAboutMain({
+    await pingLaneAboutMain({
       lane: freeze.lane,
       project: freeze.project,
       mainSha: tip.sha,
@@ -631,15 +631,15 @@ async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean 
   ensureDeployStateTable();
   let freezes: ReleaseFreeze[] = [];
   try { freezes = listFreezes(); } catch { freezes = []; }
-  const labelsBySha = new Map<string, ReturnType<typeof applyNoteLabels>>();
+  const labelsBySha = new Map<string, Awaited<ReturnType<typeof applyNoteLabels>>>();
   for (const freeze of freezes) {
     const text = noteText(freeze);
     if (text && freeze.freeze_path) {
-      try { labelsBySha.set(freeze.sha, applyNoteLabels(freeze.sha, text, freeze.freeze_path)); } catch (e) {
+      try { labelsBySha.set(freeze.sha, await applyNoteLabels(freeze.sha, text, freeze.freeze_path)); } catch (e) {
         logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Freeze label revise skipped');
       }
     }
-    try { syncAttributedLane(getFreeze(freeze.sha) ?? freeze, text); } catch (e) {
+    try { await syncAttributedLane(getFreeze(freeze.sha) ?? freeze, text); } catch (e) {
       logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Lane attribution skipped');
     }
   }
@@ -655,7 +655,7 @@ async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean 
     const facts = await factsFor(freeze, freezes, tips, freshTip);
     const state = deriveDeployState(facts);
     backfillRunReviewStatus(freeze);
-    pingBehindMain(freeze, facts);
+    await pingBehindMain(freeze, facts);
     if (facts.superseded || facts.containedInStaging === true || facts.containedInProd === true) {
       try { clearSettledReleaseErrors(freeze.sha); } catch { /* release table missing */ }
     }
@@ -665,7 +665,7 @@ async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean 
     let fullRun: TestRun | null = null;
     try {
       if (project) {
-        const runs = readLaneTests(project, freeze.lane ?? '', freeze.sha);
+        const runs = await readLaneTests(project, freeze.lane ?? '', freeze.sha);
         const checks = shaChecks(runs, freeze.sha, suiteNames(project));
         quickRun = checks.quickRun;
         fullRun = checks.fullRun;
@@ -818,18 +818,21 @@ function attachHooks(): void {
   hooked = true;
   const prevMain = pipelineHooks.onMain;
   pipelineHooks.onMain = (project, sha) => {
-    prevMain?.(project, sha);
+    const pending = prevMain?.(project, sha);
     scheduleReconcile('merge');
+    return pending;
   };
   const prevDeployed = pipelineHooks.onDeployed;
   pipelineHooks.onDeployed = (id) => {
-    prevDeployed?.(id);
+    const pending = prevDeployed?.(id);
     scheduleReconcile('deploy');
+    return pending;
   };
   const prevVerified = pipelineHooks.onVerified;
   pipelineHooks.onVerified = (project) => {
-    prevVerified?.(project);
+    const pending = prevVerified?.(project);
     scheduleReconcile('deploy');
+    return pending;
   };
 }
 

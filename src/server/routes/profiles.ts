@@ -44,13 +44,13 @@ export function registerProfileRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   /** What the open login seat is showing: the sign-in link, the device code, whether it waits for a code. */
-  app.get('/api/profiles/:name/login/:runtime', (c) => {
+  app.get('/api/profiles/:name/login/:runtime', async (c) => {
     const user = getActingUser(c);
     const name = c.req.param('name');
     if (!canLoginProfile(user, name)) return c.json({ error: 'Forbidden' }, 403);
     const seat = getAgentByName(`login-${name}-${c.req.param('runtime')}`);
     if (!seat.ok) return c.json({ open: false });
-    const hint = loginHint(seat.data.id);
+    const hint = await loginHint(seat.data.id);
     return c.json({ open: !!hint, agent_id: seat.data.id, ...(hint ?? { url: null, code: null, awaiting_code: false, tail: [] }) });
   });
 
@@ -63,7 +63,7 @@ export function registerProfileRoutes(app: Hono<NodeAppEnv>): void {
     if (typeof body.code !== 'string') return c.json({ error: 'code is required' }, 400);
     const seat = getAgentByName(`login-${name}-${c.req.param('runtime')}`);
     if (!seat.ok) return c.json({ error: 'No open login for that profile and runtime' }, 404);
-    const r = submitLoginCode(seat.data.id, body.code);
+    const r = await submitLoginCode(seat.data.id, body.code);
     if (!r.ok) return c.json({ error: r.error }, loginSeatErrorStatus(r.code));
     return c.json({ ok: true });
   });
@@ -73,7 +73,7 @@ export function registerProfileRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{ runtime?: unknown }>().catch(() => ({} as { runtime?: unknown }));
     if (typeof body.runtime !== 'string' || !body.runtime) return c.json({ error: 'runtime is required' }, 400);
 
-    const result = openLoginSeat({ profile: c.req.param('name'), runtime: body.runtime, user: getActingUser(c) });
+    const result = await openLoginSeat({ profile: c.req.param('name'), runtime: body.runtime, user: getActingUser(c) });
     if (!result.ok) return c.json({ error: result.error }, loginSeatErrorStatus(result.code));
 
     // Watch it so AgentView shows the device-code URL live

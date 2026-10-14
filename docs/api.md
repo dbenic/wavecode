@@ -210,6 +210,14 @@ List persisted team messages.
 
 ## Tasks
 
+### `GET /api/health`
+Authenticated. Event-loop delay from `perf_hooks.monitorEventLoopDelay`, sampled every 5 s:
+
+- `event_loop.p99_ms`
+- `event_loop.max_ms`
+
+A sample whose max exceeds 200 ms logs `Event loop lag`. Settings → Health shows the same numbers. Static `/` and `index.html` do not wait on this.
+
 ### `GET /api/health/perf`
 Admin only. What the daemon spends its time on, for Settings → Health:
 

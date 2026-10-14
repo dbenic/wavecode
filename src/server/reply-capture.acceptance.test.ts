@@ -74,14 +74,23 @@ describe('reply capture acceptance (spec §5b)', () => {
     return { status: res.status, json: text ? JSON.parse(text) : null };
   }
 
+  /** Reply capture starts inside the tick and is not part of the tick's promise. */
+  async function drainWatcherHooks() {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
   /** Agent works (one tick), then the final pane appears and the watcher sees idle long enough to flip. */
-  function finishTurn(name: string, finalPane: string) {
+  async function finishTurn(name: string, finalPane: string) {
     const agent = agents[name];
     panes.bySession.set(agent.tmux_session, WORKING[agent.runtime]);
-    watcher.tickForTest(agent.id);
+    await watcher.tickForTest(agent.id);
+    await drainWatcherHooks();
     expect(db.getAgent(agent.id).ok && (db.getAgent(agent.id) as { data: { status: string } }).data.status).toBe('working');
     panes.bySession.set(agent.tmux_session, finalPane);
-    for (let i = 0; i < watcher.IDLE_OVERRIDE_THRESHOLD + 1; i++) watcher.tickForTest(agent.id);
+    for (let i = 0; i < watcher.IDLE_OVERRIDE_THRESHOLD + 1; i++) {
+      await watcher.tickForTest(agent.id);
+      await drainWatcherHooks();
+    }
   }
 
   async function thread() {
@@ -141,7 +150,7 @@ describe('reply capture acceptance (spec §5b)', () => {
   it('"what is chatgpt-countix doing?" to pm → a reply bubble from pm right under the prompt, without opening the pane', async () => {
     const sent = await call('POST', `/api/agents/${agents.pm.id}/send`, { text: 'what is chatgpt-countix doing?' });
     expect(sent.status).toBe(200);
-    finishTurn('pm', fixture('claude-pm-question.txt'));
+    (await finishTurn('pm', fixture('claude-pm-question.txt')));
 
     const items = await thread();
     const prompt = items.find((i) => i.kind === 'prompt')!;
@@ -157,7 +166,7 @@ describe('reply capture acceptance (spec §5b)', () => {
 
   it('a reply ending with a question and [ ] options has chips; tapping one sends it to the seat as the user\'s prompt', async () => {
     await call('POST', `/api/agents/${agents.pm.id}/send`, { text: 'what is chatgpt-countix doing?' });
-    finishTurn('pm', fixture('claude-pm-question.txt'));
+    (await finishTurn('pm', fixture('claude-pm-question.txt')));
 
     const reply = (await thread()).find((i) => i.kind === 'reply')!;
     expect(reply.needs_attention).toBe(true);
@@ -182,7 +191,7 @@ describe('reply capture acceptance (spec §5b)', () => {
     });
     const prompt = 'what changed in auth.ts? summarize it and run the auth tests please, then tell me if anything is red';
     await WAVECODE_TOOLS.find((t) => t.name === 'send_prompt')!.handler(client, { agent_id: 'builder', text: prompt });
-    finishTurn('builder', fixture('claude-tools.txt'));
+    (await finishTurn('builder', fixture('claude-tools.txt')));
 
     const reply = (await thread()).find((i) => i.kind === 'reply' && i.agent_id === agents.builder.id)!;
     expect(reply.body.startsWith('Two changes landed in auth.ts:')).toBe(true);
@@ -196,10 +205,10 @@ describe('reply capture acceptance (spec §5b)', () => {
     const msg = await call('POST', '/api/messages', { to: 'codex2', message: 'what is the status of the leases lane?' });
     expect(msg.json.injected).toBe(true);
     // Codex echoes the injected line `[from ana] …` in its composer history
-    finishTurn('codex2', fixture('codex.txt').replace('› what is the status', '› [from ana] what is the status'));
+    (await finishTurn('codex2', fixture('codex.txt').replace('› what is the status', '› [from ana] what is the status')));
 
     await call('POST', `/api/agents/${agents['grok-fe'].id}/send`, { text: 'how many agents are idle?' });
-    finishTurn('grok-fe', fixture('grok-blocks.txt'));
+    (await finishTurn('grok-fe', fixture('grok-blocks.txt')));
 
     const items = await thread();
     const codexReply = items.find((i) => i.kind === 'reply' && i.agent_id === agents.codex2.id)!;
@@ -215,7 +224,7 @@ describe('reply capture acceptance (spec §5b)', () => {
 
   it('raw keys are not prompts — nothing is tracked or captured', async () => {
     await call('POST', `/api/agents/${agents.pm.id}/send`, { text: 'C-c', raw: true });
-    finishTurn('pm', fixture('claude-pm-question.txt'));
+    (await finishTurn('pm', fixture('claude-pm-question.txt')));
     expect((await thread()).filter((i) => i.kind === 'reply')).toEqual([]);
   });
 

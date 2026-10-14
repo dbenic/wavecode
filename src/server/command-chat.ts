@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import { getConfig } from './config.js';
 import {
   getDb, generateId, listAgents, getAgent, listTasks, listRuns, insertTask,
@@ -14,6 +14,86 @@ import { getResolvedLlmConfig, isLlmConfigured, runToolConversation, type LlmToo
 import { startWatching } from './output-watcher.js';
 import { emit } from './event-bus.js';
 import { mirrorDecision } from './rooms.js';
+
+/** Git status for a pane directory. Filled off the request path; a chat turn never waits on git. */
+export const PANE_GIT_TTL_MS = 15_000;
+
+interface PaneGitSnap { at: number; status: string; recent: string; error: string | null }
+
+const paneGitCache = new Map<string, PaneGitSnap>();
+const paneGitInflight = new Map<string, Promise<void>>();
+
+export function paneGitCached(dir: string): PaneGitSnap | null {
+  const hit = paneGitCache.get(dir);
+  if (!hit || hit.error) return null;
+  if (Date.now() - hit.at > PANE_GIT_TTL_MS) return null;
+  return hit;
+}
+
+export function paneGitFailure(dir: string): string | null {
+  return paneGitCache.get(dir)?.error ?? null;
+}
+
+export function resetPaneGitCacheForTest(): void {
+  paneGitCache.clear();
+  paneGitInflight.clear();
+}
+
+function rememberGitFailure(dir: string, message: string): void {
+  paneGitCache.set(dir, { at: 0, status: '', recent: '', error: message });
+}
+
+function schedulePaneGit(dir: string): void {
+  if (paneGitCached(dir) || paneGitInflight.has(dir)) return;
+  const slot: { current: Promise<void> | null } = { current: null };
+  const job = (async () => {
+    try {
+      let status = '';
+      let recent = '';
+      try {
+        status = (await execFileAsync('git', ['-C', dir, 'status', '--short'], { timeout: 5000 })).trim();
+      } catch (e) {
+        rememberGitFailure(dir, `git status failed: ${(e as Error).message || 'git status failed'}`);
+        return;
+      }
+      try {
+        recent = (await execFileAsync('git', ['-C', dir, 'log', '--name-only', '--pretty=format:', '-5'], { timeout: 5000 })).trim();
+      } catch (e) {
+        rememberGitFailure(dir, `git log failed: ${(e as Error).message || 'git log failed'}`);
+        return;
+      }
+      paneGitCache.set(dir, { at: Date.now(), status, recent, error: null });
+    } finally {
+      if (paneGitInflight.get(dir) === slot.current) paneGitInflight.delete(dir);
+    }
+  })();
+  slot.current = job;
+  paneGitInflight.set(dir, job);
+  void job.catch((e) => {
+    rememberGitFailure(dir, `git status failed: ${(e as Error).message || 'git status failed'}`);
+    if (paneGitInflight.get(dir) === slot.current) paneGitInflight.delete(dir);
+  });
+}
+
+/** Wait for the off-request refresh. Tests only. */
+export function refreshPaneGitForTest(dir: string): Promise<void> {
+  schedulePaneGit(dir);
+  return paneGitInflight.get(dir) ?? Promise.resolve();
+}
+
+/** What get_agent_files prints for a pane directory. A git failure is an error, never "(clean)". */
+export function formatAgentFiles(paneDir: string): string {
+  const git = paneGitCached(paneDir);
+  const failure = paneGitFailure(paneDir);
+  schedulePaneGit(paneDir);
+  if (failure && !git) {
+    return `Working dir: ${paneDir}\n\nModified/new files:\n${failure}\n\nRecently committed:\n${failure}`;
+  }
+  const gitStatus = git?.status ?? '';
+  const recentFiles = git?.recent ?? '';
+  const pending = git ? '' : '\n\n(git status is refreshing off this request)';
+  return `Working dir: ${paneDir}\n\nModified/new files:\n${gitStatus || (git ? '(clean)' : '(not loaded yet)')}\n\nRecently committed:\n${recentFiles || (git ? '(none)' : '(not loaded yet)')}${pending}`;
+}
 
 // --- DB helpers for chat ---
 
@@ -274,7 +354,7 @@ const TOOLS: LlmToolDefinition[] = [
 async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
   switch (name) {
     case 'spawn_agent': {
-      const result = sessionManager.spawnAgent({
+      const result = await sessionManager.spawnAgent({
         name: input.name as string,
         runtime: input.runtime as Agent['runtime'],
         repo: input.repo as string | undefined,
@@ -296,23 +376,25 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
     case 'list_agents': {
       const agents = listAgents();
       if (agents.length === 0) return 'No agents managed. Use spawn_agent to create one.';
-      return agents.map((a) => {
+      const lines: string[] = [];
+      for (const a of agents) {
         // Get the working directory from the last output or workspace
-        const captureResult = sessionManager.capturePane(a.tmux_session, 3);
+        const captureResult = await sessionManager.capturePane(a.tmux_session, 3);
         let workDir = a.workspace ?? '';
         if (!workDir && captureResult.ok) {
           // Try to extract path from Codex status bar or shell prompt
           const dirMatch = captureResult.data.match(/~\/[\w/.-]+/);
           if (dirMatch) workDir = dirMatch[0];
         }
-        return `• ${a.name} [${a.runtime}] — ${a.status} | dir: ${workDir || 'unknown'} (${a.mode})`;
-      }).join('\n');
+        lines.push(`• ${a.name} [${a.runtime}] — ${a.status} | dir: ${workDir || 'unknown'} (${a.mode})`);
+      }
+      return lines.join('\n');
     }
 
     case 'send_prompt': {
       const agentResult = sessionManager.get(input.agent_name as string);
       if (!agentResult.ok) return `Error: ${agentResult.error}`;
-      const sendResult = sessionManager.sendKeys(agentResult.data.id, input.text as string);
+      const sendResult = await sessionManager.sendKeys(agentResult.data.id, input.text as string);
       if (!sendResult.ok) return `Error: ${sendResult.error}`;
       return `✓ Sent prompt to ${agentResult.data.name}.`;
     }
@@ -398,7 +480,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
     case 'get_agent_output': {
       const agentResult = sessionManager.get(input.agent_name as string);
       if (!agentResult.ok) return `Error: ${agentResult.error}`;
-      const captureResult = sessionManager.capturePane(agentResult.data.tmux_session, 30);
+      const captureResult = await sessionManager.capturePane(agentResult.data.tmux_session, 30);
       if (!captureResult.ok) return `Error: ${captureResult.error}`;
       const output = captureResult.data.trim();
       return output || '(no output captured)';
@@ -458,7 +540,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
 
       if (!latestRun) {
         // No formal run — just send a self-review prompt directly
-        const sendResult = sessionManager.sendKeys(agentResult.data.id,
+        const sendResult = await sessionManager.sendKeys(agentResult.data.id,
           'Review your recent changes. Check for bugs, security issues, missing tests. Start with "REVIEW:"');
         return sendResult.ok
           ? `✓ Sent self-review prompt to ${agentResult.data.name} (no formal run found — reviewing current state).`
@@ -486,7 +568,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
       const agentResult = sessionManager.get(input.agent_name as string);
       if (!agentResult.ok) return `Error: ${agentResult.error}`;
       const instruction = input.instruction as string;
-      const sendResult = sessionManager.sendKeys(agentResult.data.id, instruction);
+      const sendResult = await sessionManager.sendKeys(agentResult.data.id, instruction);
       if (!sendResult.ok) return `Error: ${sendResult.error}`;
       return `✓ Sent instruction to ${agentResult.data.name} (${instruction.length} chars). The agent is now processing it.`;
     }
@@ -504,7 +586,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
         : lowerInstr.includes('context') || lowerInstr.includes('reference') ? 'context' as const
         : 'spec' as const;
 
-      const result = shareFile({
+      const result = await shareFile({
         fromAgentId: fromResult.data.id,
         toAgentId: toResult.data.id,
         filePath: input.file_path as string,
@@ -523,24 +605,10 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
       if (!agentResult.ok) return `Error: ${agentResult.error}`;
 
       try {
-        const paneDir = tmux.getPaneDir(agentResult.data.tmux_session);
+        const paneDir = await tmux.getPaneDir(agentResult.data.tmux_session);
         if (!paneDir) return 'Error: cannot determine agent working directory';
 
-        let gitStatus = '';
-        try {
-          gitStatus = execFileSync('git', ['-C', paneDir, 'status', '--short'], {
-            encoding: 'utf-8', timeout: 5000,
-          }).trim();
-        } catch { /* not a git repo */ }
-
-        let recentFiles = '';
-        try {
-          recentFiles = execFileSync('git', ['-C', paneDir, 'log', '--name-only', '--pretty=format:', '-5'], {
-            encoding: 'utf-8', timeout: 5000,
-          }).trim();
-        } catch { /* no git history */ }
-
-        return `Working dir: ${paneDir}\n\nModified/new files:\n${gitStatus || '(clean)'}\n\nRecently committed:\n${recentFiles || '(none)'}`;
+        return formatAgentFiles(paneDir);
       } catch (e) {
         return `Error getting files: ${(e as Error).message}`;
       }
@@ -554,7 +622,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
       if (!toResult.ok) return `Error (to): ${toResult.error}`;
 
       const captureLines = (input.lines as number) ?? 50;
-      const captureResult = sessionManager.capturePane(fromResult.data.tmux_session, captureLines);
+      const captureResult = await sessionManager.capturePane(fromResult.data.tmux_session, captureLines);
       if (!captureResult.ok) return `Error capturing output: ${captureResult.error}`;
 
       // Build the relay message
@@ -562,7 +630,7 @@ async function executeTool(name: string, input: Record<string, unknown>): Promis
       const instruction = input.instruction as string;
       const relayMessage = `${instruction}\n\nContext from ${fromResult.data.name}:\n---\n${context}\n---`;
 
-      const sendResult = sessionManager.sendKeys(toResult.data.id, relayMessage);
+      const sendResult = await sessionManager.sendKeys(toResult.data.id, relayMessage);
       if (!sendResult.ok) return `Error sending to ${toResult.data.name}: ${sendResult.error}`;
 
       return `✓ Relayed ${captureLines} lines from ${fromResult.data.name} → ${toResult.data.name} with instruction: "${instruction.substring(0, 80)}"`;
@@ -1018,15 +1086,17 @@ export async function chat(userMessage: string): Promise<{ reply: string; toolCa
   const runningTasks = currentTasks.filter((t) => t.status === 'running').length;
 
   // Build agent context with directories
-  const agentContext = currentAgents.map((a) => {
-    const captureResult = sessionManager.capturePane(a.tmux_session, 3);
+  const agentLines: string[] = [];
+  for (const a of currentAgents) {
+    const captureResult = await sessionManager.capturePane(a.tmux_session, 3);
     let workDir = a.workspace ?? '';
     if (!workDir && captureResult.ok) {
       const dirMatch = captureResult.data.match(/~\/[\w/.-]+/);
       if (dirMatch) workDir = dirMatch[0];
     }
-    return `  • ${a.name} [${a.runtime}] — ${a.status} — dir: ${workDir || 'unknown'}`;
-  }).join('\n');
+    agentLines.push(`  • ${a.name} [${a.runtime}] — ${a.status} — dir: ${workDir || 'unknown'}`);
+  }
+  const agentContext = agentLines.join('\n');
 
   const systemPrompt = `You are WaveCode's AI Project Manager. You help orchestrate coding work across CLI agents running in tmux sessions.
 

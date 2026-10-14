@@ -274,48 +274,48 @@ Do you want to proceed?
     expect(isClaudeBypassAcceptDialog('Do you want to proceed?\nbypass mode\nYes, I accept')).toBe(true);
   });
 
-  it('sends Down then Enter and honors the cooldown', () => {
+  it('sends Down then Enter and honors the cooldown', async () => {
     const t0 = 1_000_000;
-    expect(maybeDismissFirstRunDialog('agent-1', dialog, t0)).toBe(true);
+    expect((await maybeDismissFirstRunDialog('agent-1', dialog, t0))).toBe(true);
     expect(sendRawKeys).toHaveBeenNthCalledWith(1, 'agent-1', 'Down');
     expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'agent-1', 'Enter');
 
-    expect(maybeDismissFirstRunDialog('agent-1', dialog, t0 + CLAUDE_BYPASS_DIALOG_COOLDOWN_MS - 1)).toBe(false);
+    expect((await maybeDismissFirstRunDialog('agent-1', dialog, t0 + CLAUDE_BYPASS_DIALOG_COOLDOWN_MS - 1))).toBe(false);
     expect(sendRawKeys).toHaveBeenCalledTimes(2);
 
-    expect(maybeDismissFirstRunDialog('agent-1', dialog, t0 + CLAUDE_BYPASS_DIALOG_COOLDOWN_MS)).toBe(true);
+    expect((await maybeDismissFirstRunDialog('agent-1', dialog, t0 + CLAUDE_BYPASS_DIALOG_COOLDOWN_MS))).toBe(true);
     expect(sendRawKeys).toHaveBeenCalledTimes(4);
   });
 
-  it('accepts the trust-folder check (Down, Enter) and clears press-Enter screens (Enter)', () => {
+  it('accepts the trust-folder check (Down, Enter) and clears press-Enter screens (Enter)', async () => {
     const trust = ' Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel';
-    expect(maybeDismissFirstRunDialog('agent-2', trust, 1_000_000)).toBe(true);
+    expect((await maybeDismissFirstRunDialog('agent-2', trust, 1_000_000))).toBe(true);
     expect(sendRawKeys).toHaveBeenNthCalledWith(1, 'agent-2', 'Down');
     expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'agent-2', 'Enter');
     vi.mocked(sendRawKeys).mockClear();
     const notes = ' Security notes:\n 1. Claude can make mistakes.\n 2. Due to prompt injection risks, only use it with code you trust\n Press Enter to continue…';
-    expect(maybeDismissFirstRunDialog('agent-3', notes, 1_000_000)).toBe(true);
+    expect((await maybeDismissFirstRunDialog('agent-3', notes, 1_000_000))).toBe(true);
     expect(sendRawKeys).toHaveBeenCalledTimes(1);
     expect(sendRawKeys).toHaveBeenCalledWith('agent-3', 'Enter');
     vi.mocked(sendRawKeys).mockClear();
     // an old "Press Enter to continue" far up the scrollback is not a screen
-    expect(maybeDismissFirstRunDialog('agent-4', 'Press Enter to continue…\n' + Array(10).fill('working on src/a.ts').join('\n') + '\n❯ ', 1_000_000)).toBe(false);
+    expect((await maybeDismissFirstRunDialog('agent-4', 'Press Enter to continue…\n' + Array(10).fill('working on src/a.ts').join('\n') + '\n❯ ', 1_000_000))).toBe(false);
   });
 
-  it('Codex: trusts the worktree (Enter) and skips the update prompt (Down, Enter) rather than updating the CLI', () => {
+  it('Codex: trusts the worktree (Enter) and skips the update prompt (Down, Enter) rather than updating the CLI', async () => {
     const trust = '  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.\n› 1. Trust and continue\n  2. Back to Agent Command Center\n  enter continue · esc back';
-    expect(maybeDismissFirstRunDialog('cx-1', trust, 1_000_000)).toBe(true);
+    expect((await maybeDismissFirstRunDialog('cx-1', trust, 1_000_000))).toBe(true);
     expect(sendRawKeys).toHaveBeenCalledTimes(1);
     expect(sendRawKeys).toHaveBeenCalledWith('cx-1', 'Enter');
     vi.mocked(sendRawKeys).mockClear();
     const update = '  Release notes: https://github.com/openai/codex/releases/latest\n› 1. Update now (runs `npm install -g @openai/codex`)\n  2. Skip\n  3. Skip until next version\n  enter continue · esc skip';
-    expect(maybeDismissFirstRunDialog('cx-2', update, 1_000_000)).toBe(true);
+    expect((await maybeDismissFirstRunDialog('cx-2', update, 1_000_000))).toBe(true);
     expect(sendRawKeys).toHaveBeenNthCalledWith(1, 'cx-2', 'Down');
     expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'cx-2', 'Enter');
   });
 
-  it('does not send keys for unrelated pane text', () => {
-    expect(maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.')).toBe(false);
+  it('does not send keys for unrelated pane text', async () => {
+    expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();
   });
 });

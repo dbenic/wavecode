@@ -14,7 +14,6 @@ import {
   type EffortLevel,
   type Result,
 } from './db.js';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfig } from './config.js';
@@ -28,6 +27,7 @@ import {
   stopFileRunsForAgent,
 } from './file-runner.js';
 import * as tmux from './tmux.js';
+import { execFileAsync } from './proc.js';
 import { emit } from './event-bus.js';
 
 export interface TmuxSession {
@@ -58,18 +58,18 @@ export function registerPaneClassifier(fn: PaneClassifier): void {
  * row becomes idle, or working when the pane shows the runtime is busy.
  * A dead session is left as it is.
  */
-export function reprobeAgent(agent: Agent): Agent {
+export async function reprobeAgent(agent: Agent): Promise<Agent> {
   try {
     if (isFileRunnerSeat(agent)) return agent;
     bindAgent(agent);
     const loaded = getAgent(agent.id);
     const row = loaded && loaded.ok ? loaded.data : agent;
     if (row.status !== 'error') return row;
-    if (!tmux.hasSession(row.tmux_session)) return row;
+    if (!(await tmux.hasSession(row.tmux_session))) return row;
     let next: Agent['status'] = 'idle';
     let pane: { ok: boolean; data?: string } | null = null;
     try {
-      if (typeof tmux.capturePane === 'function') pane = tmux.capturePane(row.tmux_session, 30);
+      if (typeof tmux.capturePane === 'function') pane = await tmux.capturePane(row.tmux_session, 30);
     } catch { pane = null; }
     if (pane?.ok && pane.data && paneClassifier) {
       const detected = paneClassifier(pane.data, row.runtime);
@@ -87,10 +87,10 @@ export function reprobeAgent(agent: Agent): Agent {
 }
 
 /** Fill the session→socket map from the agents table. Called at startup and before capture. */
-export function rebindAgentSockets(): void {
+export async function rebindAgentSockets(): Promise<void> {
   for (const agent of listAgents()) {
     bindAgent(agent);
-    reprobeAgent(agent);
+    await reprobeAgent(agent);
   }
 }
 
@@ -99,26 +99,26 @@ function bindSession(session: string): void {
   if (agent) bindAgent(agent);
 }
 
-export function scan(socket?: string | null): Result<TmuxSession[]> {
+export async function scan(socket?: string | null): Promise<Result<TmuxSession[]>> {
   if (socket?.trim() && !tmux.isValidSocketName(socket.trim())) {
     return { ok: false, error: 'Invalid tmux socket name' };
   }
   return tmux.listSessions(socket?.trim() || null);
 }
 
-export function adopt(
+export async function adopt(
   sessionName: string,
   runtime: Agent['runtime'],
   name?: string,
   tmuxSocket?: string | null,
-): Result<Agent> {
+): Promise<Result<Agent>> {
   const socket = tmuxSocket?.trim() || null;
   if (socket && !tmux.isValidSocketName(socket)) {
     return { ok: false, error: 'Invalid tmux socket name' };
   }
   if (socket) tmux.bindSessionSocket(sessionName, socket);
   // Verify session exists (on that socket when one is set)
-  if (!tmux.hasSession(sessionName)) {
+  if (!(await tmux.hasSession(sessionName))) {
     if (socket) tmux.bindSessionSocket(sessionName, null);
     return { ok: false, error: `tmux session '${sessionName}' not found` };
   }
@@ -129,9 +129,9 @@ export function adopt(
     if ((existing.tmux_socket ?? null) !== socket) {
       const updated = updateAgentSocket(existing.id, socket);
       if (!updated.ok) return updated;
-      return { ok: true, data: reprobeAgent(updated.data) };
+      return { ok: true, data: await reprobeAgent(updated.data) };
     }
-    return { ok: true, data: reprobeAgent(existing) };
+    return { ok: true, data: await reprobeAgent(existing) };
   }
   if (agentNameShadowsIdentity(name ?? sessionName)) {
     return { ok: false, error: `Agent name '${name ?? sessionName}' collides with another agent's id or alias` };
@@ -147,7 +147,7 @@ export function adopt(
     tmux_socket: socket,
   });
   if (!inserted.ok) return inserted;
-  return { ok: true, data: reprobeAgent(inserted.data) };
+  return { ok: true, data: await reprobeAgent(inserted.data) };
 }
 
 export interface SpawnOptions {
@@ -173,7 +173,7 @@ export interface SpawnOptions {
   profile?: string | null;
 }
 
-export function spawnAgent(opts: SpawnOptions): Result<Agent> {
+export async function spawnAgent(opts: SpawnOptions): Promise<Result<Agent>> {
   const config = getConfig();
   const runtimeConfig = config.runtimes[opts.runtime];
   if (!runtimeConfig) {
@@ -196,7 +196,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
   const sessionName = `wc-${opts.name}`;
 
   // File-runner seats do not own a tmux session.
-  if (opts.runner !== 'file' && tmux.hasSession(sessionName)) {
+  if (opts.runner !== 'file' && await tmux.hasSession(sessionName)) {
     return { ok: false, error: `tmux session '${sessionName}' already exists` };
   }
 
@@ -216,7 +216,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     // Explicit workspace override (e.g., from template spawn)
     workspace = opts.workspace;
   } else if (opts.repo) {
-    const worktree = createWorktree(opts.name, opts.repo, opts.branch ?? `wc-${opts.name}`);
+    const worktree = await createWorktree(opts.name, opts.repo, opts.branch ?? `wc-${opts.name}`);
     if (!worktree.ok) return worktree;
     workspace = worktree.data;
     setupPending = true; // run the project's setup_command once the agent row exists
@@ -230,7 +230,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     if (!fs.existsSync(projectDir)) {
       fs.mkdirSync(projectDir, { recursive: true });
       try {
-        execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, timeout: 5000 });
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: projectDir, timeout: 5000 });
       } catch { /* git init is best-effort */ }
     }
     workspace = projectDir;
@@ -261,7 +261,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
     });
   }
 
-  const launchResult = launchRuntimeInNewSession({
+  const launchResult = await launchRuntimeInNewSession({
     sessionName,
     workDir: workspace,
     runtime: opts.runtime,
@@ -286,7 +286,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
 
   if (!agentResult.ok) {
     // Clean up tmux session on failure
-    tmux.killSession(sessionName);
+    await tmux.killSession(sessionName);
     return agentResult;
   }
 
@@ -305,7 +305,7 @@ export function spawnAgent(opts: SpawnOptions): Result<Agent> {
  * Upgrade an adopted agent to spawned mode.
  * Detaches from existing session, creates a new session with runner wrapper.
  */
-export function upgrade(agentId: string, repo?: string): Result<Agent> {
+export async function upgrade(agentId: string, repo?: string): Promise<Result<Agent>> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return agentResult;
 
@@ -323,14 +323,14 @@ export function upgrade(agentId: string, repo?: string): Result<Agent> {
   // Create workspace
   let workspace: string | null = null;
   if (repo) {
-    const worktree = createWorktree(agent.name, repo, `wc-${agent.name}`);
+    const worktree = await createWorktree(agent.name, repo, `wc-${agent.name}`);
     if (!worktree.ok) return worktree;
     workspace = worktree.data;
   }
 
   // Create new tmux session
   const workDir = workspace ?? repo ?? process.cwd();
-  const launchResult = launchRuntimeInNewSession({
+  const launchResult = await launchRuntimeInNewSession({
     sessionName: newSessionName,
     workDir,
     runtime: agent.runtime,
@@ -346,7 +346,7 @@ export function upgrade(agentId: string, repo?: string): Result<Agent> {
       UPDATE agents SET mode = 'spawned', tmux_session = ?, workspace = ? WHERE id = ?
     `).run(newSessionName, workspace, agentId);
   } catch (e) {
-    tmux.killSession(newSessionName);
+    await tmux.killSession(newSessionName);
     return { ok: false, error: `Failed to persist upgraded agent: ${(e as Error).message}` };
   }
 
@@ -356,7 +356,7 @@ export function upgrade(agentId: string, repo?: string): Result<Agent> {
   return getAgent(agentId);
 }
 
-export function ensureSpawnedAgentSession(agentId: string): Result<{ agent: Agent; createdSession: boolean }> {
+export async function ensureSpawnedAgentSession(agentId: string): Promise<Result<{ agent: Agent; createdSession: boolean }>> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return agentResult as Result<{ agent: Agent; createdSession: boolean }>;
 
@@ -366,9 +366,9 @@ export function ensureSpawnedAgentSession(agentId: string): Result<{ agent: Agen
   }
 
   let createdSession = false;
-  if (!tmux.hasSession(agent.tmux_session)) {
+  if (!(await tmux.hasSession(agent.tmux_session))) {
     const workDir = agent.workspace ?? process.cwd();
-    const launchResult = launchRuntimeInNewSession({
+    const launchResult = await launchRuntimeInNewSession({
       sessionName: agent.tmux_session,
       workDir,
       runtime: agent.runtime,
@@ -410,7 +410,7 @@ export function get(ref: string): Result<Agent> {
   return resolveAgent(ref);
 }
 
-export function kill(agentId: string): Result<void> {
+export async function kill(agentId: string): Promise<Result<void>> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return { ok: false, error: agentResult.error };
 
@@ -429,7 +429,7 @@ export function kill(agentId: string): Result<void> {
 
   // Session might already be dead — killSession is safe
   bindAgent(agent);
-  tmux.killSession(agent.tmux_session);
+  await tmux.killSession(agent.tmux_session);
 
   return deleteAgent(agentId);
 }
@@ -466,19 +466,19 @@ export interface StopAllSummary {
  * Emergency stop: kill every spawned agent's session and interrupt every
  * adopted agent with Ctrl+C. Never throws — collects per-agent errors.
  */
-export function stopAll(): StopAllSummary {
+export async function stopAll(): Promise<StopAllSummary> {
   const summary: StopAllSummary = { killed: [], interrupted: [], errors: [] };
 
   for (const agent of listAgents()) {
     try {
       if (agent.mode === 'spawned' || isFileRunnerSeat(agent)) {
-        const result = kill(agent.id);
+        const result = await kill(agent.id);
         if (result.ok) summary.killed.push(agent.id);
         else summary.errors.push({ agent: agent.name, error: result.error });
       } else {
         bindAgent(agent);
-        if (tmux.hasSession(agent.tmux_session)) {
-          tmux.sendRawKey(agent.tmux_session, 'C-c');
+        if (await tmux.hasSession(agent.tmux_session)) {
+          await tmux.sendRawKey(agent.tmux_session, 'C-c');
           summary.interrupted.push(agent.id);
         }
       }
@@ -490,7 +490,7 @@ export function stopAll(): StopAllSummary {
   return summary;
 }
 
-export function sendKeys(agentId: string, text: string): Result<void> {
+export async function sendKeys(agentId: string, text: string): Promise<Result<void>> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return { ok: false, error: agentResult.error };
 
@@ -499,13 +499,13 @@ export function sendKeys(agentId: string, text: string): Result<void> {
     return { ok: false, error: 'File-runner seats do not accept send-keys' };
   }
   bindAgent(agent);
-  if (!tmux.hasSession(agent.tmux_session)) {
+  if (!(await tmux.hasSession(agent.tmux_session))) {
     return { ok: false, error: `tmux session '${agent.tmux_session}' is not running` };
   }
 
   try {
     const mode = getConfig().runtimes[agent.runtime]?.input_mode ?? 'paste';
-    tmux.sendTextAndEnter(agent.tmux_session, text, { mode });
+    await tmux.sendTextAndEnter(agent.tmux_session, text, { mode });
     return { ok: true, data: undefined };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -517,7 +517,7 @@ export function sendKeys(agentId: string, text: string): Result<void> {
  * Does NOT append Enter automatically.
  * Only allows keys from an explicit allowlist to prevent injection.
  */
-export function sendRawKeys(agentId: string, key: string): Result<void> {
+export async function sendRawKeys(agentId: string, key: string): Promise<Result<void>> {
   if (!tmux.isAllowedRawKey(key)) {
     return { ok: false, error: `Disallowed key: ${key}` };
   }
@@ -530,34 +530,34 @@ export function sendRawKeys(agentId: string, key: string): Result<void> {
     return { ok: false, error: 'File-runner seats do not accept send-keys' };
   }
   bindAgent(agent);
-  if (!tmux.hasSession(agent.tmux_session)) {
+  if (!(await tmux.hasSession(agent.tmux_session))) {
     return { ok: false, error: `tmux session '${agent.tmux_session}' is not running` };
   }
 
   try {
-    tmux.sendRawKey(agent.tmux_session, key);
+    await tmux.sendRawKey(agent.tmux_session, key);
     return { ok: true, data: undefined };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
 }
 
-export function capturePane(session: string, lines: number = 50): Result<string> {
+export async function capturePane(session: string, lines: number = 50): Promise<Result<string>> {
   bindSession(session);
   return tmux.capturePane(session, lines);
 }
 
-export function capturePaneAnsi(session: string, lines: number = 50): Result<string> {
+export async function capturePaneAnsi(session: string, lines: number = 50): Promise<Result<string>> {
   bindSession(session);
   return tmux.capturePaneAnsi(session, lines);
 }
 
-export function capturePaneRange(session: string, start: number, end: number): Result<string> {
+export async function capturePaneRange(session: string, start: number, end: number): Promise<Result<string>> {
   bindSession(session);
   return tmux.capturePaneRange(session, start, end);
 }
 
-export function getScrollbackSize(session: string): Result<number> {
+export async function getScrollbackSize(session: string): Promise<Result<number>> {
   bindSession(session);
   return tmux.getScrollbackSize(session);
 }

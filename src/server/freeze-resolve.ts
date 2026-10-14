@@ -14,9 +14,8 @@
  * when that tip was readable.
  */
 
-import { execFileSync } from 'node:child_process';
 import { getDb } from './db.js';
-import { gitAncestorSync, gitText as gitTextAsync } from './git-memo.js';
+import { gitAncestor, gitRun, gitText } from './git-memo.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { mainSpec, projectRepo } from './lane-main.js';
@@ -31,23 +30,11 @@ export function setFarAheadForTest(n: number | null): void {
   farAheadCommits = n ?? FAR_AHEAD_COMMITS;
 }
 
-function gitOk(repo: string, args: string[]): boolean | null {
-  try {
-    execFileSync('git', ['-C', repo, ...args], { stdio: 'ignore', timeout: 8000 });
-    return true;
-  } catch (e) {
-    const status = (e as { status?: number }).status;
-    if (status === 1) return false;
-    return null;
-  }
-}
-
-function gitText(repo: string, args: string[]): string | null {
-  try {
-    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {
-    return null;
-  }
+async function gitOk(repo: string, args: string[]): Promise<boolean | null> {
+  const result = await gitRun(repo, args);
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  return null;
 }
 
 /**
@@ -55,25 +42,25 @@ function gitText(repo: string, args: string[]): string | null {
  * contains itself. Two full SHAs are answered from the shared ancestry memo
  * (an immutable fact); a ref name is asked every time.
  */
-function containedIn(repo: string, sha: string, ref: string): boolean | null {
-  if (/^[0-9a-f]{40}$/i.test(sha) && /^[0-9a-f]{40}$/i.test(ref)) return gitAncestorSync(repo, sha, ref);
+async function containedIn(repo: string, sha: string, ref: string): Promise<boolean | null> {
+  if (/^[0-9a-f]{40}$/i.test(sha) && /^[0-9a-f]{40}$/i.test(ref)) return gitAncestor(repo, sha, ref);
   return gitOk(repo, ['merge-base', '--is-ancestor', sha, ref]);
 }
 
 /** The upstream main as a ref and its SHA, resolved once per pass so every row shares a memoisable pair. */
 interface Upstream { ref: 'origin/main' | 'main'; sha: string }
 
-function resolveUpstream(repo: string): Upstream | null {
-  const ref = upstreamRef(repo);
+async function resolveUpstream(repo: string): Promise<Upstream | null> {
+  const ref = await upstreamRef(repo);
   if (!ref) return null;
-  const sha = gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  const sha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
   return sha && /^[0-9a-f]{40}$/i.test(sha) ? { ref, sha: sha.toLowerCase() } : null;
 }
 
-function onMain(repo: string, sha: string, upstream: Upstream | null): boolean | null {
+async function onMain(repo: string, sha: string, upstream: Upstream | null): Promise<boolean | null> {
   if (upstream) return containedIn(repo, sha, upstream.sha);
   for (const ref of ['origin/main', 'main']) {
-    const hit = containedIn(repo, sha, ref);
+    const hit = await containedIn(repo, sha, ref);
     if (hit === true) return true;
     if (hit === false) return false;
   }
@@ -83,9 +70,9 @@ function onMain(repo: string, sha: string, upstream: Upstream | null): boolean |
 /** A readable deploy tip. `unknown` is a read error — callers fail closed and do not close. */
 export type DeployTipRead = { state: 'known'; sha: string | null } | { state: 'unknown' };
 
-function upstreamRef(repo: string): 'origin/main' | 'main' | null {
-  if (gitOk(repo, ['rev-parse', '--verify', '--quiet', 'origin/main']) === true) return 'origin/main';
-  if (gitOk(repo, ['rev-parse', '--verify', '--quiet', 'main']) === true) return 'main';
+async function upstreamRef(repo: string): Promise<'origin/main' | 'main' | null> {
+  if (await gitOk(repo, ['rev-parse', '--verify', '--quiet', 'origin/main']) === true) return 'origin/main';
+  if (await gitOk(repo, ['rev-parse', '--verify', '--quiet', 'main']) === true) return 'main';
   return null;
 }
 
@@ -96,11 +83,11 @@ export function resetEquivalentsMemoForTest(): void {
   equivalentsMemo.clear();
 }
 
-function parseCherry(out: string, sha: string, repo: string, upstream: Upstream, marked: string | null): string[] | null {
+async function parseCherry(out: string, sha: string, repo: string, upstream: Upstream, marked: string | null): Promise<string[] | null> {
   const lines = out.split('\n').map((line) => line.trim()).filter(Boolean);
   if (lines.some((line) => line.startsWith('+'))) return [];
   if (lines.length === 0) {
-    const hit = containedIn(repo, sha, upstream.sha);
+    const hit = await containedIn(repo, sha, upstream.sha);
     if (hit === true) return [sha.toLowerCase()];
     return hit === false ? [] : null;
   }
@@ -116,7 +103,7 @@ function parseCherry(out: string, sha: string, repo: string, upstream: Upstream,
     if (!line.startsWith('=')) continue;
     const id = line.slice(1).toLowerCase();
     if (!/^[0-9a-f]{40}$/.test(id) || laneShas.includes(id)) continue;
-    const hit = containedIn(repo, id, upstream.sha);
+    const hit = await containedIn(repo, id, upstream.sha);
     if (hit === null) return null;
     if (hit) onMainIds.push(id);
   }
@@ -133,11 +120,11 @@ function parseCherry(out: string, sha: string, repo: string, upstream: Upstream,
 async function mainEquivalentsAsync(repo: string, sha: string, upstream: Upstream): Promise<string[] | null> {
   const key = `${repo}\0${upstream.sha}\0${sha.toLowerCase()}`;
   if (equivalentsMemo.has(key)) return equivalentsMemo.get(key) ?? null;
-  const out = await gitTextAsync(repo, ['cherry', upstream.sha, sha.toLowerCase()]);
+  const out = await gitText(repo, ['cherry', upstream.sha, sha.toLowerCase()]);
   if (out == null) return null;
   const needsMarks = out.split('\n').some((line) => line.trim().startsWith('-'));
-  const marked = needsMarks ? await gitTextAsync(repo, ['rev-list', '--cherry-mark', `${upstream.sha}...${sha.toLowerCase()}`]) : null;
-  const result = parseCherry(out, sha, repo, upstream, marked);
+  const marked = needsMarks ? await gitText(repo, ['rev-list', '--cherry-mark', `${upstream.sha}...${sha.toLowerCase()}`]) : null;
+  const result = await parseCherry(out, sha, repo, upstream, marked);
   if (result !== null) equivalentsMemo.set(key, result);
   return result;
 }
@@ -181,21 +168,22 @@ export async function deployTipsForProjects(projects: Array<string | null>): Pro
  * The patch is already on main, and a readable deploy tip does not contain it.
  * A missing or unknown tip stays false so the row remains a decision.
  */
-export function isMergedNotDeployed(project: string | null, sha: string, tip: DeployTipRead): boolean {
+export async function isMergedNotDeployed(project: string | null, sha: string, tip: DeployTipRead): Promise<boolean> {
   if (tip.state !== 'known' || !tip.sha) return false;
   const repo = projectRepo(project);
   if (!repo || !/^[0-9a-f]{40}$/i.test(sha)) return false;
-  const equivalents = mainEquivalentsCached(repo, sha, resolveUpstream(repo));
+  const equivalents = mainEquivalentsCached(repo, sha, await resolveUpstream(repo));
   if (!equivalents || equivalents.length === 0) return false;
-  const hits = equivalents.map((id) => containedIn(repo, id, tip.sha!));
+  const hits: Array<boolean | null> = [];
+  for (const id of equivalents) hits.push(await containedIn(repo, id, tip.sha));
   if (hits.some((hit) => hit == null)) return false;
   return hits.some((hit) => hit === false);
 }
 
-function laneTip(repo: string, project: string | null, lane: string): string | null {
+async function laneTip(repo: string, project: string | null, lane: string): Promise<string | null> {
   const spec = mainSpec(project);
   for (const ref of [`refs/remotes/${spec.remote}/${lane}`, lane]) {
-    const sha = gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    const sha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
     if (sha && /^[0-9a-f]{40}$/i.test(sha)) return sha.toLowerCase();
   }
   return null;
@@ -238,25 +226,26 @@ export async function autoResolveObsoleteFreezes(): Promise<number> {
     const tipSha = tip?.state === 'known' ? tip.sha : null;
     // Missing or unreadable tip: fail closed. Never close, and never use a local row in place of the peer.
     if (!tipSha) continue;
-    if (!upstreams.has(repo)) upstreams.set(repo, resolveUpstream(repo));
+    if (!upstreams.has(repo)) upstreams.set(repo, await resolveUpstream(repo));
     const upstream = upstreams.get(repo) ?? null;
-    const shipped = onMain(repo, freeze.sha, upstream) === true && containedIn(repo, freeze.sha, tipSha) === true;
+    const shipped = (await onMain(repo, freeze.sha, upstream)) === true && (await containedIn(repo, freeze.sha, tipSha)) === true;
     if (shipped) {
       closeFreeze(freeze, 'merged', 'shipped');
       n++;
       continue;
     }
     const equivalents = upstream ? await mainEquivalentsAsync(repo, freeze.sha, upstream) : null;
-    const deployed = !!equivalents?.length && equivalents.every((id) => containedIn(repo, id, tipSha) === true);
+    const deployedHits = equivalents?.length ? await Promise.all(equivalents.map((id) => containedIn(repo, id, tipSha))) : [];
+    const deployed = !!equivalents?.length && deployedHits.every((hit) => hit === true);
     if (deployed && equivalents) {
       closeFreeze(freeze, 'merged', equivalents[0] ?? 'shipped');
       n++;
       continue;
     }
     if (freeze.status === 'rejected' && freeze.lane) {
-      const head = laneTip(repo, freeze.project, freeze.lane);
+      const head = await laneTip(repo, freeze.project, freeze.lane);
       if (!head || head === freeze.sha.toLowerCase()) continue;
-      const ahead = gitText(repo, ['rev-list', '--count', `${freeze.sha}..${head}`]);
+      const ahead = await gitText(repo, ['rev-list', '--count', `${freeze.sha}..${head}`]);
       if (ahead != null && /^\d+$/.test(ahead) && Number(ahead) >= farAheadCommits) {
         closeFreeze(freeze, 'stale', head);
         n++;

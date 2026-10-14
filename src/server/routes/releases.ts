@@ -91,7 +91,7 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{ project?: unknown }>().catch(() => ({} as { project?: unknown }));
     const project = typeof body.project === 'string' ? body.project : '';
     const name = decodeURIComponent(c.req.param('name'));
-    const cand = listCandidates(project).find((x) => x.name === name);
+    const cand = (await listCandidates(project)).find((x) => x.name === name);
     if (!cand) return c.json({ error: `No unreleased candidate '${name}' in project '${project}'` }, 404);
     const lanes = (await buildBoard()).lanes.filter((l) => l.candidate === name);
     if (action === 'stage' && !isAdmin(user)) {
@@ -142,7 +142,7 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{ status?: unknown; version?: unknown; sha?: unknown; note?: unknown; failed_step?: unknown }>().catch(() => ({} as Record<string, unknown>));
     const status = body.status;
     if (status !== 'deployed' && status !== 'failed' && status !== 'rejected') return c.json({ error: "status must be 'deployed', 'failed' or 'rejected'" }, 400);
-    const r = releases.reportRelease(c.req.param('id'), {
+    const r = await releases.reportRelease(c.req.param('id'), {
       status,
       version: typeof body.version === 'string' ? body.version : null,
       sha: typeof body.sha === 'string' ? body.sha : null,

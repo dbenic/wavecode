@@ -176,7 +176,7 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
     if (!freeze.sha) continue;
     try { await commitsBehindAsync(freeze.project, freeze.sha); } catch { /* repo missing */ }
   }
-  try { reconcileBehindFreezes(); } catch (e) { logger.debug({ error: (e as Error).message }, 'behind-main reconcile skipped'); }
+  try { await reconcileBehindFreezes(); } catch (e) { logger.debug({ error: (e as Error).message }, 'behind-main reconcile skipped'); }
   const cfg = getConfig();
   const agents = listAgents();
   const out: DevLane[] = [];
@@ -231,7 +231,7 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
         ?? null;
       const freeze = current && current.sha === sha ? current : null;
       const behind = await commitsBehindAsync(project, sha) ?? 0;
-      const report = readLaneReport(project, lane, sha);
+      const report = await readLaneReport(project, lane, sha);
       allRuns.push(...report.runs);
       watched.push({ project, lane, sha });
       const viewed = checksFor(report.runs, freeze?.sha ?? sha, null, project);
@@ -250,7 +250,7 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
       const cardSha = freeze?.sha ?? sha;
       const onStaging = deployed.some((r) => (r.lane === lane || r.sha === cardSha) && r.sha === cardSha);
       const author = authorFor(lane, agents, freeze ?? current);
-      const shaView = viewShaChecks({
+      const shaView = await viewShaChecks({
         project, sha: cardSha, lane, gate: freeze?.gate ?? null, freeze_path: freeze?.freeze_path ?? null,
       }, report.runs);
       if (shaView.full === 'green') {
@@ -259,7 +259,7 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
       const fullLabel = fullRunPhrase(viewed.fullRun);
       const forwardBlock = stagingUnknown ? null : await stagingForwardBlock(project, cardSha, stagingNow);
       let prereqNote: string | null = null;
-      try { prereqNote = prereqStatusNote(project, cardSha); } catch { prereqNote = null; }
+      try { prereqNote = await prereqStatusNote(project, cardSha); } catch { prereqNote = null; }
       const status_line = laneStatusLine({
         sha, author: author.name, reviewer: freeze?.reviewer_name ?? null,
         freeze: freeze ? { sha: freeze.sha, verdict: freeze.verdict, issues: issuesFor(freeze), gate: shaView.gate } : null,
@@ -273,7 +273,7 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
       const stageGreen = shaView.quick === 'green' || fullGreen;
       const testsKnown = shaView.quick !== 'unconfigured' || shaView.full !== 'unconfigured';
       const gateBlock = freeze
-        ? stageGateBlock(freeze)
+        ? await stageGateBlock(freeze)
         : !testsKnown || stageGreen
           ? null
           : shaView.quick === 'pending'
@@ -386,7 +386,7 @@ export async function requestLaneReview(opts: { project: string; lane: string; r
   if (!picked.ok) return { ok: false, error: picked.reason };
   if (laneAutomationDenied(project, picked.agent)) return { ok: false, error: `${picked.agent.alias ?? picked.agent.name} is denied` };
   const repo = projectRepo(project);
-  const mainRef = repo ? resolveMainRef(repo, project) : null;
+  const mainRef = repo ? await resolveMainRef(repo, project) : null;
   const delta = repo && mainRef ? await deltaFor(repo, mainRef, lane, freeze.sha, listFreezes()) : null;
   const sha8 = freeze.sha.slice(0, 8);
   const text = delta
@@ -396,9 +396,9 @@ export async function requestLaneReview(opts: { project: string; lane: string; r
   return { ok: true, data: { reviewer: picked.agent.alias ?? picked.agent.name, delta: !!delta } };
 }
 
-export function laneTestLog(project: string, id: string): Result<{ log: string | null }> {
+export async function laneTestLog(project: string, id: string): Promise<Result<{ log: string | null }>> {
   if (!hasLogCommand(project)) return { ok: false, error: 'tests.log_command is not configured' };
-  const text = readTestLog(project, { id });
+  const text = await readTestLog(project, { id });
   if (text == null) return { ok: false, error: 'log command failed' };
   return { ok: true, data: { log: text } };
 }

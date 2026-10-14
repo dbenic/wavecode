@@ -2,11 +2,12 @@ import { getRequestListener } from '@hono/node-server';
 import { createServer } from 'node:http';
 import { initDb } from './db.js';
 import { loadConfig, getConfig } from './config.js';
-import logger from './logger.js';
+import logger, { installUnhandledRejectionLogger } from './logger.js';
 import { app } from './app.js';
 import { bootstrapApplication, shutdownApplication } from './bootstrap.js';
 import type { NodeAppEnv } from './auth.js';
 
+installUnhandledRejectionLogger();
 loadConfig();
 initDb();
 

@@ -71,11 +71,11 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
       continue;
     }
 
-    const sessionAlive = tmux.hasSession(agent.tmux_session);
+    const sessionAlive = await tmux.hasSession(agent.tmux_session);
 
     if (agent.mode === 'spawned') {
       if (sessionAlive && inFlightRuns.length > 0) {
-        const interruptResult = sessionManager.sendRawKeys(agent.id, 'C-c');
+        const interruptResult = await sessionManager.sendRawKeys(agent.id, 'C-c');
         if (interruptResult.ok) {
           result.sessionsInterrupted += 1;
         } else {
@@ -90,7 +90,7 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
         recoverRunningRuns(agent, inFlightRuns, 'fail', result);
       }
 
-      const resumeResult = sessionManager.ensureSpawnedAgentSession(agent.id);
+      const resumeResult = await sessionManager.ensureSpawnedAgentSession(agent.id);
       if (!resumeResult.ok) {
         result.agentResumeFailures += 1;
         updateAgentStatus(agent.id, 'error');
@@ -102,7 +102,7 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
         result.sessionsRecreated += 1;
       }
 
-      backfillWorkspace(agent);
+      await backfillWorkspace(agent);
       outputWatcher.startWatching(agent.id);
       logger.info(
         { agentId: agent.id, recreated: resumeResult.data.createdSession },
@@ -132,7 +132,7 @@ export async function reconcileStartupState(): Promise<StartupReconcileResult> {
       continue;
     }
 
-    backfillWorkspace(agent);
+    await backfillWorkspace(agent);
     outputWatcher.startWatching(agent.id);
     logger.info({ agentId: agent.id, name: agent.name }, 'Resumed adopted agent during startup reconciliation');
   }
@@ -218,10 +218,10 @@ function reconcileOrphanRunningTasks(result: StartupReconcileResult): void {
 }
 
 /** If agent has no workspace, try to detect it from tmux pane current path */
-function backfillWorkspace(agent: Agent): void {
+async function backfillWorkspace(agent: Agent): Promise<void> {
   if (agent.workspace) return;
   try {
-    const dir = tmux.getPaneDir(agent.tmux_session);
+    const dir = await tmux.getPaneDir(agent.tmux_session);
     if (dir && dir !== '/') {
       updateAgentWorkspace(agent.id, dir);
       logger.info({ agentId: agent.id, workspace: dir }, 'Backfilled agent workspace from tmux');

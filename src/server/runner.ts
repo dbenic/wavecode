@@ -180,10 +180,10 @@ export async function executeRun(
     : prompt;
 
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, briefedPrompt, { mode: getConfig().runtimes[agent.runtime]?.input_mode ?? 'paste' });
+    await tmux.sendTextAndEnter(agent.tmux_session, briefedPrompt, { mode: getConfig().runtimes[agent.runtime]?.input_mode ?? 'paste' });
   } catch (e) {
     const { finalizeRun } = await import('./task-dispatcher.js');
-    finalizeRun(run.id, agentId, 1, 'Failed to send prompt to agent');
+    await finalizeRun(run.id, agentId, 1, 'Failed to send prompt to agent');
     emit('run.failed', 'run', run.id, {
       error: (e as Error).message,
     });

@@ -1,16 +1,51 @@
 /**
  * Safe tmux command execution layer.
  *
- * All tmux interactions go through this module. Uses execFileSync with
+ * All tmux interactions go through this module. Uses execFile with
  * argument arrays to eliminate shell injection vulnerabilities entirely.
  * No shell is spawned — arguments are passed directly to the tmux binary.
+ * Calls share a concurrency limit so a burst of captures cannot pile up
+ * on the event loop. Sleeps are timers, never Atomics.wait.
  */
 
-import { execFileSync } from 'node:child_process';
 import type { Result } from './db.js';
 import logger from './logger.js';
+import { delay, execFileAsync } from './proc.js';
 
 const TMUX_TIMEOUT = 5000;
+/** How many tmux processes may run at once. The rest wait on the loop. */
+export const TMUX_CONCURRENCY = 4;
+
+let tmuxInflight = 0;
+const tmuxWaiters: Array<() => void> = [];
+
+function acquireTmux(): Promise<void> {
+  if (tmuxInflight < TMUX_CONCURRENCY) {
+    tmuxInflight += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    tmuxWaiters.push(() => {
+      tmuxInflight += 1;
+      resolve();
+    });
+  });
+}
+
+function releaseTmux(): void {
+  tmuxInflight = Math.max(0, tmuxInflight - 1);
+  const next = tmuxWaiters.shift();
+  if (next) next();
+}
+
+async function runTmux(args: string[], opts: { timeout?: number; input?: string } = {}): Promise<string> {
+  await acquireTmux();
+  try {
+    return await execFileAsync('tmux', args, { timeout: opts.timeout ?? TMUX_TIMEOUT, input: opts.input });
+  } finally {
+    releaseTmux();
+  }
+}
 
 // --- Allowed raw key names for sendRawKeys ---
 
@@ -78,21 +113,17 @@ function sessionFromArgs(args: string[]): string | null {
  * Execute a tmux command with argument array (no shell).
  * Returns stdout on success.
  */
-export function tmuxExec(args: string[], timeout = TMUX_TIMEOUT): string {
+export async function tmuxExec(args: string[], timeout = TMUX_TIMEOUT): Promise<string> {
   const full = [...socketPrefix(sessionFromArgs(args)), ...args];
-  return execFileSync('tmux', full, {
-    encoding: 'utf-8',
-    timeout,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  return runTmux(full, { timeout });
 }
 
 /**
  * Execute a tmux command, returning null on failure instead of throwing.
  */
-export function tmuxExecSafe(args: string[], timeout = TMUX_TIMEOUT): string | null {
+export async function tmuxExecSafe(args: string[], timeout = TMUX_TIMEOUT): Promise<string | null> {
   try {
-    return tmuxExec(args, timeout);
+    return await tmuxExec(args, timeout);
   } catch {
     return null;
   }
@@ -100,21 +131,17 @@ export function tmuxExecSafe(args: string[], timeout = TMUX_TIMEOUT): string | n
 
 // --- Session operations ---
 
-export function hasSession(sessionName: string): boolean {
-  return tmuxExecSafe(['has-session', '-t', sessionName]) !== null;
+export async function hasSession(sessionName: string): Promise<boolean> {
+  return (await tmuxExecSafe(['has-session', '-t', sessionName])) !== null;
 }
 
-export function listSessions(socket?: string | null): Result<Array<{ name: string; created: number; lastActivity: number }>> {
+export async function listSessions(socket?: string | null): Promise<Result<Array<{ name: string; created: number; lastActivity: number }>>> {
   try {
     const prefix = socket?.trim() ? ['-L', socket.trim()] : [];
-    const output = execFileSync('tmux', [
+    const output = (await runTmux([
       ...prefix,
       'list-sessions', '-F', '#{session_name}:#{session_created}:#{session_activity}',
-    ], {
-      encoding: 'utf-8',
-      timeout: TMUX_TIMEOUT,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    ])).trim();
 
     if (!output) return { ok: true, data: [] };
 
@@ -143,7 +170,7 @@ export function listSessions(socket?: string | null): Result<Array<{ name: strin
 export const SPAWN_COLS = 140;
 export const SPAWN_ROWS = 80;
 
-export function newSession(sessionName: string, workDir: string, command?: string): void {
+export async function newSession(sessionName: string, workDir: string, command?: string): Promise<void> {
   // Always create with a shell first — if a command is passed directly to
   // new-session and it exits (even on error), tmux destroys the session
   // immediately, making failures invisible. Instead we create a shell session
@@ -153,33 +180,33 @@ export function newSession(sessionName: string, workDir: string, command?: strin
   // give spawned sessions a tall, wide virtual terminal so long answers and
   // the prompt echo stay on screen together.
   const args = ['new-session', '-d', '-s', sessionName, '-c', workDir, '-x', String(SPAWN_COLS), '-y', String(SPAWN_ROWS)];
-  tmuxExec(args);
+  await tmuxExec(args);
 
   if (command) {
-    // Small delay to let the shell initialize, then send command
-    sleepSync(300);
-    sendTextAndEnter(sessionName, command, { mode: 'type' });
+    // Let the shell initialize without blocking the event loop, then send the command.
+    await delay(300);
+    await sendTextAndEnter(sessionName, command, { mode: 'type' });
   }
 }
 
-export function killSession(sessionName: string): void {
-  tmuxExecSafe(['kill-session', '-t', sessionName]);
+export async function killSession(sessionName: string): Promise<void> {
+  await tmuxExecSafe(['kill-session', '-t', sessionName]);
 }
 
 /**
  * Send literal text to a tmux pane using -l flag (safe, no key interpretation).
  * Text is chunked to avoid tmux's command length limits.
  */
-export function sendLiteralText(sessionName: string, text: string): void {
+export async function sendLiteralText(sessionName: string, text: string): Promise<void> {
   // Clear readline buffer first
-  tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
+  await tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
 
   // Chunk to avoid tmux length limits
   const CHUNK_SIZE = 150;
   for (let i = 0; i < text.length; i += CHUNK_SIZE) {
     const chunk = text.substring(i, i + CHUNK_SIZE);
     // `--` so a chunk that starts with `-` is never parsed as a tmux flag
-    tmuxExec(['send-keys', '-t', sessionName, '-l', '--', chunk]);
+    await tmuxExec(['send-keys', '-t', sessionName, '-l', '--', chunk]);
   }
 }
 
@@ -187,23 +214,11 @@ export function sendLiteralText(sessionName: string, text: string): void {
  * Send a raw tmux key name (C-c, Escape, Enter, etc.).
  * Only allows keys from the ALLOWED_RAW_KEYS set.
  */
-export function sendRawKey(sessionName: string, key: string): void {
+export function sendRawKey(sessionName: string, key: string): Promise<void> {
   if (!isAllowedRawKey(key)) {
     throw new Error(`Disallowed raw key: ${key}`);
   }
-  tmuxExec(['send-keys', '-t', sessionName, key]);
-}
-
-/**
- * Send literal text followed by C-m (Enter).
- * This is the primary way to send commands/prompts to agents.
- */
-/**
- * Synchronous sleep without spawning a process.
- * Uses SharedArrayBuffer + Atomics.wait for a true blocking sleep.
- */
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  return enqueueSession(sessionName, () => tmuxExec(['send-keys', '-t', sessionName, key]));
 }
 
 export type SendMode = 'paste' | 'type';
@@ -229,64 +244,76 @@ const TYPE_ENTER_DELAY_MS = 300;
 const MAX_ENTER_RETRIES = 2;
 /** Pending send per session so two messages never interleave inside one input box. */
 const sendChains = new Map<string, Promise<void>>();
+/** Paste buffer names are server-global, so each call needs its own. */
+let pasteBufferSeq = 0;
+
+/**
+ * Serialize pane mutations for one session. A rejection does not stick the
+ * chain; the derived finally promise is caught so it cannot crash the daemon.
+ */
+function enqueueSession(sessionName: string, job: () => Promise<unknown>): Promise<void> {
+  const prev = sendChains.get(sessionName);
+  const next = (prev ? prev.catch(() => undefined).then(job) : job()).then(() => undefined);
+  sendChains.set(sessionName, next);
+  void next.finally(() => {
+    if (sendChains.get(sessionName) === next) sendChains.delete(sessionName);
+  }).catch(() => undefined);
+  return next;
+}
+
+function pasteBufferName(sessionName: string): string {
+  pasteBufferSeq += 1;
+  const session = sessionName.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24) || 's';
+  const rand = Math.random().toString(36).slice(2, 10).padEnd(6, '0');
+  return `wc-${session}-${pasteBufferSeq}-${rand}`;
+}
 
 /** Exported for tests: timers are real setTimeouts, tests use fake timers. */
-export function sendTextAndEnter(sessionName: string, text: string, opts: SendOptions = {}): void {
+export function sendTextAndEnter(sessionName: string, text: string, opts: SendOptions = {}): Promise<void> {
   const mode = opts.mode ?? 'paste';
   // A send that arrives while a previous one is still waiting for its Enter is
-  // chained behind it so the two never share an input box.
-  const prev = sendChains.get(sessionName);
-  const run = () => (mode === 'type' ? typeAndSubmit(sessionName, text) : pasteAndSubmit(sessionName, text));
-  const next = prev ? prev.catch(() => undefined).then(run) : run();
-  sendChains.set(sessionName, next);
-  void next.finally(() => { if (sendChains.get(sessionName) === next) sendChains.delete(sessionName); });
+  // chained behind it so the two never share an input box. Raw keys (watcher
+  // dismiss) join the same chain.
+  return enqueueSession(sessionName, () => (mode === 'type' ? typeAndSubmit(sessionName, text) : pasteAndSubmit(sessionName, text)));
 }
 
-function typeAndSubmit(sessionName: string, text: string): Promise<void> {
-  sendLiteralText(sessionName, text);
-  sleepSync(TYPE_ENTER_DELAY_MS);
-  tmuxExec(['send-keys', '-t', sessionName, 'C-m']);
-  return new Promise((resolve) => confirmOrRetry(sessionName, text, 0, resolve));
+async function typeAndSubmit(sessionName: string, text: string): Promise<void> {
+  await sendLiteralText(sessionName, text);
+  await delay(TYPE_ENTER_DELAY_MS);
+  await tmuxExec(['send-keys', '-t', sessionName, 'C-m']);
+  await confirmOrRetry(sessionName, text, 0);
 }
 
-function pasteAndSubmit(sessionName: string, text: string): Promise<void> {
+async function pasteAndSubmit(sessionName: string, text: string): Promise<void> {
   // Clear whatever is in the input box, then one atomic bracketed paste.
   // Enter is never in this argv: it is a later send-keys, after the TUI has the text.
-  tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
-  const buf = `wc-${process.pid}-${Date.now()}`;
-  execFileSync('tmux', [...socketPrefix(sessionName), 'load-buffer', '-b', buf, '-'], { input: text, timeout: TMUX_TIMEOUT, stdio: ['pipe', 'pipe', 'pipe'] });
-  tmuxExec(['paste-buffer', '-p', '-d', '-b', buf, '-t', sessionName]);
-  return new Promise<void>((resolve) => {
-    setTimeout(() => {
-      tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
-      confirmOrRetry(sessionName, text, 0, resolve);
-    }, PASTE_ENTER_DELAY_MS);
-  });
+  await tmuxExec(['send-keys', '-t', sessionName, 'C-u']);
+  const buf = pasteBufferName(sessionName);
+  await runTmux([...socketPrefix(sessionName), 'load-buffer', '-b', buf, '-'], { input: text });
+  await tmuxExec(['paste-buffer', '-p', '-d', '-b', buf, '-t', sessionName]);
+  await delay(PASTE_ENTER_DELAY_MS);
+  await tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
+  await confirmOrRetry(sessionName, text, 0);
 }
 
 /** Capture the pane. If the text is still on the input line, press Enter again (up to 2 retries). */
-function confirmOrRetry(sessionName: string, text: string, retriesUsed: number, resolve: () => void): void {
-  setTimeout(() => {
-    if (!inputStillHolds(sessionName, text)) {
-      resolve();
-      return;
-    }
-    if (retriesUsed < MAX_ENTER_RETRIES) {
-      tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
-      confirmOrRetry(sessionName, text, retriesUsed + 1, resolve);
-      return;
-    }
-    logger.error(
-      { session: sessionName, preview: text.slice(0, 80) },
-      'typed notification still on the input line after Enter retries',
-    );
-    resolve();
-  }, PASTE_CONFIRM_DELAY_MS);
+async function confirmOrRetry(sessionName: string, text: string, retriesUsed: number): Promise<void> {
+  await delay(PASTE_CONFIRM_DELAY_MS);
+  if (!(await inputStillHolds(sessionName, text))) return;
+  if (retriesUsed < MAX_ENTER_RETRIES) {
+    await tmuxExecSafe(['send-keys', '-t', sessionName, 'C-m']);
+    await confirmOrRetry(sessionName, text, retriesUsed + 1);
+    return;
+  }
+  logger.error(
+    { session: sessionName, preview: text.slice(0, 80) },
+    'typed notification still on the input line after Enter retries',
+  );
 }
 
 /** The TUI's input line (❯ / ›) still shows the start of the text → the Enter was swallowed. */
-export function inputStillHolds(sessionName: string, text: string): boolean {
-  const pane = tmuxExecSafe(['capture-pane', '-t', sessionName, '-p', '-S', '-15']);
+export async function inputStillHolds(sessionName: string, text: string): Promise<boolean> {
+  const pane = await tmuxExecSafe(['capture-pane', '-t', sessionName, '-p', '-S', '-15']);
   if (pane === null) return false;
   return paneInputHolds(pane, text);
 }
@@ -307,17 +334,17 @@ export function paneInputHolds(pane: string, text: string): boolean {
  * Capture pane output (plain text, no ANSI).
  */
 /** Like capturePane, but wrapped lines are joined back (`-J`) — for URLs and codes the pane wrapped. */
-export function capturePaneJoined(sessionName: string, lines = 50): Result<string> {
+export async function capturePaneJoined(sessionName: string, lines = 50): Promise<Result<string>> {
   try {
-    return { ok: true, data: tmuxExec(['capture-pane', '-t', sessionName, '-p', '-J', '-S', `-${lines}`]) };
+    return { ok: true, data: await tmuxExec(['capture-pane', '-t', sessionName, '-p', '-J', '-S', `-${lines}`]) };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
 }
 
-export function capturePane(sessionName: string, lines = 50): Result<string> {
+export async function capturePane(sessionName: string, lines = 50): Promise<Result<string>> {
   try {
-    const output = tmuxExec(['capture-pane', '-t', sessionName, '-p', '-S', `-${lines}`]);
+    const output = await tmuxExec(['capture-pane', '-t', sessionName, '-p', '-S', `-${lines}`]);
     return { ok: true, data: output };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -327,9 +354,9 @@ export function capturePane(sessionName: string, lines = 50): Result<string> {
 /**
  * Capture pane output with ANSI escape sequences preserved.
  */
-export function capturePaneAnsi(sessionName: string, lines = 50): Result<string> {
+export async function capturePaneAnsi(sessionName: string, lines = 50): Promise<Result<string>> {
   try {
-    const output = tmuxExec(['capture-pane', '-t', sessionName, '-p', '-e', '-S', `-${lines}`]);
+    const output = await tmuxExec(['capture-pane', '-t', sessionName, '-p', '-e', '-S', `-${lines}`]);
     return { ok: true, data: output };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -339,9 +366,9 @@ export function capturePaneAnsi(sessionName: string, lines = 50): Result<string>
 /**
  * Capture a range of scrollback lines with ANSI.
  */
-export function capturePaneRange(sessionName: string, start: number, end: number): Result<string> {
+export async function capturePaneRange(sessionName: string, start: number, end: number): Promise<Result<string>> {
   try {
-    const output = tmuxExec([
+    const output = await tmuxExec([
       'capture-pane', '-t', sessionName, '-p', '-e',
       '-S', String(start), '-E', String(end),
     ]);
@@ -354,11 +381,11 @@ export function capturePaneRange(sessionName: string, start: number, end: number
 /**
  * Get scrollback history size.
  */
-export function getScrollbackSize(sessionName: string): Result<number> {
+export async function getScrollbackSize(sessionName: string): Promise<Result<number>> {
   try {
-    const output = tmuxExec([
+    const output = (await tmuxExec([
       'display-message', '-t', sessionName, '-p', '#{history_size}',
-    ]).trim();
+    ])).trim();
     return { ok: true, data: parseInt(output, 10) || 0 };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -368,8 +395,8 @@ export function getScrollbackSize(sessionName: string): Result<number> {
 /**
  * Get the current working directory of a tmux pane.
  */
-export function getPaneDir(sessionName: string): string | null {
-  const output = tmuxExecSafe([
+export async function getPaneDir(sessionName: string): Promise<string | null> {
+  const output = await tmuxExecSafe([
     'display-message', '-t', sessionName, '-p', '#{pane_current_path}',
   ]);
   return output?.trim() || null;

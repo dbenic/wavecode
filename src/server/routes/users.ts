@@ -57,7 +57,7 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
     return c.json({ ...publicUser(user), created_at: user.created_at, token }, 201);
   });
 
-  app.delete('/api/users/:id', (c) => {
+  app.delete('/api/users/:id', async (c) => {
     const actor = c.get('user');
     if (!isAdmin(actor)) return c.json({ error: 'Forbidden: admin only' }, 403);
 
@@ -66,7 +66,7 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
 
     // Spec §5d: the person's seat goes with them — otherwise releasing its
     // lease would leave an ownerless orchestrator the dispatcher could use.
-    const seatRemoved = removeSeatOf(id);
+    const seatRemoved = await removeSeatOf(id);
 
     const result = revokeUser(id);
     if (!result.ok) {

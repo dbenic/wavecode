@@ -508,7 +508,7 @@ export async function resolveStagingTip(project: string, opts?: { localOnly?: bo
     peerTipCache.set(project, { at: Date.now(), value });
     return value;
   }
-  const local = localStagingTip(project);
+  const local = await localStagingTip(project);
   return { state: 'local', source: local.source, tip: local.tip };
 }
 
@@ -523,12 +523,12 @@ export async function stagingTipPayload(project: string, opts?: { localOnly?: bo
 }
 
 /** Health command wins when it prints a SHA. Otherwise the newest deployed staging record. */
-export function currentStagingTip(project: string): StagingTip | null {
-  return localStagingTip(project).tip;
+export async function currentStagingTip(project: string): Promise<StagingTip | null> {
+  return (await localStagingTip(project)).tip;
 }
 
-function localStagingTip(project: string): { source: 'health' | 'local'; tip: StagingTip | null } {
-  const health = readStagingHealth(project);
+async function localStagingTip(project: string): Promise<{ source: 'health' | 'local'; tip: StagingTip | null }> {
+  const health = await readStagingHealth(project);
   let row: ReleaseRequest | null = listReleases({ project, target: 'staging', status: 'deployed', limit: 1 })[0] ?? null;
   if (health?.sha) {
     return { source: 'health', tip: { sha: health.sha, version: health.version ?? row?.version ?? null, lane: row?.lane ?? null } };
@@ -611,7 +611,7 @@ export function resolveReleaseProject(explicit: string | null | undefined, sha?:
 }
 
 /** Open staging rows that are behind main, or behind the staging tip, are rejected. The first error wins. */
-export function rejectStaleStaging(project: string | null, stagingTip?: StagingTip | null): number {
+export async function rejectStaleStaging(project: string | null, stagingTip?: StagingTip | null): Promise<number> {
   let n = 0;
   const rows = listReleases({ ...(project ? { project } : {}), target: 'staging', limit: 100 });
   for (const row of rows) {
@@ -627,10 +627,10 @@ export function rejectStaleStaging(project: string | null, stagingTip?: StagingT
       n++;
       continue;
     }
-    const verdict = evaluateForward({
+    const verdict = await evaluateForward({
       project: resolved.project,
       requestedSha: row.sha,
-      staging: stagingTip !== undefined ? stagingTip : currentStagingTip(resolved.project),
+      staging: stagingTip !== undefined ? stagingTip : await currentStagingTip(resolved.project),
     });
     if (verdict.ok) continue;
     patch(row.id, { status: 'rejected', error: verdict.error, report: verdict.error });
@@ -642,8 +642,8 @@ export function rejectStaleStaging(project: string | null, stagingTip?: StagingT
   return n;
 }
 
-function productionSteps(project: string, sha: string, who: string | null): { ok: true; steps: GoStep[] | null } | { ok: false; error: string } {
-  const gate = productionPrereqGate(project, sha, who);
+async function productionSteps(project: string, sha: string, who: string | null): Promise<{ ok: true; steps: GoStep[] | null } | { ok: false; error: string }> {
+  const gate = await productionPrereqGate(project, sha, who);
   if (!gate.ok) return gate;
   return { ok: true, steps: gate.steps };
 }
@@ -691,12 +691,12 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const dest = releaseForwardTarget(opts.project);
     if (dest) return { ok: false, error: rollbackOnDeployBox(dest.peer) };
   }
-  const behind = releaseBehindMain(opts.project, opts.sha);
+  const behind = await releaseBehindMain(opts.project, opts.sha);
   if (behind) return { ok: false, error: behind };
   let stepsJson: string | null = null;
   let rollbackReason: string | null = null;
   if (opts.target === 'production') {
-    const gate = productionSteps(opts.project, opts.sha, opts.actorName);
+    const gate = await productionSteps(opts.project, opts.sha, opts.actorName);
     if (!gate.ok) return gate;
     stepsJson = gate.steps ? JSON.stringify(gate.steps) : null;
   }
@@ -704,7 +704,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     const resolvedTip = await resolveStagingTip(opts.project, { fresh: true });
     const tipUnknown = resolvedTip.state === 'unknown';
     const staging = tipUnknown ? null : resolvedTip.tip;
-    if (!tipUnknown) rejectStaleStaging(opts.project, staging);
+    if (!tipUnknown) await rejectStaleStaging(opts.project, staging);
     const { stageEligibility } = await import('./sha-stage-block.js');
     const eligible = await stageEligibility(opts.sha, opts.project, {
       tipResolved: true,
@@ -716,7 +716,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
       markStale: true,
     });
     if (eligible.error) {
-      if (opts.lane && laneAlert(eligible.error)) alertBehind({ lane: opts.lane, project: opts.project });
+      if (opts.lane && laneAlert(eligible.error)) await alertBehind({ lane: opts.lane, project: opts.project });
       return { ok: false, error: eligible.error };
     }
     if (eligible.rollbackReason) rollbackReason = eligible.rollbackReason;
@@ -726,7 +726,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   try {
     const freeze = getFreeze(opts.sha);
     if (freeze && opts.target === 'production') {
-      const full = promoteFullBlock(freeze);
+      const full = await promoteFullBlock(freeze);
       if (full) return { ok: false, error: full };
     }
   } catch { /* freeze table unavailable: the deploy command still enforces its own gates */ }
@@ -786,7 +786,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     if (!claimed.ok) return { ok: false, error: claimed.error };
     if (rollbackReason) rememberForceRollback(claimed.data.id, rollbackReason, opts.actorName);
     const row = getRelease(claimed.data.id)!;
-    const handed = handToDeployAgent(row);
+    const handed = await handToDeployAgent(row);
     if (handed.ok && rollbackReason) recordRollback(handed.data, opts.actorName, rollbackReason);
     if (handed.ok && opts.target === 'staging') {
       invalidateStagingTipCache(opts.project);
@@ -864,7 +864,7 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
   if (!str(body.project, 64)) {
     const openRetry = listReleases({ sha, target: body.target, limit: 5 }).find((r) => r.status === 'requested' || r.status === 'sent');
     if (openRetry) {
-      if (body.target === 'staging') rejectStaleStaging(openRetry.project);
+      if (body.target === 'staging') await rejectStaleStaging(openRetry.project);
       const fresh = getRelease(openRetry.id);
       if (fresh && (fresh.status === 'requested' || fresh.status === 'sent')) return { ok: true, data: fresh };
       if (fresh?.status === 'rejected') return { ok: false, error: fresh.error ?? 'rejected' };
@@ -876,12 +876,12 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
   let stepsJson: string | null = typeof body.steps === 'string' ? body.steps : null;
   let rollbackReason: string | null = null;
   if (body.target === 'production') {
-    const gate = productionSteps(projectName, sha, str(body.requested_by, 64));
+    const gate = await productionSteps(projectName, sha, str(body.requested_by, 64));
     if (!gate.ok) return gate;
     if (gate.steps) stepsJson = JSON.stringify(gate.steps);
   }
   if (body.target === 'staging') {
-    rejectStaleStaging(projectName);
+    await rejectStaleStaging(projectName);
     const { stageEligibility } = await import('./sha-stage-block.js');
     const eligible = await stageEligibility(sha, projectName, {
       localTip: true,
@@ -892,7 +892,7 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
     });
     if (eligible.error) {
       const lane = str(body.lane, 120);
-      if (lane && laneAlert(eligible.error)) alertBehind({ lane, project: projectName });
+      if (lane && laneAlert(eligible.error)) await alertBehind({ lane, project: projectName });
       return { ok: false, error: eligible.error };
     }
     if (eligible.rollbackReason) rollbackReason = eligible.rollbackReason;
@@ -926,7 +926,7 @@ export async function acceptRelease(body: IncomingRelease, via: { userName: stri
   const row = claimed.data;
   const rollbackBy = str(body.rollback_by, 64) ?? str(body.requested_by, 64) ?? via.userName;
   if (rollbackReason) rememberForceRollback(row.id, rollbackReason, rollbackBy);
-  const handed = handToDeployAgent(getRelease(row.id) ?? row);
+  const handed = await handToDeployAgent(getRelease(row.id) ?? row);
   if (handed.ok && rollbackReason) recordRollback(handed.data, rollbackBy, rollbackReason);
   return handed;
 }
@@ -981,8 +981,8 @@ function stagingCommand(): string[] | null {
  * read from the test-status JSON. With no test command, the freeze file's
  * own gate line is the fallback (a named non-GREEN still blocks).
  */
-export function stageGateBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): string | null {
-  const view = viewShaChecks(freeze);
+export async function stageGateBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): Promise<string | null> {
+  const view = await viewShaChecks(freeze);
   if (view.quick === 'green' || view.full === 'green') return null;
   if (view.quick === 'pending') return QUICK_CHECK_RUNNING;
   if (!testsConfigured(freeze.project)) {
@@ -998,17 +998,17 @@ export function stageGateBlock(freeze: { project: string | null; sha: string; la
  * on the exact SHA. A green quick check is not enough. With no test command,
  * a freeze that names a non-GREEN gate is refused; a missing gate is not.
  */
-export function promoteFullBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): string | null {
-  const view = viewShaChecks(freeze);
+export async function promoteFullBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): Promise<string | null> {
+  const view = await viewShaChecks(freeze);
   if (view.full === 'green' || view.full === 'unconfigured') return null;
   return needsGreenFull(freeze.sha.slice(0, 8));
 }
 
-function knownStagingBlock(row: ReleaseRequest): string | null {
+async function knownStagingBlock(row: ReleaseRequest): Promise<string | null> {
   let freeze: ReturnType<typeof getFreeze> = null;
   try { freeze = getFreeze(row.sha); } catch { return null; }
   if (!freeze) return null;
-  const stale = staleStageBlock(freeze);
+  const stale = await staleStageBlock(freeze);
   if (stale) return stale;
   if (freeze.verdict && freeze.verdict !== 'pass') return STAGE_NEEDS_PASS;
   return stageGateBlock(freeze);
@@ -1021,7 +1021,7 @@ interface StagingChild {
 
 const stagingChildren = new Map<string, StagingChild>();
 
-function applyProgress(id: string, raw: string): boolean {
+async function applyProgress(id: string, raw: string): Promise<boolean> {
   const line = parseProgressLine(raw);
   if (!line) return false;
   const row = getRelease(id);
@@ -1064,12 +1064,12 @@ function applyProgress(id: string, raw: string): boolean {
   }
   if (line.phase === 'done') {
     const sha = line.staging_sha && /^[0-9a-f]{40}$/i.test(line.staging_sha) ? line.staging_sha.toLowerCase() : null;
-    reportRelease(id, { status: 'deployed', version: line.version ?? updated.version, sha, note: line.url ?? updated.staging_url });
+    await reportRelease(id, { status: 'deployed', version: line.version ?? updated.version, sha, note: line.url ?? updated.staging_url });
     return getRelease(id)?.status === 'deployed';
   }
   if (line.phase === 'failed') {
     const msg = line.error ? `${line.error.code}: ${line.error.msg}` : (updated.error ?? 'staging deploy failed');
-    reportRelease(id, { status: 'failed', version: line.version ?? updated.version, note: msg });
+    await reportRelease(id, { status: 'failed', version: line.version ?? updated.version, note: msg });
     return getRelease(id)?.status === 'failed';
   }
   return false;
@@ -1081,7 +1081,9 @@ function spawnStaging(row: ReleaseRequest, argv: string[]): void {
   try {
     child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (err) {
-    reportRelease(row.id, { status: 'failed', note: (err as Error).message });
+    void reportRelease(row.id, { status: 'failed', note: (err as Error).message }).catch((e) => {
+      logger.warn({ releaseId: row.id, error: (e as Error).message }, 'Failed to record staging spawn failure');
+    });
     return;
   }
   const handle: StagingChild = { child, abandoned: false };
@@ -1089,48 +1091,61 @@ function spawnStaging(row: ReleaseRequest, argv: string[]): void {
   let buf = '';
   let stderr = '';
   let sawTerminal = false;
+  let pending = Promise.resolve();
   const take = (chunk: string) => {
-    if (handle.abandoned) return;
-    buf += chunk;
-    const parts = buf.split(/\r?\n/);
-    buf = parts.pop() ?? '';
-    for (const part of parts) {
-      try { if (applyProgress(row.id, part)) sawTerminal = true; } catch (err) {
-        logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging progress line failed');
+    pending = pending.then(async () => {
+      if (handle.abandoned) return;
+      buf += chunk;
+      const parts = buf.split(/\r?\n/);
+      buf = parts.pop() ?? '';
+      for (const part of parts) {
+        try { if (await applyProgress(row.id, part)) sawTerminal = true; } catch (err) {
+          logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging progress line failed');
+        }
       }
-    }
+    }).catch((err) => {
+      logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging progress line failed');
+    });
   };
   child.stdout?.setEncoding('utf8');
   child.stderr?.setEncoding('utf8');
   child.stdout?.on('data', take);
   child.stderr?.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-2000); });
   child.on('error', (err) => {
-    if (stagingChildren.get(row.id) === handle) stagingChildren.delete(row.id);
-    if (handle.abandoned) return;
-    try {
-      const current = getRelease(row.id);
-      if (current && current.status !== 'deployed' && current.status !== 'failed' && current.status !== 'rejected') {
-        reportRelease(row.id, { status: 'failed', note: err.message });
-      }
-    } catch { /* db already closed */ }
+    void pending.then(async () => {
+      if (stagingChildren.get(row.id) === handle) stagingChildren.delete(row.id);
+      if (handle.abandoned) return;
+      try {
+        const current = getRelease(row.id);
+        if (current && current.status !== 'deployed' && current.status !== 'failed' && current.status !== 'rejected') {
+          await reportRelease(row.id, { status: 'failed', note: err.message });
+        }
+      } catch { /* db already closed */ }
+    }).catch((e) => {
+      logger.warn({ releaseId: row.id, error: (e as Error).message }, 'Staging command error handler failed');
+    });
   });
   child.on('close', (code) => {
-    if (stagingChildren.get(row.id) === handle) stagingChildren.delete(row.id);
-    if (handle.abandoned) return;
-    try {
-      if (buf.trim()) {
-        const rest = buf;
-        buf = '';
-        if (applyProgress(row.id, rest)) sawTerminal = true;
+    void pending.then(async () => {
+      if (stagingChildren.get(row.id) === handle) stagingChildren.delete(row.id);
+      if (handle.abandoned) return;
+      try {
+        if (buf.trim()) {
+          const rest = buf;
+          buf = '';
+          if (await applyProgress(row.id, rest)) sawTerminal = true;
+        }
+        const current = getRelease(row.id);
+        if (!current || current.status === 'deployed' || current.status === 'failed' || current.status === 'rejected') return;
+        if (!sawTerminal) {
+          await reportRelease(row.id, { status: 'failed', note: stderr.trim().slice(-500) || `staging command exited ${code ?? 'null'}` });
+        }
+      } catch (err) {
+        logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging command close handler failed');
       }
-      const current = getRelease(row.id);
-      if (!current || current.status === 'deployed' || current.status === 'failed' || current.status === 'rejected') return;
-      if (!sawTerminal) {
-        reportRelease(row.id, { status: 'failed', note: stderr.trim().slice(-500) || `staging command exited ${code ?? 'null'}` });
-      }
-    } catch (err) {
-      logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging command close handler failed');
-    }
+    }).catch((e) => {
+      logger.warn({ releaseId: row.id, error: (e as Error).message }, 'Staging command close handler failed');
+    });
   });
   logger.info({ releaseId: row.id, command: argv[0], sha: row.sha }, 'Staging deploy command started');
 }
@@ -1141,8 +1156,8 @@ function failStaging(row: ReleaseRequest, error: string): Result<ReleaseRequest>
   return { ok: false, error };
 }
 
-function startStagingCommand(row: ReleaseRequest): Result<ReleaseRequest> {
-  const block = knownStagingBlock(row);
+async function startStagingCommand(row: ReleaseRequest): Promise<Result<ReleaseRequest>> {
+  const block = await knownStagingBlock(row);
   if (block) return failStaging(row, block);
   const template = stagingCommand();
   if (!template) return failStaging(row, 'releases.staging_command is not configured');
@@ -1168,7 +1183,7 @@ export function stopStagingDeploys(): void {
 }
 
 /** After a restart, follow any staging deploy that already printed a deploy id. */
-export function resumeStagingDeploys(): void {
+export async function resumeStagingDeploys(): Promise<void> {
   const watch = getConfig().releases?.staging_watch_command;
   if (!watch || watch.length === 0) return;
   let open: ReleaseRequest[] = [];
@@ -1176,7 +1191,7 @@ export function resumeStagingDeploys(): void {
   for (const row of open) {
     if (row.status === 'rejected') continue;
     if (!row.deploy_id || stagingChildren.has(row.id)) continue;
-    rejectStaleStaging(row.project);
+    await rejectStaleStaging(row.project);
     const fresh = getRelease(row.id);
     if (!fresh || fresh.status === 'rejected' || fresh.status !== 'sent') continue;
     const argv = fillArgv(watch, { deploy_id: row.deploy_id, sha: row.sha, lane: row.lane, desk: row.desk });
@@ -1185,7 +1200,7 @@ export function resumeStagingDeploys(): void {
   }
 }
 
-function handToDeployAgent(row: ReleaseRequest): Result<ReleaseRequest> {
+async function handToDeployAgent(row: ReleaseRequest): Promise<Result<ReleaseRequest>> {
   if (row.target === 'staging' && stagingCommand()) return startStagingCommand(row);
   const agent = deployAgent();
   if (!agent.ok) {
@@ -1228,16 +1243,16 @@ function noteLateResult(row: ReleaseRequest, sha: string | null | undefined): vo
  * current tip and not a descendant of it is refused. No tip, or no repo,
  * leaves the report alone — a box without git still records its first deploys.
  */
-function stagingRewindRefusal(project: string | null, sha: string, row?: ReleaseRequest | null): string | null {
+async function stagingRewindRefusal(project: string | null, sha: string, row?: ReleaseRequest | null): Promise<string | null> {
   if (!project) return null;
-  const tip = currentStagingTip(project);
+  const tip = await currentStagingTip(project);
   if (!tip?.sha) return null;
   const tipSha = tip.sha.toLowerCase();
   const next = sha.toLowerCase();
   if (tipSha === next) return null;
   const repo = projectRepo(project);
   if (!repo) return null;
-  if (!isMissingAncestor(repo, tipSha, next)) return null;
+  if (!await isMissingAncestor(repo, tipSha, next)) return null;
   if (row?.force_rollback === 1) {
     logger.info({ project, sha: next, tip: tipSha, by: row.rollback_by, reason: row.rollback_reason }, 'Authorized staging rollback');
     return null;
@@ -1248,7 +1263,7 @@ function stagingRewindRefusal(project: string | null, sha: string, row?: Release
 }
 
 /** The deploy agent's outcome (MCP tool, API, or a RELEASED / RELEASE FAILED line). */
-export function reportRelease(id: string, report: ReleaseReport): Result<ReleaseRequest> {
+export async function reportRelease(id: string, report: ReleaseReport): Promise<Result<ReleaseRequest>> {
   const r = getRelease(id);
   if (!r) return { ok: false, error: `Release ${id} not found` };
   if (r.status === 'deployed' || r.status === 'rejected') return { ok: true, data: r }; // final: a repeat is a no-op
@@ -1262,7 +1277,7 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
     return { ok: false, error: `Reported SHA ${deployedSha.slice(0, 8)} is not the requested ${r.sha.slice(0, 8)}; report a failure instead` };
   }
   if (report.status === 'deployed' && r.target === 'staging') {
-    const rewind = stagingRewindRefusal(r.project, r.sha, r);
+    const rewind = await stagingRewindRefusal(r.project, r.sha, r);
     if (rewind) return { ok: false, error: rewind };
   }
   patch(id, {
@@ -1282,9 +1297,9 @@ export function reportRelease(id: string, report: ReleaseReport): Result<Release
   }, null);
   if (done.origin === 'local') announce(done);
   if (done.target === 'staging' && done.status === 'deployed') {
-    rejectStaleStaging(done.project);
-    try { alertLanesPastStaging(done.project, done.deployed_sha || done.sha); } catch { /* alert is best-effort */ }
-    fireStagingDeployed(done.id);
+    await rejectStaleStaging(done.project);
+    try { await alertLanesPastStaging(done.project, done.deployed_sha || done.sha); } catch { /* alert is best-effort */ }
+    await fireStagingDeployed(done.id);
     invalidateStagingTipCache(done.project);
     reconcileAfterDeploy();
   }
@@ -1406,7 +1421,7 @@ function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 }
 
-export function detectReleaseLines(agentId: string, output: string): number {
+export async function detectReleaseLines(agentId: string, output: string): Promise<number> {
   const lines = stripAnsi(output).split('\n').slice(-SCAN_LINES);
   let n = 0;
   for (const raw of lines) {
@@ -1424,7 +1439,7 @@ export function detectReleaseLines(agentId: string, output: string): number {
     if (r.deploy_agent_id && r.deploy_agent_id !== agentId) continue; // only the agent it was handed to may report
     const sha = rest.match(/\b[0-9a-f]{7,40}\b/)?.[0] ?? null;
     const version = rest.match(/\bv?(\d+\.\d+\.\d+(?:[-.][\w.]+)?)\b/)?.[1] ?? null;
-    const res = reportRelease(id, ok
+    const res = await reportRelease(id, ok
       ? { status: 'deployed', sha, version, note: rest, byAgentId: agentId }
       : { status: 'failed', note: rest, byAgentId: agentId });
     if (res.ok) n++;
@@ -1452,7 +1467,9 @@ export function ensureReleasePoller(peer: string): void {
   if (pollers.has(peer)) return;
   const handle = { stop: false };
   pollers.set(peer, handle);
-  void pollLoop(peer, handle).finally(() => { if (pollers.get(peer) === handle) pollers.delete(peer); });
+  void pollLoop(peer, handle).catch((e) => {
+    logger.warn({ peer, error: (e as Error).message }, 'Release poller failed');
+  }).finally(() => { if (pollers.get(peer) === handle) pollers.delete(peer); });
 }
 
 async function pollLoop(peer: string, handle: { stop: boolean }): Promise<void> {
@@ -1529,7 +1546,7 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   const fresh = getRelease(r.id) ?? local;
   if (s === 'deployed' && fresh.target === 'staging') {
     const tipSha = remote.data.deployed_sha || fresh.sha;
-    const rewind = stagingRewindRefusal(fresh.project, tipSha, fresh);
+    const rewind = await stagingRewindRefusal(fresh.project, tipSha, fresh);
     if (rewind) return;
   }
   patch(r.id, {
@@ -1548,7 +1565,7 @@ async function mirrorOne(peer: string, r: ReleaseRequest): Promise<void> {
   }, null);
   announce(done);
   if (done.target === 'staging' && done.status === 'deployed') {
-    fireStagingDeployed(done.id);
+    await fireStagingDeployed(done.id);
     invalidateStagingTipCache(done.project);
     reconcileAfterDeploy();
   }
@@ -1559,7 +1576,9 @@ export function startReleasePollers(): void {
   expireStuckReleases();
   const peers = withTable(() => getDb().prepare("SELECT DISTINCT peer FROM release_requests WHERE origin = 'local' AND status = 'sent' AND peer IS NOT NULL").all() as Array<{ peer: string }>);
   for (const { peer } of peers) ensureReleasePoller(peer);
-  resumeStagingDeploys();
+  void resumeStagingDeploys().catch((e) => {
+    logger.warn({ error: (e as Error).message }, 'Staging deploy resume failed');
+  });
 }
 
 export function stopReleasePollers(): void {

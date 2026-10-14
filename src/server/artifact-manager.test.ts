@@ -110,7 +110,7 @@ describe('artifact-manager.ts', () => {
       }),
     });
 
-    const result = artifactManager.attachArtifactToAgent('artifact-1', 'agent-1');
+    const result = (await artifactManager.attachArtifactToAgent('artifact-1', 'agent-1'));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -301,7 +301,7 @@ describe('artifact-manager.ts', () => {
     tmuxMocks.getPaneDir.mockReturnValue(paneDir);
     sessionManagerMocks.sendKeys.mockReturnValue({ ok: true, data: undefined });
 
-    const result = artifactManager.shareArtifact('artifact-2', 'agent-2');
+    const result = (await artifactManager.shareArtifact('artifact-2', 'agent-2'));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -354,7 +354,7 @@ describe('artifact-manager.ts', () => {
       error: 'tmux session is not running',
     });
 
-    const result = artifactManager.shareArtifact('artifact-3', 'agent-3');
+    const result = (await artifactManager.shareArtifact('artifact-3', 'agent-3'));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;

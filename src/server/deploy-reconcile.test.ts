@@ -426,7 +426,7 @@ describe('deploy reconciler review status and behind-main pings', () => {
     tip = oldSha;
     expect((await resolveStagingTip('wave')).tip?.sha).toBe(oldSha);
     tip = newSha;
-    const reported = reportRelease(first.data.id, { status: 'deployed', version: '1.4.0', sha: newSha });
+    const reported = (await reportRelease(first.data.id, { status: 'deployed', version: '1.4.0', sha: newSha }));
     expect(reported.ok).toBe(true);
     await reconcileDeployStates();
     const board = await reviewBoard({ name: 'antonio', role: 'developer' }, []);

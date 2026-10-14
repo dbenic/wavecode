@@ -22,7 +22,8 @@
  * Existing adopted/spawned seats stay on the tmux runner.
  */
 
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -124,8 +125,8 @@ export interface FileRunnerTestHooks {
   heartbeatMs?: number;
   staleMs?: number;
   claudeBin?: string;
-  listProcessGroupPids?: (pgid: number) => number[];
-  listWorktreePids?: (workspace: string) => number[];
+  listProcessGroupPids?: (pgid: number) => number[] | Promise<number[]>;
+  listWorktreePids?: (workspace: string) => number[] | Promise<number[]>;
   processTreePollMs?: number;
   processTreeTimeoutMs?: number;
 }
@@ -357,7 +358,7 @@ export async function executeFileRun(
     });
 
     writeFileRunStatus(run.id, { phase: 'starting', started_at: startedAt }, { taskId, agentId });
-    startClaudeProcess(run, agent, briefedPrompt);
+    await startClaudeProcess(run, agent, briefedPrompt);
     return { ok: true, data: run };
   } catch (e) {
     const reason = (e as Error).message || 'Failed to start file runner';
@@ -403,7 +404,7 @@ export function checkFileRunStale(runId: string, now = testHooks.now ? testHooks
   return true;
 }
 
-function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
+async function startClaudeProcess(run: Run, agent: Agent, prompt: string): Promise<void> {
   if (!agent.workspace) {
     throw new Error('File-runner seat requires a workspace');
   }
@@ -447,7 +448,7 @@ function startClaudeProcess(run: Run, agent: Agent, prompt: string): void {
   const heartbeat = setInterval(() => heartbeatLiveRun(run.id), heartbeatMs);
   const staleCheck = setInterval(() => checkFileRunStale(run.id), Math.min(heartbeatMs, staleMs));
   const excludeStarted = liveExcludePids(child.pid);
-  const worktreePidsAtStart = listWorktreePidsViaHook(agent.workspace)
+  const worktreePidsAtStart = (await listWorktreePidsViaHook(agent.workspace))
     .filter((pid) => !excludeStarted.has(pid));
 
   liveRuns.set(run.id, {
@@ -524,7 +525,7 @@ async function onClaudeExit(
   const waitOpts = leftoverWaitOpts(run, agent, resultPath, live);
 
   if (!hasParseableFileRunResult(run.id, resultPath)) {
-    const leftover = detectLeftoverFileRunWork(waitOpts);
+    const leftover = await detectLeftoverFileRunWork(waitOpts);
     if (leftover.pids.length > 0 || leftover.inFlight) {
       const prev = readFileRunStatus(run.id);
       if (prev && (prev.phase === 'starting' || prev.phase === 'running')) {
@@ -762,8 +763,8 @@ export interface LeftoverWorkWaitOpts {
   snapshotPids?: number[];
   shouldStop?: () => boolean;
   isInFlight?: () => boolean;
-  listGroupPids?: (pgid: number) => number[];
-  listWorktree?: (workspace: string) => number[];
+  listGroupPids?: (pgid: number) => number[] | Promise<number[]>;
+  listWorktree?: (workspace: string) => number[] | Promise<number[]>;
   pollMs?: number;
   timeoutMs?: number;
 }
@@ -783,7 +784,7 @@ export function looksLikeInFlightWork(text: string | null | undefined): boolean 
   return mentionsWork && mentionsActive;
 }
 
-export function listProcessGroupPids(pgid: number): number[] {
+export async function listProcessGroupPids(pgid: number): Promise<number[]> {
   if (!Number.isInteger(pgid) || pgid <= 0) return [];
   const fromProc = listProcessGroupFromProc(pgid);
   if (fromProc !== null) return fromProc;
@@ -820,10 +821,9 @@ function listProcessGroupFromProc(pgid: number): number[] | null {
   }
 }
 
-function listProcessGroupFromPs(pgid: number): number[] {
+async function listProcessGroupFromPs(pgid: number): Promise<number[]> {
   try {
-    const out = execFileSync('ps', ['-o', 'pid=', '-g', String(pgid)], {
-      encoding: 'utf8',
+    const out = await execFileAsync('ps', ['-o', 'pid=', '-g', String(pgid)], {
       timeout: 2000,
     });
     return out
@@ -890,9 +890,9 @@ function isPathInside(cwd: string, workspace: string): boolean {
   return realCwd === workspace || realCwd.startsWith(`${workspace}${path.sep}`);
 }
 
-function listWorktreePidsViaHook(workspace: string): number[] {
+async function listWorktreePidsViaHook(workspace: string): Promise<number[]> {
   const list = testHooks.listWorktreePids ?? listWorktreePids;
-  return list(workspace);
+  return await list(workspace);
 }
 
 function liveExcludePids(pgid?: number | null): Set<number> {
@@ -901,7 +901,7 @@ function liveExcludePids(pgid?: number | null): Set<number> {
   return exclude;
 }
 
-export function detectLeftoverFileRunWork(opts: LeftoverWorkWaitOpts = {}): LeftoverFileRunWork {
+export async function detectLeftoverFileRunWork(opts: LeftoverWorkWaitOpts = {}): Promise<LeftoverFileRunWork> {
   const exclude = new Set(opts.excludePids ?? []);
   const snapshot = new Set(opts.snapshotPids ?? []);
   const listGroup = opts.listGroupPids ?? testHooks.listProcessGroupPids ?? listProcessGroupPids;
@@ -909,12 +909,12 @@ export function detectLeftoverFileRunWork(opts: LeftoverWorkWaitOpts = {}): Left
   const pids = new Set<number>();
 
   if (typeof opts.pgid === 'number' && opts.pgid > 0) {
-    for (const pid of listGroup(opts.pgid)) {
+    for (const pid of await listGroup(opts.pgid)) {
       if (!exclude.has(pid)) pids.add(pid);
     }
   }
   if (opts.workspace) {
-    for (const pid of listWorktree(opts.workspace)) {
+    for (const pid of await listWorktree(opts.workspace)) {
       if (!exclude.has(pid) && !snapshot.has(pid)) pids.add(pid);
     }
   }
@@ -932,7 +932,7 @@ export async function waitForLeftoverWork(opts: LeftoverWorkWaitOpts = {}): Prom
 
   while (Date.now() - started < timeoutMs) {
     if (opts.shouldStop?.()) return;
-    const leftover = detectLeftoverFileRunWork(opts);
+    const leftover = await detectLeftoverFileRunWork(opts);
     if (leftover.pids.length === 0 && !leftover.inFlight) return;
     await delay(pollMs);
   }
@@ -943,7 +943,7 @@ export async function waitForProcessGroup(
   opts: {
     excludePids?: number[];
     shouldStop?: () => boolean;
-    listPids?: (pgid: number) => number[];
+    listPids?: (pgid: number) => number[] | Promise<number[]>;
     pollMs?: number;
     timeoutMs?: number;
   } = {},

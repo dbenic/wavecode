@@ -2,7 +2,7 @@
  * Phase 1 Security Tests — tmux.ts (shell injection prevention)
  *
  * These tests verify that:
- * 1. All tmux calls use execFileSync (no shell injection)
+ * 1. All tmux calls use execFile (no shell injection, and they do not block the loop)
  * 2. Raw key allowlist blocks arbitrary input
  * 3. Session name validation works correctly
  */
@@ -12,9 +12,24 @@ import * as child_process from 'node:child_process';
 import logger from './logger.js';
 import { bindSessionSocket, isAllowedRawKey, isValidSessionName, isValidSocketName, resetTmuxSocketsForTest, sendLiteralText } from './tmux.js';
 
-// Mock execFileSync to inspect calls without needing real tmux
+type ExecCb = (err: Error | null, stdout: string, stderr: string) => void;
+
+function complete(stdout: string, opts: unknown, cb?: ExecCb) {
+  const callback = typeof opts === 'function' ? opts as ExecCb : cb;
+  callback?.(null, stdout, '');
+  return { stdin: { end: () => undefined } };
+}
+
+function scripted(stdoutFor: (args: string[]) => string) {
+  vi.mocked(child_process.execFile).mockImplementation(((...args: unknown[]) => {
+    return complete(stdoutFor(args[1] as string[]), args[2], args[3] as ExecCb | undefined);
+  }) as never);
+}
+
+// Mock execFile to inspect calls without needing real tmux. The callback
+// runs on the loop, the way the server calls tmux.
 vi.mock('node:child_process', () => ({
-  execFileSync: vi.fn(() => ''),
+  execFile: vi.fn((...args: unknown[]) => complete('', args[2], args[3] as ExecCb | undefined)),
 }));
 
 vi.mock('./logger.js', () => ({
@@ -24,8 +39,8 @@ vi.mock('./logger.js', () => ({
 describe('tmux.ts — shell injection prevention', () => {
   beforeEach(() => {
     resetTmuxSocketsForTest();
-    vi.mocked(child_process.execFileSync).mockReset();
-    vi.mocked(child_process.execFileSync).mockReturnValue('');
+    vi.mocked(child_process.execFile).mockReset();
+    vi.mocked(child_process.execFile).mockImplementation(((...args: unknown[]) => complete('', args[2], args[3] as ExecCb | undefined)) as never);
     vi.mocked(logger.error).mockClear();
   });
 
@@ -90,20 +105,13 @@ describe('tmux.ts — shell injection prevention', () => {
     });
   });
 
-  describe('execFileSync usage (no shell)', () => {
-    it('calls execFileSync with array args, not shell strings', async () => {
-      // Import after mock is set up
+  describe('execFile usage (no shell)', () => {
+    it('calls execFile with array args, not shell strings', async () => {
       const tmuxModule = await import('./tmux.js');
 
-      // Attempt to use a session name that would be dangerous in a shell
-      try {
-        tmuxModule.hasSession("test'; rm -rf /; echo '");
-      } catch {
-        // Expected to fail since mock returns empty string
-      }
+      await tmuxModule.hasSession("test'; rm -rf /; echo '");
 
-      // Verify execFileSync was called with array args (not a shell string)
-      const calls = vi.mocked(child_process.execFileSync).mock.calls;
+      const calls = vi.mocked(child_process.execFile).mock.calls;
       expect(calls.length).toBeGreaterThan(0);
 
       const lastCall = calls[calls.length - 1];
@@ -121,13 +129,13 @@ describe('tmux.ts — shell injection prevention', () => {
 });
 
 describe('sendLiteralText', () => {
-  it('passes -- before a chunk that starts with - so tmux does not treat it as a flag', () => {
+  it('passes -- before a chunk that starts with - so tmux does not treat it as a flag', async () => {
     const session = 'wc-grok';
     const chunk = '-01M0ABCDEFGH.sock';
-    sendLiteralText(session, chunk);
+    await sendLiteralText(session, chunk);
 
-    // tmuxExec is mocked via execFileSync; assert the exact send-keys argv
-    const calls = vi.mocked(child_process.execFileSync).mock.calls;
+    // tmuxExec is mocked via execFile; assert the exact send-keys argv
+    const calls = vi.mocked(child_process.execFile).mock.calls;
     const literalCall = calls.find(
       (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('-l'),
     );
@@ -138,7 +146,7 @@ describe('sendLiteralText', () => {
 
 describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
   beforeEach(() => {
-    vi.mocked(child_process.execFileSync).mockClear();
+    vi.mocked(child_process.execFile).mockClear();
     vi.mocked(logger.error).mockClear();
   });
 
@@ -148,15 +156,15 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
       const { sendTextAndEnter } = await import('./tmux.js');
       const session = 'wc-claude1';
       const text = '[Message from @codex1] please review /home/wave/inbox/spec.md and reply with VERDICT';
-      const calls = vi.mocked(child_process.execFileSync).mock.calls;
+      const calls = vi.mocked(child_process.execFile).mock.calls;
       // first confirm capture: text still in the box; second time (if any) it is gone
       let captures = 0;
-      vi.mocked(child_process.execFileSync).mockImplementation((_cmd, args) => {
-        const a = args as string[];
+      scripted((a) => {
         if (a[0] === 'capture-pane') { captures += 1; return captures === 1 ? `older line\n❯ ${text.slice(0, 60)}\n  ⏵⏵ bypass permissions on` : 'older line\n❯ \n  ⏵⏵ bypass permissions on'; }
         return '';
       });
-      sendTextAndEnter(session, text);
+      const pending = sendTextAndEnter(session, text);
+      await vi.advanceTimersByTimeAsync(0);
       const argLists = () => calls.map((c) => c[1] as string[]);
       expect(argLists()).toContainEqual(['send-keys', '-t', session, 'C-u']);
       expect(argLists().some((a) => a[0] === 'load-buffer' && a.includes('-'))).toBe(true);
@@ -173,6 +181,7 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
       await vi.advanceTimersByTimeAsync(900);
       expect(argLists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(2); // next capture is clear
       expect(logger.error).not.toHaveBeenCalled();
+      await pending;
     } finally {
       vi.useRealTimers();
     }
@@ -182,21 +191,26 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
     vi.useFakeTimers();
     try {
       const { sendTextAndEnter, paneInputHolds } = await import('./tmux.js');
-      vi.mocked(child_process.execFileSync).mockClear();
-      vi.mocked(child_process.execFileSync).mockImplementation((_cmd, args) => ((args as string[])[0] === 'capture-pane' ? '> my prompt echoed above\n❯ \n  ⏵⏵ bypass' : ''));
-      sendTextAndEnter('wc-claude1', 'my prompt text here');
+      vi.mocked(child_process.execFile).mockClear();
+      scripted((a) => (a[0] === 'capture-pane' ? '> my prompt echoed above\n❯ \n  ⏵⏵ bypass' : ''));
+      const pasted = sendTextAndEnter('wc-claude1', 'my prompt text here');
       await vi.advanceTimersByTimeAsync(2000);
-      const enters = vi.mocked(child_process.execFileSync).mock.calls.filter((c) => (c[1] as string[])[0] === 'send-keys' && (c[1] as string[]).includes('C-m'));
+      await pasted;
+      const enters = vi.mocked(child_process.execFile).mock.calls.filter((c) => (c[1] as string[])[0] === 'send-keys' && (c[1] as string[]).includes('C-m'));
       expect(enters).toHaveLength(1);
 
-      vi.mocked(child_process.execFileSync).mockClear();
-      sendTextAndEnter('wc-shell', 'env X=1 claude --continue', { mode: 'type' });
-      const lists = vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
-      expect(lists.some((a) => a[0] === 'send-keys' && a.includes('-l'))).toBe(true);
-      expect(lists.some((a) => a[0] === 'load-buffer')).toBe(false);
-      expect(lists.filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(1);
+      vi.mocked(child_process.execFile).mockClear();
+      const typedSend = sendTextAndEnter('wc-shell', 'env X=1 claude --continue', { mode: 'type' });
+      await vi.advanceTimersByTimeAsync(0);
+      const lists = () => vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
+      expect(lists().some((a) => a[0] === 'send-keys' && a.includes('-l'))).toBe(true);
+      expect(lists().some((a) => a[0] === 'load-buffer')).toBe(false);
+      expect(lists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(lists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(900); // confirm capture sees an empty input line
-      expect(vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]).filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(1);
+      await typedSend;
+      expect(vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]).filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(1);
 
       expect(paneInputHolds('❯ [Message from @codex1] please review', '[Message from @codex1] please review the spec')).toBe(true);
       expect(paneInputHolds('> [Message from @codex1] please review\n❯ ', '[Message from @codex1] please review the spec')).toBe(false);
@@ -210,17 +224,14 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
     vi.useFakeTimers();
     try {
       const { sendTextAndEnter } = await import('./tmux.js');
-      vi.mocked(child_process.execFileSync).mockClear();
+      vi.mocked(child_process.execFile).mockClear();
       const session = 'wc-claude1';
       const text = 'Your lane claude1 is behind main. Run: git fetch origin && git merge origin/main';
       bindSessionSocket(session, 'countix');
-      vi.mocked(child_process.execFileSync).mockImplementation((_cmd, args) => {
-        const a = args as string[];
-        if (a.includes('capture-pane')) return `older line\n❯ ${text.slice(0, 48)}\n  ⏵⏵ bypass permissions on`;
-        return '';
-      });
-      sendTextAndEnter(session, text);
-      const argLists = () => vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
+      scripted((a) => (a.includes('capture-pane') ? `older line\n❯ ${text.slice(0, 48)}\n  ⏵⏵ bypass permissions on` : ''));
+      const pending = sendTextAndEnter(session, text);
+      await vi.advanceTimersByTimeAsync(0);
+      const argLists = () => vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
       const enters = () => argLists().filter((a) => a.includes('send-keys') && a.includes('C-m'));
       expect(argLists().some((a) => a.includes('load-buffer'))).toBe(true);
       expect(argLists().some((a) => a.includes('paste-buffer') && a.includes('-p'))).toBe(true);
@@ -240,6 +251,7 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
         expect.objectContaining({ session, preview: text.slice(0, 80) }),
         expect.stringContaining('input line'),
       );
+      await pending;
     } finally {
       resetTmuxSocketsForTest();
       vi.useRealTimers();
@@ -250,24 +262,26 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
     vi.useFakeTimers();
     try {
       const { sendTextAndEnter } = await import('./tmux.js');
-      vi.mocked(child_process.execFileSync).mockClear();
+      vi.mocked(child_process.execFile).mockClear();
       const session = 'wc-claude1';
       const text = 'Your lane claude1 is behind main. Nothing else to do.';
       let captures = 0;
-      vi.mocked(child_process.execFileSync).mockImplementation((_cmd, args) => {
-        const a = args as string[];
+      scripted((a) => {
         if (a[0] === 'capture-pane') {
           captures += 1;
           return captures < 3 ? `❯ ${text}\n  ⏵⏵ bypass permissions on` : '❯ \n  ⏵⏵ bypass permissions on';
         }
         return '';
       });
-      sendTextAndEnter(session, text, { mode: 'type' });
-      const enters = () => vi.mocked(child_process.execFileSync).mock.calls
+      const pending = sendTextAndEnter(session, text, { mode: 'type' });
+      await vi.advanceTimersByTimeAsync(0);
+      const enters = () => vi.mocked(child_process.execFile).mock.calls
         .map((c) => c[1] as string[])
         .filter((a) => a[0] === 'send-keys' && a.includes('C-m'));
-      const typed = vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
+      const typed = vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
       expect(typed.some((a) => a[0] === 'send-keys' && a.includes('-l') && a.includes(text))).toBe(true);
+      expect(enters()).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(300);
       expect(enters()).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(900);
       expect(enters()).toHaveLength(2); // still on the input line
@@ -276,21 +290,65 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
       await vi.advanceTimersByTimeAsync(900);
       expect(enters()).toHaveLength(3);
       expect(logger.error).not.toHaveBeenCalled();
+      await pending;
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('adds -L only for a session bound to a socket, including load-buffer', () => {
+  it('names each paste buffer with the session, a counter, and a random, and holds a raw key behind that paste', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sendRawKey, sendTextAndEnter } = await import('./tmux.js');
+      vi.mocked(child_process.execFile).mockClear();
+      scripted((a) => (a[0] === 'capture-pane' ? '❯ \n' : ''));
+      const session = 'wc-claude1';
+      const text = 'please review the spec now';
+      const lists = () => vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
+      const bufferNames = () => lists()
+        .filter((a) => a.includes('load-buffer'))
+        .map((a) => a[a.indexOf('-b') + 1]);
+
+      const first = sendTextAndEnter(session, text);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bufferNames()[0]).toMatch(/^wc-wc-claude1-\d+-[a-z0-9]+$/);
+      const raw = sendRawKey(session, 'Enter');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lists().some((a) => a[0] === 'send-keys' && a.includes('Enter'))).toBe(false);
+
+      const second = sendTextAndEnter('wc-other', text);
+      await vi.advanceTimersByTimeAsync(0);
+      const names = bufferNames();
+      expect(names).toHaveLength(2);
+      expect(names[1]).toMatch(/^wc-wc-other-\d+-[a-z0-9]+$/);
+      expect(names[0]).not.toBe(names[1]);
+      expect(lists().some((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(session))).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1900);
+      await first;
+      await raw;
+      const after = lists();
+      const pasteAt = after.findIndex((a) => a.includes('paste-buffer') && a.includes(session));
+      const enterAt = after.findIndex((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(session));
+      expect(pasteAt).toBeGreaterThanOrEqual(0);
+      expect(enterAt).toBeGreaterThan(pasteAt);
+      await vi.advanceTimersByTimeAsync(2000);
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('adds -L only for a session bound to a socket, including load-buffer', async () => {
     expect(isValidSocketName('fable')).toBe(true);
     expect(isValidSocketName('../fable')).toBe(false);
-    sendLiteralText('wc-grok', 'hi');
-    const unbound = vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
+    await sendLiteralText('wc-grok', 'hi');
+    const unbound = vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
     expect(unbound.every((args) => args[0] !== '-L')).toBe(true);
-    vi.mocked(child_process.execFileSync).mockClear();
+    vi.mocked(child_process.execFile).mockClear();
     bindSessionSocket('wc-grok', 'fable');
-    sendLiteralText('wc-grok', 'yo');
-    const bound = vi.mocked(child_process.execFileSync).mock.calls.map((c) => c[1] as string[]);
+    await sendLiteralText('wc-grok', 'yo');
+    const bound = vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
     expect(bound.length).toBeGreaterThan(0);
     expect(bound.every((args) => args[0] === '-L' && args[1] === 'fable')).toBe(true);
   });

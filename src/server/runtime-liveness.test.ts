@@ -106,12 +106,12 @@ describe('runtime-liveness.ts', () => {
   });
 
   describe('getRuntimeState', () => {
-    it('alive TUI → alive; bare shell → dead; no session → unknown', () => {
-      expect(getRuntimeState(agent())).toBe('alive');
+    it('alive TUI → alive; bare shell → dead; no session → unknown', async () => {
+      expect((await getRuntimeState(agent()))).toBe('alive');
       pane.text = BARE_SHELL;
-      expect(getRuntimeState(agent())).toBe('dead');
+      expect((await getRuntimeState(agent()))).toBe('dead');
       pane.alive = false;
-      expect(getRuntimeState(agent())).toBe('unknown');
+      expect((await getRuntimeState(agent()))).toBe('unknown');
     });
   });
 
@@ -185,11 +185,11 @@ describe('runtime-liveness.ts', () => {
   });
 
   describe('relaunchRuntime', () => {
-    it('does not double-launch within the settle window (monitor tick + dispatch)', () => {
-      expect(relaunchRuntime(agent(), 'health_check')).toEqual({ ok: true, data: { sent: true } });
-      expect(relaunchRuntime(agent(), 'dispatch')).toEqual({ ok: true, data: { sent: false } });
+    it('does not double-launch within the settle window (monitor tick + dispatch)', async () => {
+      expect((await relaunchRuntime(agent(), 'health_check'))).toEqual({ ok: true, data: { sent: true } });
+      expect((await relaunchRuntime(agent(), 'dispatch'))).toEqual({ ok: true, data: { sent: false } });
       vi.advanceTimersByTime(31_000);
-      expect(relaunchRuntime(agent(), 'dispatch')).toEqual({ ok: true, data: { sent: true } });
+      expect((await relaunchRuntime(agent(), 'dispatch'))).toEqual({ ok: true, data: { sent: true } });
       expect(tmux.sendTextAndEnter).toHaveBeenCalledTimes(2);
     });
 
@@ -197,13 +197,13 @@ describe('runtime-liveness.ts', () => {
       const { MAX_RELAUNCH_ATTEMPTS, noteRuntimeAlive, relaunchAttemptsExhausted } = await import('./runtime-liveness.js');
 
       for (let i = 0; i < MAX_RELAUNCH_ATTEMPTS; i++) {
-        expect(relaunchRuntime(agent(), 'health_check')).toEqual({ ok: true, data: { sent: true } });
+        expect((await relaunchRuntime(agent(), 'health_check'))).toEqual({ ok: true, data: { sent: true } });
         vi.advanceTimersByTime(31_000);
       }
       expect(tmux.sendTextAndEnter).toHaveBeenCalledTimes(MAX_RELAUNCH_ATTEMPTS);
 
       // Budget exhausted: a fast-failing runtime command is never retyped forever
-      const refused = relaunchRuntime(agent(), 'health_check');
+      const refused = (await relaunchRuntime(agent(), 'health_check'));
       expect(refused.ok).toBe(false);
       expect(refused.ok ? '' : refused.error).toMatch(/exhausted/);
       expect(relaunchAttemptsExhausted('agent-1')).toBe(true);
@@ -212,7 +212,7 @@ describe('runtime-liveness.ts', () => {
       // Seen alive (e.g. a human fixed it) → budget resets
       noteRuntimeAlive('agent-1');
       expect(relaunchAttemptsExhausted('agent-1')).toBe(false);
-      expect(relaunchRuntime(agent(), 'health_check')).toEqual({ ok: true, data: { sent: true } });
+      expect((await relaunchRuntime(agent(), 'health_check'))).toEqual({ ok: true, data: { sent: true } });
     });
   });
 });

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import yaml from 'js-yaml';
 import {
   type Result,
@@ -126,9 +127,8 @@ export async function addTemplate(opts: { git_url: string }): Promise<Result<Tem
   }
 
   try {
-    execFileSync('git', ['clone', '--depth', '1', opts.git_url, cloneTarget], {
+    await execFileAsync('git', ['clone', '--depth', '1', opts.git_url, cloneTarget], {
       timeout: 120_000,
-      stdio: 'pipe',
     });
   } catch (e) {
     return { ok: false, error: `git clone failed: ${(e as Error).message}` };
@@ -171,7 +171,7 @@ export async function syncTemplate(id: string): Promise<Result<Template>> {
   const root = getConfig().paths.templates_root;
   const cloneDir = path.join(root, template.local_path);
   try {
-    execFileSync('git', ['pull', '--ff-only'], { cwd: cloneDir, timeout: 60_000, stdio: 'pipe' });
+    await execFileAsync('git', ['pull', '--ff-only'], { cwd: cloneDir, timeout: 60_000 });
   } catch (e) {
     return { ok: false, error: `git pull failed: ${(e as Error).message}` };
   }
@@ -306,10 +306,10 @@ export async function spawnFromTemplate(
 
   // 2. Fresh git init
   try {
-    execFileSync('git', ['init', '-b', 'main'], { cwd: workspace, timeout: 5000, stdio: 'pipe' });
-    execFileSync('git', ['add', '.'], { cwd: workspace, timeout: 15000, stdio: 'pipe' });
-    execFileSync('git', ['commit', '-m', `init from template ${template.slug}`], {
-      cwd: workspace, timeout: 15000, stdio: 'pipe',
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workspace, timeout: 5000 });
+    await execFileAsync('git', ['add', '.'], { cwd: workspace, timeout: 15000 });
+    await execFileAsync('git', ['commit', '-m', `init from template ${template.slug}`], {
+      cwd: workspace, timeout: 15000,
       env: { ...process.env, GIT_AUTHOR_NAME: 'WaveCode', GIT_AUTHOR_EMAIL: 'wavecode@local', GIT_COMMITTER_NAME: 'WaveCode', GIT_COMMITTER_EMAIL: 'wavecode@local' },
     });
     steps.push('git init + initial commit');
@@ -350,7 +350,7 @@ export async function spawnFromTemplate(
   }
 
   // 5. Spawn agent with explicit workspace
-  const spawnResult = sessionManager.spawnAgent({
+  const spawnResult = await sessionManager.spawnAgent({
     name: opts.agentName,
     runtime,
     workspace,

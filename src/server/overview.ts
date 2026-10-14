@@ -10,7 +10,7 @@ import { usageFor } from './usage-probe.js';
 import { listPeerQuestions } from './peers.js';
 import { candidateFor, ensureReleaseFreezeTable, getFreezeByRun, listCandidates, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
 import { autoResolveObsoleteFreezes, deployTipsForProjects, isMergedNotDeployed, type DeployTipRead } from './freeze-resolve.js';
-import { commitsBehind, isMergeOnlyDelta, laneAutomationDenied, projectRepo, resolveMainRef, withRefMemo } from './lane-main.js';
+import { commitsBehind, isMergeOnlyDelta, laneAutomationDenied, projectRepo, resolveMainRef, withRefMemoAsync } from './lane-main.js';
 import { behindMainLine, fullFailFlag, needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { emit } from './event-bus.js';
 import { ensureReleaseTables, verificationFor, type ReleaseRequest } from './releases.js';
@@ -290,20 +290,20 @@ function releaseCell(r: ReleaseRequest | null, verified: Map<string, { verified_
   };
 }
 
-function liveChecks(f: ReleaseFreeze): ShaChecks | null {
+async function liveChecks(f: ReleaseFreeze): Promise<ShaChecks | null> {
   if (!f.project || !testsConfigured(f.project)) return null;
   try {
-    return shaChecks(readLaneTests(f.project, f.lane ?? '', f.sha), f.sha, suiteNames(f.project));
+    return shaChecks(await readLaneTests(f.project, f.lane ?? '', f.sha), f.sha, suiteNames(f.project));
   } catch {
     return null;
   }
 }
 
-function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null, checks: ShaChecks | null): { next: string; promotable: boolean } {
+async function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: ReleaseRequest | null, candidate: string | null, checks: ShaChecks | null): Promise<{ next: string; promotable: boolean }> {
   if (f.status === 'merged') return { next: 'on main — merged or deployed outside this pipeline', promotable: false };
   if (f.status === 'behind-main') {
     let n: number | null = null;
-    try { n = commitsBehind(f.project, f.sha); } catch { n = null; }
+    try { n = await commitsBehind(f.project, f.sha); } catch { n = null; }
     return { next: n && n > 0 ? behindMainLine(n) : 'behind main: merge main', promotable: false };
   }
   if (candidate) return { next: `in candidate ${candidate} — ships with that release`, promotable: false };
@@ -337,13 +337,13 @@ function nextStep(f: ReleaseFreeze, staging: ReleaseRequest | null, production: 
   return { next: 'reviewed — stage it, then mark Ready for prod', promotable: true };
 }
 
-function mergeOnlyAgainst(previous: ReleaseFreeze | undefined, freeze: ReleaseFreeze): boolean {
+async function mergeOnlyAgainst(previous: ReleaseFreeze | undefined, freeze: ReleaseFreeze): Promise<boolean> {
   if (!previous || !freeze.project) return false;
   const repo = projectRepo(freeze.project);
   if (!repo) return false;
-  const mainRef = resolveMainRef(repo, freeze.project);
+  const mainRef = await resolveMainRef(repo, freeze.project);
   if (!mainRef) return false;
-  try { return isMergeOnlyDelta(repo, previous.sha, freeze.sha, mainRef); } catch { return false; }
+  try { return await isMergeOnlyDelta(repo, previous.sha, freeze.sha, mainRef); } catch { return false; }
 }
 
 interface RankedFreeze extends ReleaseFreeze { rn: number }
@@ -562,7 +562,7 @@ function writeOverviewSnapshot(board: Board): void {
  * background reconciler, not on the overview route.
  */
 export async function reconcileOverview(now = Date.now()): Promise<Board> {
-  try { reconcileMerged(now); } catch { /* git unavailable: the board still builds */ }
+  try { await reconcileMerged(now); } catch { /* git unavailable: the board still builds */ }
   try { await autoResolveObsoleteFreezes(); } catch { /* same */ }
   const board = await buildBoard(now);
   try { writeOverviewSnapshot(board); } catch { /* table missing in a partial test db */ }
@@ -583,10 +583,10 @@ export async function buildBoard(now = Date.now()): Promise<Board> {
     ).all() as { project: string }[]).map((row) => row.project);
   } catch { /* table missing */ }
   const tips = await deployTipsForProjects(projects);
-  return withRefMemo(() => buildBoardPass(now, tips));
+  return withRefMemoAsync(() => buildBoardPass(now, tips));
 }
 
-function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Board {
+async function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Promise<Board> {
   const cfg = getConfig();
   const atIso = new Date(now).toISOString();
   const openQuestions = listPeerQuestions({ limit: 200 }).filter((q) => q.status === 'sent' || q.status === 'queued');
@@ -653,27 +653,27 @@ function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Board {
   const summaries = loadSummaries([...new Set([...laneFreezes, ...historyFreezes].map((f) => f.run_id).filter((id): id is string => !!id))]);
 
   const awaitingDeploy = new Map<string, boolean>();
-  const mergedNotDeployed = (project: string | null, sha: string): boolean => {
+  const mergedNotDeployed = async (project: string | null, sha: string): Promise<boolean> => {
     const key = `${project ?? ''}\0${sha}`;
     const cached = awaitingDeploy.get(key);
     if (cached !== undefined) return cached;
-    const value = isMergedNotDeployed(project, sha, (project ? tips.get(project) : undefined) ?? { state: 'unknown' });
+    const value = await isMergedNotDeployed(project, sha, (project ? tips.get(project) : undefined) ?? { state: 'unknown' });
     awaitingDeploy.set(key, value);
     return value;
   };
 
-  const toRow = (f: RankedFreeze, mergeOnly: boolean): LaneBoardRow => {
+  const toRow = async (f: RankedFreeze, mergeOnly: boolean): Promise<LaneBoardRow> => {
     const rels = releases.get(f.sha) ?? [];
     const staging = rels.find((r) => r.target === 'staging') ?? null;
     const production = rels.find((r) => r.target === 'production') ?? null;
     let candidate: string | null = null;
     if ((f.status === 'open' || f.status === 'behind-main') && f.project) {
-      try { candidate = candidateFor(f.project, f.sha, now)?.name ?? null; } catch { candidate = null; }
+      try { candidate = (await candidateFor(f.project, f.sha, now))?.name ?? null; } catch { candidate = null; }
     }
-    const checks = f.status === 'stale' ? null : liveChecks(f);
-    const step = mergedNotDeployed(f.project, f.sha)
+    const checks = f.status === 'stale' ? null : await liveChecks(f);
+    const step = await mergedNotDeployed(f.project, f.sha)
       ? { next: 'merged, not yet deployed', promotable: false }
-      : nextStep(f, staging, production, candidate, checks);
+      : await nextStep(f, staging, production, candidate, checks);
     const promotable = step.promotable && !mergeOnly && f.status === 'open' && !stagedOrShipped(staging?.status) && !stagedOrShipped(production?.status);
     const sha8 = f.sha.slice(0, 8);
     const fullGreen = checks ? checks.full === 'green' : f.gate === 'GREEN' || !f.gate;
@@ -691,27 +691,29 @@ function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Board {
   const lanes: LaneBoardRow[] = [];
   const mergeOnlyShas = new Set<string>();
   for (const f of laneFreezes) {
-    const mergeOnly = mergeOnlyAgainst(previous.get(laneKey(f)), f);
+    const mergeOnly = await mergeOnlyAgainst(previous.get(laneKey(f)), f);
     if (mergeOnly) mergeOnlyShas.add(f.sha);
-    const row = toRow(f, mergeOnly);
+    const row = await toRow(f, mergeOnly);
     lanes.push(row);
     if (row.promotable) attention.push({ kind: 'promotable', text: `${f.project ?? ''}${f.desk ? ` Desk #${f.desk}` : ''} ${f.sha.slice(0, 8)}: ${row.next}`, sha: f.sha, run_id: f.run_id! });
     for (const cell of [row.staging, row.production]) {
       if (cell?.status === 'failed') attention.push({ kind: 'release_failed', text: `${cell === row.staging ? 'staging' : 'production'} failed for ${f.sha.slice(0, 8)}: ${cell.error ?? ''}`, sha: f.sha, run_id: f.run_id! });
     }
   }
-  const history = historyFreezes.map((f) => toRow(f, true));
+  const history: LaneBoardRow[] = [];
+  for (const f of historyFreezes) history.push(await toRow(f, true));
 
   const fixes: FixRow[] = [];
   const inCandidate = new Set(lanes.filter((l) => l.candidate).map((l) => l.sha));
-  const fixFreezes = newest.filter((f) => {
-    if (!f.run_id || f.status === 'stale' || f.status === 'merged') return false;
-    if (mergedNotDeployed(f.project, f.sha)) return false;
-    if (mergeOnlyShas.has(f.sha)) return false;
-    if (inCandidate.has(f.sha)) return false;
-    if (!withinFixWindow(f.updated_at, now)) return false;
-    return true;
-  });
+  const fixFreezes: RankedFreeze[] = [];
+  for (const f of newest) {
+    if (!f.run_id || f.status === 'stale' || f.status === 'merged') continue;
+    if (await mergedNotDeployed(f.project, f.sha)) continue;
+    if (mergeOnlyShas.has(f.sha)) continue;
+    if (inCandidate.has(f.sha)) continue;
+    if (!withinFixWindow(f.updated_at, now)) continue;
+    fixFreezes.push(f);
+  }
   const fixReleases = loadReleases([...new Set(fixFreezes.map((f) => f.sha).filter((sha) => !releases.has(sha)))]);
   for (const [sha, rows] of fixReleases) releases.set(sha, rows);
   const assigned = loadFixAssignments(fixFreezes.map((f) => f.sha));
@@ -746,8 +748,8 @@ function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Board {
 
   const candidates: CandidateRow[] = [];
   for (const project of Object.keys(cfg.projects ?? {})) {
-    let refs: ReturnType<typeof listCandidates> = [];
-    try { refs = listCandidates(project, now); } catch { refs = []; }
+    let refs: Awaited<ReturnType<typeof listCandidates>> = [];
+    try { refs = await listCandidates(project, now); } catch { refs = []; }
     const tips = refs.map((c) => c.tip);
     const tipReleases = loadReleases(tips.filter((sha) => !releases.has(sha)));
     for (const [sha, rows] of tipReleases) releases.set(sha, rows);

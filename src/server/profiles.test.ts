@@ -161,14 +161,14 @@ describe('credential profiles', () => {
   describe('launch paths carry the profile', () => {
     it('spawn records the profile and launches with its env', async () => {
       const sm = await import('./session-manager.js');
-      const res = sm.spawnAgent({ name: 'ana-cc', runtime: 'claude-code', workspace: tmpDir, profile: 'ana' });
+      const res = (await sm.spawnAgent({ name: 'ana-cc', runtime: 'claude-code', workspace: tmpDir, profile: 'ana' }));
       expect(res.ok && res.data.profile).toBe('ana');
       expect(tmuxHarness.launched.at(-1)?.command).toBe(`env CLAUDE_CONFIG_DIR=${root}/ana/claude claude --dangerously-skip-permissions`);
     });
 
     it('spawn on an unconfigured profile creates nothing', async () => {
       const sm = await import('./session-manager.js');
-      const res = sm.spawnAgent({ name: 'x', runtime: 'claude-code', workspace: tmpDir, profile: 'carol' });
+      const res = (await sm.spawnAgent({ name: 'x', runtime: 'claude-code', workspace: tmpDir, profile: 'carol' }));
       expect(res).toEqual({ ok: false, error: "Profile 'carol' is not configured" });
       expect(tmuxHarness.launched).toHaveLength(0);
       expect(db.listAgents()).toHaveLength(0);
@@ -176,10 +176,10 @@ describe('credential profiles', () => {
 
     it('restart (crashed session) relaunches on the same profile', async () => {
       const sm = await import('./session-manager.js');
-      const spawned = sm.spawnAgent({ name: 'bob-cx', runtime: 'codex', workspace: tmpDir, profile: 'bob' });
+      const spawned = (await sm.spawnAgent({ name: 'bob-cx', runtime: 'codex', workspace: tmpDir, profile: 'bob' }));
       if (!spawned.ok) throw new Error(spawned.error);
       tmuxHarness.sessions.clear(); // session died
-      const restarted = sm.ensureSpawnedAgentSession(spawned.data.id);
+      const restarted = (await sm.ensureSpawnedAgentSession(spawned.data.id));
       expect(restarted.ok && restarted.data.createdSession).toBe(true);
       expect(tmuxHarness.launched.at(-1)?.command).toMatch(new RegExp(`^env CODEX_HOME=${root}/bob/codex codex `));
     });
@@ -188,7 +188,7 @@ describe('credential profiles', () => {
       const sm = await import('./session-manager.js');
       const adopted = db.insertAgent({ name: 'grok-ana', runtime: 'grok', tmux_session: 'manual-1', workspace: null, mode: 'adopted', status: 'idle', profile: 'ana' });
       if (!adopted.ok) throw new Error(adopted.error);
-      const upgraded = sm.upgrade(adopted.data.id);
+      const upgraded = (await sm.upgrade(adopted.data.id));
       expect(upgraded.ok).toBe(true);
       expect(tmuxHarness.launched.at(-1)?.command).toBe(`env HOME=${root}/ana/grok-home grok --always-approve`);
     });
@@ -197,7 +197,7 @@ describe('credential profiles', () => {
       const liveness = await import('./runtime-liveness.js');
       const agent = db.insertAgent({ name: 'a', runtime: 'claude-code', tmux_session: 'wc-a', workspace: null, mode: 'spawned', status: 'idle', profile: 'ana' });
       if (!agent.ok) throw new Error(agent.error);
-      expect(liveness.relaunchRuntime(agent.data, 'manual').ok).toBe(true);
+      expect((await liveness.relaunchRuntime(agent.data, 'manual')).ok).toBe(true);
       // first relaunch resumes the previous conversation (resume_args), still under the profile env
       expect(tmuxHarness.typed.at(-1)?.text).toBe(`env CLAUDE_CONFIG_DIR=${root}/ana/claude claude --dangerously-skip-permissions --continue`);
     });

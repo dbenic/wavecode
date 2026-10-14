@@ -43,7 +43,7 @@ describe('perf-monitor', () => {
     // the real patch: a fork through child_process is counted without the caller changing
     m.startPerfMonitor();
     const cp = await import('node:child_process');
-    cp.execFileSync('git', ['--version'], { stdio: 'ignore' });
+    cp.execFile('git', ['--version'], () => undefined);
     const after = m.perfSnapshot();
     expect(after.last_minute.spawns['git --version'] ?? after.last_minute.spawns['git']).toBeGreaterThanOrEqual(1);
     expect(after.loop_ms === null || after.loop_ms.p50 >= 0).toBe(true);

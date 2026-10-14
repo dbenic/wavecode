@@ -68,7 +68,7 @@ describe('forward-only staging', () => {
     const sent = await requestRelease({ project: 'demo', sha, lane: 'wc-ales', target: 'staging', actorName: 'denis', actorIsAdmin: true });
     expect(sent.ok).toBe(true);
     if (!sent.ok) throw new Error(sent.error);
-    const reported = reportRelease(sent.data.id, { status: 'deployed', sha, version, note: 'up' });
+    const reported = (await reportRelease(sent.data.id, { status: 'deployed', sha, version, note: 'up' }));
     expect(reported.ok).toBe(true);
     return sent.data.id;
   }
@@ -125,7 +125,7 @@ describe('forward-only staging', () => {
     db.getDb().prepare(
       `INSERT INTO release_requests (id, project, sha, lane, target, origin, status) VALUES ('rel-newer', 'demo', ?, 'wc-ales', 'staging', 'local', 'sent')`,
     ).run(newer);
-    const reported = reportRelease('rel-newer', { status: 'deployed', sha: newer, version: '1.5.0', note: 'up' });
+    const reported = (await reportRelease('rel-newer', { status: 'deployed', sha: newer, version: '1.5.0', note: 'up' }));
     expect(reported.ok).toBe(true);
     const stale = listReleases({ sha: older, target: 'staging', limit: 5 })[0];
     expect(stale?.status).toBe('rejected');
@@ -167,7 +167,7 @@ describe('forward-only staging', () => {
     git(repo, 'commit', '-q', '-m', 'main past staging');
     const past = git(repo, 'rev-parse', 'HEAD');
     git(repo, 'update-ref', 'refs/remotes/origin/main', past);
-    const reported = reportRelease('rel-newer', { status: 'deployed', sha: newer, version: '1.6.0', note: 'up' });
+    const reported = (await reportRelease('rel-newer', { status: 'deployed', sha: newer, version: '1.6.0', note: 'up' }));
     expect(reported.ok).toBe(true);
     const stale = listReleases({ sha: older, target: 'staging', limit: 5 })[0];
     expect(stale?.status).toBe('rejected');
@@ -176,7 +176,7 @@ describe('forward-only staging', () => {
     const marker = path.join(tmp, 'resumed');
     db.getDb().prepare(`UPDATE release_requests SET status = 'sent', deploy_id = 'dep-1' WHERE id = ?`).run(sent.data.id);
     releasesCfg.staging_watch_command = [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`];
-    resumeStagingDeploys();
+    (await resumeStagingDeploys());
     expect(fs.existsSync(marker)).toBe(false);
     expect(listReleases({ sha: older, target: 'staging', limit: 5 })[0]?.status).toBe('rejected');
   });
@@ -224,17 +224,63 @@ describe('fetchOrigin memo', () => {
       git(upstream, 'add', '.'); git(upstream, 'commit', '-q', '-m', 'one');
       execFileSync('git', ['clone', '-q', upstream, clone], { env });
       const first = git(upstream, 'rev-parse', 'HEAD');
-      mod.fetchOrigin(clone);
+      (await mod.fetchOrigin(clone));
       fs.writeFileSync(path.join(upstream, 'a'), '2');
       git(upstream, 'commit', '-q', '-am', 'two');
       const second = git(upstream, 'rev-parse', 'HEAD');
-      mod.fetchOrigin(clone); // within the minute: no fetch
+      (await mod.fetchOrigin(clone)); // within the minute: no fetch
       expect(git(clone, 'rev-parse', 'origin/main')).toBe(first);
       mod.resetFetchMemoForTest();
-      mod.fetchOrigin(clone); // a new minute: fetched
+      (await mod.fetchOrigin(clone)); // a new minute: fetched
       expect(git(clone, 'rev-parse', 'origin/main')).toBe(second);
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one in-flight fetch across concurrent callers and records success only after it finishes', async () => {
+    const mod = await import('./staging-forward.js');
+    const proc = await import('./proc.js');
+    mod.resetFetchMemoForTest();
+    let entered = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const spy = vi.spyOn(proc, 'execFileAsync').mockImplementation(async (file, args) => {
+      const argv = Array.isArray(args) ? args : [];
+      if (file === 'git' && argv.includes('fetch')) {
+        entered += 1;
+        await gate;
+        throw new Error('offline');
+      }
+      return '';
+    });
+    try {
+      const first = mod.fetchOrigin('/repo-shared');
+      const second = mod.fetchOrigin('/repo-shared');
+      await Promise.resolve();
+      expect(entered).toBe(1);
+      let secondSettled = false;
+      void second.then(() => { secondSettled = true; });
+      await Promise.resolve();
+      expect(secondSettled).toBe(false);
+      release();
+      await Promise.all([first, second]);
+      entered = 0;
+      await mod.fetchOrigin('/repo-shared');
+      expect(entered).toBe(1);
+
+      spy.mockImplementation(async () => {
+        entered += 1;
+        return '';
+      });
+      mod.resetFetchMemoForTest();
+      entered = 0;
+      await mod.fetchOrigin('/repo-ok');
+      await mod.fetchOrigin('/repo-ok');
+      expect(entered).toBe(1);
+    } finally {
+      spy.mockRestore();
+      mod.resetFetchMemoForTest();
     }
   });
 });

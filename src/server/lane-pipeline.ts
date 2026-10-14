@@ -12,8 +12,8 @@
  * slot (one lane until Ready for prod or the pin expires).
  */
 
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { execFileAsync } from './proc.js';
 import path from 'node:path';
 import { getConfig, type ProjectConfig } from './config.js';
 import { getAgent, getDb, getRun, listAgents, listAllAgentTags, type Agent, type Result } from './db.js';
@@ -136,22 +136,23 @@ export function laneRefError(project: string, lane: string): string | null {
   return null;
 }
 
-function runArgv(argv: string[]): ExecResult {
+async function runArgv(argv: string[]): Promise<ExecResult> {
   if (argv.length === 0) return { code: 1, stdout: '' };
   if (execForTest) return execForTest(argv);
   try {
-    const stdout = execFileSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 20000, maxBuffer: 2 * 1024 * 1024 });
+    const stdout = await execFileAsync(argv[0], argv.slice(1), { timeout: 20000, maxBuffer: 2 * 1024 * 1024 });
     return { code: 0, stdout };
   } catch (e) {
-    const err = e as { status?: number; stdout?: string };
+    const err = e as { status?: number | null; stdout?: string };
     return { code: typeof err.status === 'number' ? err.status : 1, stdout: String(err.stdout ?? '') };
   }
 }
 
-function git(repo: string, args: string[]): string {
-  return execFileSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', '-c', 'core.fsmonitor=false', '-c', 'user.name=wavecode', '-c', 'user.email=wavecode@localhost', ...args], {
-    encoding: 'utf8', timeout: 15000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
+async function git(repo: string, args: string[]): Promise<string> {
+  const out = await execFileAsync('git', ['-C', repo, '-c', 'commit.gpgsign=false', '-c', 'core.fsmonitor=false', '-c', 'user.name=wavecode', '-c', 'user.email=wavecode@localhost', ...args], {
+    timeout: 15000, maxBuffer: 4 * 1024 * 1024,
+  });
+  return out.trim();
 }
 
 function ensureQueue(): void {
@@ -210,18 +211,18 @@ function tell(agentId: string | null, text: string): void {
   deliverSystemLine(agent.data, text, { kind: 'info', source: 'pipeline' });
 }
 
-function headOf(workspace: string): string | null {
+async function headOf(workspace: string): Promise<string | null> {
   try {
-    const sha = git(workspace, ['rev-parse', 'HEAD']);
+    const sha = await git(workspace, ['rev-parse', 'HEAD']);
     return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
   } catch {
     return null;
   }
 }
 
-function branchOf(workspace: string): string | null {
+async function branchOf(workspace: string): Promise<string | null> {
   try {
-    const name = git(workspace, ['branch', '--show-current']);
+    const name = await git(workspace, ['branch', '--show-current']);
     return name || null;
   } catch {
     return null;
@@ -239,17 +240,17 @@ function workspaceOwnedByDenied(workspace: string): boolean {
 }
 
 /** Merge origin/main. A conflict aborts and names the files. A denied owner's workspace is left untouched. Never pushes. */
-export function mergeMainClean(workspace: string, mainRef: string): { ok: true } | { ok: false; files: string[]; skipped?: boolean } {
+export async function mergeMainClean(workspace: string, mainRef: string): Promise<{ ok: true } | { ok: false; files: string[]; skipped?: boolean }> {
   if (workspaceOwnedByDenied(workspace)) return { ok: false, files: [], skipped: true };
   try {
-    git(workspace, ['merge', '--no-ff', '--no-edit', '-m', 'merge origin/main', mainRef]);
+    await git(workspace, ['merge', '--no-ff', '--no-edit', '-m', 'merge origin/main', mainRef]);
     return { ok: true };
   } catch {
     let files: string[] = [];
     try {
-      files = git(workspace, ['diff', '--name-only', '--diff-filter=U']).split('\n').map((l) => l.trim()).filter(Boolean);
+      files = (await git(workspace, ['diff', '--name-only', '--diff-filter=U'])).split('\n').map((l) => l.trim()).filter(Boolean);
     } catch { /* no unmerged list */ }
-    try { git(workspace, ['merge', '--abort']); } catch { /* already clean, or no merge to abort */ }
+    try { await git(workspace, ['merge', '--abort']); } catch { /* already clean, or no merge to abort */ }
     return { ok: false, files };
   }
 }
@@ -260,15 +261,15 @@ function freezeDir(project: string, pipe: PipelineSwitches): string | null {
   return inbox[0] ?? null;
 }
 
-function publishFreeze(opts: {
+async function publishFreeze(opts: {
   workspace: string; project: string; lane: string; sha: string; author: Agent; pipe: PipelineSwitches;
-}): Result<{ sha: string }> {
+}): Promise<Result<{ sha: string }>> {
   const refused = laneRefError(opts.project, opts.lane);
   if (refused) return { ok: false, error: refused };
   const spec = mainSpec(opts.project);
   const vars = { workspace: opts.workspace, lane: opts.lane, sha: opts.sha, remote: spec.remote, project: opts.project };
   if (opts.pipe.push_command?.length) {
-    const pushed = runArgv(fill(opts.pipe.push_command, vars));
+    const pushed = await runArgv(fill(opts.pipe.push_command, vars));
     if (pushed.code !== 0) {
       const text = `push of ${opts.lane} failed. The freeze was not written.`;
       tell(opts.author.id, text);
@@ -277,7 +278,7 @@ function publishFreeze(opts: {
     }
   }
   if (opts.pipe.quick_check_command?.length) {
-    const checked = runArgv(fill(opts.pipe.quick_check_command, vars));
+    const checked = await runArgv(fill(opts.pipe.quick_check_command, vars));
     if (checked.code !== 0) {
       const text = `quick check failed on ${opts.sha.slice(0, 8)}. The freeze was not written.`;
       tell(opts.author.id, text);
@@ -288,7 +289,7 @@ function publishFreeze(opts: {
   const dir = freezeDir(opts.project, opts.pipe);
   if (!dir) return { ok: false, error: 'no freeze directory' };
   const file = writeFreeze(dir, opts.author.name, opts.project, opts.lane, opts.sha);
-  const ingested = ingestFreezeFile(file);
+  const ingested = await ingestFreezeFile(file);
   if (!ingested.ok) return ingested;
   emit(FROZEN, 'run', opts.sha, { sha: opts.sha, project: opts.project, lane: opts.lane, file }, null);
   note(opts.project, opts.lane, opts.sha, 'freeze', `auto: freeze written on ${opts.sha.slice(0, 8)}`);
@@ -352,16 +353,16 @@ export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: s
   });
 }
 
-function deltaSentence(project: string, lane: string, sha: string): string | null {
+async function deltaSentence(project: string, lane: string, sha: string): Promise<string | null> {
   const repo = projectRepo(project);
-  const mainRef = repo ? resolveMainRef(repo, project) : null;
+  const mainRef = repo ? await resolveMainRef(repo, project) : null;
   if (!repo || !mainRef) return null;
   const previous = listFreezes().find((f) => f.project === project && f.lane === lane && f.sha !== sha && f.verdict === 'pass');
-  if (!previous || !isMergeOnlyDelta(repo, previous.sha, sha, mainRef)) return null;
+  if (!previous || !await isMergeOnlyDelta(repo, previous.sha, sha, mainRef)) return null;
   return `delta review: merge only. Previous verdict: ${previous.verdict_path ?? previous.sha}`;
 }
 
-function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 'assign'): void {
+async function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 'assign'): Promise<void> {
   if (!freeze.project || !freeze.author_agent_id) return;
   const pipe = pipelineOf(freeze.project);
   if (!pipe.auto_review) return;
@@ -378,7 +379,7 @@ function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 'assig
     tell(author.data.id, text);
     return;
   }
-  const delta = freeze.lane ? deltaSentence(freeze.project, freeze.lane, freeze.sha) : null;
+  const delta = freeze.lane ? await deltaSentence(freeze.project, freeze.lane, freeze.sha) : null;
   const sha8 = freeze.sha.slice(0, 8);
   const text = delta
     ? `[from WaveCode] ${delta}. New SHA ${sha8} on ${freeze.lane}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).`
@@ -458,7 +459,7 @@ function gateWord(stdout: string): 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED' | null
   return null;
 }
 
-function queueFullGate(freeze: ReleaseFreeze): void {
+async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
   if (!freeze.project) return;
   if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
   const pipe = pipelineOf(freeze.project);
@@ -468,7 +469,7 @@ function queueFullGate(freeze: ReleaseFreeze): void {
   const argv = fill(pipe.gate_command, {
     sha: freeze.sha, lane: freeze.lane ?? '', workspace: '', remote: spec.remote, project: freeze.project,
   });
-  const result = runArgv(argv);
+  const result = await runArgv(argv);
   const word = gateWord(result.stdout) ?? (result.code === 0 ? 'QUEUED' : 'RED');
   setFreezeGate(freeze.sha, word);
   emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: word }, null);
@@ -476,12 +477,12 @@ function queueFullGate(freeze: ReleaseFreeze): void {
   if (word === 'GREEN') {
     pingReviewersForGreenSha(freeze.sha);
     const fresh = getFreeze(freeze.sha);
-    if (fresh && fresh.verdict !== 'pass' && pipelineOf(fresh.project).auto_review) assignReviewer(fresh, 'green');
+    if (fresh && fresh.verdict !== 'pass' && pipelineOf(fresh.project).auto_review) await assignReviewer(fresh, 'green');
   }
 }
 
-function isGreen(freeze: ReleaseFreeze): boolean {
-  return viewShaChecks(freeze).full === 'green';
+async function isGreen(freeze: ReleaseFreeze): Promise<boolean> {
+  return (await viewShaChecks(freeze)).full === 'green';
 }
 
 function touches(files: string[], paths: string[]): string | null {
@@ -491,7 +492,7 @@ function touches(files: string[], paths: string[]): string | null {
   return null;
 }
 
-function overlapWithStaging(project: string, lane: string, files: string[], repo: string, mainRef: string): { lane: string; files: number } | null {
+async function overlapWithStaging(project: string, lane: string, files: string[], repo: string, mainRef: string): Promise<{ lane: string; files: number } | null> {
   const deployed = listReleases({ project, target: 'staging', status: 'deployed', limit: 40 });
   let overlap: { lane: string; files: number } | null = null;
   const spec = mainSpec(project);
@@ -499,10 +500,10 @@ function overlapWithStaging(project: string, lane: string, files: string[], repo
     if (!rel.lane || rel.lane === lane) continue;
     let otherSha = rel.sha;
     try {
-      const tip = git(repo, ['rev-parse', '--verify', `${spec.remote}/${rel.lane}^{commit}`]);
+      const tip = await git(repo, ['rev-parse', '--verify', `${spec.remote}/${rel.lane}^{commit}`]);
       if (/^[0-9a-f]{40}$/i.test(tip)) otherSha = tip;
     } catch { /* the deployed SHA is enough */ }
-    const other = new Set(changedFiles(repo, otherSha, mainRef));
+    const other = new Set(await changedFiles(repo, otherSha, mainRef));
     const n = files.filter((file) => other.has(file)).length;
     if (n > 0 && (!overlap || n > overlap.files)) overlap = { lane: rel.lane, files: n };
   }
@@ -542,6 +543,19 @@ function enqueue(freeze: ReleaseFreeze, kind: 'stage' | 'dump'): void {
 
 /** One staging slot per project. The next lane waits for Ready for prod or pin expiry. */
 export async function drainStagingQueue(project: string): Promise<void> {
+  try {
+    await drainStagingQueueBody(project);
+  } catch (e) {
+    const message = (e as Error).message ?? '';
+    if (/no such table: pipeline_queue/i.test(message)) {
+      logger.debug({ project, error: message }, 'Staging queue drain skipped');
+      return;
+    }
+    throw e;
+  }
+}
+
+async function drainStagingQueueBody(project: string): Promise<void> {
   if (!project || slotBusy(project)) return;
   ensureQueue();
   const row = getDb().prepare(
@@ -553,10 +567,11 @@ export async function drainStagingQueue(project: string): Promise<void> {
     getDb().prepare('DELETE FROM pipeline_queue WHERE sha = ?').run(row.sha);
     return drainStagingQueue(project);
   }
-  if (!isGreen(freeze)) {
+  if (!await isGreen(freeze)) {
     note(row.project, row.lane, row.sha, 'hold', `auto: waiting for GREEN on ${row.sha.slice(0, 8)}`);
     return;
   }
+  if (slotBusy(project)) return;
   const { stageEligibility } = await import('./sha-stage-block.js');
   const eligible = await stageEligibility(row.sha, row.project, { markStale: true });
   if (eligible.error) {
@@ -565,6 +580,7 @@ export async function drainStagingQueue(project: string): Promise<void> {
     logger.warn({ sha: row.sha, error: eligible.error }, 'Auto-stage refused');
     return;
   }
+  if (slotBusy(project)) return;
   const dump = row.kind === 'dump';
   // Staging only. This function has no production target.
   const sent = await requestRelease({
@@ -609,29 +625,29 @@ export async function considerAutoStage(sha: string): Promise<void> {
   }
   if (freeze.status !== 'open') return;
   if (listReleases({ project: freeze.project, sha: freeze.sha, target: 'staging', limit: 5 }).some((r) => r.status !== 'failed' && r.status !== 'rejected')) return;
-  const behind = commitsBehind(freeze.project, freeze.sha);
+  const behind = await commitsBehind(freeze.project, freeze.sha);
   if (behind == null || behind > 0) {
     note(freeze.project, freeze.lane, freeze.sha, 'hold', `auto: behind main — not staged`);
     return;
   }
-  if (!isGreen(freeze)) {
+  if (!await isGreen(freeze)) {
     note(freeze.project, freeze.lane, freeze.sha, 'hold', `auto: waiting for GREEN on ${freeze.sha.slice(0, 8)}`);
     return;
   }
   const repo = projectRepo(freeze.project);
-  const mainRef = repo ? resolveMainRef(repo, freeze.project) : null;
+  const mainRef = repo ? await resolveMainRef(repo, freeze.project) : null;
   if (!repo || !mainRef) {
     note(freeze.project, freeze.lane, freeze.sha, 'hold', 'auto: repo unavailable — not staged');
     return;
   }
   const project = getConfig().projects?.[freeze.project];
-  const files = changedFiles(repo, freeze.sha, mainRef);
+  const files = await changedFiles(repo, freeze.sha, mainRef);
   const protectedPath = touches(files, project?.protected_paths ?? []);
   if (protectedPath) {
     note(freeze.project, freeze.lane, freeze.sha, 'hold', `auto: touches ${protectedPath} — not staged`);
     return;
   }
-  const overlap = overlapWithStaging(freeze.project, freeze.lane, files, repo, mainRef);
+  const overlap = await overlapWithStaging(freeze.project, freeze.lane, files, repo, mainRef);
   if (overlap) {
     note(freeze.project, freeze.lane, freeze.sha, 'hold', `auto: overlaps lane ${overlap.lane} in ${overlap.files} files — not staged`);
     return;
@@ -657,7 +673,7 @@ export async function considerAutoStage(sha: string): Promise<void> {
  * Merges a clean main, pushes only the lane branch, runs the quick check,
  * and writes the freeze note.
  */
-export function onAuthorDone(agentId: string): Result<{ sha: string }> {
+export async function onAuthorDone(agentId: string): Promise<Result<{ sha: string }>> {
   try {
     const agent = getAgent(agentId);
     if (!agent.ok || !agent.data.workspace) return { ok: false, error: 'no workspace' };
@@ -665,28 +681,28 @@ export function onAuthorDone(agentId: string): Result<{ sha: string }> {
     if (!project) return { ok: false, error: 'no project' };
     const pipe = pipelineOf(project);
     if (!pipe.auto_freeze) return { ok: false, error: 'auto-freeze off' };
-    const lane = branchOf(agent.data.workspace);
+    const lane = await branchOf(agent.data.workspace);
     const spec = mainSpec(project);
     const refused = lane ? laneRefError(project, lane) : 'not a developer lane';
     if (!lane || refused) return { ok: false, error: refused ?? 'not a developer lane' };
     if (laneAutomationDenied(project, agent.data, lane)) return { ok: false, error: `refusing ${lane}: denied` };
     const repo = projectRepo(project) ?? agent.data.workspace;
-    const mainRef = resolveMainRef(repo, project) ?? `${spec.remote}/${spec.branch}`;
-    let sha = headOf(agent.data.workspace);
+    const mainRef = await resolveMainRef(repo, project) ?? `${spec.remote}/${spec.branch}`;
+    let sha = await headOf(agent.data.workspace);
     if (!sha) return { ok: false, error: 'no HEAD' };
-    const behind = commitsBehind(project, sha);
+    const behind = await commitsBehind(project, sha);
     if (behind != null && behind > 0) {
       if (laneAutomationDenied(project, agent.data)) return { ok: false, error: 'excluded from lane automation' };
-      const merged = mergeMainClean(agent.data.workspace, mainRef);
+      const merged = await mergeMainClean(agent.data.workspace, mainRef);
       if (!merged.ok) {
         if (merged.skipped) return { ok: false, error: 'excluded from lane automation' };
         const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
-        alertBehind({ lane, project, authorAgentId: agent.data.id, authorName: agent.data.name });
+        await alertBehind({ lane, project, authorAgentId: agent.data.id, authorName: agent.data.name });
         const text = behindConflict(lane);
         note(project, lane, sha, 'merge', `auto: merge conflict in ${files} — @${agent.data.name}`);
         return { ok: false, error: text };
       }
-      sha = headOf(agent.data.workspace) ?? sha;
+      sha = await headOf(agent.data.workspace) ?? sha;
     }
     if (acted(sha, FROZEN)) return { ok: false, error: 'already frozen' };
     return publishFreeze({ workspace: agent.data.workspace, project, lane, sha, author: agent.data, pipe });
@@ -701,12 +717,12 @@ function behindConflict(lane: string): string {
 }
 
 /** Main moved: clean-merge every open lane that is now behind, then refreeze. `review_deny` seats are left alone. */
-export function onMainAdvanced(project: string, mainSha?: string): void {
+export async function onMainAdvanced(project: string, mainSha?: string): Promise<void> {
   const pipe = pipelineOf(project);
   if (!pipe.auto_merge_main) return;
   const repo = projectRepo(project);
   if (!repo) return;
-  const mainRef = resolveMainRef(repo, project);
+  const mainRef = await resolveMainRef(repo, project);
   if (!mainRef) return;
   const lanes = new Set<string>();
   for (const freeze of listFreezes()) {
@@ -714,44 +730,50 @@ export function onMainAdvanced(project: string, mainSha?: string): void {
   }
   for (const agent of listAgents()) {
     if (!agent.workspace) continue;
-    const branch = branchOf(agent.workspace);
+    const branch = await branchOf(agent.workspace);
     if (branch && !laneRefError(project, branch)) lanes.add(branch);
   }
   for (const lane of lanes) {
     if (laneRefError(project, lane)) continue;
-    const author = listAgents().find((agent) => agent.workspace && branchOf(agent.workspace) === lane);
+    let author: Agent | undefined;
+    for (const agent of listAgents()) {
+      if (!agent.workspace) continue;
+      if (await branchOf(agent.workspace) === lane) { author = agent; break; }
+    }
     if (!author?.workspace || laneAutomationDenied(project, author, lane)) continue;
-    const before = headOf(author.workspace);
+    const before = await headOf(author.workspace);
     if (!before) continue;
-    const behind = commitsBehind(project, before);
+    const behind = await commitsBehind(project, before);
     if (behind == null || behind <= 0) continue;
-    const merged = mergeMainClean(author.workspace, mainRef);
+    const merged = await mergeMainClean(author.workspace, mainRef);
     if (!merged.ok) {
       if (merged.skipped) continue;
       const files = merged.files.length ? merged.files.join(', ') : 'unknown files';
-      const shaNow = mainSha ?? mainTip(repo, project)?.sha ?? '';
-      if (shaNow) alertBehind({ lane, project, authorAgentId: author.id, authorName: author.name });
+      const tip = await mainTip(repo, project);
+      const shaNow = mainSha ?? tip?.sha ?? '';
+      if (shaNow) await alertBehind({ lane, project, authorAgentId: author.id, authorName: author.name });
       note(project, lane, before, 'merge', `auto: merge conflict in ${files} — @${author.name}`);
       continue;
     }
-    const sha = headOf(author.workspace);
-    const mergedTip = mainSha ?? mainTip(repo, project)?.sha ?? '';
-    if (mergedTip) alertMerged({ lane, project, mainSha: mergedTip, authorAgentId: author.id, authorName: author.name });
+    const sha = await headOf(author.workspace);
+    const tip = await mainTip(repo, project);
+    const mergedTip = mainSha ?? tip?.sha ?? '';
+    if (mergedTip) await alertMerged({ lane, project, mainSha: mergedTip, authorAgentId: author.id, authorName: author.name });
     if (!sha || sha === before || acted(sha, FROZEN)) continue;
-    publishFreeze({ workspace: author.workspace, project, lane, sha, author, pipe });
+    await publishFreeze({ workspace: author.workspace, project, lane, sha, author, pipe });
   }
 }
 
-export function onFreezeRecorded(sha: string): void {
+export async function onFreezeRecorded(sha: string): Promise<void> {
   const freeze = getFreeze(sha);
   if (!freeze || (freeze.status !== 'open' && freeze.status !== 'behind-main')) return;
   if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
-  try { queueFullGate(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'); }
-  try { assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
-  void considerAutoStage(sha).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'));
+  try { await queueFullGate(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'); }
+  try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
+  try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
 }
 
-export function onStagingDeployed(releaseId: string): void {
+export async function onStagingDeployed(releaseId: string): Promise<void> {
   const release = getRelease(releaseId);
   if (!release || release.target !== 'staging' || release.status !== 'deployed' || release.requested_by !== 'auto') return;
   if (acted(release.sha, LIVE)) return;
@@ -763,11 +785,15 @@ export function onStagingDeployed(releaseId: string): void {
   void notify({ title: 'Live on staging', body: text, url: '/release', tag: `live-${release.sha}` }).catch(() => {});
   emit(LIVE, 'run', release.sha, { sha: release.sha, project: release.project, lane: release.lane, text }, null);
   if (release.project && release.lane) note(release.project, release.lane, release.sha, 'live', text);
-  if (release.project) void drainStagingQueue(release.project);
+  if (release.project) await drainStagingQueue(release.project);
 }
 
 pipelineHooks.onFreeze = onFreezeRecorded;
-pipelineHooks.onAuthorDone = (agentId) => { onAuthorDone(agentId); };
-pipelineHooks.onMain = (project, sha) => { onMainAdvanced(project, sha); };
+pipelineHooks.onAuthorDone = (agentId) => {
+  void onAuthorDone(agentId).catch((e) => logger.debug({ agentId, error: (e as Error).message }, 'Auto-freeze skipped'));
+};
+pipelineHooks.onMain = (project, sha) => {
+  void onMainAdvanced(project, sha).catch((e) => logger.debug({ project, error: (e as Error).message }, 'Auto-merge skipped'));
+};
 pipelineHooks.onDeployed = onStagingDeployed;
-pipelineHooks.onVerified = (project) => { if (project) void drainStagingQueue(project); };
+pipelineHooks.onVerified = (project) => (project ? drainStagingQueue(project) : undefined);

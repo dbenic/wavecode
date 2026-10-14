@@ -170,7 +170,7 @@ describe('staging tip is proxied from the release peer', () => {
   it('the forwarding box reports the peer health tip and blocks the card', async () => {
     const laneSha = git(repo, 'rev-parse', 'refs/remotes/origin/wc-a');
     const stagingSha = git(repo, 'rev-parse', 'staging');
-    expect(currentStagingTip('wavepulse')?.sha).toBe(laneSha);
+    expect((await currentStagingTip('wavepulse'))?.sha).toBe(laneSha);
 
     const devRes = await dev.fetch(new Request('http://dev.local/api/releases/staging-tip?project=wavepulse'));
     expect(devRes.status).toBe(200);

@@ -146,7 +146,7 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
     if (!recipient?.ok) return c.json(result.data, 201);
     // Spec §5c: the agent's persona is prepended to everything typed into it
     const injectedText = withPersona(recipient.data, formatInjectedReply(user.name, result.data.message));
-    const injection = injectReply(recipient.data, injectedText);
+    const injection = await injectReply(recipient.data, injectedText);
     if (injection.ok) {
       // Spec §5b: the agent's answer appears in the thread under this message
       replyCapture.trackPrompt({ agent: recipient.data, actorId: user.id, prompt: injectedText, promptEventId: created?.id ?? null });
@@ -209,10 +209,10 @@ export function registerMessageRoutes(app: Hono<NodeAppEnv>): void {
  * failure is reported to the caller rather than failing the request. Never
  * types into a bare shell (T0) or a file-runner seat (no pane).
  */
-function injectReply(agent: Agent, text: string): { ok: true } | { ok: false; error: string } {
+async function injectReply(agent: Agent, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
   if (isFileRunnerSeat(agent)) return { ok: false, error: 'File-runner seats have no terminal' };
-  if (getRuntimeState(agent) === 'dead') return { ok: false, error: 'runtime not running' };
-  const sent = sessionManager.sendKeys(agent.id, text);
+  if (await getRuntimeState(agent) === 'dead') return { ok: false, error: 'runtime not running' };
+  const sent = await sessionManager.sendKeys(agent.id, text);
   if (!sent.ok) {
     logger.warn({ agentId: agent.id, error: sent.error }, 'Reply injection failed');
     return { ok: false, error: sent.error };

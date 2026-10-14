@@ -14,7 +14,7 @@
  * (docs/peers.md). No credentials cross the wire; only text.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileAsync } from './proc.js';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -297,8 +297,8 @@ export async function onRunPromoted(
   let head = freeze?.sha ?? 'unknown';
   let branch = freeze?.lane ?? 'unknown';
   if (!freeze && agent.data.workspace && fs.existsSync(agent.data.workspace)) {
-    try { head = execFileSync('git', ['-C', agent.data.workspace, 'rev-parse', 'HEAD'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
-    try { branch = execFileSync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], { encoding: 'utf-8', timeout: 5000 }).trim(); } catch { /* keep unknown */ }
+    try { head = (await execFileAsync('git', ['-C', agent.data.workspace, 'rev-parse', 'HEAD'], { timeout: 5000 })).trim(); } catch { /* keep unknown */ }
+    try { branch = (await execFileAsync('git', ['-C', agent.data.workspace, 'branch', '--show-current'], { timeout: 5000 })).trim(); } catch { /* keep unknown */ }
   }
   const summary = (run.summary ?? '').trim().substring(0, 1500);
   const question = freeze
@@ -353,7 +353,7 @@ function writeAnswerFile(q: PeerQuestion, answer: string): string {
 
 const undelivered = new Map<string, string[]>(); // from_agent_id → question ids waiting for an idle pane
 
-function recordAnswer(q: PeerQuestion, answer: string): void {
+async function recordAnswer(q: PeerQuestion, answer: string): Promise<void> {
   const file = writeAnswerFile(q, answer);
   getDb().prepare(`UPDATE peer_questions SET status = 'answered', answer_path = ?, answered_at = datetime('now') WHERE id = ?`).run(file, q.id);
   emit('peer.answer', 'peer', `${q.peer}/${q.agent}`, {
@@ -361,11 +361,11 @@ function recordAnswer(q: PeerQuestion, answer: string): void {
     answer_path: file, answer: answer.substring(0, 4000), question: q.question.substring(0, 300),
   }, null);
   logger.info({ questionId: q.id, file }, 'Peer answer stored');
-  if (q.from_agent_id) deliverOrQueue(q.id, q.from_agent_id);
+  if (q.from_agent_id) await deliverOrQueue(q.id, q.from_agent_id);
   void sendNextQueued(q.peer, q.remote_agent_id);
 }
 
-function deliverOrQueue(questionId: string, agentId: string): void {
+async function deliverOrQueue(questionId: string, agentId: string): Promise<void> {
   const agent = getAgent(agentId);
   if (!agent.ok) return;
   if (agent.data.status === 'working') {
@@ -374,7 +374,7 @@ function deliverOrQueue(questionId: string, agentId: string): void {
     undelivered.set(agentId, list);
     return;
   }
-  deliver(questionId, agent.data);
+  await deliver(questionId, agent.data);
 }
 
 /** The asker (if a person) must still be allowed to act on the target pane when the answer lands. */
@@ -385,7 +385,7 @@ function deliveryStillAllowed(q: PeerQuestion, agent: Agent): boolean {
   return checkAgentAccess(agent, user.data).ok;
 }
 
-function deliver(questionId: string, agent: Agent): void {
+async function deliver(questionId: string, agent: Agent): Promise<void> {
   const q = getPeerQuestion(questionId);
   if (!q || q.status !== 'answered' || !q.answer_path) return;
   if (!deliveryStillAllowed(q, agent)) {
@@ -398,7 +398,7 @@ function deliver(questionId: string, agent: Agent): void {
   } catch { /* file gone: deliver the pointer only */ }
   const clipped = answer.length > DELIVER_CHARS ? `${answer.substring(0, DELIVER_CHARS)}\n…(full answer in the file)` : answer;
   const text = `[Answer from ${q.peer}/${q.agent} to your question "${q.question.substring(0, 80).replace(/\s+/g, ' ')}"] Full text: ${q.answer_path}\n\n${clipped}`;
-  const sent = sessionManager.sendKeys(agent.id, text);
+  const sent = await sessionManager.sendKeys(agent.id, text);
   if (sent.ok) {
     getDb().prepare(`UPDATE peer_questions SET status = 'delivered' WHERE id = ?`).run(q.id);
   } else {
@@ -407,13 +407,13 @@ function deliver(questionId: string, agent: Agent): void {
 }
 
 /** Output-watcher hook: an agent went idle — hand it any answers that arrived while it worked. */
-export function onAgentIdle(agentId: string): void {
+export async function onAgentIdle(agentId: string): Promise<void> {
   const list = undelivered.get(agentId);
   if (!list?.length) return;
   undelivered.delete(agentId);
   const agent = getAgent(agentId);
   if (!agent.ok) return;
-  for (const id of list) deliver(id, agent.data);
+  for (const id of list) await deliver(id, agent.data);
 }
 
 function fail(q: PeerQuestion, error: string): void {
@@ -578,7 +578,7 @@ async function pollLoop(peerName: string, state: { stop: boolean }): Promise<voi
       const ev = byPrompt.get(q.remote_prompt_event_id!)!;
       const msg = messages.data.find((m) => m.id === ev.entity_id);
       if (!msg) continue; // not visible yet; next poll
-      recordAnswer(q, msg.message);
+      await recordAnswer(q, msg.message);
     }
   }
 }

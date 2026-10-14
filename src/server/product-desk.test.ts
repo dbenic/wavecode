@@ -109,7 +109,7 @@ describe('product-desk.ts', () => {
     const v = path.join(inbox, `claude2-verdict-pd108-${SHA.slice(0, 8)}.md`);
     fs.writeFileSync(v, `# Verdict: Codex2 PD-108 (exact SHA ${SHA})\nProject: wavepulse · reviewer Claude2 · Author: codex2\n\nVERDICT: NEEDS FIXES\n`);
     db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: path.join(tmp, 'ws', 'claude2'), mode: 'spawned', status: 'idle' });
-    expect(rf.ingestFreezeFile(v).ok).toBe(true);
+    expect((await rf.ingestFreezeFile(v)).ok).toBe(true);
 
     const res = await app.fetch(new Request('http://x/api/desk'));
     expect(res.status).toBe(200);

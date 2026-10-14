@@ -54,9 +54,9 @@ export function isBareShellPrompt(paneText: string): boolean {
 export type RuntimeState = 'alive' | 'dead' | 'unknown';
 
 /** Inspect the pane. `unknown` = no session / capture failed (not our call to relaunch). */
-export function getRuntimeState(agent: Pick<Agent, 'tmux_session'>): RuntimeState {
-  if (!tmux.hasSession(agent.tmux_session)) return 'unknown';
-  const capture = tmux.capturePane(agent.tmux_session, 20);
+export async function getRuntimeState(agent: Pick<Agent, 'tmux_session'>): Promise<RuntimeState> {
+  if (!(await tmux.hasSession(agent.tmux_session))) return 'unknown';
+  const capture = await tmux.capturePane(agent.tmux_session, 20);
   if (!capture.ok) return 'unknown';
   return isBareShellPrompt(capture.data) ? 'dead' : 'alive';
 }
@@ -92,7 +92,7 @@ export function relaunchAttemptsExhausted(agentId: string): boolean {
  * window, so the monitor tick and a dispatch never double-launch. Refuses
  * once MAX_RELAUNCH_ATTEMPTS were sent without the runtime coming back.
  */
-export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check' | 'manual'): Result<{ sent: boolean }> {
+export async function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check' | 'manual'): Promise<Result<{ sent: boolean }>> {
   const last = relaunchedAt.get(agent.id);
   if (last !== undefined && Date.now() - last < RUNTIME_SETTLE_TIMEOUT_MS) {
     return { ok: true, data: { sent: false } };
@@ -109,7 +109,7 @@ export function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check
   const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile, resume: attempts === 0 });
   if (!command.ok) return command;
   try {
-    tmux.sendTextAndEnter(agent.tmux_session, command.data, { mode: 'type' }); // a shell prompt: typed, not pasted
+    await tmux.sendTextAndEnter(agent.tmux_session, command.data, { mode: 'type' }); // a shell prompt: typed, not pasted
   } catch (e) {
     return { ok: false, error: `Failed to relaunch runtime: ${(e as Error).message}` };
   }
@@ -140,7 +140,7 @@ export async function waitForRuntimeSettled(
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollMs));
-    const state = getRuntimeState(agent);
+    const state = await getRuntimeState(agent);
     streak = state === 'alive' ? streak + 1 : 0;
     if (streak >= SETTLE_CHECKS) return true;
   }
@@ -156,9 +156,9 @@ export async function ensureRuntimeAlive(
   agent: Agent,
   opts: { timeoutMs?: number; pollMs?: number } = {},
 ): Promise<Result<{ relaunched: boolean }>> {
-  if (getRuntimeState(agent) !== 'dead') return { ok: true, data: { relaunched: false } };
+  if (await getRuntimeState(agent) !== 'dead') return { ok: true, data: { relaunched: false } };
 
-  const relaunch = relaunchRuntime(agent, 'dispatch');
+  const relaunch = await relaunchRuntime(agent, 'dispatch');
   if (!relaunch.ok) {
     logger.warn({ agentId: agent.id, error: relaunch.error }, 'Runtime relaunch failed');
     return { ok: false, error: RUNTIME_NOT_RUNNING };

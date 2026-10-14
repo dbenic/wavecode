@@ -222,6 +222,7 @@ describe('code-review.ts', () => {
         '- [severity: HIGH] broken auth check',
         'VERDICT: NEEDS FIXES',
       ].join('\n'));
+      await new Promise((resolve) => setImmediate(resolve));
 
       const review = codeReview.getReview(reviewId);
       expect(review?.status).toBe('done');
@@ -492,25 +493,25 @@ describe('code-review.ts', () => {
       fs.writeFileSync(path.join(repo, 'app.ts'), 'const a = 2;\n');
 
       vi.mocked(tmux.getPaneDir).mockReturnValue(null);
-      const dirty = codeReview.captureGitDiff({
+      const dirty = (await codeReview.captureGitDiff({
         tmuxSession: 'wc-missing',
         workspace: repo,
-      });
+      }));
       expect(dirty).toMatch(/const a = 2/);
 
       execFileSync('git', ['-C', repo, 'add', 'app.ts']);
       execFileSync('git', ['-C', repo, 'commit', '-m', 'update']);
-      const committed = codeReview.captureGitDiff({
+      const committed = (await codeReview.captureGitDiff({
         tmuxSession: 'wc-missing',
         workspace: repo,
-      });
+      }));
       expect(committed).toMatch(/const a = 2/);
 
-      const listed = codeReview.captureGitDiff({
+      const listed = (await codeReview.captureGitDiff({
         tmuxSession: 'wc-missing',
         workspace: null,
         changedFiles: JSON.stringify(['src/auth.ts', 'src/db.ts']),
-      });
+      }));
       expect(listed).toBe(
         'Changed files (no unified diff available):\n- src/auth.ts\n- src/db.ts',
       );
@@ -532,7 +533,7 @@ describe('code-review.ts', () => {
       git('commit', '-m', 'init');
 
       // On main itself there is no lane base → nothing to review beyond HEAD
-      expect(codeReview.resolveLaneBase(repo)).toBeNull();
+      expect((await codeReview.resolveLaneBase(repo))).toBeNull();
 
       git('checkout', '-q', '-b', 'wc-lane');
       fs.writeFileSync(path.join(repo, 'first.ts'), 'export const first = 1;\n');
@@ -543,7 +544,7 @@ describe('code-review.ts', () => {
       git('commit', '-m', 'lane commit 2');
 
       vi.mocked(tmux.getPaneDir).mockReturnValue(null);
-      const diff = codeReview.captureGitDiff({ tmuxSession: 'wc-missing', workspace: repo });
+      const diff = (await codeReview.captureGitDiff({ tmuxSession: 'wc-missing', workspace: repo }));
 
       // Both lane commits are in the review unit — `git show HEAD` alone would miss first.ts
       expect(diff).toMatch(/first = 1/);

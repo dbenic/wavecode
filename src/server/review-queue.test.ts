@@ -137,13 +137,13 @@ describe('review-queue.ts', () => {
     reviewConfig.require_pass_to_promote = true;
 
     // No review at all → blocked
-    const noReview = queue.promote(fixture.runId);
+    const noReview = (await queue.promote(fixture.runId));
     expect(noReview.ok).toBe(false);
     if (!noReview.ok) expect(noReview.error).toContain('no completed review');
 
     // Non-pass verdict → blocked
     await insertCompletedAiReview(fixture.runId, 'needs-fixes');
-    const nonPass = queue.promote(fixture.runId);
+    const nonPass = (await queue.promote(fixture.runId));
     expect(nonPass.ok).toBe(false);
     if (!nonPass.ok) expect(nonPass.error).toContain("'needs-fixes'");
   });
@@ -155,7 +155,7 @@ describe('review-queue.ts', () => {
     reviewConfig.auto_review = true; // gating implied, require flag stays off
 
     await insertCompletedAiReview(fixture.runId, 'pass');
-    const result = queue.promote(fixture.runId);
+    const result = (await queue.promote(fixture.runId));
     expect(result.ok).toBe(true);
     expect(expectOk(db.getRun(fixture.runId)).review_status).toBe('approved');
   });
@@ -168,7 +168,7 @@ describe('review-queue.ts', () => {
     reviewConfig.require_pass_to_promote = true;
 
     await insertCompletedAiReview(fixture.runId, 'needs-fixes');
-    const result = queue.promote(fixture.runId, { overrideReason: 'accepting vs known-red baseline' });
+    const result = (await queue.promote(fixture.runId, { overrideReason: 'accepting vs known-red baseline' }));
 
     expect(result.ok).toBe(true);
     expect(expectOk(db.getRun(fixture.runId)).review_status).toBe('approved');
@@ -184,7 +184,7 @@ describe('review-queue.ts', () => {
     const dispatcher = await import('./task-dispatcher.js');
     reviewConfig.gate_dependents_on_approval = true;
 
-    const result = queue.promote(fixture.runId);
+    const result = (await queue.promote(fixture.runId));
 
     expect(result.ok).toBe(true);
     expect(vi.mocked(dispatcher.unblockDependentsPublic)).toHaveBeenCalledWith(fixture.taskId);
@@ -196,7 +196,7 @@ describe('review-queue.ts', () => {
     const transactionSpy = vi.spyOn(db.getDb(), 'transaction');
     const queue = await import('./review-queue.js');
 
-    const result = queue.promote(fixture.runId);
+    const result = (await queue.promote(fixture.runId));
 
     expect(result.ok).toBe(true);
     expect(transactionSpy).toHaveBeenCalledTimes(1);
@@ -247,7 +247,7 @@ describe('review-queue.ts', () => {
       require_result_to_promote: true,
     };
 
-    const blocked = queue.promote(fixture.runId, { overrideReason: 'known-red' });
+    const blocked = (await queue.promote(fixture.runId, { overrideReason: 'known-red' }));
     expect(blocked.ok).toBe(false);
     if (!blocked.ok) expect(blocked.error).toContain('no referee RESULT');
   });
@@ -272,7 +272,7 @@ describe('review-queue.ts', () => {
       checked_at: '2026-08-16T00:00:00Z',
     });
 
-    const result = queue.promote(fixture.runId);
+    const result = (await queue.promote(fixture.runId));
     expect(result.ok).toBe(true);
     expect(expectOk(db.getRun(fixture.runId)).review_status).toBe('approved');
   });

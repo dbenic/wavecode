@@ -12,13 +12,13 @@ function resolveAgentId(ref: string): string {
   return agent.ok ? agent.data.id : ref;
 }
 
-function attachUploadedArtifact(
+async function attachUploadedArtifact(
   artifact: Artifact,
   agentId?: string | null,
-): Result<Artifact & { attached_path?: string }> {
+): Promise<Result<Artifact & { attached_path?: string }>> {
   if (!agentId) return { ok: true, data: artifact };
 
-  const attachResult = artifactManager.attachArtifactToAgent(artifact.id, agentId);
+  const attachResult = await artifactManager.attachArtifactToAgent(artifact.id, agentId);
   if (!attachResult.ok) return attachResult;
 
   return {
@@ -153,7 +153,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
 
       if (!result.ok) return c.json({ error: result.error }, 400);
 
-      const attached = attachUploadedArtifact(result.data, agentId);
+      const attached = await attachUploadedArtifact(result.data, agentId);
       if (!attached.ok) return c.json({ error: attached.error }, 400);
       return c.json(attached.data, 201);
     }
@@ -178,7 +178,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
 
     if (!result.ok) return c.json({ error: result.error }, 500);
 
-    const attached = attachUploadedArtifact(result.data, agentId);
+    const attached = await attachUploadedArtifact(result.data, agentId);
     if (!attached.ok) return c.json({ error: attached.error }, 400);
     return c.json(attached.data, 201);
   });
@@ -212,7 +212,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
     }
 
     if (agentId) {
-      const attachResult = artifactManager.attachArtifactToAgent(artifactId, agentId);
+      const attachResult = await artifactManager.attachArtifactToAgent(artifactId, agentId);
       if (!attachResult.ok) return c.json({ error: attachResult.error }, 400);
       response.attached_path = attachResult.data.attachedPath;
     }
@@ -232,7 +232,7 @@ export function registerArtifactRoutes(app: Hono<NodeAppEnv>): void {
     const access = leases.checkAgentAccess(resolved.data, getActingUser(c));
     if (!access.ok) return c.json({ error: access.error }, 403);
 
-    const result = artifactManager.shareArtifact(c.req.param('id'), resolved.data.id);
+    const result = await artifactManager.shareArtifact(c.req.param('id'), resolved.data.id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json({
       ok: true,

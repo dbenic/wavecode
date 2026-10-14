@@ -31,13 +31,21 @@ function ago(iso: string): string {
  * it forks per minute, how long the background jobs take, and how big the
  * journal is. Reads once, again on a lag or prune event, or on REFRESH.
  */
+interface HealthLag {
+  event_loop?: { p99_ms: number; max_ms: number };
+}
+
 export default function PerfPanel() {
   const [me, setMe] = useState<Pick<User, 'role'> | null>(null);
   const [snap, setSnap] = useState<PerfSnapshot | null>(null);
+  const [lag, setLag] = useState<{ p99_ms: number; max_ms: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     apiGet<PerfSnapshot>('/health/perf').then((s) => { if (s) { setSnap(s); setError(null); } }).catch((e) => setError((e as Error).message || 'unavailable'));
+    apiGet<HealthLag>('/health').then((s) => {
+      if (s?.event_loop && typeof s.event_loop.p99_ms === 'number') setLag(s.event_loop);
+    }).catch(() => { /* the perf snapshot still paints */ });
   }, []);
 
   useEffect(() => {
@@ -72,6 +80,14 @@ export default function PerfPanel() {
         ) : (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className={`rounded border px-3 py-2 ${lagging ? 'border-amber-500/50 bg-amber-500/10' : 'border-slate-800/60'}`} data-testid="health-panel">
+                <div className="text-[9px] uppercase tracking-wider text-slate-500">Event loop</div>
+                {lag ? (
+                  <div className="text-slate-200" data-testid="health-loop">
+                    p99 <span className="font-mono">{fmtMs(lag.p99_ms)}</span> · max <span className="font-mono">{fmtMs(lag.max_ms)}</span>
+                  </div>
+                ) : <div className="text-slate-500">no samples yet</div>}
+              </div>
               <div className={`rounded border px-3 py-2 ${lagging ? 'border-amber-500/50 bg-amber-500/10' : 'border-slate-800/60'}`} data-testid="perf-loop">
                 <div className="text-[9px] uppercase tracking-wider text-slate-500">Event loop (1 min)</div>
                 {snap.loop_ms ? (
