@@ -118,7 +118,7 @@ describe('validate.ts — input validation', () => {
     });
 
     it('rejects unknown effort levels', () => {
-      expect(validateSpawnBody({ name: 'a', runtime: 'codex', effort: 'ultra' })).not.toBeNull();
+      expect(validateSpawnBody({ name: 'a', runtime: 'codex', effort: 'extreme' })).not.toBeNull();
       expect(validateSpawnBody({ name: 'a', runtime: 'codex', effort: 'HIGH' })).not.toBeNull();
     });
 

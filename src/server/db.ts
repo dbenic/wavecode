@@ -9,7 +9,8 @@ export type Result<T> =
   | { ok: false; error: string };
 
 /** Reasoning-effort levels an agent can be pinned to. */
-export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+/** Reasoning effort a runtime accepts. Codex adds `max` and `ultra` (maximum reasoning with task delegation). */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 export function isEffortLevel(value: unknown): value is EffortLevel {

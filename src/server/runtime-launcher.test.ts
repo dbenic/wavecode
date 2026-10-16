@@ -186,7 +186,7 @@ describe('runtime-launcher.ts', () => {
       const { buildRuntimeCommand } = await import('./runtime-launcher.js');
       expect(buildRuntimeCommand({ ...base, model_flag: '-m' }, { model: 'x; rm -rf /' }))
         .toBe('codex --full-auto');
-      expect(buildRuntimeCommand({ ...base, effort_flag: '--effort' }, { effort: 'ultra' }))
+      expect(buildRuntimeCommand({ ...base, effort_flag: '--effort' }, { effort: 'extreme' }))
         .toBe('codex --full-auto');
     });
 

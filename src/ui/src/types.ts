@@ -1,4 +1,4 @@
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
 export interface Agent {
   id: string;

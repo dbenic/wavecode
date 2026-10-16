@@ -41,7 +41,7 @@ const MODES: { id: ComposerMode; label: string }[] = [
   { id: 'file', label: 'File' },
 ];
 
-const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh'];
+const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 export default function Composer(props: ComposerProps) {
   const [text, setText] = useState('');
