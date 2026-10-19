@@ -11,6 +11,8 @@ export interface RuntimeConfig {
   model_flag?: string;
   /** CLI flag used to pass a pinned reasoning effort (e.g. '--effort'). Unset = pin is recorded but not injected. */
   effort_flag?: string;
+  /** Models the UI offers for this runtime. Codex lists its own cache when this is unset. */
+  models?: string[];
   /**
    * Appended when WaveCode relaunches a runtime that ran before in this
    * worktree, so the CLI resumes its previous conversation instead of

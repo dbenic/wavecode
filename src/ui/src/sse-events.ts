@@ -50,6 +50,7 @@ export const SSE_EVENT_TYPES = [
   'deploy.reconciled',
   'overview.board',
   'perf.lag',
+  'agent.model_applied',
   'events.pruned',
   'overlord.report',
   'overlord.chat',

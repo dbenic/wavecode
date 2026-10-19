@@ -218,6 +218,21 @@ Authenticated. Event-loop delay from `perf_hooks.monitorEventLoopDelay`, sampled
 
 A sample whose max exceeds 200 ms logs `Event loop lag`. Settings → Health shows the same numbers. Static `/` and `index.html` do not wait on this.
 
+### `GET /api/agents/:id/models` · `POST /api/agents/:id/model`
+Change the model an agent runs on from the UI (the MODEL button on the agent page).
+
+`GET …/models` lists what that agent's CLI can use: Codex reads its own
+`models_cache.json` on the agent's profile (id, label, efforts); Claude Code
+lists the configured `runtimes.claude-code.models` or the built-in Claude ids.
+`free_text: true` means no list is known and the UI offers a text box.
+
+`POST …/model` `{ model, effort }` (owner or admin) stores the pin and makes it
+take effect: Claude Code receives `/model <id>` live; Codex is asked to `/quit`
+and relaunched with `-m` and the effort, resuming its conversation; an agent
+that is working gets the change when it next goes idle (`agent.model_applied`
+reports the outcome); a dead runtime gets it on relaunch. Response:
+`{ agent, applied: live | relaunched | when_idle | on_relaunch | pin_only, note }`.
+
 ### `GET /api/health/perf`
 Admin only. What the daemon spends its time on, for Settings → Health:
 

@@ -716,3 +716,16 @@ export interface PerfSnapshot {
   lag_threshold_ms: number;
   storage: { events: number; events_short_lived: number; freezes: number; tasks: number; runs: number; db_bytes: number | null };
 }
+
+/** GET /api/agents/:id/models and POST /api/agents/:id/model. */
+export interface ModelCatalogue {
+  runtime: string;
+  models: Array<{ id: string; label: string; efforts: EffortLevel[] }>;
+  free_text: boolean;
+  source: 'codex_cache' | 'config' | 'builtin' | 'none';
+}
+export interface ModelSwitchResponse {
+  agent: Agent;
+  applied: 'live' | 'relaunched' | 'when_idle' | 'on_relaunch' | 'pin_only';
+  note: string;
+}

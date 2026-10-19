@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import ModelSwitch from '../components/ModelSwitch';
 import { useParams, useNavigate } from 'react-router-dom';
 import { apiGet, apiPost, apiUpload, apiDelete } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
@@ -80,6 +81,7 @@ export default function AgentView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [agent, setAgent] = useState<Agent | null>(null);
+  const [modelNote, setModelNote] = useState<string | null>(null);
   const [allAgents, setAllAgents] = useState<Agent[]>([]);
   const [output, setOutput] = useState('');
   const [outputHtml, setOutputHtml] = useState('');
@@ -517,6 +519,7 @@ export default function AgentView() {
                     {modelBadge(agent)!.label}
                   </span>
                 )}
+                <ModelSwitch agent={agent} onApplied={(next, note) => { setAgent(next); setModelNote(note); }} />
                 {agent.usage?.summary && (
                   <span
                     className={`rounded border px-1.5 py-px text-[10px] font-semibold normal-case ${usageTone(agent.usage)}`}
@@ -534,6 +537,9 @@ export default function AgentView() {
                   </span>
                 )}
               </h1>
+              {modelNote && (
+                <p className="text-[10px] text-indigo-300 mt-0.5" data-testid="model-note">{modelNote} <button onClick={() => setModelNote(null)} className="text-slate-500">×</button></p>
+              )}
               <p className="text-[10px] text-slate-600 tracking-wide truncate">
                 {agent.persona ? <span className="italic text-slate-500">{agent.persona} · </span> : null}
                 <span className="uppercase">{agent.tmux_session}{agent.owner ? ` · ${agent.owner}` : ''}</span>

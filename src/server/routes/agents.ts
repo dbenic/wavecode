@@ -23,6 +23,7 @@ import { getConfig } from '../config.js';
 import { isAdmin } from '../users.js';
 import type { User } from '../db.js';
 import * as leases from '../leases.js';
+import * as modelSwitch from '../model-switch.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
 import * as replyCapture from '../reply-capture.js';
 import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
@@ -312,6 +313,28 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const result = leases.releaseAgent(agentResult.data.id, getActingUser(c));
     if (!result.ok) return c.json({ error: result.error }, leases.leaseErrorStatus(result.code));
     return c.json(enrichAgent(result.data, getActingUser(c)));
+  });
+
+  // The models this agent's CLI can use (Codex: its own cache on this profile).
+  app.get('/api/agents/:id/models', (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    return c.json(modelSwitch.listModels(agentResult.data));
+  });
+
+  // Pin a model/effort and make the running CLI use it (owner or admin).
+  app.post('/api/agents/:id/model', async (c) => {
+    const body = await c.req.json<{ model?: string | null; effort?: EffortLevel | null }>().catch(() => ({} as { model?: string | null; effort?: EffortLevel | null }));
+    if (body.model === undefined && body.effort === undefined) return c.json({ error: 'Provide model and/or effort (null clears a pin)' }, 400);
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    const user = getActingUser(c);
+    const access = leases.checkAgentAccess(agentResult.data, user);
+    if (!access.ok) return c.json({ error: access.error }, 403);
+    const result = await modelSwitch.switchModel(agentResult.data, { model: body.model, effort: body.effort });
+    if (!result.ok) return c.json({ error: result.error }, 400);
+    logger.info({ agentId: agentResult.data.id, model: result.data.agent.model, effort: result.data.agent.effort, applied: result.data.applied }, 'Agent model switched');
+    return c.json({ agent: enrichAgent(result.data.agent, user), applied: result.data.applied, note: result.data.note });
   });
 
   app.patch('/api/agents/:id', async (c) => {
