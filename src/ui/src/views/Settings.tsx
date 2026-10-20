@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPut } from '../hooks/useApi';
 import ProfilesPanel from '../components/ProfilesPanel';
 import PerfPanel from '../components/PerfPanel';
+import ModelsPanel from '../components/ModelsPanel';
 
 interface SettingsData {
   server: { port: number; host: string };
@@ -139,6 +140,9 @@ export default function Settings() {
       <main className="max-w-2xl mx-auto px-4 py-6 space-y-6">
         {/* Profiles · subscriptions (what a new developer needs first) */}
         <ProfilesPanel />
+
+        {/* Models · every agent: pinned vs running, change in place */}
+        <ModelsPanel />
 
         {/* Health · daemon (admins): is it keeping up? */}
         <PerfPanel />
