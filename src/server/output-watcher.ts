@@ -77,6 +77,11 @@ export function isClaudeRewindMenu(output: string): boolean {
   return /\(current\)/.test(output) && /Enter to continue\s*·\s*Esc to cancel/i.test(output) && !/Yes,\s*I trust/i.test(output);
 }
 
+/** Claude's first-run theme picker (an agent spawned seconds after a fresh login lands on it); the preselected theme is fine. */
+export function isClaudeThemePicker(output: string): boolean {
+  return /Choose the text style|Select a theme|run \/theme/i.test(output) && /Dark mode|Light mode/i.test(output) && !/Select login method/i.test(output);
+}
+
 /** Claude found an API key in the environment and asks whether to use it; an agent runs on the subscription, so No. */
 export function isClaudeApiKeyQuestion(output: string): boolean {
   return /Do you want to use this API key\?/i.test(output) && /❯\s*No\b/i.test(output);
@@ -92,6 +97,7 @@ export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: 
   if (isCodexUpdatePrompt(output)) return { keys: ['Down', 'Enter'], what: 'Codex update prompt (skipped)' };
   if (isClaudeRewindMenu(output)) return { keys: ['Escape'], what: 'Claude rewind menu (cancelled)' };
   if (isClaudeApiKeyQuestion(output)) return { keys: ['Enter'], what: 'Claude API-key question (No: the subscription is used)' };
+  if (isClaudeThemePicker(output)) return { keys: ['Enter'], what: 'Claude theme picker' };
   if (isCodexThreadLockScreen(output)) return { keys: ['q'], what: 'Codex thread lock (another process holds that conversation) — left, the relaunch resumes this worktree\'s own thread' };
   if (isCodexTrustFolderDialog(output)) return { keys: ['Enter'], what: 'Codex trust-folder dialog' };
   if (isPressEnterToContinueScreen(output)) return { keys: ['Enter'], what: 'press-Enter screen' };

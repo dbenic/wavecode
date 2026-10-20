@@ -350,6 +350,12 @@ Do you want to proceed?
     expect(sendRawKeys).toHaveBeenCalledWith('cc-key', 'Enter');
   });
 
+  it('Claude\'s theme picker on a just-spawned agent takes Enter', async () => {
+    const picker = ' Choose the text style that looks best with your terminal\n To change this later, run /theme\n ❯ ✔ Dark mode\n     Light mode\n  Syntax theme: Monokai Extended (ctrl+t to disable)';
+    expect((await maybeDismissFirstRunDialog('cc-theme', picker, 1_000_000))).toBe(true);
+    expect(sendRawKeys).toHaveBeenCalledWith('cc-theme', 'Enter');
+  });
+
   it('does not send keys for unrelated pane text', async () => {
     expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();
