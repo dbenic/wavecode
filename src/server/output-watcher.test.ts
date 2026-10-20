@@ -343,6 +343,13 @@ Do you want to proceed?
     expect(sendRawKeys).toHaveBeenCalledWith('cc-rewind', 'Escape');
   });
 
+  it('Claude\'s API-key question is answered No (Enter on the preselected option)', async () => {
+    const q = ' Do you want to use this API key?\n   Yes\n ❯ No (recommended)\n Enter to confirm · Esc to cancel';
+    expect((await maybeDismissFirstRunDialog('cc-key', q, 1_000_000))).toBe(true);
+    expect(sendRawKeys).toHaveBeenCalledTimes(1);
+    expect(sendRawKeys).toHaveBeenCalledWith('cc-key', 'Enter');
+  });
+
   it('does not send keys for unrelated pane text', async () => {
     expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

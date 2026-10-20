@@ -77,6 +77,11 @@ export function isClaudeRewindMenu(output: string): boolean {
   return /\(current\)/.test(output) && /Enter to continue\s*·\s*Esc to cancel/i.test(output) && !/Yes,\s*I trust/i.test(output);
 }
 
+/** Claude found an API key in the environment and asks whether to use it; an agent runs on the subscription, so No. */
+export function isClaudeApiKeyQuestion(output: string): boolean {
+  return /Do you want to use this API key\?/i.test(output) && /❯\s*No\b/i.test(output);
+}
+
 /** Which keys clear a CLI first-run screen, or null when none is showing (exported for tests). */
 export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: string } | null {
   // Only the bottom of the pane counts: a dialog that scrolled up was answered already
@@ -86,6 +91,7 @@ export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: 
   if (isClaudeTrustFolderDialog(output)) return { keys: ['Down', 'Enter'], what: 'trust-folder dialog' };
   if (isCodexUpdatePrompt(output)) return { keys: ['Down', 'Enter'], what: 'Codex update prompt (skipped)' };
   if (isClaudeRewindMenu(output)) return { keys: ['Escape'], what: 'Claude rewind menu (cancelled)' };
+  if (isClaudeApiKeyQuestion(output)) return { keys: ['Enter'], what: 'Claude API-key question (No: the subscription is used)' };
   if (isCodexThreadLockScreen(output)) return { keys: ['q'], what: 'Codex thread lock (another process holds that conversation) — left, the relaunch resumes this worktree\'s own thread' };
   if (isCodexTrustFolderDialog(output)) return { keys: ['Enter'], what: 'Codex trust-folder dialog' };
   if (isPressEnterToContinueScreen(output)) return { keys: ['Enter'], what: 'press-Enter screen' };

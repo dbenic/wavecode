@@ -198,6 +198,8 @@ function joinWrappedUrls(clean: string): string[] {
  */
 export function loginAutoAdvanceKey(paneText: string): 'Enter' | null {
   if (/Select login method/i.test(paneText) && /❯\s*1\.\s*Claude account/i.test(paneText)) return 'Enter';
+  // an API key in the environment: never use it for a seat ("No (recommended)" is preselected)
+  if (/Do you want to use this API key\?/i.test(paneText) && /❯\s*No\b/i.test(paneText)) return 'Enter';
   // "Login successful" / "Security notes" screens after the code was accepted
   if (/Press Enter to continue/i.test(paneText.split('\n').filter((l) => l.trim()).slice(-4).join('\n'))) return 'Enter';
   // the workspace trust check on the profile dir: "No, exit" is preselected — exiting ends the seat, logged in

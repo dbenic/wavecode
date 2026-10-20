@@ -287,6 +287,7 @@ describe('login seats', () => {
       expect(loginAutoAdvanceKey(' Select login method:\n ❯ 1. Claude account with subscription · Pro, Max\n   2. Anthropic Console account')).toBe('Enter');
       expect(loginAutoAdvanceKey(' Browser didn\'t open? Use the url below\n https://claude.com/cai/oauth/authorize?x=1\n Paste code here if prompted >')).toBeNull();
       expect(loginAutoAdvanceKey(' Logged in as ana@countix.ai\n Login successful. Press Enter to continue…')).toBe('Enter');
+      expect(loginAutoAdvanceKey(' Do you want to use this API key?\n   Yes\n ❯ No (recommended)\n Enter to confirm · Esc to cancel')).toBe('Enter');
       expect(loginAutoAdvanceKey(' Security notes:\n 1. Claude can make mistakes.\n Press Enter to continue…')).toBe('Enter');
       // the trust check on the profile dir: "No, exit" ends the seat, which is what we want
       expect(loginAutoAdvanceKey(' Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm')).toBe('Enter');
