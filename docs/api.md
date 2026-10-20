@@ -233,6 +233,15 @@ that is working gets the change when it next goes idle (`agent.model_applied`
 reports the outcome); a dead runtime gets it on relaunch. Response:
 `{ agent, applied: live | relaunched | when_idle | on_relaunch | pin_only, note }`.
 
+Every agent row also carries `live_model` (what the CLI's own footer says it
+runs — Codex prints `GPT-6-Astra high`; Claude Code prints nothing, so null)
+and `model_mismatch` (a pin exists and the footer disagrees). A guard runs
+every minute: an idle agent with a mismatch gets its pin reapplied (someone
+typed `/model`, or the daemon restarted while a change was pending), once per
+ten minutes per agent; `agent.model_applied` with `reason: guard` records it.
+An agent with no pin follows the CLI's own settings on its profile, which
+`/model` in the pane rewrites — pin the ones that must stay put.
+
 ### `GET /api/health/perf`
 Admin only. What the daemon spends its time on, for Settings → Health:
 

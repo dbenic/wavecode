@@ -322,6 +322,13 @@ Do you want to proceed?
     expect(sendRawKeys).not.toHaveBeenCalled();
   });
 
+  it('reads the model Codex prints in its footer; Claude prints none', async () => {
+    const { liveModelFromPane } = await import('./output-watcher.js');
+    expect(liveModelFromPane('› Ask Codex to do anything\n  GPT-6-Astra high · ~/.wavecode-data/worktrees/scout · Main [default]\n  ? for shortcuts')).toEqual({ label: 'GPT-6-Astra', model: 'gpt-6-astra', effort: 'high' });
+    expect(liveModelFromPane('  GPT-6.1-Sol ultra · ~/x')).toEqual({ label: 'GPT-6.1-Sol', model: 'gpt-6.1-sol', effort: 'ultra' });
+    expect(liveModelFromPane('❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)')).toBeNull();
+  });
+
   it('does not send keys for unrelated pane text', async () => {
     expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

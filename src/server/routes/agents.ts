@@ -526,10 +526,16 @@ function safeUsage(agent: Agent) {
 
 function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null, tags?: string[]) {
   const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
+  const live = outputWatcher.getLiveModel(agent.id);
+  const mismatch = modelSwitch.pinDiffersFromLive(agent, live);
   const defaultSeat = orchestratorId === undefined ? defaultSeatFor(viewer, listAgents())?.id ?? null : orchestratorId;
   return {
     ...agent,
     owner,
+    /** What the CLI's own footer says it runs (Codex); null when it shows none. */
+    live_model: live,
+    /** A pin exists and the CLI shows something else: the guard reapplies it when the agent is idle. */
+    model_mismatch: mismatch,
     /** Group tags (spec §5c) */
     tags: tags ?? safeAllTags()?.get(agent.id) ?? [],
     /** The Command Center's default recipient (spec §5b). */

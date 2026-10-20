@@ -26,6 +26,7 @@ vi.mock('./session-manager.js', () => ({
 }));
 
 vi.mock('./output-watcher.js', () => ({
+  getLiveModel: vi.fn(() => null),
   startWatching: vi.fn(),
   stopWatching: vi.fn(),
 }));

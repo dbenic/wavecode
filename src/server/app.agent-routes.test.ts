@@ -69,6 +69,7 @@ vi.mock('./output-watcher.js', () => ({
   getLastOutputLine: vi.fn(),
   getOutputVersion: vi.fn(),
   isWatching: vi.fn(),
+  getLiveModel: vi.fn(() => null),
 }));
 
 vi.mock('./logger.js', () => ({

@@ -31,6 +31,7 @@ vi.mock('./notifications.js', () => ({
 }));
 
 vi.mock('./output-watcher.js', () => ({
+  getLiveModel: vi.fn(() => null),
   stopAll: vi.fn(),
 }));
 

@@ -22,6 +22,7 @@ vi.mock('./session-manager.js', async () => {
   };
 });
 vi.mock('./output-watcher.js', () => ({
+  getLiveModel: vi.fn(() => null),
   getLastOutputLine: vi.fn(() => null), getOutputVersion: vi.fn(() => 0), isWatching: vi.fn(() => false), startWatching: vi.fn(), stopWatching: vi.fn(),
 }));
 vi.mock('./runtime-liveness.js', () => ({ getRuntimeState: vi.fn(() => 'alive'), RUNTIME_NOT_RUNNING: 'Runtime is not running' }));

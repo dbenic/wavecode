@@ -29,6 +29,10 @@ export interface Agent {
   subscription?: { account: string | null; plan: string | null };
   /** Model/effort from the CLI's own settings on that profile, shown when nothing is pinned. */
   runtime_defaults?: { model: string | null; effort: string | null };
+  /** What the CLI's own footer says it runs (Codex); null when it shows none. */
+  live_model?: { label: string; model: string; effort: string | null } | null;
+  /** A pin exists and the CLI shows something else; the daemon reapplies the pin when the agent is idle. */
+  model_mismatch?: boolean;
   /** Plan usage from the CLI's status screen, probed every ~15 min; null until known. */
   usage?: { summary: string; metrics: Array<{ label: string; left_pct: number | null; used_pct: number | null; resets: string | null; extra?: string }>; probed_at: string } | null;
   /** 'orchestrator' = the PM seat (spec §5b). */

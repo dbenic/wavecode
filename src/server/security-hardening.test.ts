@@ -20,7 +20,8 @@ vi.mock('./session-manager.js', async () => {
     spawnAgent: vi.fn(), scan: vi.fn(() => ({ ok: true, data: [] })),
   };
 });
-vi.mock('./output-watcher.js', () => ({ getLastOutputLine: vi.fn(() => null), getOutputVersion: vi.fn(() => 0), isWatching: vi.fn(() => false), startWatching: vi.fn(), stopWatching: vi.fn() }));
+vi.mock('./output-watcher.js', () => ({
+  getLiveModel: vi.fn(() => null), getLastOutputLine: vi.fn(() => null), getOutputVersion: vi.fn(() => 0), isWatching: vi.fn(() => false), startWatching: vi.fn(), stopWatching: vi.fn() }));
 const runtimeState = { value: 'alive' as 'alive' | 'dead' | 'unknown' };
 vi.mock('./runtime-liveness.js', () => ({ getRuntimeState: vi.fn(() => runtimeState.value), RUNTIME_NOT_RUNNING: 'Runtime is not running' }));
 vi.mock('./reply-capture.js', () => ({ trackPrompt: vi.fn(), parseReplyQuestion: vi.fn(() => null) }));

@@ -109,10 +109,35 @@ function notifyReviewLoopAgentIdle(agentId: string): void {
   );
 }
 
+export interface LiveModel {
+  /** as the CLI prints it, e.g. GPT-6-Astra */
+  label: string;
+  /** lower-cased id-like form, e.g. gpt-6-astra, for comparing with a pin */
+  model: string;
+  effort: string | null;
+}
+
+const LIVE_MODEL_RE = /\b(GPT-[A-Za-z0-9.]+(?:-[A-Za-z0-9]+)*)\s+(low|medium|high|xhigh|max|ultra)\b/;
+
+/**
+ * What model the CLI says it is running. Codex prints `GPT-6-Astra high` in
+ * its footer; Claude Code prints nothing, so it stays null there. Exported for tests.
+ */
+export function liveModelFromPane(output: string): LiveModel | null {
+  const tail = output.split('\n').filter((l) => l.trim()).slice(-12);
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const m = LIVE_MODEL_RE.exec(tail[i]);
+    if (m) return { label: m[1], model: m[1].toLowerCase(), effort: m[2].toLowerCase() };
+  }
+  return null;
+}
+
 interface WatcherState {
   previousOutput: string;
   lastOutputLine: string;
   outputVersion: number;
+  /** The model the CLI's own footer shows (Codex); null when it shows none. */
+  liveModel: LiveModel | null;
   /**
    * Counts consecutive ticks where the output-detected status is 'idle'
    * but the DB says 'working'. We wait a few ticks before overriding
@@ -208,6 +233,7 @@ export function startWatching(agentId: string): void {
     previousOutput: '',
     lastOutputLine: '',
     outputVersion: 0,
+    liveModel: null,
     idleOverrideCounter: 0,
     lastWorkingAt: null,
     watchedAt: Date.now(),
@@ -227,6 +253,11 @@ export function stopWatching(agentId: string): void {
 export function stopAll(): void {
   watchers.clear();
   stopBatch();
+}
+
+/** The model the agent's CLI last showed in its pane, or null (Claude Code shows none). */
+export function getLiveModel(agentId: string): LiveModel | null {
+  return watchers.get(agentId)?.liveModel ?? null;
 }
 
 export function getLastOutputLine(agentId: string): string {
@@ -291,6 +322,8 @@ async function tickInner(agentId: string, state: WatcherState): Promise<void> {
   // Track last non-empty line for dashboard preview (only when output changes)
   if (outputChanged) {
     state.outputVersion += 1;
+    const live = liveModelFromPane(output);
+    if (live) state.liveModel = live;
     const lines = output.split('\n').filter((l) => l.trim().length > 0);
     if (lines.length > 0) {
       state.lastOutputLine = lines[lines.length - 1];

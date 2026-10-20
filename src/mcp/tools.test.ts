@@ -39,6 +39,7 @@ vi.mock('../server/runtime-liveness.js', async (importOriginal) => {
   return { ...actual, getRuntimeState: vi.fn(() => 'alive') };
 });
 vi.mock('../server/output-watcher.js', () => ({
+  getLiveModel: vi.fn(() => null),
   startWatching: vi.fn(),
   stopWatching: vi.fn(),
   getLastOutputLine: vi.fn(() => null),

@@ -28,6 +28,7 @@ vi.mock('./tmux.js', () => ({
 }));
 vi.mock('./runner.js', () => ({ startRunner: vi.fn(), stopRunner: vi.fn(), executeRun: vi.fn(), clearRunnerRun: vi.fn() }));
 vi.mock('./output-watcher.js', () => ({
+  getLiveModel: vi.fn(() => null),
   startWatching: vi.fn(), stopWatching: vi.fn(), getLastOutputLine: vi.fn(() => null), getOutputVersion: vi.fn(() => 0), isWatching: vi.fn(() => false),
   isClaudeBypassAcceptDialog: vi.fn(() => false),
 }));

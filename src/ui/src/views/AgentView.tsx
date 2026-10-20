@@ -519,6 +519,15 @@ export default function AgentView() {
                     {modelBadge(agent)!.label}
                   </span>
                 )}
+                {agent.live_model && (
+                  <span
+                    className={`rounded border px-1.5 py-px text-[10px] font-semibold normal-case ${agent.model_mismatch ? 'border-amber-500/50 bg-amber-950/60 text-amber-200' : 'border-emerald-500/30 bg-emerald-950/40 text-emerald-200'}`}
+                    title={agent.model_mismatch ? 'The CLI shows a different model than the pin; the pin is reapplied when the agent is idle' : 'What the CLI reports it is running right now'}
+                    data-testid="live-model"
+                  >
+                    live: {agent.live_model.label}{agent.live_model.effort ? ` ${agent.live_model.effort}` : ''}{agent.model_mismatch ? ' ≠ pin' : ''}
+                  </span>
+                )}
                 <ModelSwitch agent={agent} onApplied={(next, note) => { setAgent(next); setModelNote(note); }} />
                 {agent.usage?.summary && (
                   <span

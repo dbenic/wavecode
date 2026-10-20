@@ -22,6 +22,8 @@ import { emit, onEvent } from './event-bus.js';
 import logger from './logger.js';
 import { resolveProfileEnv } from './profiles.js';
 import { ensureRuntimeAlive, getRuntimeState, noteRuntimeAlive, relaunchRuntime, waitForRuntimeSettled } from './runtime-liveness.js';
+import { getLiveModel, type LiveModel } from './output-watcher.js';
+import { listAgents } from './db.js';
 import * as tmux from './tmux.js';
 
 export interface ModelChoice {
@@ -203,4 +205,56 @@ export async function switchModel(agent: Agent, pin: { model?: string | null; ef
   } catch (e) {
     return { ok: true, data: { agent: updated, applied: 'pin_only', note: `Saved, but applying it failed: ${(e as Error).message}` } };
   }
+}
+
+/** A pin exists and the CLI's footer disagrees on the model or (when pinned) the effort. */
+export function pinDiffersFromLive(agent: Pick<Agent, 'model' | 'effort'>, live: LiveModel | null): boolean {
+  if (!live || (!agent.model && !agent.effort)) return false;
+  if (agent.model && live.model !== agent.model.toLowerCase()) return true;
+  if (agent.effort && live.effort !== agent.effort) return true;
+  return false;
+}
+
+export const MODEL_GUARD_EVERY_MS = 60_000;
+/** After reapplying a pin, leave that agent alone for this long (a relaunch takes time to settle). */
+const GUARD_BACKOFF_MS = 10 * 60_000;
+const guardedAt = new Map<string, number>();
+let guardTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Every minute: an idle agent whose CLI shows a different model than its pin
+ * (someone typed /model, or the daemon restarted while a change was pending)
+ * gets the pin reapplied. Exported for tests.
+ */
+export async function guardPinsOnce(now = Date.now()): Promise<string[]> {
+  const reapplied: string[] = [];
+  for (const agent of listAgents()) {
+    if (agent.status !== 'idle' || (!agent.model && !agent.effort)) continue;
+    const live = getLiveModel(agent.id);
+    if (!pinDiffersFromLive(agent, live)) continue;
+    const last = guardedAt.get(agent.id) ?? 0;
+    if (now - last < GUARD_BACKOFF_MS) continue;
+    guardedAt.set(agent.id, now);
+    try {
+      const r = await applyPin(agent);
+      emit('agent.model_applied', 'agent', agent.id, { name: agent.name, model: agent.model, effort: agent.effort, applied: r.applied, note: r.note, reason: 'guard', live: live?.label ?? null });
+      logger.info({ agentId: agent.id, name: agent.name, pin: `${agent.model ?? ''} ${agent.effort ?? ''}`.trim(), live: live ? `${live.label} ${live.effort ?? ''}`.trim() : null, applied: r.applied }, 'Model pin reapplied');
+      reapplied.push(agent.id);
+    } catch (e) {
+      logger.warn({ agentId: agent.id, error: (e as Error).message }, 'Model pin reapply failed');
+    }
+  }
+  return reapplied;
+}
+
+export function startModelGuard(): void {
+  if (guardTimer) return;
+  guardTimer = setInterval(() => { void guardPinsOnce(); }, MODEL_GUARD_EVERY_MS);
+  guardTimer.unref?.();
+}
+
+export function stopModelGuard(): void {
+  if (guardTimer) clearInterval(guardTimer);
+  guardTimer = null;
+  guardedAt.clear();
 }

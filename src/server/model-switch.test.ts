@@ -21,6 +21,7 @@ vi.mock('./profiles.js', () => ({
 }));
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('./tmux.js', () => ({ sendTextAndEnter: vi.fn(), sendRawKey: vi.fn(), hasSession: vi.fn(() => true) }));
+vi.mock('./output-watcher.js', () => ({ getLiveModel: vi.fn(() => null) }));
 vi.mock('./runtime-liveness.js', () => ({
   getRuntimeState: vi.fn(async () => 'alive'),
   ensureRuntimeAlive: vi.fn(async () => ({ ok: true, data: { relaunched: true } })),
@@ -105,5 +106,29 @@ describe('model switch', () => {
     expect(live.relaunchRuntime).toHaveBeenCalledWith(expect.objectContaining({ id: made.data.id, model: 'gpt-6-astra', effort: 'high' }), 'manual');
     const bad = await switchModel(made.data, { model: 'gpt-6-astra', effort: 'extreme' as never });
     expect(bad.ok).toBe(false);
+  });
+
+  it('the guard reapplies a pin to an idle agent whose CLI shows another model, once per backoff', async () => {
+    const db = await import('./db.js');
+    const tmux = await import('./tmux.js');
+    const live = await import('./runtime-liveness.js');
+    const watcher = await import('./output-watcher.js');
+    const { guardPinsOnce, pinDiffersFromLive, stopModelGuard } = await import('./model-switch.js');
+    stopModelGuard();
+    const made = db.insertAgent({ name: 'scout', runtime: 'codex', tmux_session: 'wc-scout', workspace: null, mode: 'spawned', status: 'idle', model: 'gpt-6-astra', effort: 'high' } as never);
+    if (!made.ok) throw new Error(made.error);
+    expect(pinDiffersFromLive({ model: 'gpt-6-astra', effort: 'high' }, { label: 'GPT-6-Astra', model: 'gpt-6-astra', effort: 'high' })).toBe(false);
+    expect(pinDiffersFromLive({ model: 'gpt-6-astra', effort: 'high' }, { label: 'GPT-6.1-Sol', model: 'gpt-6.1-sol', effort: 'ultra' })).toBe(true);
+    expect(pinDiffersFromLive({ model: null, effort: null }, { label: 'GPT-6.1-Sol', model: 'gpt-6.1-sol', effort: 'ultra' })).toBe(false); // nothing pinned
+    expect(pinDiffersFromLive({ model: 'gpt-6-astra', effort: 'high' }, null)).toBe(false); // Claude shows no footer
+    vi.mocked(watcher.getLiveModel).mockReturnValue({ label: 'GPT-6.1-Sol', model: 'gpt-6.1-sol', effort: 'ultra' });
+    let asks = 0;
+    vi.mocked(live.getRuntimeState).mockImplementation(async () => (asks++ % 2 === 0 ? 'alive' : 'dead'));
+    const t0 = 5_000_000;
+    expect(await guardPinsOnce(t0)).toEqual([made.data.id]);
+    expect(tmux.sendTextAndEnter).toHaveBeenCalledWith('wc-scout', '/quit');
+    expect(live.relaunchRuntime).toHaveBeenCalledWith(expect.objectContaining({ model: 'gpt-6-astra', effort: 'high' }), 'manual');
+    expect(await guardPinsOnce(t0 + 60_000)).toEqual([]); // backoff: not again within ten minutes
+    expect(await guardPinsOnce(t0 + 11 * 60_000)).toEqual([made.data.id]);
   });
 });

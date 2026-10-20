@@ -103,7 +103,15 @@ export default function AgentCard({
               </h3>
               <p className="text-[10px] text-slate-500 tracking-wide uppercase flex items-center gap-1">
                 {agent.runtime} &middot; {agent.mode}
-                {agent.model && (
+                {agent.live_model ? (
+                  <span
+                    className={`px-1 py-px rounded border text-[8px] font-bold normal-case ${agent.model_mismatch ? 'bg-amber-900/50 border-amber-500/40 text-amber-200' : 'bg-indigo-900/50 border-indigo-500/30 text-indigo-300'}`}
+                    title={agent.model_mismatch ? `Running ${agent.live_model.label} ${agent.live_model.effort ?? ''}, pinned ${agent.model ?? 'default'} ${agent.effort ?? ''} — the pin is reapplied when idle` : 'What the CLI reports it is running'}
+                    data-testid="live-model"
+                  >
+                    {agent.live_model.label}{agent.live_model.effort ? ` @${agent.live_model.effort}` : ''}{agent.model_mismatch ? ' ≠ pin' : ''}
+                  </span>
+                ) : agent.model && (
                   <span className="px-1 py-px rounded bg-indigo-900/50 border border-indigo-500/30 text-[8px] text-indigo-300 font-bold normal-case">
                     {agent.model}{agent.effort ? ` @${agent.effort}` : ''}
                   </span>
