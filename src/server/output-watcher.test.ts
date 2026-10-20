@@ -329,6 +329,13 @@ Do you want to proceed?
     expect(liveModelFromPane('❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)')).toBeNull();
   });
 
+  it('Codex thread lock ("open in another app"): leaves with q so the relaunch resumes the right thread', async () => {
+    const lock = '• Explored\n■ Conversation interrupted - use /feedback if something went wrong\n  🔒  This conversation is open in another app\n      Close it there and press R to continue here.\n   r retry   f fork   esc/^c/q exit   ^t transcript';
+    expect((await maybeDismissFirstRunDialog('cx-lock', lock, 1_000_000))).toBe(true);
+    expect(sendRawKeys).toHaveBeenCalledTimes(1);
+    expect(sendRawKeys).toHaveBeenCalledWith('cx-lock', 'q');
+  });
+
   it('does not send keys for unrelated pane text', async () => {
     expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

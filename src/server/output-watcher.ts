@@ -60,6 +60,15 @@ export function isCodexUpdatePrompt(output: string): boolean {
   return /›\s*1\.\s*Update now/i.test(output) && /2\.\s*Skip/i.test(output);
 }
 
+/**
+ * Codex resumed a thread another process holds ("This conversation is open in
+ * another app"): on a shared login that is another agent's conversation.
+ * Leaving with q lets the relaunch resume this worktree's own thread.
+ */
+export function isCodexThreadLockScreen(output: string): boolean {
+  return /open in another app/i.test(output) && /press R to continue/i.test(output);
+}
+
 /** Which keys clear a CLI first-run screen, or null when none is showing (exported for tests). */
 export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: string } | null {
   // Only the bottom of the pane counts: a dialog that scrolled up was answered already
@@ -68,6 +77,7 @@ export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: 
   if (isClaudeBypassAcceptDialog(output)) return { keys: ['Down', 'Enter'], what: 'Bypass Permissions dialog' };
   if (isClaudeTrustFolderDialog(output)) return { keys: ['Down', 'Enter'], what: 'trust-folder dialog' };
   if (isCodexUpdatePrompt(output)) return { keys: ['Down', 'Enter'], what: 'Codex update prompt (skipped)' };
+  if (isCodexThreadLockScreen(output)) return { keys: ['q'], what: 'Codex thread lock (another process holds that conversation) — left, the relaunch resumes this worktree\'s own thread' };
   if (isCodexTrustFolderDialog(output)) return { keys: ['Enter'], what: 'Codex trust-folder dialog' };
   if (isPressEnterToContinueScreen(output)) return { keys: ['Enter'], what: 'press-Enter screen' };
   return null;

@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { apiGet } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import type { Agent } from '../types';
-import ModelSwitch from './ModelSwitch';
+import { ModelEditor } from './ModelSwitch';
 
 function pinLabel(a: Agent): string {
   if (!a.model && !a.effort) return 'none (CLI default)';
@@ -20,6 +20,7 @@ export default function ModelsPanel() {
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
 
   const load = useCallback(() => {
     apiGet<Agent[]>('/agents')
@@ -64,7 +65,8 @@ export default function ModelsPanel() {
               </thead>
               <tbody className="divide-y divide-slate-800/50">
                 {rows.map((a) => (
-                  <tr key={a.id} data-testid={`model-row-${a.name}`} className={a.model_mismatch ? 'bg-amber-950/20' : ''}>
+                  <Fragment key={a.id}>
+                  <tr data-testid={`model-row-${a.name}`} className={a.model_mismatch ? 'bg-amber-950/20' : ''}>
                     <td className="px-2 py-1.5 font-mono text-slate-200">{a.alias ? `@${a.alias}` : a.name}{a.alias && <span className="ml-1 text-[9px] text-slate-500">{a.name}</span>}{a.profile && <span className="ml-1 text-[9px] text-slate-600">· {a.profile}</span>}</td>
                     <td className="px-2 py-1.5 text-slate-400">{a.runtime}</td>
                     <td className="px-2 py-1.5"><span className={a.model || a.effort ? 'text-indigo-200' : 'text-slate-500'}>{pinLabel(a)}</span></td>
@@ -74,8 +76,24 @@ export default function ModelsPanel() {
                       ) : <span className="text-slate-600">{a.runtime === 'claude-code' ? 'not shown by the CLI' : '—'}</span>}
                     </td>
                     <td className="px-2 py-1.5 text-slate-500">{a.status}</td>
-                    <td className="px-2 py-1.5 text-right"><ModelSwitch agent={a} onApplied={(next, n) => { setNote(`${next.name}: ${n}`); load(); }} /></td>
+                    <td className="px-2 py-1.5 text-right">
+                      <button
+                        onClick={() => setEditing(editing === a.id ? null : a.id)}
+                        className={`rounded border px-1.5 py-px text-[10px] font-semibold tracking-wider ${editing === a.id ? 'border-indigo-500/60 bg-indigo-950/60 text-indigo-200' : 'border-slate-700 text-slate-300 hover:bg-slate-800'}`}
+                        title="Change the model this agent runs on"
+                      >
+                        MODEL
+                      </button>
+                    </td>
                   </tr>
+                  {editing === a.id && (
+                    <tr data-testid={`model-editor-row-${a.name}`}>
+                      <td colSpan={6} className="px-3 py-2 bg-slate-950/60">
+                        <ModelEditor agent={a} onApplied={(next, n) => { setNote(`${next.name}: ${n}`); setEditing(null); load(); }} onCancel={() => setEditing(null)} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

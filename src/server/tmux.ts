@@ -53,6 +53,7 @@ const ALLOWED_RAW_KEYS = new Set([
   'C-c', 'C-d', 'C-u', 'C-l', 'C-z', 'C-m', 'C-a', 'C-e', 'C-k', 'C-w',
   'Escape', 'Enter', 'Tab', 'BSpace', 'DC', 'Up', 'Down', 'Left', 'Right',
   'Home', 'End', 'PageUp', 'PageDown', 'Space',
+  'q', // leave a Codex lock screen ("open in another app"): the relaunch then resumes the right thread
   'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
   // y/n for CLI confirmation prompts
   'y', 'n', 'Y', 'N',

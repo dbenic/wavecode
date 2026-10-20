@@ -42,7 +42,9 @@ export default function PerfPanel() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    apiGet<PerfSnapshot>('/health/perf').then((s) => { if (s) { setSnap(s); setError(null); } }).catch((e) => setError((e as Error).message || 'unavailable'));
+    apiGet<PerfSnapshot>('/health/perf')
+      .then((s) => { if (s && s.at) { setSnap(s); setError(null); } else { setError('no reading yet — the daemon may be restarting; press REFRESH'); } })
+      .catch((e) => setError((e as Error).message || 'unavailable'));
     apiGet<HealthLag>('/health').then((s) => {
       if (s?.event_loop && typeof s.event_loop.p99_ms === 'number') setLag(s.event_loop);
     }).catch(() => { /* the perf snapshot still paints */ });

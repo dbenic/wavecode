@@ -106,7 +106,7 @@ export async function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health
   // Same command as spawn, including the agent's credential profile env. The
   // first attempt resumes the previous conversation (`resume_args`); if the
   // runtime dies again, the next attempt launches plain.
-  const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile, resume: attempts === 0 });
+  const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile, resume: attempts === 0, workspace: agent.workspace });
   if (!command.ok) return command;
   try {
     await tmux.sendTextAndEnter(agent.tmux_session, command.data, { mode: 'type' }); // a shell prompt: typed, not pasted

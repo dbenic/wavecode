@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { workspaceMatches } from './project-gate.js';
+import { codexResumeArgs } from './codex-sessions.js';
 import { emit } from './event-bus.js';
 import { getConfig, type RuntimeConfig } from './config.js';
 import { isEffortLevel, type Result } from './db.js';
@@ -19,6 +21,8 @@ const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,99}$/;
 export interface RuntimePin {
   model?: string | null;
   effort?: EffortPin;
+  /** The agent's worktree: a Codex relaunch resumes the thread that ran there. */
+  workspace?: string | null;
   /**
    * Launch env (credential profile, spec §5), rendered as an `env K=V …`
    * prefix. Pass the output of resolveProfileEnv(); a pair that fails the
@@ -52,7 +56,16 @@ export function buildRuntimeCommand(runtimeConfig: RuntimeConfig, pin: RuntimePi
   }
 
   if (pin.resume && runtimeConfig.resume_args && /^[\w .=-]{1,64}$/.test(runtimeConfig.resume_args)) {
-    command += ` ${runtimeConfig.resume_args.trim()}`;
+    const configured = runtimeConfig.resume_args.trim();
+    if (/^resume\b/.test(configured)) {
+      // Codex: `resume --last` is the login's newest thread, which on a shared profile is
+      // another agent's. Resume this workspace's own thread, or start fresh (codex-sessions.ts).
+      const home = pin.env?.CODEX_HOME ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
+      const own = codexResumeArgs(home, pin.workspace);
+      if (own) command += ` ${own}`;
+    } else {
+      command += ` ${configured}`;
+    }
   }
 
   const envPairs = Object.entries(pin.env ?? {}).filter(([k, v]) => isSafeEnvKey(k) && isSafeEnvValue(v));
@@ -71,13 +84,13 @@ export function buildRuntimeCommand(runtimeConfig: RuntimeConfig, pin: RuntimePi
  */
 export function buildLaunchCommand(
   runtime: string,
-  opts: { model?: string | null; effort?: string | null; profile?: string | null; resume?: boolean },
+  opts: { model?: string | null; effort?: string | null; profile?: string | null; resume?: boolean; workspace?: string | null },
 ): Result<string> {
   const runtimeConfig = getConfig().runtimes[runtime];
   if (!runtimeConfig) return { ok: false, error: `Unknown runtime '${runtime}'` };
   const env = resolveProfileEnv(runtime, opts.profile);
   if (!env.ok) return env;
-  return { ok: true, data: buildRuntimeCommand(runtimeConfig, { model: opts.model, effort: opts.effort, env: env.data, resume: opts.resume }) };
+  return { ok: true, data: buildRuntimeCommand(runtimeConfig, { model: opts.model, effort: opts.effort, env: env.data, resume: opts.resume, workspace: opts.workspace }) };
 }
 
 export function getWorktreesRoot(): string {
@@ -156,7 +169,7 @@ export async function launchRuntimeInNewSession(opts: {
   /** Session recreated for an agent that ran before: resume its conversation. */
   resume?: boolean;
 }): Promise<Result<void>> {
-  const command = buildLaunchCommand(opts.runtime, opts);
+  const command = buildLaunchCommand(opts.runtime, { ...opts, workspace: opts.workDir });
   if (!command.ok) return command;
 
   try {

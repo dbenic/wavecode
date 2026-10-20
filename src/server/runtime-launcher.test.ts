@@ -89,6 +89,25 @@ describe('runtime-launcher.ts', () => {
     exists.mockRestore();
   });
 
+  it('a Codex relaunch resumes the worktree\'s own thread by id, and starts fresh when it has none', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-launch-home-'));
+    const wt = path.join(home, 'wt', 'scout');
+    const dir = path.join(home, 'sessions', '2026', '10', '20');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'rollout-2026-10-20T09-29-18-01a158a4-ce6a-7382-b660-6f51fa7f0da9.jsonl'), JSON.stringify({ type: 'session_meta', payload: { id: '01a158a4-ce6a-7382-b660-6f51fa7f0da9', cwd: wt } }) + '\n');
+    const { buildRuntimeCommand } = await import('./runtime-launcher.js');
+    const codex = { command: 'codex --full-auto', idle_pattern: '^>', model_flag: '-m', resume_args: 'resume --last' };
+    expect(buildRuntimeCommand(codex, { resume: true, workspace: wt, env: { CODEX_HOME: home } })).toBe(`env CODEX_HOME=${home} codex --full-auto resume 01a158a4-ce6a-7382-b660-6f51fa7f0da9`);
+    expect(buildRuntimeCommand(codex, { resume: true, workspace: path.join(home, 'wt', 'other'), env: { CODEX_HOME: home } })).toBe(`env CODEX_HOME=${home} codex --full-auto`);
+    expect(buildRuntimeCommand(codex, { resume: true, env: { CODEX_HOME: home } })).toBe(`env CODEX_HOME=${home} codex --full-auto`); // no workspace: never --last
+    const claude = { command: 'claude', idle_pattern: '❯', resume_args: '--continue' };
+    expect(buildRuntimeCommand(claude, { resume: true, workspace: wt })).toBe('claude --continue'); // Claude keeps its per-directory continue
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
   it('launches codex with the configured command', async () => {
     const tmux = await import('./tmux.js');
     const { launchRuntimeInNewSession } = await import('./runtime-launcher.js');
@@ -175,7 +194,9 @@ describe('runtime-launcher.ts', () => {
     it('appends resume_args only when asked to resume; refuses odd values', async () => {
       const { buildRuntimeCommand } = await import('./runtime-launcher.js');
       const codex = { command: 'codex --dangerously-bypass-approvals-and-sandbox', idle_pattern: '>', effort_flag: '-c model_reasoning_effort=', resume_args: 'resume --last' };
-      expect(buildRuntimeCommand(codex, { effort: 'high', resume: true })).toBe('codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high resume --last');
+      // Codex never gets `resume --last` (the login's last thread may be another agent's): with no
+      // workspace to look up it starts fresh; with one, it resumes that worktree's own thread by id.
+      expect(buildRuntimeCommand(codex, { effort: 'high', resume: true })).toBe('codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high');
       expect(buildRuntimeCommand(codex, { effort: 'high' })).toBe('codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high');
       const claude = { command: 'claude --dangerously-skip-permissions', idle_pattern: '$', model_flag: '--model', resume_args: '--continue' };
       expect(buildRuntimeCommand(claude, { model: 'claude-opus-5-5', resume: true })).toBe('claude --dangerously-skip-permissions --model claude-opus-5-5 --continue');
