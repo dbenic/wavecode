@@ -314,6 +314,14 @@ Do you want to proceed?
     expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'cx-2', 'Enter');
   });
 
+  it('a dialog that scrolled out of the bottom of the pane is not answered again', async () => {
+    const scrolled = ' Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm\n'
+      + Array(14).fill('  working on src/app.ts').join('\n')
+      + '\n  ⚠ Usage limit reached · limit resets Oct 23, 1am\n❯ ';
+    expect((await maybeDismissFirstRunDialog('agent-9', scrolled, 1_000_000))).toBe(false);
+    expect(sendRawKeys).not.toHaveBeenCalled();
+  });
+
   it('does not send keys for unrelated pane text', async () => {
     expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

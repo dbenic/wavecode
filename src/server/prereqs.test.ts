@@ -147,6 +147,26 @@ describe('prereqs', () => {
     expect((await gitAncestor(dir, first, 'main'))).toBeNull(); // a ref is asked again
   });
 
+  it('the git memo is bounded: huge outputs are not kept and the oldest entries go first', async () => {
+    const memo = await import('./git-memo.js');
+    memo.resetGitMemoForTest();
+    let calls = 0;
+    memo.setGitExecForTest(async (_repo, args) => { calls++; return { stdout: args.includes('big') ? 'x'.repeat(memo.MEMO_MAX_BYTES + 1) : `out-${args.join(' ')}`, status: 0 }; });
+    const sha = (n: number) => n.toString(16).padStart(40, '0');
+    await memo.gitText('/r', ['rev-list', '--count', `${sha(1)}..${sha(2)}`]);
+    await memo.gitText('/r', ['rev-list', '--count', `${sha(1)}..${sha(2)}`]);
+    expect(calls).toBe(1); // remembered
+    await memo.gitText('/r', ['diff', '--big', 'big', sha(3), sha(4)]);
+    await memo.gitText('/r', ['diff', '--big', 'big', sha(3), sha(4)]);
+    expect(calls).toBe(3); // too big to keep: asked twice
+    for (let i = 10; i < 10 + memo.MEMO_MAX_ENTRIES; i++) await memo.gitText('/r', ['merge-base', sha(i), sha(i + 1)]);
+    expect(memo.gitMemoStats().entries).toBe(memo.MEMO_MAX_ENTRIES);
+    const before = calls;
+    await memo.gitText('/r', ['rev-list', '--count', `${sha(1)}..${sha(2)}`]); // the oldest entry was evicted
+    expect(calls).toBe(before + 1);
+    memo.resetGitMemoForTest();
+  });
+
   it('unions freeze notes whose SHAs are contained in a candidate', async () => {
     const repo = path.join(tmp, 'repo');
     fs.mkdirSync(repo);

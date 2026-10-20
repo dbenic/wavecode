@@ -61,7 +61,10 @@ export function isCodexUpdatePrompt(output: string): boolean {
 }
 
 /** Which keys clear a CLI first-run screen, or null when none is showing (exported for tests). */
-export function firstRunDialogKeys(output: string): { keys: string[]; what: string } | null {
+export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: string } | null {
+  // Only the bottom of the pane counts: a dialog that scrolled up was answered already
+  // (an agent parked on a usage-limit screen was getting Down+Enter every 10 s from its scrollback).
+  const output = fullOutput.split('\n').filter((l) => l.trim()).slice(-12).join('\n');
   if (isClaudeBypassAcceptDialog(output)) return { keys: ['Down', 'Enter'], what: 'Bypass Permissions dialog' };
   if (isClaudeTrustFolderDialog(output)) return { keys: ['Down', 'Enter'], what: 'trust-folder dialog' };
   if (isCodexUpdatePrompt(output)) return { keys: ['Down', 'Enter'], what: 'Codex update prompt (skipped)' };

@@ -37,6 +37,8 @@ export interface PerfSnapshot {
   loop_ms: { p50: number; p99: number; max: number; mean: number } | null;
   cpu_pct: number | null;
   rss_mb: number;
+  /** process.memoryUsage() in MB, to tell heap growth from native buffers */
+  memory_mb: { heap_used: number; heap_total: number; external: number; array_buffers: number };
   last_minute: { spawns: Record<string, number>; sync_spawns: number; sync_blocked_ms: number };
   last_15_min: { spawns: Record<string, number>; sync_spawns: number; sync_blocked_ms: number };
   jobs: Record<string, { last_ms: number; last_at: string; max_ms: number; runs: number }>;
@@ -165,6 +167,7 @@ export function perfSnapshot(now = Date.now()): PerfSnapshot {
     loop_ms: loopStats(),
     cpu_pct: cpuPercent(now),
     rss_mb: Math.round(process.memoryUsage().rss / 1048576),
+    memory_mb: (() => { const m = process.memoryUsage(); const mb = (n: number) => Math.round(n / 1048576); return { heap_used: mb(m.heapUsed), heap_total: mb(m.heapTotal), external: mb(m.external), array_buffers: mb(m.arrayBuffers) }; })(),
     last_minute: sum([current]),
     last_15_min: sum(window),
     jobs: jobsOut,

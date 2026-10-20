@@ -14,8 +14,33 @@ export interface GitResult {
 
 type GitExec = (repo: string, args: string[], timeout: number) => Promise<GitResult>;
 
+/**
+ * Bounded: at most MEMO_MAX_ENTRIES results, none larger than MEMO_MAX_BYTES
+ * (a full lane diff can be megabytes; thousands of freezes would turn the
+ * memo into the daemon's biggest allocation). Oldest entries go first.
+ */
+export const MEMO_MAX_ENTRIES = 4000;
+export const MEMO_MAX_BYTES = 256 * 1024;
 const memo = new Map<string, GitResult>();
 let custom: GitExec | null = null;
+
+function remember(key: string, result: GitResult): void {
+  if ((result.stdout?.length ?? 0) > MEMO_MAX_BYTES) return;
+  if (memo.has(key)) memo.delete(key);
+  memo.set(key, result);
+  while (memo.size > MEMO_MAX_ENTRIES) {
+    const oldest = memo.keys().next().value;
+    if (oldest === undefined) break;
+    memo.delete(oldest);
+  }
+}
+
+/** Entries held and their text size, for the Health panel. */
+export function gitMemoStats(): { entries: number; bytes: number } {
+  let bytes = 0;
+  for (const r of memo.values()) bytes += r.stdout?.length ?? 0;
+  return { entries: memo.size, bytes };
+}
 
 function isFullSha(text: string): boolean {
   return /^[0-9a-f]{40}$/i.test(text);
@@ -79,7 +104,7 @@ export async function gitRun(repo: string, args: string[], timeout = 8000): Prom
     if (hit) return hit;
   }
   const result = await (custom ?? defaultExec)(repo, args, timeout);
-  if (gitArgsCacheable(args) && result.status !== null) memo.set(key, result);
+  if (gitArgsCacheable(args) && result.status !== null) remember(key, result);
   return result;
 }
 
