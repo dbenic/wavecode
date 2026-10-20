@@ -47,6 +47,11 @@ function shaN(n: number): string {
   return n.toString(16).padStart(40, '0');
 }
 
+/** SQLite-shaped timestamp relative to the real clock: these tests read the board with the daemon's own now(). */
+function sqliteAgo(ms: number): string {
+  return new Date(Date.now() - ms).toISOString().slice(0, 19).replace('T', ' ');
+}
+
 describe('overview snapshot', () => {
   let tmp: string;
   let app: Hono;
@@ -173,7 +178,7 @@ describe('overview snapshot', () => {
         runId,
         authorName: 'claude2',
         createdAt: `2026-10-03 00:${String(i).padStart(2, '0')}:00`,
-        updatedAt: '2026-10-12 12:00:00',
+        updatedAt: sqliteAgo(60 * 60_000),
       });
     }
     const full = await ov.buildBoard();
@@ -197,7 +202,7 @@ describe('overview snapshot', () => {
     const author = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', mode: 'spawned', status: 'idle' });
     if (!codex1.ok || !denied.ok || !author.ok) throw new Error('agent');
     projects.demo = { pipeline: { agent_deny: ['builder'] } };
-    const recent = '2026-10-12 12:00:00';
+    const recent = sqliteAgo(60 * 60_000); // an hour ago, so it is inside every window the board applies against the real clock
     insertFreeze({ sha: shaN(301), lane: 'wc-codex1', status: 'open', verdict: 'needs-fixes', runId: runFor(codex1.data.id), authorId: codex1.data.id, authorName: 'codex1', updatedAt: recent, createdAt: recent });
     insertFreeze({ sha: shaN(302), lane: 'wc-builder', status: 'open', verdict: 'needs-fixes', runId: runFor(denied.data.id), project: 'demo', authorId: denied.data.id, authorName: 'builder', updatedAt: recent, createdAt: recent });
     insertFreeze({ sha: shaN(303), lane: 'wc-claude2', status: 'open', verdict: 'needs-fixes', runId: runFor(author.data.id), authorId: author.data.id, authorName: 'claude2', updatedAt: recent, createdAt: recent });
@@ -235,7 +240,7 @@ describe('overview snapshot', () => {
     const agent = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'spawned', status: 'idle' });
     if (!agent.ok) throw new Error(agent.error);
     const shippedRun = runFor(agent.data.id);
-    insertFreeze({ sha: shipped, lane: 'wc-claude2', status: 'open', verdict: 'pass', runId: shippedRun, project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00' });
+    insertFreeze({ sha: shipped, lane: 'wc-claude2', status: 'open', verdict: 'pass', runId: shippedRun, project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: sqliteAgo(60 * 60_000) });
     db.getDb().prepare(
       `INSERT INTO release_requests (id, project, sha, target, status, origin, deployed_sha) VALUES ('rel-ship', 'wave', ?, 'staging', 'deployed', 'local', ?)`,
     ).run(shipped, shipped);
@@ -250,7 +255,7 @@ describe('overview snapshot', () => {
     git(repo, 'commit', '-q', '-m', 'same patch on main');
     git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
     const cherryRun = runFor(agent.data.id);
-    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'needs-fixes', runId: cherryRun, project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00' });
+    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'needs-fixes', runId: cherryRun, project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: sqliteAgo(60 * 60_000) });
 
     git(repo, 'checkout', '-q', '-b', 'wc-far');
     fs.writeFileSync(path.join(repo, 'c.txt'), 'old');
@@ -267,7 +272,7 @@ describe('overview snapshot', () => {
     const rejectedRun = runFor(agent.data.id);
     insertFreeze({
       sha: rejected, lane: 'wc-far', status: 'rejected', verdict: 'reject', reason: 'no',
-      runId: rejectedRun, project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00',
+      runId: rejectedRun, project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: sqliteAgo(60 * 60_000),
     });
     setFarAheadForTest(2);
 
@@ -304,7 +309,7 @@ describe('overview snapshot', () => {
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainEq);
     const agent = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'spawned', status: 'idle' });
     if (!agent.ok) throw new Error(agent.error);
-    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00' });
+    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: sqliteAgo(60 * 60_000) });
     db.getDb().prepare(
       `INSERT INTO release_requests (id, project, sha, target, status, origin, deployed_sha) VALUES ('rel-cherry', 'wave', ?, 'staging', 'deployed', 'local', ?)`,
     ).run(mainEq, mainEq);
@@ -334,7 +339,7 @@ describe('overview snapshot', () => {
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainEq);
     const agent = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'spawned', status: 'idle' });
     if (!agent.ok) throw new Error(agent.error);
-    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00' });
+    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: sqliteAgo(60 * 60_000) });
     db.getDb().prepare(
       `INSERT INTO release_requests (id, project, sha, target, status, origin, deployed_sha) VALUES ('rel-cherry', 'wave', ?, 'staging', 'deployed', 'local', ?)`,
     ).run(mainEq, mainEq);
@@ -373,7 +378,7 @@ describe('overview snapshot', () => {
     git(repo, 'update-ref', 'refs/remotes/origin/main', mainEq);
     const agent = db.insertAgent({ name: 'claude2', runtime: 'claude-code', tmux_session: 'wc-claude2', workspace: repo, mode: 'spawned', status: 'idle' });
     if (!agent.ok) throw new Error(agent.error);
-    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00' });
+    insertFreeze({ sha: cherrySha, lane: 'wc-empty', status: 'open', verdict: 'pass', runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: sqliteAgo(60 * 60_000) });
     if (opts.row) {
       db.getDb().prepare(
         `INSERT INTO release_requests (id, project, sha, target, status, origin, deployed_sha) VALUES ('rel-local', 'wave', ?, 'staging', 'deployed', 'local', ?)`,
@@ -393,7 +398,7 @@ describe('overview snapshot', () => {
     git(repo, 'update-ref', 'refs/remotes/origin/wc-far', git(repo, 'rev-parse', 'HEAD'));
     insertFreeze({
       sha: rejected, lane: 'wc-far', status: 'rejected', verdict: 'reject', reason: 'no',
-      runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: '2026-10-12 12:00:00',
+      runId: runFor(agent.data.id), project: 'wave', authorId: agent.data.id, authorName: 'claude2', updatedAt: sqliteAgo(60 * 60_000),
     });
     setFarAheadForTest(2);
     return { cherrySha, rejected };
@@ -469,14 +474,14 @@ describe('overview snapshot', () => {
     ensureReviewTable();
     const old = mk('2026-10-01 00:00:00');
     const reviewed = mk('2026-10-01 00:00:00');
-    const recent = mk('2026-10-12 12:00:00');
+    const recent = mk(sqliteAgo(60 * 60_000));
     db.getDb().prepare(
       `INSERT INTO code_reviews (id, run_id, reviewer_type, status, verdict) VALUES ('cr1', ?, 'cross-model', 'done', 'pass')`,
     ).run(reviewed);
-    const dry = purgeStalePendingReviews({ now: Date.parse('2026-10-13T00:00:00Z'), dryRun: true });
+    const dry = purgeStalePendingReviews({ now: Date.now(), dryRun: true });
     expect(dry.abandoned).toEqual([old]);
     expect(db.getRun(old).data?.review_status).toBe('pending');
-    const purged = purgeStalePendingReviews({ now: Date.parse('2026-10-13T00:00:00Z') });
+    const purged = purgeStalePendingReviews({ now: Date.now() });
     expect(purged.abandoned).toEqual([old]);
     expect(db.getRun(old).data?.review_status).toBe('abandoned');
     expect(db.getRun(reviewed).data?.review_status).toBe('pending');
