@@ -70,12 +70,21 @@ function sameDir(a: string, b: string): boolean {
 /**
  * The thread id to resume for an agent working in `workspace`, or null when
  * the login has no thread of its own there (start fresh).
+ *
+ * A thread belongs to the directory it was *created* in: resuming it elsewhere
+ * writes a new rollout with the new cwd, so the newest file alone would call
+ * codex1's thread scout's own after a bad `--last`. The oldest rollout of
+ * each id decides; forks are never resumed.
  */
 export function ownThreadId(codexHome: string, workspace: string): string | null {
-  for (const file of rolloutFiles(codexHome)) {
-    const meta = readMeta(file);
-    if (!meta || !sameDir(meta.cwd, workspace)) continue;
+  const files = rolloutFiles(codexHome); // newest first
+  const metas = files.map(readMeta).filter((m): m is SessionMeta => m !== null);
+  const origin = new Map<string, string>(); // id → cwd of its oldest rollout
+  for (let i = metas.length - 1; i >= 0; i--) if (!origin.has(metas[i].id)) origin.set(metas[i].id, metas[i].cwd);
+  for (const meta of metas) {
     if (meta.forkedFrom) continue; // a fork made from the lock screen carries someone else's conversation
+    if (!sameDir(meta.cwd, workspace)) continue;
+    if (!sameDir(origin.get(meta.id) ?? meta.cwd, workspace)) continue; // created elsewhere: another agent's
     return meta.id;
   }
   return null;

@@ -22,6 +22,9 @@ describe('codex sessions', () => {
       rollout(home, '20', '08:44:44', '01a10000-0000-7000-8000-000000000002', scout);
       rollout(home, '20', '11:00:00', '01a10000-0000-7000-8000-000000000003', codex1); // the login's last thread: codex1's
       rollout(home, '20', '11:47:52', '01a10000-0000-7000-8000-000000000004', scout, '01a10000-0000-7000-8000-000000000003'); // forked from codex1's on the lock screen
+      // codex1's thread was once resumed inside scout's worktree (a bad --last): the newer rollout says cwd=scout,
+      // but the thread was created in codex1's directory, so it is not scout's.
+      rollout(home, '20', '12:00:00', '01a10000-0000-7000-8000-000000000003', scout);
       expect(ownThreadId(home, scout)).toBe('01a10000-0000-7000-8000-000000000002');
       expect(ownThreadId(home, codex1)).toBe('01a10000-0000-7000-8000-000000000003');
       expect(codexResumeArgs(home, scout)).toBe('resume 01a10000-0000-7000-8000-000000000002');
