@@ -69,6 +69,14 @@ export function isCodexThreadLockScreen(output: string): boolean {
   return /open in another app/i.test(output) && /press R to continue/i.test(output);
 }
 
+/**
+ * Claude Code's rewind menu (double Escape): "(current) … Enter to continue · Esc to cancel".
+ * Nobody asked for it on an unattended agent (a stray Escape opened it); cancel.
+ */
+export function isClaudeRewindMenu(output: string): boolean {
+  return /\(current\)/.test(output) && /Enter to continue\s*·\s*Esc to cancel/i.test(output) && !/Yes,\s*I trust/i.test(output);
+}
+
 /** Which keys clear a CLI first-run screen, or null when none is showing (exported for tests). */
 export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: string } | null {
   // Only the bottom of the pane counts: a dialog that scrolled up was answered already
@@ -77,6 +85,7 @@ export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: 
   if (isClaudeBypassAcceptDialog(output)) return { keys: ['Down', 'Enter'], what: 'Bypass Permissions dialog' };
   if (isClaudeTrustFolderDialog(output)) return { keys: ['Down', 'Enter'], what: 'trust-folder dialog' };
   if (isCodexUpdatePrompt(output)) return { keys: ['Down', 'Enter'], what: 'Codex update prompt (skipped)' };
+  if (isClaudeRewindMenu(output)) return { keys: ['Escape'], what: 'Claude rewind menu (cancelled)' };
   if (isCodexThreadLockScreen(output)) return { keys: ['q'], what: 'Codex thread lock (another process holds that conversation) — left, the relaunch resumes this worktree\'s own thread' };
   if (isCodexTrustFolderDialog(output)) return { keys: ['Enter'], what: 'Codex trust-folder dialog' };
   if (isPressEnterToContinueScreen(output)) return { keys: ['Enter'], what: 'press-Enter screen' };

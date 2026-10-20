@@ -74,4 +74,11 @@ describe('pickProbeTargets', () => {
     const seat = { ...agents[0], id: 'seat', name: 'login-ales-codex', tmux_session: 'wc-login-ales-codex', profile: 'ales', mode: 'adopted' as const };
     expect(pickProbeTargets([seat]).map((a) => a.name)).toEqual([]);
   });
+
+  it('after /usage one Escape closes the screen; a second is sent only while the screen is still up', async () => {
+    const { overlayStillOpen } = await import('./usage-probe.js');
+    expect(overlayStillOpen('claude-code', ' Current session\n 7% used · resets 2am\n Esc to close')).toBe(true);
+    expect(overlayStillOpen('claude-code', '● done\n❯ \n  ⏵⏵ bypass permissions on')).toBe(false);
+    expect(overlayStillOpen('codex', 'anything')).toBe(false);
+  });
 });

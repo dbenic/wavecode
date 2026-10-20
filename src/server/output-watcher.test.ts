@@ -336,6 +336,13 @@ Do you want to proceed?
     expect(sendRawKeys).toHaveBeenCalledWith('cx-lock', 'q');
   });
 
+  it('Claude rewind menu opened by a stray Escape is cancelled', async () => {
+    const menu = '   No code changes\n   ❯ (current)\n   Enter to continue · Esc to cancel';
+    expect((await maybeDismissFirstRunDialog('cc-rewind', menu, 1_000_000))).toBe(true);
+    expect(sendRawKeys).toHaveBeenCalledTimes(1);
+    expect(sendRawKeys).toHaveBeenCalledWith('cc-rewind', 'Escape');
+  });
+
   it('does not send keys for unrelated pane text', async () => {
     expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

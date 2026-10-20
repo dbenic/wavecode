@@ -129,6 +129,13 @@ export function pickProbeTargets(agents: Agent[], now = Date.now(), intervalMs =
   return [...chosen.values()];
 }
 
+/** The /usage or /status screen is still on top (exported for tests). */
+export function overlayStillOpen(runtime: string, pane: string): boolean {
+  const tail = pane.split('\n').filter((l) => l.trim()).slice(-25).join('\n');
+  if (runtime === 'claude-code') return /Current session|Current week|Esc to close|resets/i.test(tail) && !/^[❯>]\s*$/m.test(tail.split('\n').slice(-3).join('\n'));
+  return false;
+}
+
 export async function probeAgent(agent: Agent): Promise<ProfileUsage | null> {
   const cmd = PROBE_COMMAND[agent.runtime];
   if (!cmd) return null;
@@ -139,10 +146,12 @@ export async function probeAgent(agent: Agent): Promise<ProfileUsage | null> {
     await tmux.sendTextAndEnter(agent.tmux_session, cmd, { mode: 'type' });
     await sleep(SCREEN_WAIT_MS);
     const pane = await tmux.capturePane(agent.tmux_session, CAPTURE_LINES);
-    // close the overlay (Claude) / no-op at the prompt (Codex)
+    // close the overlay (Claude) / no-op at the prompt (Codex). One Escape; a second only
+    // if the screen is still up — two Escapes at Claude's prompt open its rewind menu.
     await tmux.sendRawKey(agent.tmux_session, 'Escape');
     await sleep(400);
-    await tmux.sendRawKey(agent.tmux_session, 'Escape');
+    const after = await tmux.capturePane(agent.tmux_session, CAPTURE_LINES);
+    if (after.ok && overlayStillOpen(agent.runtime, after.data)) await tmux.sendRawKey(agent.tmux_session, 'Escape');
     if (!pane.ok) return null;
     const metrics = agent.runtime === 'codex' ? parseCodexStatus(pane.data) : parseClaudeUsage(pane.data);
     if (metrics.length === 0) {

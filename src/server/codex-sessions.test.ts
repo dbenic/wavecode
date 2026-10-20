@@ -7,7 +7,8 @@ import { codexResumeArgs, ownThreadId } from './codex-sessions.js';
 function rollout(home: string, day: string, stamp: string, id: string, cwd: string, forkedFrom?: string): void {
   const dir = path.join(home, 'sessions', '2026', '10', day);
   fs.mkdirSync(dir, { recursive: true });
-  const meta = { timestamp: `2026-10-${day}T${stamp}Z`, ordinal: 0, type: 'session_meta', payload: { id, cwd, ...(forkedFrom ? { forked_from_id: forkedFrom } : {}) } };
+  // real meta lines carry base instructions and workspace roots: tens of KB on one line
+  const meta = { timestamp: `2026-10-${day}T${stamp}Z`, ordinal: 0, type: 'session_meta', payload: { id, cwd, ...(forkedFrom ? { forked_from_id: forkedFrom } : {}), base_instructions: 'x'.repeat(20_000), runtime_workspace_roots: [cwd] } };
   fs.writeFileSync(path.join(dir, `rollout-2026-10-${day}T${stamp.replace(/:/g, '-')}-${id}.jsonl`), JSON.stringify(meta) + '\n' + JSON.stringify({ type: 'turn', text: 'x'.repeat(100) }) + '\n');
 }
 

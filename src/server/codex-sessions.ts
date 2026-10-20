@@ -18,7 +18,8 @@ import path from 'node:path';
 
 const ROLLOUT_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/;
 const MAX_FILES = 400;
-const HEAD_BYTES = 4096;
+/** The meta line carries instructions and workspace roots and can run to tens of KB. */
+const HEAD_BYTES = 512 * 1024;
 
 interface SessionMeta { id: string; cwd: string; forkedFrom: string | null; file: string }
 
@@ -28,7 +29,9 @@ function readMeta(file: string): SessionMeta | null {
     fd = fs.openSync(file, 'r');
     const buf = Buffer.alloc(HEAD_BYTES);
     const n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0);
-    const firstLine = buf.subarray(0, n).toString('utf8').split('\n')[0];
+    const nl = buf.subarray(0, n).indexOf(0x0a);
+    if (nl === -1 && n === HEAD_BYTES) return null; // a first line longer than the window: not a meta line we trust
+    const firstLine = buf.subarray(0, nl === -1 ? n : nl).toString('utf8');
     const row = JSON.parse(firstLine) as { type?: string; payload?: { id?: unknown; cwd?: unknown; forked_from_id?: unknown } };
     if (row.type !== 'session_meta' || !row.payload) return null;
     const id = typeof row.payload.id === 'string' ? row.payload.id : null;
