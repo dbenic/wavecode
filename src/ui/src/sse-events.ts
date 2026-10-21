@@ -51,6 +51,7 @@ export const SSE_EVENT_TYPES = [
   'overview.board',
   'perf.lag',
   'tests.portal',
+  'agent.pane_recreated',
   'agent.model_applied',
   'events.pruned',
   'overlord.report',

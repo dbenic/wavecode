@@ -182,6 +182,7 @@ export async function newSession(sessionName: string, workDir: string, command?:
   // the prompt echo stay on screen together.
   const args = ['new-session', '-d', '-s', sessionName, '-c', workDir, '-x', String(SPAWN_COLS), '-y', String(SPAWN_ROWS)];
   await tmuxExec(args);
+  await disableAlternateScreen(sessionName); // the agent page's history depends on scrollback
 
   if (command) {
     // Let the shell initialize without blocking the event loop, then send the command.
@@ -378,6 +379,24 @@ export const AGENT_HISTORY_LIMIT = 20000;
 export async function applyAgentPaneDefaults(): Promise<void> {
   await tmuxExecSafe(['set-option', '-g', 'history-limit', String(AGENT_HISTORY_LIMIT)]);
   await tmuxExecSafe(['set-option', '-gw', 'alternate-screen', 'off']);
+  // windows that already exist carry their own copy of the option: set it on each agent window too
+  const listed = await tmuxExecSafe(['list-windows', '-a', '-F', '#{session_name}:#{window_index}']);
+  for (const target of (listed ?? '').split('\n').map((l) => l.trim()).filter((l) => /^wc-/.test(l))) {
+    await tmuxExecSafe(['set-option', '-w', '-t', target, 'alternate-screen', 'off']);
+  }
+}
+
+/**
+ * Replace the pane's process with a fresh pane at a shell prompt (same session
+ * and window). A pane stuck on the alternate screen starts clean this way.
+ */
+export async function respawnPane(sessionName: string): Promise<boolean> {
+  return (await tmuxExecSafe(['respawn-pane', '-k', '-t', sessionName])) !== null;
+}
+
+/** A new agent session: the window keeps scrollback (no alternate screen). Called right after new-session. */
+export async function disableAlternateScreen(sessionName: string): Promise<void> {
+  await tmuxExecSafe(['set-option', '-w', '-t', sessionName, 'alternate-screen', 'off']);
 }
 
 /**
