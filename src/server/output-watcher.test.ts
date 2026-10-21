@@ -356,6 +356,13 @@ Do you want to proceed?
     expect(sendRawKeys).toHaveBeenCalledWith('cc-theme', 'Enter');
   });
 
+  it('Claude\'s usage-limit menu picks "wait here, continue at reset" (Down, Enter)', async () => {
+    const menu = '   What do you want to do?\n   ❯ 1. Stop and wait for limit to reset\n     2. Wait here, then continue automatically at Oct 23, 1am\n     3. Ask your admin for more usage\n   Enter to confirm · Esc to cancel';
+    expect((await maybeDismissFirstRunDialog('cc-limit', menu, 1_000_000))).toBe(true);
+    expect(sendRawKeys).toHaveBeenNthCalledWith(1, 'cc-limit', 'Down');
+    expect(sendRawKeys).toHaveBeenNthCalledWith(2, 'cc-limit', 'Enter');
+  });
+
   it('does not send keys for unrelated pane text', async () => {
     expect((await maybeDismissFirstRunDialog('agent-1', 'REVIEW PASS: no issues found.'))).toBe(false);
     expect(sendRawKeys).not.toHaveBeenCalled();

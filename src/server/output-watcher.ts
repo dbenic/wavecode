@@ -82,6 +82,14 @@ export function isClaudeThemePicker(output: string): boolean {
   return /Choose the text style|Select a theme|run \/theme/i.test(output) && /Dark mode|Light mode/i.test(output) && !/Select login method/i.test(output);
 }
 
+/**
+ * Claude hit the subscription's usage limit and asks what to do. An unattended
+ * agent waits here and continues when the limit resets (option 2).
+ */
+export function isClaudeUsageLimitMenu(output: string): boolean {
+  return /What do you want to do\?/i.test(output) && /Stop and wait for limit to reset/i.test(output) && /Wait here, then continue automatically/i.test(output) && /❯\s*1\./.test(output);
+}
+
 /** Claude found an API key in the environment and asks whether to use it; an agent runs on the subscription, so No. */
 export function isClaudeApiKeyQuestion(output: string): boolean {
   return /Do you want to use this API key\?/i.test(output) && /❯\s*No\b/i.test(output);
@@ -98,6 +106,7 @@ export function firstRunDialogKeys(fullOutput: string): { keys: string[]; what: 
   if (isClaudeRewindMenu(output)) return { keys: ['Escape'], what: 'Claude rewind menu (cancelled)' };
   if (isClaudeApiKeyQuestion(output)) return { keys: ['Enter'], what: 'Claude API-key question (No: the subscription is used)' };
   if (isClaudeThemePicker(output)) return { keys: ['Enter'], what: 'Claude theme picker' };
+  if (isClaudeUsageLimitMenu(output)) return { keys: ['Down', 'Enter'], what: 'Claude usage-limit menu (wait here, continue at reset)' };
   if (isCodexThreadLockScreen(output)) return { keys: ['q'], what: 'Codex thread lock (another process holds that conversation) — left, the relaunch resumes this worktree\'s own thread' };
   if (isCodexTrustFolderDialog(output)) return { keys: ['Enter'], what: 'Codex trust-folder dialog' };
   if (isPressEnterToContinueScreen(output)) return { keys: ['Enter'], what: 'press-Enter screen' };

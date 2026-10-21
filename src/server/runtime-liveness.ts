@@ -92,6 +92,14 @@ export function relaunchAttemptsExhausted(agentId: string): boolean {
  * window, so the monitor tick and a dispatch never double-launch. Refuses
  * once MAX_RELAUNCH_ATTEMPTS were sent without the runtime coming back.
  */
+const RESUME_FAILURE_RE = /Failed to resume session|No conversation found to continue|could not resume/i;
+
+/** The CLI that just exited printed that its resume failed (Codex: a stale or incompatible rollout; Claude: nothing to continue). */
+export async function paneShowsResumeFailure(agent: Pick<Agent, 'tmux_session'>): Promise<boolean> {
+  const capture = await tmux.capturePane(agent.tmux_session, 20);
+  return capture.ok && RESUME_FAILURE_RE.test(capture.data);
+}
+
 export async function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health_check' | 'manual'): Promise<Result<{ sent: boolean }>> {
   const last = relaunchedAt.get(agent.id);
   if (last !== undefined && Date.now() - last < RUNTIME_SETTLE_TIMEOUT_MS) {
@@ -105,8 +113,10 @@ export async function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health
 
   // Same command as spawn, including the agent's credential profile env. The
   // first attempt resumes the previous conversation (`resume_args`); if the
-  // runtime dies again, the next attempt launches plain.
-  const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile, resume: attempts === 0, workspace: agent.workspace });
+  // runtime dies again, or the pane shows the last resume failed, the next
+  // attempt launches plain (a resume that keeps failing would loop forever).
+  const resume = attempts === 0 && !(await paneShowsResumeFailure(agent));
+  const command = buildLaunchCommand(agent.runtime, { model: agent.model, effort: agent.effort, profile: agent.profile, resume, workspace: agent.workspace });
   if (!command.ok) return command;
   try {
     await tmux.sendTextAndEnter(agent.tmux_session, command.data, { mode: 'type' }); // a shell prompt: typed, not pasted
@@ -122,7 +132,7 @@ export async function relaunchRuntime(agent: Agent, reason: 'dispatch' | 'health
     model: agent.model,
     effort: agent.effort,
     reason,
-    resumed: attempts === 0,
+    resumed: resume,
   });
   logger.warn({ agentId: agent.id, runtime: agent.runtime, reason }, 'Runtime TUI had exited — relaunched');
   return { ok: true, data: { sent: true } };

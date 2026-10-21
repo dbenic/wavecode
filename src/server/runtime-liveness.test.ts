@@ -147,6 +147,19 @@ describe('runtime-liveness.ts', () => {
       }));
     });
 
+    it('a pane that shows the last resume failed is relaunched plain, not resumed again', async () => {
+      const cfg = await import('./config.js');
+      vi.mocked(cfg.getConfig).mockReturnValueOnce({
+        runtimes: { 'claude-code': { command: 'claude --dangerously-skip-permissions', idle_pattern: '>', model_flag: '--model', effort_flag: '--effort', resume_args: '--continue' } },
+      } as never);
+      pane.alive = true;
+      pane.text = 'No conversation found to continue\nci@wavecode-box:~/repo$ ';
+      const result = await relaunchRuntime(agent(), 'health_check');
+      expect(result).toEqual({ ok: true, data: { sent: true } });
+      expect(tmux.sendTextAndEnter).toHaveBeenCalledWith('wc-builder', 'claude --dangerously-skip-permissions --model claude-sonnet-5 --effort high', { mode: 'type' });
+      expect(emit).toHaveBeenCalledWith('agent.runtime_relaunched', 'agent', 'agent-1', expect.objectContaining({ resumed: false }));
+    });
+
     it('relaunch timeout: pane stays at the shell for 30s → runtime not running', async () => {
       pane.text = BARE_SHELL;
       vi.mocked(tmux.sendTextAndEnter).mockImplementationOnce(() => {
