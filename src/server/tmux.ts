@@ -364,6 +364,22 @@ export async function capturePaneAnsi(sessionName: string, lines = 50): Promise<
   }
 }
 
+/** Scrollback kept per pane once the daemon has set its tmux defaults. */
+export const AGENT_HISTORY_LIMIT = 20000;
+
+/**
+ * tmux defaults for agent panes. Claude Code and Codex draw on the alternate
+ * screen, which tmux keeps no scrollback for: the agent page could only ever
+ * show the visible rows. With the alternate screen off they draw on the
+ * normal screen and what scrolls off the top becomes history (history-limit
+ * applies to panes created afterwards; a running TUI takes the screen change
+ * on its next launch). Best effort: no tmux server yet is not an error.
+ */
+export async function applyAgentPaneDefaults(): Promise<void> {
+  await tmuxExecSafe(['set-option', '-g', 'history-limit', String(AGENT_HISTORY_LIMIT)]);
+  await tmuxExecSafe(['set-option', '-gw', 'alternate-screen', 'off']);
+}
+
 /**
  * The pane in two captures: the last `historyLines` of frozen history above
  * the visible screen (tmux lines -N..-1) and the visible screen (0..rows-1).

@@ -82,6 +82,7 @@ vi.mock('./deploy-state.js', () => ({
 }));
 
 vi.mock('./tmux.js', () => ({
+  applyAgentPaneDefaults: vi.fn(async () => undefined),
   hasSession: vi.fn(),
 }));
 

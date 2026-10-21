@@ -20,6 +20,7 @@ import { startEventLoopMonitor, stopEventLoopMonitor } from './event-loop.js';
 import { pruneOldArtifacts } from './artifact-manager.js';
 import { reconcileStartupState, type StartupReconcileResult } from './startup-reconcile.js';
 import { rebindAgentSockets } from './session-manager.js';
+import * as tmux from './tmux.js';
 import { startLaneBoard, stopLaneBoard } from './dev-lanes.js';
 import { startPerfMonitor } from './perf-monitor.js';
 import { startModelGuard } from './model-switch.js';
@@ -55,6 +56,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   teamManager.startAllCommsWatchers();
   notifications.getVapidPublicKey();
 
+  await tmux.applyAgentPaneDefaults();
   await rebindAgentSockets();
   startEventLoopMonitor();
   startPerfMonitor();

@@ -36,6 +36,7 @@ vi.mock('./task-dispatcher.js', () => ({
 }));
 
 vi.mock('./tmux.js', () => ({
+  applyAgentPaneDefaults: vi.fn(async () => undefined),
   hasSession: vi.fn(),
 }));
 
