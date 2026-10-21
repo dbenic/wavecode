@@ -739,8 +739,8 @@ export interface TestPortalDoc {
   schema: number;
   generated_at: string;
   queue: Array<{ ticket: string; agent: string; lane: string; tier: string; sha: string; priority: string; wait_s: number | null; wait_min: number | null }>;
-  runs: Array<{ place: string; kind: string; agent: string; lane: string; tier: string; sha: string; started_at: string | null; elapsed_s: number | null; elapsed_min: number | null; expected_s: number; expected_min: number }>;
-  runners: Array<{ name: string; type: string; health: string; preflight: string; load: number | null; mem_avail_gb: number | null; disk_used_pct: number | null; state: string; age_s: number | null; age_min: number | null }>;
+  runs: Array<{ place: string; kind: string; agent: string; lane: string; tier: string; sha: string; started_at: string | null; elapsed_s: number | null; elapsed_min: number | null; expected_s: number; expected_min: number; median_s?: number; median_min?: number; pace?: '' | 'amber' | 'red' }>;
+  runners: Array<{ name: string; type: string; server_type?: string; role?: string; group?: string; health: string; preflight: string; load: number | null; mem_avail_gb: number | null; disk_used_pct: number | null; state: string; age_s: number | null; age_min: number | null; agent?: string; kind?: string; sha?: string; slots?: Array<{ name: string; state: string }> }>;
   results: Array<{ agent: string; tier: string; sha: string; result: string; duration_s: number | null; duration_min: number | null; infra_error: boolean }>;
   scaler: { mode: string; eur_today: number | null; cap_eur: number; cap_reached: boolean; desired: number; actual: number };
   alerts: Array<{ name: string; detail: string }>;

@@ -24,8 +24,8 @@ const BACKOFF_S = [20, 60, 120];
 const FETCH_TIMEOUT_MS = 10_000;
 
 export interface PortalQueueRow { ticket: string; agent: string; lane: string; tier: string; sha: string; priority: string; wait_s: number | null; wait_min: number | null }
-export interface PortalRun { place: string; kind: string; agent: string; lane: string; tier: string; sha: string; started_at: string | null; elapsed_s: number | null; elapsed_min: number | null; expected_s: number; expected_min: number }
-export interface PortalRunner { name: string; type: string; health: string; preflight: string; load: number | null; mem_avail_gb: number | null; disk_used_pct: number | null; state: string; age_s: number | null; age_min: number | null }
+export interface PortalRun { place: string; kind: string; agent: string; lane: string; tier: string; sha: string; started_at: string | null; elapsed_s: number | null; elapsed_min: number | null; expected_s: number; expected_min: number; median_s?: number; median_min?: number; pace?: '' | 'amber' | 'red' }
+export interface PortalRunner { name: string; type: string; server_type?: string; role?: string; group?: string; health: string; preflight: string; load: number | null; mem_avail_gb: number | null; disk_used_pct: number | null; state: string; age_s: number | null; age_min: number | null; agent?: string; kind?: string; sha?: string; slots?: Array<{ name: string; state: string }> }
 export interface PortalResult { agent: string; tier: string; sha: string; result: string; duration_s: number | null; duration_min: number | null; infra_error: boolean }
 export interface PortalScaler { mode: string; eur_today: number | null; cap_eur: number; cap_reached: boolean; desired: number; actual: number }
 export interface PortalAlert { name: string; detail: string }
@@ -91,7 +91,7 @@ export function materialKey(doc: PortalDoc): string {
   const h = createHash('sha1');
   h.update(JSON.stringify({
     q: doc.queue.map((r) => [r.ticket, r.sha, r.tier, r.priority]),
-    r: doc.runs.map((r) => [r.place, r.sha, r.tier, r.agent, r.started_at]),
+    r: doc.runs.map((r) => [r.place, r.sha, r.tier, r.agent, r.started_at, r.pace ?? '']),
     n: doc.runners.map((r) => [r.name, r.health, r.preflight, r.state]),
     a: doc.alerts.map((a) => [a.name, a.detail]),
     s: doc.results.slice(0, 5).map((r) => [r.sha, r.tier, r.result]),

@@ -108,15 +108,20 @@ export default function Tests() {
               <section className="rounded-lg border border-slate-800/50 bg-slate-900/50 overflow-hidden" data-testid="tests-runs">
                 <div className="px-4 py-2.5 border-b border-slate-800/50 flex items-center justify-between">
                   <h2 className="text-xs font-bold tracking-[0.2em] text-slate-300 uppercase">Running · {doc.runs.length}</h2>
-                  <span className="text-[10px] text-slate-500">budget is a display hint, not a timeout</span>
+                  <span className="text-[10px] text-slate-500">~ is the typical duration of that kind; amber past 1.5×, red past 2.5×</span>
                 </div>
                 <div className="p-3">
                   {doc.runs.length === 0 ? <p className="text-slate-600">nothing running</p> : (
                     <table className="w-full"><tbody className="divide-y divide-slate-800/50">
                       {doc.runs.map((r, i) => {
                         const el = elapsedOf(r.started_at, r.elapsed_s);
-                        const pct = el == null ? 0 : Math.min(100, Math.round((el / Math.max(1, r.expected_s)) * 100));
-                        const over = el != null && el > r.expected_s;
+                        // typical duration (median of that kind) when the portal gives it, else the fixed budget
+                        const typical = r.median_s ?? r.expected_s;
+                        const pct = el == null ? 0 : Math.min(100, Math.round((el / Math.max(1, typical)) * 100));
+                        const pace: '' | 'amber' | 'red' = r.pace ?? (el != null && el > 2.5 * typical ? 'red' : el != null && el > 1.5 * typical ? 'amber' : '');
+                        const over = pace !== '';
+                        const tone = pace === 'red' ? 'text-red-300' : pace === 'amber' ? 'text-amber-300' : 'text-slate-300';
+                        const bar = pace === 'red' ? 'bg-red-500' : pace === 'amber' ? 'bg-amber-500' : 'bg-cyan-500';
                         return (
                           <tr key={`${r.place}-${i}`} data-testid={`run-${r.place}`}>
                             <td className="py-1.5 pr-2 font-mono text-slate-300">{r.place}</td>
@@ -124,9 +129,9 @@ export default function Tests() {
                             <td className="py-1.5 pr-2 text-slate-400">{r.tier}{r.lane && r.lane !== r.tier ? ` · ${r.lane}` : ''}</td>
                             <td className="py-1.5 pr-2 font-mono text-slate-500">{r.sha || '–'}</td>
                             <td className="py-1.5 w-40">
-                              <div className={`flex items-center gap-2 ${over ? 'text-amber-300' : 'text-slate-300'}`}>
-                                <div className="h-1.5 flex-1 rounded bg-slate-800 overflow-hidden"><div className={`h-full ${over ? 'bg-amber-500' : 'bg-cyan-500'}`} style={{ width: `${pct}%` }} /></div>
-                                <span className="font-mono whitespace-nowrap">{fmtDuration(el)} / ~{fmtDuration(r.expected_s)}{over ? ' over' : ''}</span>
+                              <div className={`flex items-center gap-2 ${tone}`} title={r.median_s != null ? `typical ${fmtDuration(r.median_s)} for ${r.tier || r.lane || 'this kind'} · fixed budget ${fmtDuration(r.expected_s)}` : `fixed budget ${fmtDuration(r.expected_s)}`}>
+                                <div className="h-1.5 flex-1 rounded bg-slate-800 overflow-hidden"><div className={`h-full ${bar}`} style={{ width: `${pct}%` }} /></div>
+                                <span className="font-mono whitespace-nowrap">{fmtDuration(el)} / ~{fmtDuration(typical)}{over ? ` ${pace}` : ''}</span>
                               </div>
                             </td>
                           </tr>
@@ -170,11 +175,11 @@ export default function Tests() {
                 <table className="w-full">
                   <thead className="text-[9px] uppercase tracking-wider text-slate-500"><tr><th className="text-left pr-2">Runner</th><th className="text-left pr-2">Type</th><th className="text-left pr-2">Health</th><th className="text-left pr-2">State</th><th className="text-right pr-2">Load</th><th className="text-right pr-2">Mem free</th><th className="text-right pr-2">Disk</th><th className="text-right">Age</th></tr></thead>
                   <tbody className="divide-y divide-slate-800/50">
-                    {doc.runners.map((r) => (
+                    {doc.runners.filter((r) => r.type !== 'gateway').map((r) => (
                       <tr key={r.name} data-testid={`runner-${r.name}`} className={r.health === 'unhealthy' ? 'bg-red-950/20' : ''}>
-                        <td className="py-1.5 pr-2 font-mono text-slate-200">{r.name}</td>
-                        <td className="py-1.5 pr-2 text-slate-400">{r.type || '–'}</td>
-                        <td className="py-1.5 pr-2"><span className={r.health === 'ok' ? 'text-emerald-300' : r.health === 'unhealthy' ? 'text-red-300' : 'text-slate-500'}>{r.health}</span>{r.preflight !== 'ok' && <span className="ml-1 text-[9px] text-slate-500">preflight {r.preflight}</span>}</td>
+                        <td className="py-1.5 pr-2 font-mono text-slate-200">{r.name}{r.role && <span className="ml-1.5 text-[9px] font-sans text-slate-500">{r.role}</span>}{r.state === 'busy' && r.agent && <span className="ml-1.5 text-[9px] font-sans text-slate-500">· {agentNameOf(r.agent) ?? r.agent}{r.sha ? ` ${r.sha}` : ''}</span>}</td>
+                        <td className="py-1.5 pr-2 text-slate-400">{r.server_type || (r.type && r.type !== 'legacy' && r.type !== 'main' ? r.type : '–')}</td>
+                        <td className="py-1.5 pr-2"><span className={r.health === 'ok' ? 'text-emerald-300' : r.health === 'unhealthy' ? 'text-red-300' : 'text-slate-500'}>{r.health}</span>{r.preflight !== 'ok' && r.preflight !== r.health && <span className="ml-1 text-[9px] text-slate-500">preflight {r.preflight}</span>}</td>
                         <td className="py-1.5 pr-2"><span className={r.state === 'busy' ? 'text-cyan-200' : 'text-slate-400'}>{r.state}</span></td>
                         <td className="py-1.5 pr-2 text-right font-mono text-slate-300">{r.load == null ? '–' : r.load.toFixed(1)}</td>
                         <td className="py-1.5 pr-2 text-right font-mono text-slate-300">{r.mem_avail_gb == null ? '–' : `${r.mem_avail_gb.toFixed(0)} GB`}</td>

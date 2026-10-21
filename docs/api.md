@@ -269,6 +269,14 @@ never for elapsed time ticking; the page animates elapsed time from
 `started_at`. Submitter labels `wave.<box>.<agent>` link to the WaveCode agent.
 `POST …/refresh` polls once now (any signed-in user).
 
+Portal commit 5093352 (additive, schema still 1) is understood: a run's
+`median_s` (typical duration of that kind) is the bar's scale and `pace`
+(`amber` past 1.5×, `red` past 2.5×) its colour, falling back to the fixed
+`expected_s` budget; runners show `server_type` (the real Hetzner type) and
+`role`, `not probed` health, and the main server's slot rows with the agent
+and SHA they carry; the `countix-testing` gateway summary row is not listed
+as a runner. A pace change counts as a material change for `tests.portal`.
+
 ### `GET /api/health/perf`
 Admin only. What the daemon spends its time on, for Settings → Health:
 
