@@ -49,6 +49,7 @@ vi.mock('./event-bus.js', () => ({
 
 vi.mock('./session-manager.js', () => ({
   get: vi.fn(),
+  capturePaneSplit: vi.fn(async () => ({ ok: true, data: { history: '', screen: '', history_size: 0, rows: 80 } })),
   scan: vi.fn(),
   adopt: vi.fn(),
   reprobeAgent: vi.fn((agent) => agent),

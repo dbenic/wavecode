@@ -24,6 +24,7 @@ import { isAdmin } from '../users.js';
 import type { User } from '../db.js';
 import * as leases from '../leases.js';
 import * as modelSwitch from '../model-switch.js';
+import { splitPayload } from '../pane-split.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
 import * as replyCapture from '../reply-capture.js';
 import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
@@ -159,6 +160,13 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const lines = validate.validateIntParam(c.req.query('lines'), { min: 1, max: 500, default: 50 });
     const useAnsi = c.req.query('ansi') === 'true';
 
+    // The agent page's history buffer: frozen history and the live screen, per line (pane-split.ts).
+    if (c.req.query('mode') === 'split') {
+      const result = await sessionManager.capturePaneSplit(agentResult.data.tmux_session, lines);
+      if (!result.ok) return c.json({ error: result.error }, 500);
+      return c.json(await splitPayload(result.data.history, result.data.screen, result.data, cleanCapturedOutput, renderAnsiHtml));
+    }
+
     if (useAnsi) {
       const result = await sessionManager.capturePaneAnsi(agentResult.data.tmux_session, lines);
       if (!result.ok) return c.json({ error: result.error }, 500);
@@ -190,9 +198,11 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!result.ok) return c.json({ error: result.error }, 500);
 
     const cleaned = cleanCapturedOutput(result.data);
+    const perLine = await splitPayload(result.data, '', { history_size: totalLines, rows: 0 }, cleanCapturedOutput, renderAnsiHtml);
     return c.json({
       html: await renderAnsiHtml(cleaned),
       output: cleaned,
+      lines: perLine.history,
       totalLines,
       start,
       end,

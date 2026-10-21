@@ -64,11 +64,14 @@ describe('AgentView', () => {
         return { available: false } as never;
       }
 
-      if (path === '/agents/agent-1/output?lines=250&ansi=true') {
+      if (path === '/agents/agent-1/output?mode=split&lines=400') {
         outputFetchCount += 1;
+        const first = { t: 'Initial output line', h: 'Initial output line' };
+        const second = { t: 'Updated output line', h: 'Updated output line' };
         return {
-          output: outputFetchCount === 1 ? 'Initial output line' : 'Updated output line',
-          html: '',
+          history: outputFetchCount === 1 ? [first] : [first, second],
+          screen: [{ t: '❯ ', h: '❯ ' }],
+          history_size: outputFetchCount, rows: 80,
         } as never;
       }
 
@@ -108,6 +111,8 @@ describe('AgentView', () => {
     await waitFor(() => {
       expect(screen.getByText('Updated output line')).toBeInTheDocument();
     });
+    // the earlier line is still there: history is appended to, not replaced
+    expect(screen.getByText('Initial output line')).toBeInTheDocument();
     expect(outputFetchCount).toBe(2);
   });
 
@@ -118,7 +123,7 @@ describe('AgentView', () => {
       if (path === '/agents/agent-1') return agent as never;
       if (path === '/agents') return [agent] as never;
       if (path === '/enhance/status') return { available: false } as never;
-      if (path.startsWith('/agents/agent-1/output')) return { output: '', html: '' } as never;
+      if (path.startsWith('/agents/agent-1/output')) return { history: [], screen: [], history_size: 0, rows: 80 } as never;
       return [] as never;
     });
     render(
@@ -161,11 +166,8 @@ describe('AgentView', () => {
         return { available: false } as never;
       }
 
-      if (path === '/agents/agent-1/output?lines=250&ansi=true') {
-        return {
-          output: 'Initial output line',
-          html: '',
-        } as never;
+      if (path === '/agents/agent-1/output?mode=split&lines=400') {
+        return { history: [{ t: 'Initial output line', h: 'Initial output line' }], screen: [], history_size: 1, rows: 80 } as never;
       }
 
       if (path.startsWith('/decisions') || path.startsWith('/guides') || path.startsWith('/agents/agent-1/guides')) {

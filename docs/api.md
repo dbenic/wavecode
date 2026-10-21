@@ -242,6 +242,17 @@ ten minutes per agent; `agent.model_applied` with `reason: guard` records it.
 An agent with no pin follows the CLI's own settings on its profile, which
 `/model` in the pane rewrites — pin the ones that must stay put.
 
+### `GET /api/agents/:id/output?mode=split&lines=N`
+The agent page's terminal buffer. Returns `{ history, screen, history_size, rows }`:
+`history` is the last `N` lines of the frozen scrollback above the visible
+screen (tmux lines `-N..-1`), `screen` the visible screen (`0..rows-1`), each
+as `{ t: text, h: html }` per line. The page keeps an append-only copy of the
+history (merging each capture by overlap, marking gaps when more scrolled by
+than one capture holds, capped at 4,000 lines), renders the screen separately
+below it, follows the live end only while the reader is at the bottom and
+shows "↓ N new lines" otherwise. `GET …/scrollback?start=&end=` now also
+returns `lines` per line for loading older history with the viewport kept in place.
+
 ### `GET /api/tests/status` · `POST /api/tests/status/refresh`
 The Tests page: the daemon's copy of the countix-testing status portal
 (`GET /api/status`, schema 1; tailnet-only, no CORS, so the daemon fetches it).

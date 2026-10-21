@@ -552,6 +552,10 @@ export async function capturePaneAnsi(session: string, lines: number = 50): Prom
   return tmux.capturePaneAnsi(session, lines);
 }
 
+export async function capturePaneSplit(session: string, historyLines = 400): Promise<Result<{ history: string; screen: string; history_size: number; rows: number }>> {
+  return tmux.capturePaneSplit(session, historyLines);
+}
+
 export async function capturePaneRange(session: string, start: number, end: number): Promise<Result<string>> {
   bindSession(session);
   return tmux.capturePaneRange(session, start, end);

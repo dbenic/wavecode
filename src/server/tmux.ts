@@ -365,6 +365,24 @@ export async function capturePaneAnsi(sessionName: string, lines = 50): Promise<
 }
 
 /**
+ * The pane in two captures: the last `historyLines` of frozen history above
+ * the visible screen (tmux lines -N..-1) and the visible screen (0..rows-1).
+ */
+export async function capturePaneSplit(sessionName: string, historyLines = 400): Promise<Result<{ history: string; screen: string; history_size: number; rows: number }>> {
+  try {
+    const meta = (await tmuxExec(['display-message', '-t', sessionName, '-p', '#{history_size} #{pane_height}'])).trim().split(/\s+/);
+    const historySize = parseInt(meta[0] ?? '0', 10) || 0;
+    const rows = parseInt(meta[1] ?? '0', 10) || 0;
+    const n = Math.min(historyLines, historySize);
+    const history = n > 0 ? await tmuxExec(['capture-pane', '-t', sessionName, '-p', '-e', '-S', `-${n}`, '-E', '-1']) : '';
+    const screen = await tmuxExec(['capture-pane', '-t', sessionName, '-p', '-e', '-S', '0', '-E', String(Math.max(0, rows - 1))]);
+    return { ok: true, data: { history, screen, history_size: historySize, rows } };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+/**
  * Capture a range of scrollback lines with ANSI.
  */
 export async function capturePaneRange(sessionName: string, start: number, end: number): Promise<Result<string>> {

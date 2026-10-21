@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ModelSwitch from '../components/ModelSwitch';
+import { bufferText, mergeHistory, prependOlder, type TermLine } from '../utils/terminal-buffer';
 import { useParams, useNavigate } from 'react-router-dom';
 import { apiGet, apiPost, apiUpload, apiDelete } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
@@ -51,6 +52,10 @@ function cap(s: string): string {
  * The model badge: a WaveCode pin wins; otherwise what the CLI's own
  * settings say ("Opus 5.5 · high"); nothing when neither is known.
  */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 export function modelBadge(agent: Pick<Agent, 'model' | 'effort' | 'runtime_defaults'>): { label: string; pinned: boolean } | null {
   if (agent.model || agent.effort) {
     return { label: `${agent.model ? prettyModel(agent.model) : 'default model'}${agent.effort ? ` · ${agent.effort}` : ''}`, pinned: true };
@@ -99,9 +104,12 @@ export default function AgentView() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [olderHtml, setOlderHtml] = useState('');
-  const [scrollbackLoaded, setScrollbackLoaded] = useState(100); // lines loaded so far
   const [hasMoreScrollback, setHasMoreScrollback] = useState(true);
+  // The history buffer (frozen lines above the screen, append-only) and the live screen (redrawn in place)
+  const [history, setHistory] = useState<TermLine[]>([]);
+  const [screenLines, setScreenLines] = useState<TermLine[]>([]);
+  const [unseen, setUnseen] = useState(0);
+  const [historyTotal, setHistoryTotal] = useState(0);
   const touchStartX = useRef(0);
   const touchEndX = useRef(0);
   const outputRef = useRef<HTMLDivElement>(null);
@@ -121,9 +129,16 @@ export default function AgentView() {
     outputRequestInFlightRef.current = true;
 
     try {
-      const data = await apiGet<{ output: string; html?: string }>(`/agents/${id}/output?lines=250&ansi=true`);
-      setOutput(data.output);
-      setOutputHtml(data.html ?? '');
+      const data = await apiGet<{ history: TermLine[]; screen: TermLine[]; history_size: number; rows: number }>(`/agents/${id}/output?mode=split&lines=400`);
+      setHistory((prev) => {
+        const merged = mergeHistory(prev, data.history ?? []);
+        if (merged.added > 0 && !isNearBottom.current) setUnseen((n) => n + merged.added);
+        setOutput(bufferText(merged.lines, data.screen ?? []));
+        return merged.lines;
+      });
+      setScreenLines(data.screen ?? []);
+      setHistoryTotal(data.history_size ?? 0);
+      setOutputHtml('');
       outputVersionRef.current = Math.max(outputVersionRef.current, pendingOutputVersionRef.current);
     } catch {
       // output refresh failed
@@ -195,51 +210,56 @@ export default function AgentView() {
     };
   }, [id, navigate, scheduleOutputRefresh]);
 
-  // Auto-scroll output (only if user is near bottom)
+  // Follow the live end only while the reader is at the bottom; otherwise the viewport stays where it is
+  // (new history is appended below it) and a pill counts the unseen lines.
   const isNearBottom = useRef(true);
   useEffect(() => {
     if (outputRef.current && isNearBottom.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
+      setUnseen(0);
     }
-  }, [output]);
+  }, [history, screenLines]);
+  const jumpToLive = () => {
+    isNearBottom.current = true;
+    setUnseen(0);
+    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
+  };
 
-  // Load older scrollback when scrolling to top
+  // Track whether the reader is at the live end; load older history when they reach the top.
   const handleOutputScroll = useCallback(() => {
-    if (!outputRef.current || loadingMore || !hasMoreScrollback) return;
-
+    if (!outputRef.current) return;
     const el = outputRef.current;
-    // Track if user is near the bottom (for auto-scroll)
-    isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+    isNearBottom.current = nearBottom;
+    if (nearBottom && unseen) setUnseen(0);
+    if (loadingMore || !hasMoreScrollback || el.scrollTop >= 30) return;
 
-    // Load more when scrolled to top
-    if (el.scrollTop < 30) {
-      setLoadingMore(true);
-      const nextEnd = -(scrollbackLoaded);
-      const nextStart = nextEnd - 200;
-
-      apiGet<{ html: string; hasMore: boolean }>(`/agents/${id}/scrollback?start=${nextStart}&end=${nextEnd}`)
-        .then((data) => {
-          if (data.html.trim()) {
-            setOlderHtml((prev) => data.html + prev);
-            setScrollbackLoaded((prev) => prev + 200);
-            setHasMoreScrollback(data.hasMore);
-            // Maintain scroll position after prepending
-            requestAnimationFrame(() => {
-              if (el) el.scrollTop = 100;
-            });
-          } else {
-            setHasMoreScrollback(false);
-          }
-        })
-        .catch(() => {})
-        .finally(() => setLoadingMore(false));
-    }
-  }, [id, loadingMore, hasMoreScrollback, scrollbackLoaded]);
+    // The buffer holds the last `history.length` history lines (tmux indexes -N..-1); ask for the 200 before them.
+    const have = history.filter((l) => !l.gap).length;
+    if (have >= historyTotal) { setHasMoreScrollback(false); return; }
+    setLoadingMore(true);
+    const nextEnd = -(have + 1);
+    const nextStart = Math.max(-historyTotal, nextEnd - 199);
+    const beforeHeight = el.scrollHeight;
+    apiGet<{ lines?: TermLine[]; hasMore: boolean }>(`/agents/${id}/scrollback?start=${nextStart}&end=${nextEnd}`)
+      .then((data) => {
+        const older = data.lines ?? [];
+        if (older.length === 0) { setHasMoreScrollback(false); return; }
+        setHistory((prev) => prependOlder(prev, older).lines);
+        setHasMoreScrollback(data.hasMore && nextStart > -historyTotal);
+        // keep the reader on the same line: shift by the height the new rows added
+        requestAnimationFrame(() => { el.scrollTop += Math.max(0, el.scrollHeight - beforeHeight); });
+      })
+      .catch(() => {})
+      .finally(() => setLoadingMore(false));
+  }, [id, loadingMore, hasMoreScrollback, history, historyTotal, unseen]);
 
   // Reset scrollback state when switching agents
   useEffect(() => {
-    setOlderHtml('');
-    setScrollbackLoaded(100);
+    setHistory([]);
+    setScreenLines([]);
+    setUnseen(0);
+    setHistoryTotal(0);
     setHasMoreScrollback(true);
     isNearBottom.current = true;
     outputVersionRef.current = 0;
@@ -608,7 +628,7 @@ export default function AgentView() {
             </span>
             <span className="text-[9px] text-slate-700 font-mono flex items-center gap-1.5">
               <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" />
-              live &middot; 100 lines
+              live &middot; {history.length.toLocaleString()} lines buffered
             </span>
           </div>
           <div
@@ -623,26 +643,43 @@ export default function AgentView() {
                 LOADING HISTORY...
               </div>
             )}
-            {hasMoreScrollback && !loadingMore && olderHtml && (
+            {hasMoreScrollback && !loadingMore && history.length > 0 && (
               <div className="text-center py-1 text-[9px] text-slate-700 tracking-wider">
                 ↑ SCROLL UP FOR MORE
               </div>
             )}
-            {/* Older scrollback content */}
-            {olderHtml && (
-              <div dangerouslySetInnerHTML={{ __html: linkifyPathsHtml(sanitizeHtml(olderHtml)) }} />
+            {/* Frozen history: append-only, so reading it is not disturbed by new output */}
+            {history.length > 0 && (
+              <div data-testid="terminal-history">
+                {history.map((l, i) => (
+                  <div key={i} className={l.gap ? 'py-0.5' : undefined} dangerouslySetInnerHTML={{ __html: l.gap ? l.h : linkifyPathsHtml(sanitizeHtml(l.h || escapeHtml(l.t))) || '&nbsp;' }} />
+                ))}
+              </div>
             )}
-            {/* Current output */}
-            {outputHtml ? (
-              <div dangerouslySetInnerHTML={{ __html: linkifyPathsHtml(sanitizeHtml(outputHtml)) }} />
-            ) : (
+            {/* The live screen: redrawn in place */}
+            {screenLines.length > 0 ? (
+              <div data-testid="terminal-screen" className="border-t border-slate-800/40 mt-1 pt-1">
+                {screenLines.map((l, i) => (
+                  <div key={i} dangerouslySetInnerHTML={{ __html: linkifyPathsHtml(sanitizeHtml(l.h || escapeHtml(l.t))) || '&nbsp;' }} />
+                ))}
+              </div>
+            ) : history.length === 0 && (
               <pre className="whitespace-pre-wrap">
-                {output || (
+                {outputHtml ? null : (
                   <span className="text-slate-700 italic">
                     No output captured yet.
                   </span>
                 )}
               </pre>
+            )}
+            {unseen > 0 && (
+              <button
+                onClick={jumpToLive}
+                className="sticky bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-cyan-500/50 bg-slate-950/90 px-3 py-1 text-[10px] font-semibold tracking-wider text-cyan-200 shadow-lg"
+                data-testid="jump-to-live"
+              >
+                ↓ {unseen} new line{unseen === 1 ? '' : 's'}
+              </button>
             )}
           </div>
         </div>
