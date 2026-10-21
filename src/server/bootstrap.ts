@@ -23,6 +23,7 @@ import { rebindAgentSockets } from './session-manager.js';
 import { startLaneBoard, stopLaneBoard } from './dev-lanes.js';
 import { startPerfMonitor } from './perf-monitor.js';
 import { startModelGuard } from './model-switch.js';
+import { startTestPortal } from './test-portal.js';
 import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import logger from './logger.js';
@@ -59,6 +60,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   startPerfMonitor();
   startEventRetention();
   startModelGuard();
+  startTestPortal();
   startLaneBoard();
   startDeployReconciler();
 

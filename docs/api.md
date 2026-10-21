@@ -242,6 +242,22 @@ ten minutes per agent; `agent.model_applied` with `reason: guard` records it.
 An agent with no pin follows the CLI's own settings on its profile, which
 `/model` in the pane rewrites — pin the ones that must stay put.
 
+### `GET /api/tests/status` · `POST /api/tests/status/refresh`
+The Tests page: the daemon's copy of the countix-testing status portal
+(`GET /api/status`, schema 1; tailnet-only, no CORS, so the daemon fetches it).
+Configure `test_portal: { url: http://countix-testing.tailf32df0.ts.net:8088, poll_s: 20 }`
+in config.yaml; unset hides the page's content.
+
+Response: `{ enabled, host, doc, fetched_at, error, next_in_s, schema_ok }` where
+`doc` is the portal document (queue, runs, runners, results, scaler, alerts)
+with unknown fields dropped. The poller runs every `poll_s` (default 20 s) and
+backs off 20 → 60 → 120 s while the portal is unreachable, keeping the last
+document and the error. `tests.portal` is emitted only on a material change
+(queue, active runs, runner health or state, alerts, newest results, scaler),
+never for elapsed time ticking; the page animates elapsed time from
+`started_at`. Submitter labels `wave.<box>.<agent>` link to the WaveCode agent.
+`POST …/refresh` polls once now (any signed-in user).
+
 ### `GET /api/health/perf`
 Admin only. What the daemon spends its time on, for Settings → Health:
 

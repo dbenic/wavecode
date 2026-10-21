@@ -13,7 +13,7 @@ import logger from './logger.js';
 import { recordJob } from './perf-monitor.js';
 
 export const PRUNE_EVERY_MS = 6 * 60 * 60_000;
-export const DEFAULT_SHORT_LIVED_TYPES = ['agent.output_updated', 'queue.empty'];
+export const DEFAULT_SHORT_LIVED_TYPES = ['agent.output_updated', 'queue.empty', 'tests.portal'];
 
 export interface EventRetention {
   /** event types kept only `short_hours` (default: pane output ticks, queue.empty) */

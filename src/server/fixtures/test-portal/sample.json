@@ -1,0 +1,147 @@
+{
+ "alerts": [],
+ "generated_at": "2026-10-21T11:43:22.558267Z",
+ "queue": [],
+ "results": [
+  {
+   "agent": "wave.countix-dev.claude5",
+   "duration_min": 32.5,
+   "duration_s": 1950,
+   "infra_error": false,
+   "result": "GREEN",
+   "sha": "3946e22",
+   "tier": "gate"
+  },
+  {
+   "agent": "wave.countix-dev.claude5",
+   "duration_min": 8.8,
+   "duration_s": 528,
+   "infra_error": false,
+   "result": "RED",
+   "sha": "9962c12",
+   "tier": "api"
+  },
+  {
+   "agent": "unknown",
+   "duration_min": 10.4,
+   "duration_s": 626,
+   "infra_error": false,
+   "result": "RED",
+   "sha": "9cf6ab4",
+   "tier": "tier2"
+  }
+ ],
+ "runners": [
+  {
+   "age_min": 1380.3,
+   "age_s": 82817,
+   "disk_used_pct": 3.0,
+   "health": "ok",
+   "load": 25.81,
+   "mem_avail_gb": 52.0,
+   "name": "runner-a",
+   "preflight": "ok",
+   "state": "busy",
+   "type": "legacy"
+  },
+  {
+   "age_min": 1380.2,
+   "age_s": 82813,
+   "disk_used_pct": 3.0,
+   "health": "ok",
+   "load": 7.57,
+   "mem_avail_gb": 58.0,
+   "name": "runner-b",
+   "preflight": "ok",
+   "state": "busy",
+   "type": "legacy"
+  },
+  {
+   "age_min": 965.7,
+   "age_s": 57943,
+   "disk_used_pct": 3.0,
+   "health": "ok",
+   "load": 7.43,
+   "mem_avail_gb": 52.0,
+   "name": "runner-c",
+   "preflight": "ok",
+   "state": "busy",
+   "type": "legacy"
+  },
+  {
+   "age_min": 12.0,
+   "age_s": 718,
+   "disk_used_pct": null,
+   "health": "ok",
+   "load": null,
+   "mem_avail_gb": null,
+   "name": "full-a",
+   "preflight": "unknown",
+   "state": "idle",
+   "type": "ccx53"
+  }
+ ],
+ "runs": [
+  {
+   "agent": "wave.countix-dev.claude6",
+   "elapsed_min": 13.7,
+   "elapsed_s": 820,
+   "expected_min": 60.0,
+   "expected_s": 3600,
+   "kind": "slot",
+   "lane": "gate",
+   "place": "slot2",
+   "sha": "ade3a1f",
+   "started_at": "2026-10-21T11:29:42.000000Z",
+   "tier": "gate"
+  },
+  {
+   "agent": "",
+   "elapsed_min": 3.2,
+   "elapsed_s": 189,
+   "expected_min": 20.0,
+   "expected_s": 1200,
+   "kind": "runner",
+   "lane": "tier2",
+   "place": "runner-a",
+   "sha": "e337732",
+   "started_at": "2026-10-21T11:40:13.000000Z",
+   "tier": "tier2"
+  },
+  {
+   "agent": "wave.countix-dev.ales-claude2",
+   "elapsed_min": 1.7,
+   "elapsed_s": 100,
+   "expected_min": 10.0,
+   "expected_s": 600,
+   "kind": "runner",
+   "lane": "tier1",
+   "place": "runner-b",
+   "sha": "8f23d39",
+   "started_at": "2026-10-21T11:41:42.000000Z",
+   "tier": "tier1"
+  },
+  {
+   "agent": "wave.countix-dev.claude5",
+   "elapsed_min": 0.6,
+   "elapsed_s": 36,
+   "expected_min": 10.0,
+   "expected_s": 600,
+   "kind": "runner",
+   "lane": "api",
+   "place": "runner-c",
+   "sha": "9962c12",
+   "started_at": "2026-10-21T11:42:46.000000Z",
+   "tier": "api"
+  }
+ ],
+ "scaler": {
+  "actual": 5,
+  "cap_eur": 15.0,
+  "cap_reached": false,
+  "desired": 3,
+  "eur_today": 0.0,
+  "mode": "shadow"
+ },
+ "schema": 1
+}

@@ -382,6 +382,11 @@ export interface WaveConfig {
    * config (`header = "Authorization: Bearer …"`) owned by the service user; it is read per call
    * and never logged.
    */
+  /** countix-testing status portal (GET /api/status, schema 1), shown on the Tests page. Unset = hidden. */
+  test_portal?: {
+    url?: string;
+    poll_s?: number;
+  };
   product_desk?: {
     enabled?: boolean;
     url?: string;
@@ -626,6 +631,8 @@ export function validateConfig(cfg: WaveConfig): void {
     throw new Error('diagrams.kroki_url must be an http(s) origin like http://127.0.0.1:8000');
   }
   if (cfg.product_desk?.url && !/^https?:\/\/[^\s]+$/.test(cfg.product_desk.url)) throw new Error('product_desk.url must be an http(s) URL');
+  if (cfg.test_portal?.url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.test_portal.url)) throw new Error('test_portal.url must be an http(s) origin like http://countix-testing.tailf32df0.ts.net:8088');
+  if (cfg.test_portal?.poll_s !== undefined && (typeof cfg.test_portal.poll_s !== 'number' || !(cfg.test_portal.poll_s >= 5))) throw new Error('test_portal.poll_s must be a number >= 5');
   if (cfg.overlord) {
     const o = cfg.overlord;
     if (o.model !== undefined && (typeof o.model !== 'string' || !/^[\w.-]{3,64}$/.test(o.model))) throw new Error('overlord.model must be a model id like claude-sonnet-5-5');
