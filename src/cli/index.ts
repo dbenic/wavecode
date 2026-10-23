@@ -614,8 +614,8 @@ const syncNotices = laneCmd
 function syncNoticeAction(action: 'pause' | 'resume') {
   return async (lanes: string[], opts: { agent?: string; deferred?: boolean; reason?: string }) => {
     initDb();
-    const { runLaneSyncNoticesCli } = await import('./lane-sync-notices-command.js');
-    const result = runLaneSyncNoticesCli(action, lanes, opts);
+    const { runLaneSyncNoticesCommand } = await import('./lane-sync-notices-command.js');
+    const result = await runLaneSyncNoticesCommand(action, lanes, opts);
     if (!result.ok) {
       console.error(result.error);
       process.exit(1);
