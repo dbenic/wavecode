@@ -20,7 +20,34 @@ import { currentActorId } from './request-context.js';
 export const SYNC_NOTICE_EVENT = 'lane.sync_notices';
 export const STAGE_CLEAR_REASON = 'cleared by Stage request';
 const REASON_MAX = 500;
-const LANE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/;
+/** Git branch names: slash, dot, dash, underscore. Not `..`, a leading `-`, spaces, or controls. */
+const LANE_MAX = 255;
+const LANE_RE = /^[A-Za-z0-9_][A-Za-z0-9._/-]{0,254}$/;
+
+export type SyncNoticeStatus = 'paused' | 'not found' | 'invalid';
+
+export interface SyncNoticeLaneResult {
+  lane: string;
+  status: SyncNoticeStatus;
+}
+
+export type SyncNoticeApply =
+  | { ok: true; lanes: string[]; results: SyncNoticeLaneResult[] }
+  | { ok: false; error: string; results: SyncNoticeLaneResult[] };
+
+/**
+ * A lane id `pingLaneAboutMain` can store. `claude1/foo` is valid.
+ * Rejects `..`, a leading `-`, control characters, spaces, and over-long names.
+ */
+export function canonicalLaneName(raw: string): string | null {
+  const lane = raw.trim();
+  if (!lane || lane.length > LANE_MAX || !LANE_RE.test(lane)) return null;
+  if (lane.includes('..') || lane.includes('//') || lane.endsWith('/') || lane.endsWith('.')) return null;
+  if (/[\u0000-\u001f\u007f]/.test(lane) || /\s/.test(lane)) return null;
+  const parts = lane.split('/');
+  if (parts.some((part) => !part || part.startsWith('.') || part.startsWith('-') || part.endsWith('.lock') || part.endsWith('.'))) return null;
+  return lane;
+}
 
 export interface SyncNoticeRow {
   lane: string;
@@ -45,43 +72,50 @@ export function getSyncNotice(lane: string): SyncNoticeRow | null {
   return read(lane);
 }
 
-export function pauseSyncNotices(lanes: string[], by: string, reason: string, actorId?: string | null): Result<string[]> {
+/**
+ * Pause or resume an explicit lane list. A valid name with no row yet is
+ * inserted on pause — `syncNoticesPaused` reads that row. An invalid name
+ * rejects the whole call and writes nothing. Resume of a lane that is not
+ * paused is `not found` and does not insert a row.
+ */
+export function applyLaneSyncNotices(
+  action: 'pause' | 'resume',
+  lanes: readonly unknown[],
+  by: string,
+  reason: string,
+  actorId?: string | null,
+): SyncNoticeApply {
   const parsed = requireSyncNoticeReason(reason);
-  if (!parsed.ok) return parsed;
-  const names = normalizeLanes(lanes);
-  if (!names.ok) return names;
-  const at = new Date().toISOString();
-  const actor = actorId === undefined ? currentActorId() : actorId;
-  getDb().transaction(() => {
-    for (const lane of names.data) {
-      getDb().prepare(`
-        INSERT INTO lane_sync_notices (lane, sync_notices_paused, paused_by, paused_at, reason)
-        VALUES (?, 1, ?, ?, ?)
-        ON CONFLICT(lane) DO UPDATE SET
-          sync_notices_paused = 1,
-          paused_by = excluded.paused_by,
-          paused_at = excluded.paused_at,
-          reason = excluded.reason
-      `).run(lane, by, at, parsed.data);
-      audit('pause', lane, parsed.data, by, actor);
-    }
-  })();
-  return { ok: true, data: names.data };
-}
-
-/** Lanes that were paused. A lane that was already clear is left alone and is not listed. */
-export function resumeSyncNotices(lanes: string[], by: string, reason: string, actorId?: string | null): Result<string[]> {
-  const parsed = requireSyncNoticeReason(reason);
-  if (!parsed.ok) return parsed;
-  const names = normalizeLanes(lanes);
-  if (!names.ok) return names;
+  if (!parsed.ok) return { ok: false, error: parsed.error, results: [] };
+  const classified = classifyLanes(lanes);
+  if (classified.invalid) return { ok: false, error: 'invalid lane name', results: classified.results };
+  if (classified.valid.length === 0) return { ok: false, error: 'name at least one lane', results: [] };
   const at = new Date().toISOString();
   const actor = actorId === undefined ? currentActorId() : actorId;
   const affected: string[] = [];
+  const results: SyncNoticeLaneResult[] = [];
   getDb().transaction(() => {
-    for (const lane of names.data) {
+    for (const lane of classified.valid) {
+      if (action === 'pause') {
+        getDb().prepare(`
+          INSERT INTO lane_sync_notices (lane, sync_notices_paused, paused_by, paused_at, reason)
+          VALUES (?, 1, ?, ?, ?)
+          ON CONFLICT(lane) DO UPDATE SET
+            sync_notices_paused = 1,
+            paused_by = excluded.paused_by,
+            paused_at = excluded.paused_at,
+            reason = excluded.reason
+        `).run(lane, by, at, parsed.data);
+        audit('pause', lane, parsed.data, by, actor);
+        affected.push(lane);
+        results.push({ lane, status: 'paused' });
+        continue;
+      }
       const row = read(lane);
-      if (row?.sync_notices_paused !== 1) continue;
+      if (row?.sync_notices_paused !== 1) {
+        results.push({ lane, status: 'not found' });
+        continue;
+      }
       getDb().prepare(`
         UPDATE lane_sync_notices
         SET sync_notices_paused = 0, paused_by = ?, paused_at = ?, reason = ?
@@ -91,7 +125,20 @@ export function resumeSyncNotices(lanes: string[], by: string, reason: string, a
       affected.push(lane);
     }
   })();
-  return { ok: true, data: affected };
+  return { ok: true, lanes: affected, results };
+}
+
+export function pauseSyncNotices(lanes: readonly unknown[], by: string, reason: string, actorId?: string | null): Result<string[]> {
+  const applied = applyLaneSyncNotices('pause', lanes, by, reason, actorId);
+  if (!applied.ok) return { ok: false, error: applied.error };
+  return { ok: true, data: applied.lanes };
+}
+
+/** Lanes that were paused. A lane that was not paused is `not found` and is not listed. */
+export function resumeSyncNotices(lanes: readonly unknown[], by: string, reason: string, actorId?: string | null): Result<string[]> {
+  const applied = applyLaneSyncNotices('resume', lanes, by, reason, actorId);
+  if (!applied.ok) return { ok: false, error: applied.error };
+  return { ok: true, data: applied.lanes };
 }
 
 export function pauseDeferredLanes(agentId: string, by: string, reason: string, actorId?: string | null): Result<string[]> {
@@ -149,17 +196,24 @@ function audit(action: 'pause' | 'resume', lane: string, reason: string, by: str
   logger.info({ lane, action, by }, 'Sync notices changed');
 }
 
-function normalizeLanes(lanes: string[]): Result<string[]> {
-  const out: string[] = [];
+function classifyLanes(lanes: readonly unknown[]): { valid: string[]; results: SyncNoticeLaneResult[]; invalid: boolean } {
+  const valid: string[] = [];
+  const results: SyncNoticeLaneResult[] = [];
   const seen = new Set<string>();
+  let invalid = false;
   for (const raw of lanes) {
-    const lane = raw.trim();
-    if (!LANE_RE.test(lane)) return { ok: false, error: 'lane must be a branch name (letters, digits, ., _, -)' };
-    if (seen.has(lane)) continue;
-    seen.add(lane);
-    out.push(lane);
+    const shown = typeof raw === 'string' ? raw.trim() : '';
+    const name = typeof raw === 'string' ? canonicalLaneName(raw) : null;
+    if (!name) {
+      invalid = true;
+      results.push({ lane: shown, status: 'invalid' });
+      continue;
+    }
+    if (seen.has(name)) continue;
+    seen.add(name);
+    valid.push(name);
   }
-  return { ok: true, data: out };
+  return { valid, results, invalid };
 }
 
 function read(lane: string): SyncNoticeRow | null {

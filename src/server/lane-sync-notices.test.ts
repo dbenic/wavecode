@@ -24,7 +24,7 @@ vi.mock('./config.js', () => ({
 }));
 
 import * as db from './db.js';
-import { runLaneSyncNoticesCli } from '../cli/lane-sync-notices-command.js';
+import { presentLaneSyncResult, runLaneSyncNoticesCommand } from '../cli/lane-sync-notices-command.js';
 import {
   alertMerged,
   behindMainAlert,
@@ -37,6 +37,7 @@ import {
 import {
   getSyncNotice,
   pauseSyncNotices,
+  resumeSyncNotices,
   STAGE_CLEAR_REASON,
   SYNC_NOTICE_EVENT,
   syncNoticesPaused,
@@ -203,6 +204,23 @@ describe('sync notice pause', () => {
     const clears = noticeEvents().filter((row) => JSON.parse(row.payload_json).action === 'stage_clear');
     expect(clears).toHaveLength(1);
   });
+
+  it('pauses claude1/foo, and pingLaneAboutMain skips that lane until it is resumed', async () => {
+    const seat = db.insertAgent({ name: 'claude1', runtime: 'claude-code', tmux_session: 'claude1/foo', workspace: repo, mode: 'spawned', status: 'idle' });
+    if (!seat.ok) throw new Error(seat.error);
+    const mainSha = 'a'.repeat(40);
+    expect(pauseSyncNotices(['claude1/foo'], 'denis', 'slash lane', null).ok).toBe(true);
+    expect(syncNoticesPaused('claude1/foo')).toBe(true);
+    expect(getSyncNotice('claude1/foo')).toMatchObject({ sync_notices_paused: 1, reason: 'slash lane' });
+    expect(await pingLaneAboutMain({ lane: 'claude1/foo', project: null, mainSha, kind: 'moved', authorName: 'claude1' })).toBe(false);
+    const pings = () => db.getDb().prepare('SELECT COUNT(*) AS n FROM events WHERE type = ?').get(MAIN_PING) as { n: number };
+    expect(pings().n).toBe(0);
+    expect(db.listAgentMessages({ limit: 10 }).some((m) => m.message === behindMainAlert('claude1/foo'))).toBe(false);
+
+    expect(resumeSyncNotices(['claude1/foo'], 'denis', 'back', null).ok).toBe(true);
+    expect(await pingLaneAboutMain({ lane: 'claude1/foo', project: null, mainSha, kind: 'moved', authorName: 'claude1' })).toBe(true);
+    expect(pings().n).toBe(1);
+  });
 });
 
 describe('sync notice API and CLI', () => {
@@ -271,17 +289,77 @@ describe('sync notice API and CLI', () => {
     expect(getSyncNotice('wc-ales')).toBeNull();
     expect(noticeEvents()).toHaveLength(0);
 
-    const missing = await call(app, 'POST', '/api/lanes/wc-ales/sync-notices/pause', FALLBACK, {});
+    const missing = await call(app, 'POST', '/api/lanes/' + encodeURIComponent('claude1/foo') + '/sync-notices/pause', FALLBACK, {});
     const blank = await call(app, 'POST', '/api/lanes/wc-ales/sync-notices/resume', FALLBACK, { reason: '   ' });
     expect(missing.status).toBe(400);
     expect(missing.json.error).toBe('reason is required');
     expect(blank.status).toBe(400);
     expect(blank.json.error).toBe('reason is required');
     expect(noticeEvents()).toHaveLength(0);
+
+    const bulkForbidden = await call(app, 'POST', '/api/lanes/sync-notices/pause', dev.data.token, { lanes: ['claude1/foo'], reason: 'please' });
+    expect(bulkForbidden.status).toBe(403);
+    expect(getSyncNotice('claude1/foo')).toBeNull();
+  });
+
+  it('accepts claude1/foo via a %2F path and a bulk lane list, and an invalid name writes nothing', async () => {
+    const app = await makeApp();
+    const encoded = await call(app, 'POST', '/api/lanes/' + encodeURIComponent('claude1/foo') + '/sync-notices/pause', FALLBACK, { reason: 'path' });
+    expect(encoded.status).toBe(200);
+    expect(encoded.json.results).toEqual([{ lane: 'claude1/foo', status: 'paused' }]);
+    expect(syncNoticesPaused('claude1/foo')).toBe(true);
+    expect(getSyncNotice('claude1/foo')).toMatchObject({ paused_by: 'owner', reason: 'path', sync_notices_paused: 1 });
+
+    const bulk = await call(app, 'POST', '/api/lanes/sync-notices/pause', FALLBACK, {
+      lanes: ['claude1/bar', 'wc-ales'], reason: 'list',
+    });
+    expect(bulk.status).toBe(200);
+    expect(bulk.json.lanes).toEqual(['claude1/bar', 'wc-ales']);
+    expect(bulk.json.results).toEqual([
+      { lane: 'claude1/bar', status: 'paused' },
+      { lane: 'wc-ales', status: 'paused' },
+    ]);
+    expect(syncNoticesPaused('claude1/bar')).toBe(true);
+    expect(syncNoticesPaused('wc-ales')).toBe(true);
+
+    const missing = await call(app, 'POST', '/api/lanes/sync-notices/resume', FALLBACK, {
+      lanes: ['claude1/missing'], reason: 'no row',
+    });
+    expect(missing.status).toBe(200);
+    expect(missing.json.lanes).toEqual([]);
+    expect(missing.json.results).toEqual([{ lane: 'claude1/missing', status: 'not found' }]);
+    expect(getSyncNotice('claude1/missing')).toBeNull();
+
+    const bad = await call(app, 'POST', '/api/lanes/sync-notices/pause', FALLBACK, {
+      lanes: ['claude1/baz', 'bad name'], reason: 'no',
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toBe('invalid lane name');
+    expect(bad.json.results).toEqual([{ lane: 'bad name', status: 'invalid' }]);
+    expect(getSyncNotice('claude1/baz')).toBeNull();
+    expect(getSyncNotice('bad name')).toBeNull();
+    expect(syncNoticesPaused('claude1/foo')).toBe(true);
+  });
+
+  it('posts named lanes to the bulk endpoint', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      lanes: ['claude1/foo'],
+      results: [{ lane: 'claude1/foo', status: 'paused' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const result = await runLaneSyncNoticesCommand('pause', ['claude1/foo'], { reason: 'slash' }, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      resolveConnection: () => ({ url: 'http://daemon.test', token: 't' }),
+    });
+    expect(result.ok && result.data).toEqual(['claude1/foo']);
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('http://daemon.test/api/lanes/sync-notices/pause');
+    expect(JSON.parse(String(init.body))).toEqual({ lanes: ['claude1/foo'], reason: 'slash' });
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer t');
+    expect(getSyncNotice('claude1/foo')).toBeNull();
   });
 
   it('bulk form pauses and resumes only that agent\'s deferred lanes', async () => {
-    const { ales, bora } = seedLanes();
+    const { ales } = seedLanes();
     const app = await makeApp();
     const paused = await call(app, 'POST', '/api/lanes/sync-notices/pause', FALLBACK, {
       agent_id: ales, deferred: 'true', reason: 'desk is deferred',
@@ -303,13 +381,65 @@ describe('sync notice API and CLI', () => {
     expect(syncNoticesPaused('wc-ales')).toBe(false);
     expect(syncNoticesPaused('wc-ales-side')).toBe(false);
     expect(syncNoticesPaused('wc-bora')).toBe(true);
+  });
 
-    const cli = runLaneSyncNoticesCli('pause', [], { agent: bora, deferred: true, reason: 'again' });
-    expect(cli.ok && cli.data).toEqual(['wc-bora']);
-    const named = runLaneSyncNoticesCli('resume', ['wc-bora'], { reason: 'named lane' });
-    expect(named.ok && named.data).toEqual(['wc-bora']);
-    expect(syncNoticesPaused('wc-bora')).toBe(false);
-    expect(runLaneSyncNoticesCli('pause', ['wc-ales'], { agent: ales, deferred: true, reason: 'both' }).ok).toBe(false);
-    expect(runLaneSyncNoticesCli('pause', [], { agent: ales, reason: 'no flag' }).ok).toBe(false);
+  it('writes nothing and exits 1 when the daemon is unreachable', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError('connect ECONNREFUSED');
+    });
+    const result = await runLaneSyncNoticesCommand('pause', ['claude1/foo'], { reason: 'quiet' }, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      resolveConnection: () => ({ url: 'http://127.0.0.1:9', token: 't' }),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/not reachable at http:\/\/127\.0\.0\.1:9/);
+    expect(result.error).toMatch(/Nothing was changed/);
+    expect(getSyncNotice('claude1/foo')).toBeNull();
+    const stderr: string[] = [];
+    const codes: number[] = [];
+    presentLaneSyncResult(result, {
+      stderr: { write: (chunk: string) => { stderr.push(chunk); } },
+      exit: (code: number) => { codes.push(code); },
+    });
+    expect(codes).toEqual([1]);
+    expect(stderr.join('')).toContain('Nothing was changed');
+    expect(getSyncNotice('claude1/foo')).toBeNull();
+  });
+
+  it('--agent --deferred posts the bulk body and writes nothing locally', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      lanes: ['wc-ales'],
+      results: [{ lane: 'wc-ales', status: 'paused' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const result = await runLaneSyncNoticesCommand(
+      'pause',
+      [],
+      { agent: 'agt-1', deferred: true, reason: 'desk' },
+      {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        resolveConnection: () => ({ url: 'http://daemon.test', token: 'secret' }),
+      },
+    );
+    expect(result.ok && result.data).toEqual(['wc-ales']);
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('http://daemon.test/api/lanes/sync-notices/pause');
+    expect(JSON.parse(String(init.body))).toEqual({ agent_id: 'agt-1', deferred: true, reason: 'desk' });
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer secret');
+    expect(getSyncNotice('wc-ales')).toBeNull();
+    expect(getSyncNotice('agt-1')).toBeNull();
+  });
+
+  it('rejects mixed flags before calling the daemon', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('should not fetch');
+    });
+    const deps = { fetchImpl: fetchImpl as unknown as typeof fetch };
+    const both = await runLaneSyncNoticesCommand('pause', ['wc-ales'], { agent: 'agt', deferred: true, reason: 'both' }, deps);
+    const noFlag = await runLaneSyncNoticesCommand('pause', [], { agent: 'agt', reason: 'no flag' }, deps);
+    expect(both.ok).toBe(false);
+    expect(noFlag.ok).toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(getSyncNotice('wc-ales')).toBeNull();
   });
 });

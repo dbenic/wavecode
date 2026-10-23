@@ -613,16 +613,10 @@ const syncNotices = laneCmd
 
 function syncNoticeAction(action: 'pause' | 'resume') {
   return async (lanes: string[], opts: { agent?: string; deferred?: boolean; reason?: string }) => {
-    initDb();
-    const { runLaneSyncNoticesCli } = await import('./lane-sync-notices-command.js');
-    const result = runLaneSyncNoticesCli(action, lanes, opts);
-    if (!result.ok) {
-      console.error(result.error);
-      process.exit(1);
-    }
-    for (const id of result.data) {
-      if (!writeLine(process.stdout, id)) break;
-    }
+    loadInstalledConfig();
+    const { presentLaneSyncResult, runLaneSyncNoticesCommand } = await import('./lane-sync-notices-command.js');
+    const result = await runLaneSyncNoticesCommand(action, lanes, opts);
+    presentLaneSyncResult(result);
   };
 }
 
