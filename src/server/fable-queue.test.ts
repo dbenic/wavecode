@@ -9,7 +9,7 @@ vi.mock('./proc.js', () => ({
 
 import { execFileAsync } from './proc.js';
 import { resolveFableQueue } from './fable-queue-config.js';
-import { collectOnce, resetFableQueueForTest, startFableQueue, stopFableQueue } from './fable-queue.js';
+import { collectOnce, readExpectedReceiptLines, resetFableQueueForTest, startFableQueue, stopFableQueue } from './fable-queue.js';
 
 const SECRET = 'SUPER_SECRET_TOKEN sk-do-not-leak';
 
@@ -67,7 +67,8 @@ describe('fable queue collector', () => {
     expect(report.bots[0].capture).toContain('esc to interrupt');
     expect(report.bots[0].capture).toContain('[redacted]');
     expect(report.bots[0].capture).not.toContain(SECRET);
-    expect(report.bots[0].pending.map((p) => p.name).sort()).toEqual(['134-freeze.md', '145-brief.md']);
+    expect(report.bots[0].pending.map((p) => p.name).sort()).toEqual(['134-freeze.md', '145-brief.md', 'done.md']);
+    expect(report.bots[0].unpaired.map((p) => p.name).sort()).toEqual(['134-freeze.md', '145-brief.md', 'done.md']);
     expect(report.bots[0].current?.name).toBe('145-brief.md');
     expect(report.bots[0].newest_receipt?.name).toBe('done.txt');
     expect(report.pipeline.find((row) => row.card === '#145')?.stages.freeze).toMatchObject({ status: 'seen', name: 'desk-145-freeze.md' });
@@ -78,6 +79,57 @@ describe('fable queue collector', () => {
     expect(encoded).not.toContain('.env');
     expect(encoded).not.toContain(inbox);
     expect(report.bots[0]).not.toHaveProperty('inbox');
+  });
+
+  it('keeps only Expected receipt lines and shows each one present or missing', async () => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-fable-exact-'));
+    const inbox = path.join(tmp, 'inbox');
+    const outbox = path.join(tmp, 'outbox');
+    fs.mkdirSync(inbox);
+    fs.mkdirSync(outbox);
+    const brief = 'maestro-to-fable4-onboard-1644.md';
+    const body = [
+      `password=${SECRET}`,
+      'notes that must stay in the file',
+      'Expected receipt: /home/ci/outbox/fable-prodw-roles-20261023.md',
+      'Expected receipt: /home/ci/outbox/fable4-145-staged-20261023.md',
+      `token=${SECRET}`,
+    ].join('\n');
+    fs.writeFileSync(path.join(inbox, brief), body);
+    fs.writeFileSync(path.join(outbox, 'fable-prodw-roles-20261023.md'), 'receipt body stays out');
+    const lines = await readExpectedReceiptLines(path.join(inbox, brief));
+    expect(lines).toEqual([
+      'Expected receipt: /home/ci/outbox/fable-prodw-roles-20261023.md',
+      'Expected receipt: /home/ci/outbox/fable4-145-staged-20261023.md',
+    ]);
+    expect(lines.join('\n')).not.toContain(SECRET);
+    expect(await readExpectedReceiptLines(path.join(tmp, 'missing.md'))).toEqual([]);
+
+    const config = resolveFableQueue({
+      fable_queue: {
+        cards: ['#145'],
+        bots: [{ id: 'fable4', socket: 'fable4', session: 'claude-countix-4', inbox, outbox }],
+      },
+    });
+    vi.mocked(execFileAsync).mockResolvedValue('❯');
+    const partial = await collectOnce({ config });
+    const open = partial.bots[0].briefs[0];
+    expect(open?.status).toBe('pending');
+    expect(open?.match).toBe('exact');
+    expect(open?.expected).toEqual([
+      { name: 'fable-prodw-roles-20261023.md', status: 'present' },
+      { name: 'fable4-145-staged-20261023.md', status: 'missing' },
+    ]);
+    expect(JSON.stringify(partial)).not.toContain(SECRET);
+    expect(JSON.stringify(partial)).not.toContain('notes that must stay');
+    expect(JSON.stringify(partial)).not.toContain('receipt body stays out');
+
+    fs.writeFileSync(path.join(outbox, 'fable4-145-staged-20261023.md'), 'second receipt');
+    const finished = await collectOnce({ config });
+    expect(finished.bots[0].briefs[0]?.status).toBe('done');
+    expect(finished.bots[0].pending).toEqual([]);
+    expect(finished.bots[0].briefs[0]?.expected?.every((item) => item.status === 'present')).toBe(true);
+    expect(JSON.stringify(finished)).not.toContain(SECRET);
   });
 
   it('degrades when the socket or a directory is missing and writes nothing', async () => {

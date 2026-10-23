@@ -90,8 +90,18 @@ export default function Queue() {
                       {bot.inbox_error ? `inbox ${bot.inbox_error}` : ''}{bot.inbox_error && bot.outbox_error ? ' · ' : ''}{bot.outbox_error ? `outbox ${bot.outbox_error}` : ''}
                     </p>
                   )}
-                  <p className="mt-1 text-slate-400" data-testid={`queue-unmatched-${bot.id}`}>
-                    unmatched {bot.unmatched.length ? bot.unmatched.map((brief) => brief.name).join(', ') : 'none'}
+                  <ul className="mt-1 space-y-1 text-slate-400" data-testid={`queue-briefs-${bot.id}`}>
+                    {bot.briefs.map((brief) => (
+                      <li key={brief.name}>
+                        <span>{brief.status} {brief.name}</span>
+                        {brief.expected?.map((item) => (
+                          <span key={item.name} className="block pl-3">{item.status} {item.name}</span>
+                        ))}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-1 text-slate-400" data-testid={`queue-unpaired-${bot.id}`}>
+                    unpaired {bot.unpaired.length ? bot.unpaired.map((brief) => brief.name).join(', ') : 'none'}
                     {' · '}
                     newest receipt {bot.newest_receipt ? `${bot.newest_receipt.name} · ${fmtAge(bot.newest_receipt.age_s)}` : 'none'}
                   </p>

@@ -771,9 +771,16 @@ export interface FableQueueReport {
     state_error: 'socket unavailable' | 'invalid name' | null;
     inbox_error: 'missing' | 'unavailable' | null;
     outbox_error: 'missing' | 'unavailable' | null;
-    pending: Array<{ name: string; age_s: number; status?: 'unmatched' }>;
-    unmatched: Array<{ name: string; age_s: number; status?: 'unmatched' }>;
-    current: { name: string; age_s: number; status?: 'unmatched' } | null;
+    briefs: Array<{
+      name: string;
+      age_s: number;
+      status: 'done' | 'pending' | 'paired' | 'unpaired';
+      match: 'exact' | 'fallback' | 'unpaired';
+      expected?: Array<{ name: string; status: 'present' | 'missing' }>;
+    }>;
+    pending: Array<{ name: string; age_s: number; status: 'done' | 'pending' | 'paired' | 'unpaired' }>;
+    unpaired: Array<{ name: string; age_s: number; status: 'unpaired' }>;
+    current: { name: string; age_s: number; status: 'done' | 'pending' | 'paired' | 'unpaired' } | null;
     newest_receipt: { name: string; age_s: number } | null;
     capture: string | null;
   }>;

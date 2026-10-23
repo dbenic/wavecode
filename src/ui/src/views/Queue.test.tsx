@@ -24,14 +24,32 @@ const REPORT: FableQueueReport = {
     state_error: 'socket unavailable',
     inbox_error: 'missing',
     outbox_error: null,
-    pending: [{ name: '145-brief.md', age_s: 1200, status: 'unmatched' }],
-    unmatched: [{ name: '145-brief.md', age_s: 1200, status: 'unmatched' }],
-    current: { name: '145-brief.md', age_s: 1200, status: 'unmatched' },
-    newest_receipt: { name: 'fable-prodw-roles-20261023.md', age_s: 30 },
+    briefs: [{
+      name: 'maestro-to-fable4-onboard-1644.md',
+      age_s: 1200,
+      status: 'pending',
+      match: 'exact',
+      expected: [
+        { name: 'fable-prodw-roles-20261023.md', status: 'present' },
+        { name: 'fable4-145-staged-20261023.md', status: 'missing' },
+      ],
+    }, {
+      name: 'maestro-to-fable-145-priority-1643.md',
+      age_s: 60,
+      status: 'unpaired',
+      match: 'unpaired',
+    }],
+    pending: [
+      { name: 'maestro-to-fable4-onboard-1644.md', age_s: 1200, status: 'pending' },
+      { name: 'maestro-to-fable-145-priority-1643.md', age_s: 60, status: 'unpaired' },
+    ],
+    unpaired: [{ name: 'maestro-to-fable-145-priority-1643.md', age_s: 60, status: 'unpaired' }],
+    current: { name: 'maestro-to-fable4-onboard-1644.md', age_s: 1200, status: 'pending' },
+    newest_receipt: { name: 'fable4-145-staged-20261023.md', age_s: 30 },
     capture: 'esc to interrupt\npassword=[redacted]',
   }],
   alerts: [
-    { kind: 'pending_too_long', bot: 'fable', name: '145-brief.md', age_s: 1200 },
+    { kind: 'pending_too_long', bot: 'fable', name: 'maestro-to-fable4-onboard-1644.md', age_s: 1200 },
     { kind: 'idle_with_pending', bot: 'fable', pending: 1 },
   ],
   pipeline: [{
@@ -59,12 +77,15 @@ describe('Queue page', () => {
   it('shows bots, alerts, and unknown stages', async () => {
     render(<MemoryRouter><Queue /></MemoryRouter>);
     expect(await screen.findByTestId('queue-bot-fable')).toBeTruthy();
-    expect(screen.getByTestId('queue-alerts').textContent).toContain('145-brief.md pending 20 min');
+    expect(screen.getByTestId('queue-alerts').textContent).toContain('maestro-to-fable4-onboard-1644.md pending 20 min');
     expect(screen.getByTestId('queue-alerts').textContent).toContain('idle with 1 pending');
     expect(screen.getByTestId('queue-state-error-fable').textContent).toBe('socket unavailable');
     expect(screen.getByTestId('queue-bot-fable').textContent).toContain('inbox missing');
-    expect(screen.getByTestId('queue-unmatched-fable').textContent).toContain('unmatched 145-brief.md');
-    expect(screen.getByTestId('queue-unmatched-fable').textContent).toContain('fable-prodw-roles-20261023.md');
+    expect(screen.getByTestId('queue-briefs-fable').textContent).toContain('pending maestro-to-fable4-onboard-1644.md');
+    expect(screen.getByTestId('queue-briefs-fable').textContent).toContain('present fable-prodw-roles-20261023.md');
+    expect(screen.getByTestId('queue-briefs-fable').textContent).toContain('missing fable4-145-staged-20261023.md');
+    expect(screen.getByTestId('queue-unpaired-fable').textContent).toContain('unpaired maestro-to-fable-145-priority-1643.md');
+    expect(screen.getByTestId('queue-unpaired-fable').textContent).toContain('fable4-145-staged-20261023.md');
     expect(screen.getByTestId('queue-capture-fable').textContent).toContain('[redacted]');
     expect(screen.getByTestId('queue-capture-fable').textContent).not.toContain('hunter2');
     const card = screen.getByTestId('queue-card-#145');

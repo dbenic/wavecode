@@ -1,20 +1,24 @@
 /**
  * Read-only Fable Queue collector.
  * Captures panes with `tmux -L <socket> capture-pane -p -t <session>` only.
- * It does not type into the pane, never reads file bodies, and never writes.
+ * It does not type into the pane and never writes.
+ * From a maestro brief it keeps only `Expected receipt:` lines.
  * A missing socket or directory is a field on the snapshot.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline';
 import { getConfig } from './config.js';
 import {
   alertsForBot,
   buildPipeline,
   classifyPane,
+  expectedReceiptNames,
   pairInbox,
   redactSecrets,
   type AgedName,
+  type BriefPair,
   type NamedFile,
   type PaneState,
   type PipelineRow,
@@ -36,9 +40,10 @@ export interface QueueBot {
   state_error: 'socket unavailable' | 'invalid name' | null;
   inbox_error: 'missing' | 'unavailable' | null;
   outbox_error: 'missing' | 'unavailable' | null;
-  pending: AgedName[];
-  unmatched: AgedName[];
-  current: AgedName | null;
+  briefs: BriefPair[];
+  pending: BriefPair[];
+  unpaired: BriefPair[];
+  current: BriefPair | null;
   newest_receipt: AgedName | null;
   /** Visible pane after secret redaction. Null when the capture failed. */
   capture: string | null;
@@ -64,7 +69,44 @@ export interface QueueDeps {
   now?: () => number;
   capture?: (session: string, socket: string) => Promise<{ ok: true; data: string } | { ok: false; error: string }>;
   listDir?: (dir: string) => Promise<DirList>;
+  /** Lines kept from one brief. The default keeps only `Expected receipt:` lines. */
+  readExpected?: (filePath: string) => Promise<string[]>;
   config?: ResolvedFableQueue;
+}
+
+/** Keep `Expected receipt:` lines. Any other line is dropped before it can be stored. A read error is an empty list. */
+export async function readExpectedReceiptLines(filePath: string): Promise<string[]> {
+  const kept: string[] = [];
+  const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (expectedReceiptNames([line]).length > 0) kept.push(line.trim());
+    }
+  } catch {
+    return [];
+  } finally {
+    rl.close();
+  }
+  return kept;
+}
+
+async function expectedByBriefName(
+  inboxDir: string,
+  files: readonly NamedFile[],
+  readExpected: (filePath: string) => Promise<string[]>,
+): Promise<Record<string, string[]>> {
+  const expected: Record<string, string[]> = {};
+  for (const file of files) {
+    if (!file.name.startsWith('maestro-to-')) continue;
+    try {
+      const lines = await readExpected(path.join(inboxDir, file.name));
+      expected[file.name] = expectedReceiptNames(lines);
+    } catch {
+      expected[file.name] = [];
+    }
+  }
+  return expected;
 }
 
 let snapshot: QueueReport | null = null;
@@ -93,8 +135,9 @@ export function emptyReport(cfg: ResolvedFableQueue): QueueReport {
       state_error: null,
       inbox_error: null,
       outbox_error: null,
+      briefs: [],
       pending: [],
-      unmatched: [],
+      unpaired: [],
       current: null,
       newest_receipt: null,
       capture: null,
@@ -171,7 +214,8 @@ async function inspectBot(
   }
   const inbox = await read(bot.inbox);
   const outbox = await read(bot.outbox);
-  const paired = pairInbox(inbox.files, outbox.files, nowMs);
+  const expected = await expectedByBriefName(bot.inbox, inbox.files, deps.readExpected ?? readExpectedReceiptLines);
+  const paired = pairInbox(inbox.files, outbox.files, nowMs, expected);
   return {
     id: bot.id,
     socket: bot.socket,
@@ -180,8 +224,9 @@ async function inspectBot(
     state_error: stateError,
     inbox_error: inbox.error,
     outbox_error: outbox.error,
+    briefs: paired.briefs,
     pending: paired.pending,
-    unmatched: paired.unmatched,
+    unpaired: paired.unpaired,
     current: paired.current,
     newest_receipt: paired.newest_receipt,
     capture: captureText,
@@ -226,12 +271,16 @@ async function collectReport(deps: QueueDeps): Promise<QueueReport> {
   return report;
 }
 
+function usesTestDeps(deps: QueueDeps): boolean {
+  return Boolean(deps.capture || deps.listDir || deps.config || deps.now || deps.readExpected);
+}
+
 export function collectOnce(deps: QueueDeps = {}): Promise<QueueReport> {
-  if (!deps.capture && !deps.listDir && !deps.config && !deps.now && inflight) return inflight;
+  if (!usesTestDeps(deps) && inflight) return inflight;
   const run = collectNow(deps).finally(() => {
     if (inflight === run) inflight = null;
   });
-  if (!deps.capture && !deps.listDir && !deps.config && !deps.now) inflight = run;
+  if (!usesTestDeps(deps)) inflight = run;
   return run;
 }
 

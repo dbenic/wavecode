@@ -3,10 +3,11 @@ import {
   alertsForBot,
   buildPipeline,
   classifyPane,
-  embeddedIds,
+  expectedReceiptNames,
+  fallbackMatch,
   pairInbox,
-  pairReason,
-  receiptMatchesBrief,
+  parseBriefName,
+  parseReceiptName,
   redactSecrets,
   stagesNamedIn,
 } from './fable-queue-classify.js';
@@ -47,54 +48,118 @@ describe('redactSecrets', () => {
 
 describe('inbox pairing', () => {
   const now = Date.parse('2026-10-23T12:00:00Z');
+  const onboard = 'maestro-to-fable4-onboard-1644.md';
+  const priority = 'maestro-to-fable-145-priority-1643.md';
+  const prodw = 'fable-prodw-roles-20261023.md';
+  const staged = 'fable4-145-staged-20261023.md';
+  const secret = 'password=hunter2 do not return this line';
+  const expectedLines = [
+    secret,
+    'Expected receipt: /home/ci/outbox/fable-prodw-roles-20261023.md',
+    'Expected receipt: /home/ci/outbox/fable4-145-staged-20261023.md',
+  ];
 
-  it('matches a receipt on the stem or an embedded id, and never needs a body', () => {
-    expect(receiptMatchesBrief('brief.md', 'brief.txt')).toBe(true);
-    expect(receiptMatchesBrief('task-#145.md', '145.receipt')).toBe(true);
-    expect(receiptMatchesBrief('ENG-5-impl.md', 'done-ENG-5.txt')).toBe(true);
-    expect(receiptMatchesBrief('B1.md', 'B1-receipt.txt')).toBe(true);
-    expect(receiptMatchesBrief('B1.md', 'B10.txt')).toBe(false);
-    expect(receiptMatchesBrief('2026-10-23-note.md', '2026.txt')).toBe(false);
-    expect(receiptMatchesBrief('only.md', 'other.md')).toBe(false);
-    expect(embeddedIds('desk-145-freeze.md').has('145')).toBe(true);
-    expect(pairReason('prodw-roles.md', 'fable-prodw-roles-20261023.md')).toBe('slug');
-    expect(receiptMatchesBrief('other-task.md', 'fable-prodw-roles-20261023.md')).toBe(false);
-    expect(receiptMatchesBrief('notes-20261023.md', 'fable-prodw-roles-20261023.md')).toBe(false);
+  it('parses bot and topic and drops the time and date suffixes', () => {
+    expect(parseBriefName(onboard)).toMatchObject({ bot: 'fable4', tokens: ['onboard'] });
+    expect(parseBriefName(priority)).toMatchObject({ bot: 'fable', tokens: ['145', 'priority'] });
+    expect(parseReceiptName(prodw)).toMatchObject({ bot: 'fable', tokens: ['prodw', 'roles'] });
+    expect(parseReceiptName(staged)).toMatchObject({ bot: 'fable4', tokens: ['145', 'staged'] });
+    expect(parseBriefName(onboard)?.tokens).not.toContain('1644');
+    expect(parseReceiptName(staged)?.tokens).not.toContain('20261023');
   });
 
-  it('leaves an unpaired brief unmatched and still lists the newest receipt', () => {
+  it('is done only when every Expected receipt line exists, and ignores every other line', () => {
+    const names = expectedReceiptNames(expectedLines);
+    expect(names).toEqual([prodw, staged]);
+    expect(JSON.stringify(names)).not.toContain('hunter2');
+
+    const partial = pairInbox(
+      [{ name: onboard, mtimeMs: now - 1000 }],
+      [{ name: prodw, mtimeMs: now }],
+      now,
+      { [onboard]: names },
+    );
+    expect(partial.briefs[0]).toMatchObject({
+      name: onboard,
+      status: 'pending',
+      match: 'exact',
+      expected: [
+        { name: prodw, status: 'present' },
+        { name: staged, status: 'missing' },
+      ],
+    });
+    expect(partial.pending.map((brief) => brief.name)).toEqual([onboard]);
+    expect(partial.unpaired).toEqual([]);
+
+    const done = pairInbox(
+      [{ name: onboard, mtimeMs: now - 1000 }],
+      [
+        { name: prodw, mtimeMs: now - 50 },
+        { name: staged, mtimeMs: now },
+      ],
+      now,
+      { [onboard]: names },
+    );
+    expect(done.briefs[0].status).toBe('done');
+    expect(done.briefs[0].expected?.every((item) => item.status === 'present')).toBe(true);
+    expect(done.pending).toEqual([]);
+    expect(done.current).toBeNull();
+    // An expected list does not fall back onto a same-bot topic match.
+    const listed = pairInbox(
+      [{ name: onboard, mtimeMs: now - 1000 }],
+      [{ name: 'fable4-onboard-20261023.md', mtimeMs: now }],
+      now,
+      { [onboard]: names },
+    );
+    expect(listed.briefs[0].status).toBe('pending');
+    expect(listed.briefs[0].match).toBe('exact');
+  });
+
+  it('falls back to the same bot plus a shared topic token, ignoring the clock suffixes', () => {
+    expect(fallbackMatch(onboard, 'fable4-onboard-20261023.md')).toBe(true);
+    expect(fallbackMatch(priority, 'fable-145-priority-20261023.md')).toBe(true);
+    expect(fallbackMatch(priority, staged)).toBe(false);
+    expect(fallbackMatch(onboard, staged)).toBe(false);
+    expect(fallbackMatch(priority, prodw)).toBe(false);
+    expect(fallbackMatch(onboard, prodw)).toBe(false);
+
     const paired = pairInbox(
       [
-        { name: 'other-task.md', mtimeMs: now - 1000 },
-        { name: 'prodw-roles.md', mtimeMs: now - 5000 },
+        { name: onboard, mtimeMs: now - 2000 },
+        { name: priority, mtimeMs: now - 1000 },
       ],
-      [{ name: 'fable-prodw-roles-20261023.md', mtimeMs: now - 100 }],
+      [
+        { name: 'fable4-onboard-20261023.md', mtimeMs: now - 100 },
+        { name: 'fable-145-priority-20261023.md', mtimeMs: now - 50 },
+      ],
       now,
     );
-    expect(paired.unmatched).toEqual([{ name: 'other-task.md', age_s: 1, status: 'unmatched' }]);
-    expect(paired.pending.map((brief) => brief.name)).toEqual(['other-task.md']);
-    expect(paired.current?.name).toBe('other-task.md');
-    expect(paired.newest_receipt).toEqual({ name: 'fable-prodw-roles-20261023.md', age_s: 0 });
+    expect(paired.briefs.map((brief) => [brief.name, brief.status, brief.match])).toEqual([
+      [onboard, 'paired', 'fallback'],
+      [priority, 'paired', 'fallback'],
+    ]);
+    expect(paired.pending).toEqual([]);
+    expect(paired.unpaired).toEqual([]);
+  });
+
+  it('leaves both example briefs unpaired against both example receipts', () => {
+    const paired = pairInbox(
+      [
+        { name: onboard, mtimeMs: now - 20 * MIN * 1000 },
+        { name: priority, mtimeMs: now - 1000 },
+      ],
+      [
+        { name: prodw, mtimeMs: now - 500 },
+        { name: staged, mtimeMs: now - 100 },
+      ],
+      now,
+    );
+    expect(paired.unpaired.map((brief) => brief.name)).toEqual([onboard, priority]);
+    expect(paired.briefs.every((brief) => brief.status === 'unpaired' && brief.match === 'unpaired')).toBe(true);
+    expect(paired.pending.map((brief) => brief.name)).toEqual([onboard, priority]);
+    expect(paired.current).toEqual({ name: onboard, age_s: 20 * MIN, status: 'unpaired', match: 'unpaired' });
+    expect(paired.newest_receipt).toEqual({ name: staged, age_s: 0 });
     expect(paired.newest_receipt).not.toHaveProperty('status');
-  });
-
-  it('reports pending age, the oldest brief, and the newest receipt', () => {
-    const paired = pairInbox(
-      [
-        { name: 'newer.md', mtimeMs: now - 2 * MIN * 1000 },
-        { name: 'older.md', mtimeMs: now - 20 * MIN * 1000 },
-        { name: 'done.md', mtimeMs: now - MIN * 1000 },
-      ],
-      [
-        { name: 'done.txt', mtimeMs: now - 30 * 1000 },
-        { name: 'old-receipt.txt', mtimeMs: now - 5 * MIN * 1000 },
-      ],
-      now,
-    );
-    expect(paired.pending.map((p) => p.name)).toEqual(['older.md', 'newer.md']);
-    expect(paired.pending[0].age_s).toBe(20 * MIN);
-    expect(paired.current).toEqual({ name: 'older.md', age_s: 20 * MIN, status: 'unmatched' });
-    expect(paired.newest_receipt).toEqual({ name: 'done.txt', age_s: 30 });
   });
 });
 

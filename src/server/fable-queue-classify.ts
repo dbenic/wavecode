@@ -43,8 +43,18 @@ export interface NamedFile {
 export interface AgedName {
   name: string;
   age_s: number;
-  /** Set on a brief that no receipt paired with. Never set on the newest receipt. */
-  status?: 'unmatched';
+}
+
+export interface ReceiptCheck {
+  name: string;
+  status: 'present' | 'missing';
+}
+
+export interface BriefPair extends AgedName {
+  /** `done` only when every Expected receipt exists. `unpaired` means neither rule matched. */
+  status: 'done' | 'pending' | 'paired' | 'unpaired';
+  match: 'exact' | 'fallback' | 'unpaired';
+  expected?: ReceiptCheck[];
 }
 
 export function fileStem(name: string): string {
@@ -61,16 +71,6 @@ export function redactSecrets(text: string): string {
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[redacted]');
 }
 
-const SLUG_STOP = new Set([
-  'fable', 'fable2', 'fable3', 'fable4', 'fable5',
-  'brief', 'receipt', 'inbox', 'outbox', 'note', 'notes', 'done', 'from',
-  'freeze', 'verdict', 'staged', 'review', 'ready', 'live', 'production', 'staging',
-]);
-
-function isDateToken(token: string): boolean {
-  return /^20\d{2}$/.test(token) || /^20\d{6}$/.test(token) || /^20\d{12}$/.test(token);
-}
-
 /** Ids embedded in a filename: `#145`/`145`, `ENG-5`, `B1`. Dates are not ids. */
 export function embeddedIds(name: string): Set<string> {
   const stem = fileStem(name).replace(/\b20\d{2}-\d{2}-\d{2}\b/g, ' ');
@@ -82,46 +82,56 @@ export function embeddedIds(name: string): Set<string> {
   return ids;
 }
 
-/** Brief ids: `#145`, `ENG-5`, `B1`, and a bounded number that is not a date. */
-export function briefIds(name: string): Set<string> {
-  const stem = fileStem(name);
-  const ids = new Set<string>();
-  for (const match of stem.matchAll(/#(\d+)/g)) ids.add(match[1]);
-  for (const match of stem.matchAll(/\b([A-Z]{2,}-\d+)\b/g)) ids.add(match[1].toUpperCase());
-  for (const match of stem.matchAll(/(?:^|[^A-Za-z0-9])([A-Z]\d+)(?=[^A-Za-z0-9]|$)/g)) ids.add(match[1].toUpperCase());
-  for (const match of stem.matchAll(/(?:^|[^A-Za-z0-9])(\d{2,})(?=[^A-Za-z0-9]|$)/g)) {
-    if (!isDateToken(match[1])) ids.add(match[1]);
-  }
-  return ids;
+const BRIEF_NAME_RE = /^maestro-to-(fable\d*)-(.+)-(\d{4})$/i;
+const RECEIPT_NAME_RE = /^(fable\d*)-(.+)-(\d{8})$/i;
+const EXPECTED_RECEIPT_RE = /^\s*Expected receipt:\s*(\S+)\s*$/;
+
+export interface TopicName {
+  bot: string;
+  /** Topic between the bot and the time or date suffix. */
+  topic: string;
+  tokens: string[];
 }
 
-/** Slug words such as `prodw` and `roles`. Dates, bot names, and stage words are not slugs. */
-export function slugTokens(name: string): Set<string> {
-  const tokens = fileStem(name).toLowerCase().split(/[^a-z0-9]+/);
-  return new Set(tokens.filter((token) => token.length >= 4 && !SLUG_STOP.has(token) && !isDateToken(token) && !/^\d+$/.test(token)));
+function topicTokens(topic: string): string[] {
+  return topic.split(/[^A-Za-z0-9]+/).filter(Boolean).map((token) => token.toLowerCase());
 }
 
-export type PairReason = 'basename' | 'id' | 'slug';
+/** `maestro-to-fable4-onboard-1644.md` → bot `fable4`, topic `onboard`. The HHMM suffix is dropped. */
+export function parseBriefName(name: string): TopicName | null {
+  const match = BRIEF_NAME_RE.exec(fileStem(name));
+  if (!match) return null;
+  return { bot: match[1].toLowerCase(), topic: match[2], tokens: topicTokens(match[2]) };
+}
+
+/** `fable-prodw-roles-20261023.md` → bot `fable`, topic `prodw-roles`. The YYYYMMDD suffix is dropped. */
+export function parseReceiptName(name: string): TopicName | null {
+  const match = RECEIPT_NAME_RE.exec(fileStem(name));
+  if (!match) return null;
+  return { bot: match[1].toLowerCase(), topic: match[2], tokens: topicTokens(match[2]) };
+}
 
 /**
- * Exact basename first, then a shared brief id, then a shared slug token.
- * A date or the word `fable` is not a match.
+ * Basenames named by `Expected receipt:` lines. Every other line is ignored,
+ * so a caller that already dropped non-matching lines cannot leak them here either.
  */
-export function pairReason(brief: string, receipt: string): PairReason | null {
-  if (fileStem(brief) === fileStem(receipt)) return 'basename';
-  const receiptIds = briefIds(receipt);
-  for (const id of briefIds(brief)) {
-    if (receiptIds.has(id)) return 'id';
+export function expectedReceiptNames(lines: readonly string[]): string[] {
+  const names: string[] = [];
+  for (const line of lines) {
+    const match = EXPECTED_RECEIPT_RE.exec(line);
+    if (!match) continue;
+    names.push(match[1].split(/[/\\]/).pop() ?? match[1]);
   }
-  const receiptSlugs = slugTokens(receipt);
-  for (const token of slugTokens(brief)) {
-    if (receiptSlugs.has(token)) return 'slug';
-  }
-  return null;
+  return names;
 }
 
-export function receiptMatchesBrief(brief: string, receipt: string): boolean {
-  return pairReason(brief, receipt) !== null;
+/** Same bot and a shared topic token (a card number or a keyword). Time and date suffixes are not tokens. */
+export function fallbackMatch(briefName: string, receiptName: string): boolean {
+  const brief = parseBriefName(briefName);
+  const receipt = parseReceiptName(receiptName);
+  if (!brief || !receipt || brief.bot !== receipt.bot) return false;
+  const receiptTokens = new Set(receipt.tokens);
+  return brief.tokens.some((token) => receiptTokens.has(token));
 }
 
 function ageSeconds(mtimeMs: number, nowMs: number): number {
@@ -129,27 +139,57 @@ function ageSeconds(mtimeMs: number, nowMs: number): number {
 }
 
 export interface Pairing {
-  /** Briefs with no paired receipt. Each one is unmatched — a receipt was not guessed. */
-  pending: AgedName[];
-  unmatched: AgedName[];
-  /** Oldest unmatched brief. Null when every brief paired. */
-  current: AgedName | null;
+  briefs: BriefPair[];
+  /** Not done: an exact list with a missing receipt, or an unpaired brief. */
+  pending: BriefPair[];
+  unpaired: BriefPair[];
+  /** Oldest brief that is not done. */
+  current: BriefPair | null;
   /** Newest outbox file, whether or not it pairs with a brief. */
   newest_receipt: AgedName | null;
 }
 
-/** A brief with no basename, id, or slug match stays unmatched. The newest receipt is always listed. */
-export function pairInbox(inbox: readonly NamedFile[], outbox: readonly NamedFile[], nowMs: number): Pairing {
-  const unmatched = inbox
-    .filter((brief) => !outbox.some((receipt) => receiptMatchesBrief(brief.name, receipt.name)))
+function expectedOf(expectedByBrief: Readonly<Record<string, readonly string[]>> | undefined, name: string): readonly string[] {
+  return expectedByBrief?.[name] ?? [];
+}
+
+/**
+ * Expected-receipt lines win. Otherwise the same bot plus a shared topic token.
+ * Anything else is unpaired — a shared date or a different bot is not a match.
+ */
+export function pairInbox(
+  inbox: readonly NamedFile[],
+  outbox: readonly NamedFile[],
+  nowMs: number,
+  expectedByBrief?: Readonly<Record<string, readonly string[]>>,
+): Pairing {
+  const outboxNames = new Set(outbox.map((file) => file.name));
+  const briefs = inbox
     .slice()
     .sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name))
-    .map((file) => ({ name: file.name, age_s: ageSeconds(file.mtimeMs, nowMs), status: 'unmatched' as const }));
+    .map((file): BriefPair => {
+      const age_s = ageSeconds(file.mtimeMs, nowMs);
+      const expectedNames = expectedOf(expectedByBrief, file.name);
+      if (expectedNames.length > 0) {
+        const expected = expectedNames.map((name) => ({
+          name,
+          status: (outboxNames.has(name) ? 'present' : 'missing') as ReceiptCheck['status'],
+        }));
+        const done = expected.every((item) => item.status === 'present');
+        return { name: file.name, age_s, status: done ? 'done' : 'pending', match: 'exact', expected };
+      }
+      if (outbox.some((receipt) => fallbackMatch(file.name, receipt.name))) {
+        return { name: file.name, age_s, status: 'paired', match: 'fallback' };
+      }
+      return { name: file.name, age_s, status: 'unpaired', match: 'unpaired' };
+    });
+  const pending = briefs.filter((brief) => brief.status === 'pending' || brief.status === 'unpaired');
   const newest = outbox.slice().sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name))[0] ?? null;
   return {
-    pending: unmatched,
-    unmatched,
-    current: unmatched[0] ?? null,
+    briefs,
+    pending,
+    unpaired: briefs.filter((brief) => brief.status === 'unpaired'),
+    current: pending[0] ?? null,
     newest_receipt: newest ? { name: newest.name, age_s: ageSeconds(newest.mtimeMs, nowMs) } : null,
   };
 }
