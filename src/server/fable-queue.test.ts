@@ -9,7 +9,7 @@ vi.mock('./proc.js', () => ({
 
 import { execFileAsync } from './proc.js';
 import { resolveFableQueue } from './fable-queue-config.js';
-import { collectOnce, readExpectedReceiptLines, resetFableQueueForTest, startFableQueue, stopFableQueue } from './fable-queue.js';
+import { collectOnce, readExpectedReceiptLines, resetFableQueueForTest, startFableQueue, stopFableQueue, sudoRefused } from './fable-queue.js';
 
 const SECRET = 'SUPER_SECRET_TOKEN sk-do-not-leak';
 
@@ -27,6 +27,7 @@ describe('fable queue collector', () => {
     const src = fs.readFileSync(new URL('./fable-queue.ts', import.meta.url), 'utf8');
     expect(src).not.toMatch(/execFileSync|execSync|spawnSync|Atomics\.wait|readFile|send-keys|sendKeys|capturePane/);
     expect(src).toContain("['-L', socket, 'capture-pane', '-p', '-t', session]");
+    expect(src).toContain("['-n', '-u', user, 'tmux', ...tmuxArgs]");
   });
 
   it('pairs files by name, classifies the pane, and omits bodies and pane text', async () => {
@@ -130,6 +131,105 @@ describe('fable queue collector', () => {
     expect(finished.bots[0].pending).toEqual([]);
     expect(finished.bots[0].briefs[0]?.expected?.every((item) => item.status === 'present')).toBe(true);
     expect(JSON.stringify(finished)).not.toContain(SECRET);
+  });
+
+  it('reads run_as panes with sudo -n and reports a refusal as unreadable', async () => {
+    const refused = Object.assign(new Error('Command failed: sudo -n -u fable2 tmux -L fable2 capture-pane -p -t claude-countix-2'), {
+      status: 1,
+      stdout: '',
+      stderr: 'sudo: a password is required\nsudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper',
+    });
+    const missingSocket = Object.assign(new Error('no server running on /tmp/tmux-1000/fable'), {
+      status: 1,
+      stdout: '',
+      stderr: 'no server running on /tmp/tmux-1000/fable',
+    });
+    expect(sudoRefused(refused)).toBe(true);
+    expect(sudoRefused(Object.assign(new Error('denied'), { stderr: 'ci is not in the sudoers file. This incident will be reported.' }))).toBe(true);
+    expect(sudoRefused(Object.assign(new Error('denied'), { stderr: "Sorry, user ci is not allowed to execute '/usr/bin/tmux' as fable2 on host." }))).toBe(true);
+    expect(sudoRefused(missingSocket)).toBe(false);
+    vi.mocked(execFileAsync).mockImplementation(async (file) => {
+      if (file === 'sudo') throw refused;
+      throw missingSocket;
+    });
+
+    const report = await collectOnce({
+      config: resolveFableQueue({
+        fable_queue: {
+          cards: ['#145'],
+          bots: [
+            { id: 'fable', socket: 'fable', session: 'claude-countix', inbox: '/no-inbox', outbox: '/no-outbox' },
+            { id: 'fable2', socket: 'fable2', session: 'claude-countix-2', inbox: '/no-inbox', outbox: '/no-outbox', run_as: 'fable2' },
+            { id: 'bad', socket: 'fable3', session: 'claude-countix-3', inbox: '/no-inbox', outbox: '/no-outbox', run_as: 'fable 3' },
+          ],
+        },
+      }),
+    });
+
+    expect(vi.mocked(execFileAsync).mock.calls.map((call) => [call[0], call[1]])).toEqual([
+      ['tmux', ['-L', 'fable', 'capture-pane', '-p', '-t', 'claude-countix']],
+      ['sudo', ['-n', '-u', 'fable2', 'tmux', '-L', 'fable2', 'capture-pane', '-p', '-t', 'claude-countix-2']],
+    ]);
+    expect(report.bots[0].state).toBe('unknown');
+    expect(report.bots[0].state_error).toBe('socket unavailable');
+    expect(report.bots[1].state).toBe('unreadable (no access)');
+    expect(report.bots[1].state_error).toBeNull();
+    expect(report.bots[1].capture).toBeNull();
+    expect(report.bots[2].state).toBe('unknown');
+    expect(report.bots[2].state_error).toBe('invalid name');
+    const body = JSON.stringify(report);
+    expect(body).not.toContain('password is required');
+    expect(body).not.toContain('askpass');
+    expect(body).not.toContain('sudo:');
+    expect(body).not.toContain('/tmp/tmux');
+  });
+
+  it('keeps a tmux failure under sudo as a missing socket', async () => {
+    const failure = Object.assign(new Error('Command failed: sudo -n -u fable4 tmux -L fable4 capture-pane -p -t claude-countix-4'), {
+      status: 1,
+      stdout: '',
+      stderr: 'error connecting to /tmp/tmux-1004/fable4 (No such file or directory)',
+    });
+    expect(sudoRefused(failure)).toBe(false);
+    vi.mocked(execFileAsync).mockRejectedValue(failure);
+    const report = await collectOnce({
+      config: resolveFableQueue({
+        fable_queue: {
+          bots: [{ id: 'fable4', socket: 'fable4', session: 'claude-countix-4', inbox: '/no-inbox', outbox: '/no-outbox', run_as: 'fable4' }],
+        },
+      }),
+    });
+    expect(vi.mocked(execFileAsync).mock.calls[0]?.[1]).toEqual(
+      ['-n', '-u', 'fable4', 'tmux', '-L', 'fable4', 'capture-pane', '-p', '-t', 'claude-countix-4'],
+    );
+    expect(report.bots[0].state).toBe('unknown');
+    expect(report.bots[0].state_error).toBe('socket unavailable');
+    expect(JSON.stringify(report)).not.toContain('/tmp/tmux');
+  });
+
+  it('lists a symlinked outbox from the directory it points at', async () => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-fable-link-'));
+    const real = path.join(tmp, 'srv', 'fable', '2', 'outbox');
+    fs.mkdirSync(real, { recursive: true });
+    fs.writeFileSync(path.join(real, 'fable2-onboard-20261023.md'), 'receipt stays on disk');
+    const link = path.join(tmp, 'outbox-2');
+    fs.symlinkSync(real, link);
+    vi.mocked(execFileAsync).mockResolvedValue('❯');
+
+    const report = await collectOnce({
+      config: resolveFableQueue({
+        fable_queue: {
+          bots: [{ id: 'fable2', socket: 'fable2', session: 'claude-countix-2', inbox: path.join(tmp, 'missing-inbox'), outbox: link, run_as: 'fable2' }],
+        },
+      }),
+    });
+
+    expect(report.bots[0].outbox_error).toBeNull();
+    expect(report.bots[0].newest_receipt?.name).toBe('fable2-onboard-20261023.md');
+    expect(report.bots[0].state).toBe('idle');
+    const body = JSON.stringify(report);
+    expect(body).not.toContain('receipt stays on disk');
+    expect(body).not.toContain(real);
   });
 
   it('degrades when the socket or a directory is missing and writes nothing', async () => {

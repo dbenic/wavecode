@@ -222,13 +222,20 @@ describe('fable queue defaults', () => {
     expect(resolved.pollS).toBe(10);
     expect(resolved.pendingAlertMin).toBe(15);
     expect(resolved.cards).toEqual(['#145', '#134', 'B1', 'ENG-5']);
-    expect(defaultFableBots().map((b) => [b.id, b.socket, b.session, b.inbox, b.outbox])).toEqual([
-      ['fable', 'fable', 'claude-countix', '/home/ci/inbox', '/home/ci/outbox'],
-      ['fable2', 'fable2', 'claude-countix-2', '/home/ci/inbox-2', '/home/ci/outbox-2'],
-      ['fable3', 'fable3', 'claude-countix-3', '/home/ci/inbox-3', '/home/ci/outbox-3'],
-      ['fable4', 'fable4', 'claude-countix-4', '/home/ci/inbox-4', '/home/ci/outbox-4'],
-      ['fable5', 'fable5', 'claude-countix-5', '/home/ci/inbox-5', '/home/ci/outbox-5'],
+    expect(defaultFableBots().map((b) => [b.id, b.socket, b.session, b.inbox, b.outbox, b.run_as ?? ''])).toEqual([
+      ['fable', 'fable', 'claude-countix', '/home/ci/inbox', '/home/ci/outbox', ''],
+      ['fable2', 'fable2', 'claude-countix-2', '/home/ci/inbox-2', '/srv/fable/2/outbox', 'fable2'],
+      ['fable3', 'fable3', 'claude-countix-3', '/home/ci/inbox-3', '/srv/fable/3/outbox', 'fable3'],
+      ['fable4', 'fable4', 'claude-countix-4', '/home/ci/inbox-4', '/srv/fable/4/outbox', 'fable4'],
+      ['fable5', 'fable5', 'claude-countix-5', '/home/ci/inbox-5', '/srv/fable/5/outbox', 'fable5'],
     ]);
+    const prefixed = resolveFableQueue({
+      fable_queue: {
+        bots: [{ id: 'fable2', socket: 'fable2', session: 'claude-countix-2', inbox: '/in', outbox: '/home/ci/outbox-2', run_as: '  fable2  ' }],
+      },
+    });
+    expect(prefixed.bots[0].run_as).toBe('fable2');
+    expect(prefixed.bots[0].outbox).toBe('/home/ci/outbox-2');
     const custom = resolveFableQueue({
       fable_queue: { pending_alert_min: 0, poll_s: 5, cards: ['#9'] },
       review: { freeze_inbox: ['/notes'] },

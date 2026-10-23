@@ -10,6 +10,12 @@ export interface FableBotConfig {
   session: string;
   inbox: string;
   outbox: string;
+  /**
+   * Linux user for the pane read. When set, the command is
+   * `sudo -n -u <run_as> tmux -L <socket> capture-pane -p -t <session>`.
+   * Omitted means the collector's own user, with no sudo.
+   */
+  run_as?: string;
 }
 
 export interface FableQueueConfig {
@@ -32,7 +38,11 @@ export const DEFAULT_PENDING_ALERT_MIN = 15;
 
 export const DEFAULT_FABLE_CARDS = ['#145', '#134', 'B1', 'ENG-5'] as const;
 
-/** fable, then fable2..fable5. N is the suffix on the socket, session, inbox, and outbox. */
+/**
+ * fable runs as ci: no sudo, inbox and outbox under /home/ci.
+ * fable2..fable5 run as that Linux user. N is the socket, session, and inbox suffix.
+ * Their outbox is /srv/fable/N/outbox. /home/ci/outbox-N is a symlink to it.
+ */
 export function defaultFableBots(): FableBotConfig[] {
   const bots: FableBotConfig[] = [{
     id: 'fable',
@@ -47,7 +57,8 @@ export function defaultFableBots(): FableBotConfig[] {
       socket: `fable${n}`,
       session: `claude-countix-${n}`,
       inbox: `/home/ci/inbox-${n}`,
-      outbox: `/home/ci/outbox-${n}`,
+      outbox: `/srv/fable/${n}/outbox`,
+      run_as: `fable${n}`,
     });
   }
   return bots;
@@ -72,7 +83,12 @@ export function resolveFableQueue(input: {
     ? raw.pending_alert_min
     : DEFAULT_PENDING_ALERT_MIN;
   const cards = (raw.cards ?? [...DEFAULT_FABLE_CARDS]).map((c) => c.trim()).filter(Boolean);
-  const bots = (raw.bots ?? defaultFableBots()).filter((b) => b.id.trim() && b.session.trim());
+  const bots = (raw.bots ?? defaultFableBots())
+    .filter((b) => b.id.trim() && b.session.trim())
+    .map((bot) => {
+      const runAs = bot.run_as?.trim() ?? '';
+      return runAs ? { ...bot, run_as: runAs } : { ...bot, run_as: undefined };
+    });
   const noteDirs = [...(input?.review?.freeze_inbox ?? []), ...(raw.note_dirs ?? [])]
     .map((d) => d.trim())
     .filter(Boolean);

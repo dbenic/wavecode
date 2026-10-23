@@ -1,8 +1,10 @@
 /**
  * Read-only Fable Queue collector.
  * Captures panes with `tmux -L <socket> capture-pane -p -t <session>` only.
+ * A bot with run_as is prefixed by `sudo -n -u <user>`. sudo is never interactive.
  * It does not type into the pane and never writes.
  * From a maestro brief it keeps only `Expected receipt:` lines.
+ * Outbox paths are resolved so a symlink such as /home/ci/outbox-N reaches /srv/fable/N/outbox.
  * A missing socket or directory is a field on the snapshot.
  */
 
@@ -26,7 +28,7 @@ import {
 } from './fable-queue-classify.js';
 import { resolveFableQueue, type FableBotConfig, type ResolvedFableQueue } from './fable-queue-config.js';
 import logger from './logger.js';
-import { execFileAsync } from './proc.js';
+import { execFileAsync, type ExecFileFailure } from './proc.js';
 import { isValidSessionName, isValidSocketName } from './tmux.js';
 
 const CAPTURE_TIMEOUT_MS = 5000;
@@ -67,7 +69,7 @@ export interface DirList {
 
 export interface QueueDeps {
   now?: () => number;
-  capture?: (session: string, socket: string) => Promise<{ ok: true; data: string } | { ok: false; error: string }>;
+  capture?: (session: string, socket: string, runAs?: string) => Promise<CaptureResult>;
   listDir?: (dir: string) => Promise<DirList>;
   /** Lines kept from one brief. The default keeps only `Expected receipt:` lines. */
   readExpected?: (filePath: string) => Promise<string[]>;
@@ -153,20 +155,30 @@ export function queueSnapshot(): QueueReport {
   return snapshot ?? emptyReport(resolvedConfig());
 }
 
+function dirFailure(err: unknown): DirList {
+  const code = (err as NodeJS.ErrnoException).code;
+  return { files: [], error: code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unavailable' };
+}
+
 async function listDir(dir: string): Promise<DirList> {
   if (!dir.trim()) return { files: [], error: 'missing' };
+  let resolved = dir;
+  try {
+    resolved = await fs.promises.realpath(dir);
+  } catch (err) {
+    return dirFailure(err);
+  }
   let entries: fs.Dirent[];
   try {
-    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    entries = await fs.promises.readdir(resolved, { withFileTypes: true });
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return { files: [], error: code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unavailable' };
+    return dirFailure(err);
   }
   const files: NamedFile[] = [];
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue;
     try {
-      const st = await fs.promises.stat(path.join(dir, entry.name));
+      const st = await fs.promises.stat(path.join(resolved, entry.name));
       if (!st.isFile()) continue;
       files.push({ name: entry.name, mtimeMs: st.mtimeMs });
     } catch {
@@ -176,14 +188,33 @@ async function listDir(dir: string): Promise<DirList> {
   return { files, error: null };
 }
 
-async function captureSession(session: string, socket: string): Promise<{ ok: true; data: string } | { ok: false; error: string }> {
-  if (!isValidSocketName(socket) || !isValidSessionName(session)) {
+/** A sudo refusal. A tmux failure under a successful sudo is not one of these. */
+export function sudoRefused(err: unknown): boolean {
+  const failure = err as Partial<ExecFileFailure>;
+  const stderr = typeof failure.stderr === 'string' ? failure.stderr : '';
+  const text = stderr.trim() ? stderr : (typeof failure.message === 'string' ? failure.message : '');
+  return /password is required|terminal is required to read the password|no tty present|not in the sudoers|not allowed to execute|authentication required/i.test(text);
+}
+
+function isValidRunAs(user: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(user);
+}
+
+type CaptureResult = { ok: true; data: string } | { ok: false; error: 'invalid name' | 'socket unavailable' | 'unreadable' };
+
+async function captureSession(session: string, socket: string, runAs?: string): Promise<CaptureResult> {
+  const user = runAs?.trim() ?? '';
+  if (!isValidSocketName(socket) || !isValidSessionName(session) || (user !== '' && !isValidRunAs(user))) {
     return { ok: false, error: 'invalid name' };
   }
+  const tmuxArgs = ['-L', socket, 'capture-pane', '-p', '-t', session];
   try {
-    const data = await execFileAsync('tmux', ['-L', socket, 'capture-pane', '-p', '-t', session], { timeout: CAPTURE_TIMEOUT_MS });
+    const data = user
+      ? await execFileAsync('sudo', ['-n', '-u', user, 'tmux', ...tmuxArgs], { timeout: CAPTURE_TIMEOUT_MS })
+      : await execFileAsync('tmux', tmuxArgs, { timeout: CAPTURE_TIMEOUT_MS });
     return { ok: true, data: redactSecrets(data) };
-  } catch {
+  } catch (err) {
+    if (user && sudoRefused(err)) return { ok: false, error: 'unreadable' };
     return { ok: false, error: 'socket unavailable' };
   }
 }
@@ -199,12 +230,15 @@ async function inspectBot(
   let stateError: QueueBot['state_error'] = null;
   let captureText: string | null = null;
   try {
-    if (!isValidSocketName(bot.socket) || !isValidSessionName(bot.session)) {
+    const user = bot.run_as?.trim() ?? '';
+    if (!isValidSocketName(bot.socket) || !isValidSessionName(bot.session) || (user !== '' && !isValidRunAs(user))) {
       stateError = 'invalid name';
     } else {
-      const captured = await capture(bot.session, bot.socket);
-      if (!captured.ok) stateError = 'socket unavailable';
-      else {
+      const captured = await capture(bot.session, bot.socket, bot.run_as);
+      if (!captured.ok) {
+        if (captured.error === 'unreadable') state = 'unreadable (no access)';
+        else stateError = captured.error === 'invalid name' ? 'invalid name' : 'socket unavailable';
+      } else {
         captureText = redactSecrets(captured.data);
         state = classifyPane(captureText);
       }

@@ -3,7 +3,7 @@
  * Filenames and mtimes only — callers must not pass file bodies.
  */
 
-export type PaneState = 'working' | 'idle' | 'waiting_input' | 'queued' | 'unknown';
+export type PaneState = 'working' | 'idle' | 'waiting_input' | 'queued' | 'unknown' | 'unreadable (no access)';
 
 export const PIPELINE_STAGES = ['freeze', 'review', 'staged', 'GO-ready', 'live'] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];

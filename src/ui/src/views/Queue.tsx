@@ -10,6 +10,7 @@ const STATE_TONE: Record<string, string> = {
   waiting_input: 'text-amber-200 border-amber-500/40 bg-amber-950/40',
   queued: 'text-cyan-200 border-cyan-500/40 bg-cyan-950/40',
   unknown: 'text-slate-400 border-slate-700 bg-slate-900/60',
+  'unreadable (no access)': 'text-slate-300 border-slate-600/50 bg-slate-900',
 };
 
 export function fmtAge(ageS: number): string {

@@ -755,7 +755,7 @@ export interface TestPortalState {
   schema_ok: boolean;
 }
 
-export type FablePaneState = 'working' | 'idle' | 'waiting_input' | 'queued' | 'unknown';
+export type FablePaneState = 'working' | 'idle' | 'waiting_input' | 'queued' | 'unknown' | 'unreadable (no access)';
 export type FableStageName = 'freeze' | 'review' | 'staged' | 'GO-ready' | 'live';
 export type FableStageCell = { status: 'unknown' } | { status: 'seen'; name: string; age_s: number };
 export interface FableQueueReport {
