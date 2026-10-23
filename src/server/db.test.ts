@@ -43,6 +43,7 @@ describe('db.ts — schema migrations', () => {
     expect(tableNames).toContain('kv_settings');
     expect(tableNames).toContain('decisions');
     expect(tableNames).toContain('goals');
+    expect(tableNames).toContain('lane_sync_notices');
 
     const taskColumns = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
     expect(taskColumns.map((c) => c.name)).toContain('goal_id');
@@ -79,6 +80,7 @@ describe('db.ts — schema migrations', () => {
     expect(tableNames).toContain('kv_settings');
     expect(tableNames).toContain('decisions');
     expect(tableNames).toContain('goals');
+    expect(tableNames).toContain('lane_sync_notices');
 
     // Check that changed_files column was added to runs
     const columns = db.prepare("PRAGMA table_info(runs)").all() as { name: string }[];

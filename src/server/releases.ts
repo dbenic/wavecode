@@ -30,6 +30,7 @@ import { getFreeze, releaseBehindMain, staleStageBlock, viewShaChecks } from './
 import { fillArgv, parseProgressLine } from './staging-progress.js';
 import { needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, projectRepo } from './lane-main.js';
+import { clearSyncNoticesForStage } from './lane-sync-notices.js';
 import { productionPrereqGate, stepsPrompt, type GoStep } from './prereqs.js';
 import { evaluateForward, isMissingAncestor, readStagingHealth, type StagingTip } from './staging-forward.js';
 import { setStagingTipStatuses, stagingTipStatuses, type StagingTipStatus } from './staging-tip-status.js';
@@ -776,6 +777,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     if (opts.target === 'staging') {
       invalidateStagingTipCache(opts.project);
       reconcileAfterDeploy();
+      if (opts.lane) clearSyncNoticesForStage(opts.lane, opts.actorName);
     }
     return { ok: true, data: sent };
   }
@@ -791,6 +793,7 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
     if (handed.ok && opts.target === 'staging') {
       invalidateStagingTipCache(opts.project);
       reconcileAfterDeploy();
+      if (opts.lane) clearSyncNoticesForStage(opts.lane, opts.actorName);
     }
     return handed;
   }

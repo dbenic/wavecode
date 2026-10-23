@@ -283,7 +283,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 25;
+export const SCHEMA_VERSION = 26;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -617,6 +617,14 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_code_reviews_run ON code_reviews(run_id);
+
+  CREATE TABLE IF NOT EXISTS lane_sync_notices (
+    lane TEXT PRIMARY KEY,
+    sync_notices_paused INTEGER NOT NULL DEFAULT 0,
+    paused_by TEXT,
+    paused_at TEXT,
+    reason TEXT
+  );
 `;
 
 /**
@@ -922,6 +930,16 @@ const MIGRATIONS: Record<number, string> = {
   24: `
     ALTER TABLE tasks ADD COLUMN fix_sha TEXT;
     CREATE INDEX IF NOT EXISTS idx_tasks_fix_sha ON tasks(fix_sha) WHERE fix_sha IS NOT NULL;
+  `,
+  // v25 → v26: per-lane pause of behind-main / lane-sync notices. Who, when, and why.
+  25: `
+    CREATE TABLE IF NOT EXISTS lane_sync_notices (
+      lane TEXT PRIMARY KEY,
+      sync_notices_paused INTEGER NOT NULL DEFAULT 0,
+      paused_by TEXT,
+      paused_at TEXT,
+      reason TEXT
+    );
   `,
 };
 
