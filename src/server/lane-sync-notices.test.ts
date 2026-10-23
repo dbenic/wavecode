@@ -24,7 +24,7 @@ vi.mock('./config.js', () => ({
 }));
 
 import * as db from './db.js';
-import { runLaneSyncNoticesCli, runLaneSyncNoticesCommand } from '../cli/lane-sync-notices-command.js';
+import { presentLaneSyncResult, runLaneSyncNoticesCommand } from '../cli/lane-sync-notices-command.js';
 import {
   alertMerged,
   behindMainAlert,
@@ -359,7 +359,7 @@ describe('sync notice API and CLI', () => {
   });
 
   it('bulk form pauses and resumes only that agent\'s deferred lanes', async () => {
-    const { ales, bora } = seedLanes();
+    const { ales } = seedLanes();
     const app = await makeApp();
     const paused = await call(app, 'POST', '/api/lanes/sync-notices/pause', FALLBACK, {
       agent_id: ales, deferred: 'true', reason: 'desk is deferred',
@@ -381,13 +381,65 @@ describe('sync notice API and CLI', () => {
     expect(syncNoticesPaused('wc-ales')).toBe(false);
     expect(syncNoticesPaused('wc-ales-side')).toBe(false);
     expect(syncNoticesPaused('wc-bora')).toBe(true);
+  });
 
-    const cli = runLaneSyncNoticesCli('pause', [], { agent: bora, deferred: true, reason: 'again' });
-    expect(cli.ok && cli.data).toEqual(['wc-bora']);
-    const named = runLaneSyncNoticesCli('resume', ['wc-bora'], { reason: 'named lane' });
-    expect(named.ok && named.data).toEqual(['wc-bora']);
-    expect(syncNoticesPaused('wc-bora')).toBe(false);
-    expect(runLaneSyncNoticesCli('pause', ['wc-ales'], { agent: ales, deferred: true, reason: 'both' }).ok).toBe(false);
-    expect(runLaneSyncNoticesCli('pause', [], { agent: ales, reason: 'no flag' }).ok).toBe(false);
+  it('writes nothing and exits 1 when the daemon is unreachable', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError('connect ECONNREFUSED');
+    });
+    const result = await runLaneSyncNoticesCommand('pause', ['claude1/foo'], { reason: 'quiet' }, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      resolveConnection: () => ({ url: 'http://127.0.0.1:9', token: 't' }),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/not reachable at http:\/\/127\.0\.0\.1:9/);
+    expect(result.error).toMatch(/Nothing was changed/);
+    expect(getSyncNotice('claude1/foo')).toBeNull();
+    const stderr: string[] = [];
+    const codes: number[] = [];
+    presentLaneSyncResult(result, {
+      stderr: { write: (chunk: string) => { stderr.push(chunk); } },
+      exit: (code: number) => { codes.push(code); },
+    });
+    expect(codes).toEqual([1]);
+    expect(stderr.join('')).toContain('Nothing was changed');
+    expect(getSyncNotice('claude1/foo')).toBeNull();
+  });
+
+  it('--agent --deferred posts the bulk body and writes nothing locally', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      lanes: ['wc-ales'],
+      results: [{ lane: 'wc-ales', status: 'paused' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const result = await runLaneSyncNoticesCommand(
+      'pause',
+      [],
+      { agent: 'agt-1', deferred: true, reason: 'desk' },
+      {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        resolveConnection: () => ({ url: 'http://daemon.test', token: 'secret' }),
+      },
+    );
+    expect(result.ok && result.data).toEqual(['wc-ales']);
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('http://daemon.test/api/lanes/sync-notices/pause');
+    expect(JSON.parse(String(init.body))).toEqual({ agent_id: 'agt-1', deferred: true, reason: 'desk' });
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer secret');
+    expect(getSyncNotice('wc-ales')).toBeNull();
+    expect(getSyncNotice('agt-1')).toBeNull();
+  });
+
+  it('rejects mixed flags before calling the daemon', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('should not fetch');
+    });
+    const deps = { fetchImpl: fetchImpl as unknown as typeof fetch };
+    const both = await runLaneSyncNoticesCommand('pause', ['wc-ales'], { agent: 'agt', deferred: true, reason: 'both' }, deps);
+    const noFlag = await runLaneSyncNoticesCommand('pause', [], { agent: 'agt', reason: 'no flag' }, deps);
+    expect(both.ok).toBe(false);
+    expect(noFlag.ok).toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(getSyncNotice('wc-ales')).toBeNull();
   });
 });
