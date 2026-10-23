@@ -20,6 +20,7 @@ import {
   type QueueAlert,
 } from './fable-queue-classify.js';
 import { resolveFableQueue, type FableBotConfig, type ResolvedFableQueue } from './fable-queue-config.js';
+import logger from './logger.js';
 import { bindSessionSocket, capturePane, isValidSessionName, isValidSocketName } from './tmux.js';
 
 export const COLLECT_LINES = 40;
@@ -144,16 +145,16 @@ async function inspectBot(
   const read = deps.listDir ?? listDir;
   let state: PaneState = 'unknown';
   let stateError: QueueBot['state_error'] = null;
-  if (!isValidSocketName(bot.socket) || !isValidSessionName(bot.session)) {
-    stateError = 'invalid name';
-  } else {
-    try {
+  try {
+    if (!isValidSocketName(bot.socket) || !isValidSessionName(bot.session)) {
+      stateError = 'invalid name';
+    } else {
       const captured = await capture(bot.session, bot.socket);
       if (!captured.ok) stateError = 'socket unavailable';
       else state = classifyPane(captured.data);
-    } catch {
-      stateError = 'socket unavailable';
     }
+  } catch {
+    stateError = 'socket unavailable';
   }
   const inbox = await read(bot.inbox);
   const outbox = await read(bot.outbox);
@@ -174,6 +175,15 @@ async function inspectBot(
 }
 
 async function collectNow(deps: QueueDeps): Promise<QueueReport> {
+  try {
+    return await collectReport(deps);
+  } catch (err) {
+    logger.warn({ error: (err as Error).message }, 'Fable queue collect failed');
+    return snapshot ?? emptyReport(resolvedConfig(deps.config));
+  }
+}
+
+async function collectReport(deps: QueueDeps): Promise<QueueReport> {
   const cfg = resolvedConfig(deps.config);
   const nowMs = deps.now?.() ?? Date.now();
   const read = deps.listDir ?? listDir;
