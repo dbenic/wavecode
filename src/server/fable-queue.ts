@@ -1,8 +1,8 @@
 /**
  * Read-only Fable Queue collector.
- * Captures panes through the async tmux helper and lists inbox/outbox
- * names and mtimes. It never reads file bodies, never sends keys, and
- * never writes. A missing socket or directory is a field on the snapshot.
+ * Captures panes with `tmux -L <socket> capture-pane -p -t <session>` only.
+ * It does not type into the pane, never reads file bodies, and never writes.
+ * A missing socket or directory is a field on the snapshot.
  */
 
 import fs from 'node:fs';
@@ -13,6 +13,7 @@ import {
   buildPipeline,
   classifyPane,
   pairInbox,
+  redactSecrets,
   type AgedName,
   type NamedFile,
   type PaneState,
@@ -21,9 +22,10 @@ import {
 } from './fable-queue-classify.js';
 import { resolveFableQueue, type FableBotConfig, type ResolvedFableQueue } from './fable-queue-config.js';
 import logger from './logger.js';
-import { bindSessionSocket, capturePane, isValidSessionName, isValidSocketName } from './tmux.js';
+import { execFileAsync } from './proc.js';
+import { isValidSessionName, isValidSocketName } from './tmux.js';
 
-export const COLLECT_LINES = 40;
+const CAPTURE_TIMEOUT_MS = 5000;
 
 export interface QueueBot {
   id: string;
@@ -35,8 +37,11 @@ export interface QueueBot {
   inbox_error: 'missing' | 'unavailable' | null;
   outbox_error: 'missing' | 'unavailable' | null;
   pending: AgedName[];
+  unmatched: AgedName[];
   current: AgedName | null;
   newest_receipt: AgedName | null;
+  /** Visible pane after secret redaction. Null when the capture failed. */
+  capture: string | null;
 }
 
 export interface QueueReport {
@@ -89,8 +94,10 @@ export function emptyReport(cfg: ResolvedFableQueue): QueueReport {
       inbox_error: null,
       outbox_error: null,
       pending: [],
+      unmatched: [],
       current: null,
       newest_receipt: null,
+      capture: null,
     })),
     alerts: [],
     pipeline: buildPipeline(cfg.cards, [], Date.now()),
@@ -130,10 +137,12 @@ async function captureSession(session: string, socket: string): Promise<{ ok: tr
   if (!isValidSocketName(socket) || !isValidSessionName(session)) {
     return { ok: false, error: 'invalid name' };
   }
-  bindSessionSocket(session, socket);
-  const result = await capturePane(session, COLLECT_LINES);
-  if (!result.ok) return { ok: false, error: 'socket unavailable' };
-  return { ok: true, data: result.data };
+  try {
+    const data = await execFileAsync('tmux', ['-L', socket, 'capture-pane', '-p', '-t', session], { timeout: CAPTURE_TIMEOUT_MS });
+    return { ok: true, data: redactSecrets(data) };
+  } catch {
+    return { ok: false, error: 'socket unavailable' };
+  }
 }
 
 async function inspectBot(
@@ -145,13 +154,17 @@ async function inspectBot(
   const read = deps.listDir ?? listDir;
   let state: PaneState = 'unknown';
   let stateError: QueueBot['state_error'] = null;
+  let captureText: string | null = null;
   try {
     if (!isValidSocketName(bot.socket) || !isValidSessionName(bot.session)) {
       stateError = 'invalid name';
     } else {
       const captured = await capture(bot.session, bot.socket);
       if (!captured.ok) stateError = 'socket unavailable';
-      else state = classifyPane(captured.data);
+      else {
+        captureText = redactSecrets(captured.data);
+        state = classifyPane(captureText);
+      }
     }
   } catch {
     stateError = 'socket unavailable';
@@ -168,8 +181,10 @@ async function inspectBot(
     inbox_error: inbox.error,
     outbox_error: outbox.error,
     pending: paired.pending,
+    unmatched: paired.unmatched,
     current: paired.current,
     newest_receipt: paired.newest_receipt,
+    capture: captureText,
     receipts: outbox.files,
   };
 }

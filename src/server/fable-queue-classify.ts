@@ -43,11 +43,32 @@ export interface NamedFile {
 export interface AgedName {
   name: string;
   age_s: number;
+  /** Set on a brief that no receipt paired with. Never set on the newest receipt. */
+  status?: 'unmatched';
 }
 
 export function fileStem(name: string): string {
   const base = name.split(/[/\\]/).pop() ?? name;
   return base.replace(/\.[^.]+$/, '');
+}
+
+/** Strip token, key, and password values. The placeholder is not itself a secret. */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/\b((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\s*[=:]\s*)\S+/gi, '$1[redacted]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g, '[redacted]')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[redacted]');
+}
+
+const SLUG_STOP = new Set([
+  'fable', 'fable2', 'fable3', 'fable4', 'fable5',
+  'brief', 'receipt', 'inbox', 'outbox', 'note', 'notes', 'done', 'from',
+  'freeze', 'verdict', 'staged', 'review', 'ready', 'live', 'production', 'staging',
+]);
+
+function isDateToken(token: string): boolean {
+  return /^20\d{2}$/.test(token) || /^20\d{6}$/.test(token) || /^20\d{12}$/.test(token);
 }
 
 /** Ids embedded in a filename: `#145`/`145`, `ENG-5`, `B1`. Dates are not ids. */
@@ -61,13 +82,46 @@ export function embeddedIds(name: string): Set<string> {
   return ids;
 }
 
-export function receiptMatchesBrief(brief: string, receipt: string): boolean {
-  if (fileStem(brief) === fileStem(receipt)) return true;
-  const receiptIds = embeddedIds(receipt);
-  for (const id of embeddedIds(brief)) {
-    if (receiptIds.has(id)) return true;
+/** Brief ids: `#145`, `ENG-5`, `B1`, and a bounded number that is not a date. */
+export function briefIds(name: string): Set<string> {
+  const stem = fileStem(name);
+  const ids = new Set<string>();
+  for (const match of stem.matchAll(/#(\d+)/g)) ids.add(match[1]);
+  for (const match of stem.matchAll(/\b([A-Z]{2,}-\d+)\b/g)) ids.add(match[1].toUpperCase());
+  for (const match of stem.matchAll(/(?:^|[^A-Za-z0-9])([A-Z]\d+)(?=[^A-Za-z0-9]|$)/g)) ids.add(match[1].toUpperCase());
+  for (const match of stem.matchAll(/(?:^|[^A-Za-z0-9])(\d{2,})(?=[^A-Za-z0-9]|$)/g)) {
+    if (!isDateToken(match[1])) ids.add(match[1]);
   }
-  return false;
+  return ids;
+}
+
+/** Slug words such as `prodw` and `roles`. Dates, bot names, and stage words are not slugs. */
+export function slugTokens(name: string): Set<string> {
+  const tokens = fileStem(name).toLowerCase().split(/[^a-z0-9]+/);
+  return new Set(tokens.filter((token) => token.length >= 4 && !SLUG_STOP.has(token) && !isDateToken(token) && !/^\d+$/.test(token)));
+}
+
+export type PairReason = 'basename' | 'id' | 'slug';
+
+/**
+ * Exact basename first, then a shared brief id, then a shared slug token.
+ * A date or the word `fable` is not a match.
+ */
+export function pairReason(brief: string, receipt: string): PairReason | null {
+  if (fileStem(brief) === fileStem(receipt)) return 'basename';
+  const receiptIds = briefIds(receipt);
+  for (const id of briefIds(brief)) {
+    if (receiptIds.has(id)) return 'id';
+  }
+  const receiptSlugs = slugTokens(receipt);
+  for (const token of slugTokens(brief)) {
+    if (receiptSlugs.has(token)) return 'slug';
+  }
+  return null;
+}
+
+export function receiptMatchesBrief(brief: string, receipt: string): boolean {
+  return pairReason(brief, receipt) !== null;
 }
 
 function ageSeconds(mtimeMs: number, nowMs: number): number {
@@ -75,23 +129,27 @@ function ageSeconds(mtimeMs: number, nowMs: number): number {
 }
 
 export interface Pairing {
+  /** Briefs with no paired receipt. Each one is unmatched — a receipt was not guessed. */
   pending: AgedName[];
-  /** Oldest pending brief. Null when nothing is waiting. */
+  unmatched: AgedName[];
+  /** Oldest unmatched brief. Null when every brief paired. */
   current: AgedName | null;
+  /** Newest outbox file, whether or not it pairs with a brief. */
   newest_receipt: AgedName | null;
 }
 
-/** A brief with no receipt of the same stem or a shared embedded id is pending. */
+/** A brief with no basename, id, or slug match stays unmatched. The newest receipt is always listed. */
 export function pairInbox(inbox: readonly NamedFile[], outbox: readonly NamedFile[], nowMs: number): Pairing {
-  const pending = inbox
+  const unmatched = inbox
     .filter((brief) => !outbox.some((receipt) => receiptMatchesBrief(brief.name, receipt.name)))
     .slice()
     .sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name))
-    .map((file) => ({ name: file.name, age_s: ageSeconds(file.mtimeMs, nowMs) }));
+    .map((file) => ({ name: file.name, age_s: ageSeconds(file.mtimeMs, nowMs), status: 'unmatched' as const }));
   const newest = outbox.slice().sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name))[0] ?? null;
   return {
-    pending,
-    current: pending[0] ?? null,
+    pending: unmatched,
+    unmatched,
+    current: unmatched[0] ?? null,
     newest_receipt: newest ? { name: newest.name, age_s: ageSeconds(newest.mtimeMs, nowMs) } : null,
   };
 }

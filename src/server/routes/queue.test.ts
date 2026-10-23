@@ -46,7 +46,7 @@ describe('GET /api/queue', () => {
     const secret = 'BODY_SHOULD_NOT_APPEAR';
     await collectOnce({
       now: () => Date.parse('2026-10-23T12:00:00Z'),
-      capture: async () => ({ ok: true, data: `${secret}\n❯` }),
+      capture: async () => ({ ok: true, data: `password=${secret}\n❯` }),
       listDir: async (dir) => (dir === '/inbox'
         ? { files: [{ name: '145-brief.md', mtimeMs: Date.parse('2026-10-23T11:00:00Z') }], error: null }
         : { files: [], error: null }),
@@ -61,6 +61,7 @@ describe('GET /api/queue', () => {
     expect(after.status).toBe(200);
     const body = JSON.stringify(after.json);
     expect(body).not.toContain(secret);
+    expect(body).toContain('[redacted]');
     expect(body).not.toContain(FALLBACK);
     expect(body).toContain('145-brief.md');
     const bot = (after.json.bots as Array<{ state: string; current: { name: string } | null }>)[0];

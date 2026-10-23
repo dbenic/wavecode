@@ -3,14 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./tmux.js', () => ({
-  capturePane: vi.fn(async () => ({ ok: false, error: 'no server' })),
-  bindSessionSocket: vi.fn(),
-  isValidSessionName: (name: string) => /^[a-zA-Z0-9._-]+$/.test(name) && name.length > 0 && name.length <= 256,
-  isValidSocketName: (name: string) => /^[a-zA-Z0-9._-]+$/.test(name) && name.length > 0 && name.length <= 64,
+vi.mock('./proc.js', () => ({
+  execFileAsync: vi.fn(async () => ''),
 }));
 
-import { bindSessionSocket, capturePane } from './tmux.js';
+import { execFileAsync } from './proc.js';
 import { resolveFableQueue } from './fable-queue-config.js';
 import { collectOnce, resetFableQueueForTest, startFableQueue, stopFableQueue } from './fable-queue.js';
 
@@ -28,7 +25,8 @@ describe('fable queue collector', () => {
 
   it('stays on the async tmux path', () => {
     const src = fs.readFileSync(new URL('./fable-queue.ts', import.meta.url), 'utf8');
-    expect(src).not.toMatch(/execFileSync|execSync|spawnSync|Atomics\.wait|readFile/);
+    expect(src).not.toMatch(/execFileSync|execSync|spawnSync|Atomics\.wait|readFile|send-keys|sendKeys|capturePane/);
+    expect(src).toContain("['-L', socket, 'capture-pane', '-p', '-t', session]");
   });
 
   it('pairs files by name, classifies the pane, and omits bodies and pane text', async () => {
@@ -47,7 +45,7 @@ describe('fable queue collector', () => {
     fs.writeFileSync(path.join(outbox, 'done.txt'), SECRET);
     fs.writeFileSync(path.join(notes, 'desk-145-freeze.md'), SECRET);
     fs.utimesSync(path.join(inbox, '145-brief.md'), (now - 1000) / 1000, (now - 1000) / 1000);
-    vi.mocked(capturePane).mockResolvedValue({ ok: true, data: `esc to interrupt\n${SECRET}` });
+    vi.mocked(execFileAsync).mockResolvedValue(`esc to interrupt\npassword=${SECRET}\ntoken=${SECRET}`);
 
     const report = await collectOnce({
       now: () => now,
@@ -60,9 +58,15 @@ describe('fable queue collector', () => {
       }),
     });
 
-    expect(bindSessionSocket).toHaveBeenCalledWith('claude-countix', 'fable');
-    expect(capturePane).toHaveBeenCalledWith('claude-countix', 40);
+    expect(execFileAsync).toHaveBeenCalledWith(
+      'tmux',
+      ['-L', 'fable', 'capture-pane', '-p', '-t', 'claude-countix'],
+      expect.objectContaining({ timeout: 5000 }),
+    );
     expect(report.bots[0].state).toBe('working');
+    expect(report.bots[0].capture).toContain('esc to interrupt');
+    expect(report.bots[0].capture).toContain('[redacted]');
+    expect(report.bots[0].capture).not.toContain(SECRET);
     expect(report.bots[0].pending.map((p) => p.name).sort()).toEqual(['134-freeze.md', '145-brief.md']);
     expect(report.bots[0].current?.name).toBe('145-brief.md');
     expect(report.bots[0].newest_receipt?.name).toBe('done.txt');
@@ -82,7 +86,7 @@ describe('fable queue collector', () => {
     fs.mkdirSync(inbox);
     fs.writeFileSync(path.join(inbox, 'keep.md'), 'stay');
     const before = fs.readFileSync(path.join(inbox, 'keep.md'), 'utf8');
-    vi.mocked(capturePane).mockResolvedValue({ ok: false, error: 'no server running on /tmp/secret-socket' });
+    vi.mocked(execFileAsync).mockRejectedValue(new Error('no server running on /tmp/secret-socket'));
     const missingNotes = path.join(tmp, 'no-notes');
 
     const report = await collectOnce({
@@ -103,7 +107,10 @@ describe('fable queue collector', () => {
     expect(report.bots[0].outbox_error).toBe('missing');
     expect(report.bots[0].pending.map((p) => p.name)).toEqual(['keep.md']);
     expect(report.bots[1].state_error).toBe('invalid name');
-    expect(capturePane).toHaveBeenCalledTimes(1);
+    expect(execFileAsync).toHaveBeenCalledTimes(1);
+    const args = vi.mocked(execFileAsync).mock.calls[0]?.[1] as string[];
+    expect(args).toEqual(['-L', 'fable', 'capture-pane', '-p', '-t', 'claude-countix']);
+    expect(args.join(' ')).not.toContain('send-keys');
     expect(report.notes_unavailable).toBe(1);
     expect(report.pipeline[0].stages.freeze).toEqual({ status: 'unknown' });
     expect(JSON.stringify(report)).not.toContain('secret-socket');
@@ -112,13 +119,13 @@ describe('fable queue collector', () => {
 
   it('collects again after 10 seconds', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    vi.mocked(capturePane).mockClear();
-    vi.mocked(capturePane).mockResolvedValue({ ok: false, error: 'no server' });
+    vi.mocked(execFileAsync).mockClear();
+    vi.mocked(execFileAsync).mockResolvedValue('esc to interrupt');
     try {
       startFableQueue();
-      await vi.waitFor(() => expect(vi.mocked(capturePane).mock.calls.length).toBe(5));
+      await vi.waitFor(() => expect(vi.mocked(execFileAsync).mock.calls.length).toBe(5));
       await vi.advanceTimersByTimeAsync(10_000);
-      await vi.waitFor(() => expect(vi.mocked(capturePane).mock.calls.length).toBe(10));
+      await vi.waitFor(() => expect(vi.mocked(execFileAsync).mock.calls.length).toBe(10));
     } finally {
       stopFableQueue();
       vi.useRealTimers();

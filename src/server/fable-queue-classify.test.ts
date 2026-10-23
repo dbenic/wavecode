@@ -5,7 +5,9 @@ import {
   classifyPane,
   embeddedIds,
   pairInbox,
+  pairReason,
   receiptMatchesBrief,
+  redactSecrets,
   stagesNamedIn,
 } from './fable-queue-classify.js';
 import { defaultFableBots, resolveFableQueue } from './fable-queue-config.js';
@@ -30,6 +32,19 @@ describe('classifyPane', () => {
   });
 });
 
+describe('redactSecrets', () => {
+  it('strips tokens, keys, and password values and leaves the footer alone', () => {
+    expect(redactSecrets('password=hunter2')).toBe('password=[redacted]');
+    expect(redactSecrets('token: sk-do-not-leak')).toBe('token: [redacted]');
+    expect(redactSecrets('api_key=sk-ant-api03-supersecret')).toBe('api_key=[redacted]');
+    expect(redactSecrets('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payloadxx.signaturex')).toBe('Authorization: Bearer [redacted]');
+    expect(redactSecrets('key sk-live-not-a-real-key and ghp_1234567890abcdef')).not.toMatch(/sk-live|ghp_/);
+    const sha = 'a'.repeat(40);
+    expect(redactSecrets(`esc to interrupt\n${sha}`)).toBe(`esc to interrupt\n${sha}`);
+    expect(redactSecrets('password=hunter2')).not.toContain('hunter2');
+  });
+});
+
 describe('inbox pairing', () => {
   const now = Date.parse('2026-10-23T12:00:00Z');
 
@@ -42,6 +57,25 @@ describe('inbox pairing', () => {
     expect(receiptMatchesBrief('2026-10-23-note.md', '2026.txt')).toBe(false);
     expect(receiptMatchesBrief('only.md', 'other.md')).toBe(false);
     expect(embeddedIds('desk-145-freeze.md').has('145')).toBe(true);
+    expect(pairReason('prodw-roles.md', 'fable-prodw-roles-20261023.md')).toBe('slug');
+    expect(receiptMatchesBrief('other-task.md', 'fable-prodw-roles-20261023.md')).toBe(false);
+    expect(receiptMatchesBrief('notes-20261023.md', 'fable-prodw-roles-20261023.md')).toBe(false);
+  });
+
+  it('leaves an unpaired brief unmatched and still lists the newest receipt', () => {
+    const paired = pairInbox(
+      [
+        { name: 'other-task.md', mtimeMs: now - 1000 },
+        { name: 'prodw-roles.md', mtimeMs: now - 5000 },
+      ],
+      [{ name: 'fable-prodw-roles-20261023.md', mtimeMs: now - 100 }],
+      now,
+    );
+    expect(paired.unmatched).toEqual([{ name: 'other-task.md', age_s: 1, status: 'unmatched' }]);
+    expect(paired.pending.map((brief) => brief.name)).toEqual(['other-task.md']);
+    expect(paired.current?.name).toBe('other-task.md');
+    expect(paired.newest_receipt).toEqual({ name: 'fable-prodw-roles-20261023.md', age_s: 0 });
+    expect(paired.newest_receipt).not.toHaveProperty('status');
   });
 
   it('reports pending age, the oldest brief, and the newest receipt', () => {
@@ -59,7 +93,7 @@ describe('inbox pairing', () => {
     );
     expect(paired.pending.map((p) => p.name)).toEqual(['older.md', 'newer.md']);
     expect(paired.pending[0].age_s).toBe(20 * MIN);
-    expect(paired.current).toEqual({ name: 'older.md', age_s: 20 * MIN });
+    expect(paired.current).toEqual({ name: 'older.md', age_s: 20 * MIN, status: 'unmatched' });
     expect(paired.newest_receipt).toEqual({ name: 'done.txt', age_s: 30 });
   });
 });

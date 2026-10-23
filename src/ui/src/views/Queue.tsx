@@ -90,13 +90,14 @@ export default function Queue() {
                       {bot.inbox_error ? `inbox ${bot.inbox_error}` : ''}{bot.inbox_error && bot.outbox_error ? ' · ' : ''}{bot.outbox_error ? `outbox ${bot.outbox_error}` : ''}
                     </p>
                   )}
-                  <p className="mt-1 text-slate-400">
-                    current {bot.current ? `${bot.current.name} · ${fmtAge(bot.current.age_s)}` : 'none'}
-                    {' · '}
-                    pending {bot.pending.length}
+                  <p className="mt-1 text-slate-400" data-testid={`queue-unmatched-${bot.id}`}>
+                    unmatched {bot.unmatched.length ? bot.unmatched.map((brief) => brief.name).join(', ') : 'none'}
                     {' · '}
                     newest receipt {bot.newest_receipt ? `${bot.newest_receipt.name} · ${fmtAge(bot.newest_receipt.age_s)}` : 'none'}
                   </p>
+                  {bot.capture && (
+                    <pre data-testid={`queue-capture-${bot.id}`} className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-slate-500">{bot.capture}</pre>
+                  )}
                 </article>
               ))}
             </section>

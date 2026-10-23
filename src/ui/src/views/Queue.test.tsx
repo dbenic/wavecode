@@ -24,9 +24,11 @@ const REPORT: FableQueueReport = {
     state_error: 'socket unavailable',
     inbox_error: 'missing',
     outbox_error: null,
-    pending: [{ name: '145-brief.md', age_s: 1200 }],
-    current: { name: '145-brief.md', age_s: 1200 },
-    newest_receipt: null,
+    pending: [{ name: '145-brief.md', age_s: 1200, status: 'unmatched' }],
+    unmatched: [{ name: '145-brief.md', age_s: 1200, status: 'unmatched' }],
+    current: { name: '145-brief.md', age_s: 1200, status: 'unmatched' },
+    newest_receipt: { name: 'fable-prodw-roles-20261023.md', age_s: 30 },
+    capture: 'esc to interrupt\npassword=[redacted]',
   }],
   alerts: [
     { kind: 'pending_too_long', bot: 'fable', name: '145-brief.md', age_s: 1200 },
@@ -61,6 +63,10 @@ describe('Queue page', () => {
     expect(screen.getByTestId('queue-alerts').textContent).toContain('idle with 1 pending');
     expect(screen.getByTestId('queue-state-error-fable').textContent).toBe('socket unavailable');
     expect(screen.getByTestId('queue-bot-fable').textContent).toContain('inbox missing');
+    expect(screen.getByTestId('queue-unmatched-fable').textContent).toContain('unmatched 145-brief.md');
+    expect(screen.getByTestId('queue-unmatched-fable').textContent).toContain('fable-prodw-roles-20261023.md');
+    expect(screen.getByTestId('queue-capture-fable').textContent).toContain('[redacted]');
+    expect(screen.getByTestId('queue-capture-fable').textContent).not.toContain('hunter2');
     const card = screen.getByTestId('queue-card-#145');
     expect(card.textContent).toContain('desk-145-freeze.md');
     expect(card.textContent).toContain('unknown');
