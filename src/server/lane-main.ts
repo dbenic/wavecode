@@ -12,6 +12,7 @@ import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { fireMainAdvanced } from './pipeline-hooks.js';
+import { syncNoticesPaused } from './lane-sync-notices.js';
 
 export const MAIN_PING = 'lane.main_ping';
 
@@ -460,6 +461,8 @@ export async function pingLaneAboutMain(opts: {
 }): Promise<boolean> {
   if (!opts.lane || !opts.mainSha) return false;
   if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
+  // A paused lane skips the notice only. Freeze status and Stage eligibility are decided by the caller.
+  if (syncNoticesPaused(opts.lane)) return false;
   const key = pingKey(opts.lane, opts.mainSha);
   const latest = latestPing(opts.lane, opts.mainSha);
   if (latest) {

@@ -144,6 +144,12 @@ export function resetDeskForTest(): void {
   lastError = null;
 }
 
+/** Seed the board cache. The bulk lane filter reads deferred desks from here, never the network. */
+export function setDeskCacheForTest(items: DeskItem[] | null, now = Date.now()): void {
+  cache = items ? { at: now, items } : null;
+  lastError = null;
+}
+
 /** The whole board, cached for poll_min minutes; `force` refetches. */
 export async function fetchBoard(force = false, now = Date.now()): Promise<Result<DeskItem[]>> {
   const cfg = deskConfig();

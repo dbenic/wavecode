@@ -25,6 +25,7 @@ import { registerRoomRoutes } from './routes/rooms.js';
 import { registerFileRoutes } from './routes/files.js';
 import { registerPeerRoutes } from './routes/peers.js';
 import { registerReleaseRoutes } from './routes/releases.js';
+import { registerLaneRoutes } from './routes/lanes.js';
 import { registerOverviewRoutes } from './routes/overview.js';
 import { registerDeskRoutes } from './routes/desk.js';
 import { registerDiagramRoutes } from './routes/diagrams.js';
@@ -81,6 +82,7 @@ export function createApp(): Hono<NodeAppEnv> {
   registerFileRoutes(app);
   registerPeerRoutes(app);
   registerReleaseRoutes(app);
+  registerLaneRoutes(app);
   registerOverviewRoutes(app);
   registerDeskRoutes(app);
   registerDiagramRoutes(app);

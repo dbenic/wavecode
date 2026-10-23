@@ -602,6 +602,46 @@ program
     // Keep the process alive; the transport closes it when the client disconnects
   });
 
+// --- lane sync notices ---
+const laneCmd = program
+  .command('lane')
+  .description('Developer lanes');
+
+const syncNotices = laneCmd
+  .command('sync-notices')
+  .description('Pause or resume behind-main notices for a lane');
+
+function syncNoticeAction(action: 'pause' | 'resume') {
+  return async (lanes: string[], opts: { agent?: string; deferred?: boolean; reason?: string }) => {
+    initDb();
+    const { runLaneSyncNoticesCli } = await import('./lane-sync-notices-command.js');
+    const result = runLaneSyncNoticesCli(action, lanes, opts);
+    if (!result.ok) {
+      console.error(result.error);
+      process.exit(1);
+    }
+    for (const id of result.data) {
+      if (!writeLine(process.stdout, id)) break;
+    }
+  };
+}
+
+syncNotices
+  .command('pause [lanes...]')
+  .description('Pause behind-main notices for named lanes, or for one agent\'s deferred lanes')
+  .option('--agent <id>', 'Agent id. With --deferred, only that agent\'s deferred lanes')
+  .option('--deferred', 'Limit --agent to lanes whose newest freeze desk is deferred')
+  .option('--reason <text>', 'Why these notices are paused')
+  .action(syncNoticeAction('pause'));
+
+syncNotices
+  .command('resume [lanes...]')
+  .description('Resume behind-main notices for named lanes, or for one agent\'s deferred lanes')
+  .option('--agent <id>', 'Agent id. With --deferred, only that agent\'s deferred lanes')
+  .option('--deferred', 'Limit --agent to lanes whose newest freeze desk is deferred')
+  .option('--reason <text>', 'Why these notices are resumed')
+  .action(syncNoticeAction('resume'));
+
 program.parse();
 
 function printQueueResult(
