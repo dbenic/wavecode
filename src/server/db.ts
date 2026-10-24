@@ -283,7 +283,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 27;
+export const SCHEMA_VERSION = 28;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -639,9 +639,15 @@ const SCHEMA_SQL = `
     finished_at TEXT,
     receipt_paths_json TEXT,
     approval_by TEXT,
-    approval_at TEXT
+    approval_at TEXT,
+    stage_sha TEXT GENERATED ALWAYS AS (
+      CASE WHEN kind = 'stage' THEN lower(json_extract(payload_json, '$.sha')) ELSE NULL END
+    ) VIRTUAL
   );
   CREATE INDEX IF NOT EXISTS idx_ops_jobs_claim ON ops_jobs(role, status, created_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_jobs_open_stage
+    ON ops_jobs(kind, stage_sha)
+    WHERE kind = 'stage' AND status IN ('queued', 'claimed');
 `;
 
 /**
@@ -976,6 +982,16 @@ const MIGRATIONS: Record<number, string> = {
       approval_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_ops_jobs_claim ON ops_jobs(role, status, created_at);
+  `,
+  // v27 → v28: one open stage job per SHA. The insert conflicts instead of racing the git check.
+  27: `
+    ALTER TABLE ops_jobs ADD COLUMN stage_sha TEXT
+      GENERATED ALWAYS AS (
+        CASE WHEN kind = 'stage' THEN lower(json_extract(payload_json, '$.sha')) ELSE NULL END
+      ) VIRTUAL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_jobs_open_stage
+      ON ops_jobs(kind, stage_sha)
+      WHERE kind = 'stage' AND status IN ('queued', 'claimed');
   `,
 };
 

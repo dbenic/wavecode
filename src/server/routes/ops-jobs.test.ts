@@ -78,6 +78,8 @@ describe('ops job routes', () => {
     const app = await makeApp();
     const scout = await user('scout');
     const stager = await user('stager');
+    const stage = await import('../ops-stage.js');
+    vi.spyOn(stage, 'opsStageRefusal').mockResolvedValue(null);
     const jobs = await import('../ops-jobs.js');
     const scoutJob = jobs.insertOpsJob({
       kind: 'ask_data', role: 'scout', status: 'queued', requester: 'denis', payload: { company: 'hipsl' },
@@ -101,6 +103,8 @@ describe('ops job routes', () => {
     const app = await makeApp();
     const stager = await user('stager');
     const jobs = await import('../ops-jobs.js');
+    const stage = await import('../ops-stage.js');
+    vi.spyOn(stage, 'opsStageRefusal').mockResolvedValue(null);
     const job = jobs.insertOpsJob({
       kind: 'stage', role: 'stager', status: 'queued', requester: 'denis', payload: jobs.stagePayload(SHA),
     });
@@ -208,6 +212,81 @@ describe('ops job routes', () => {
       company: 'acme', env: 'staging', question: 'drop the table',
     });
     expect(unknown.status).toBe(400);
+  });
+
+  it('inserts one stage job when two posts overlap during the git check', async () => {
+    const app = await makeApp();
+    const stage = await import('../ops-stage.js');
+    let entered = 0;
+    let release: () => void = () => {};
+    const bothIn = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(stage, 'opsStageRefusal').mockImplementation(async () => {
+      entered += 1;
+      if (entered >= 2) release();
+      await bothIn;
+      return null;
+    });
+    const [left, right] = await Promise.all([
+      call(app, 'POST', '/api/ops/stage', FALLBACK, { sha: SHA }),
+      call(app, 'POST', '/api/ops/stage', FALLBACK, { sha: SHA }),
+    ]);
+    expect(left.status === 200 || left.status === 201).toBe(true);
+    expect(right.status === 200 || right.status === 201).toBe(true);
+    const jobs = await import('../ops-jobs.js');
+    const rows = jobs.listOpsJobs().filter((job) => job.kind === 'stage');
+    expect(rows).toHaveLength(1);
+    const id = rows[0]?.id;
+    expect((left.json.job as { id: string }).id).toBe(id);
+    expect((right.json.job as { id: string }).id).toBe(id);
+  });
+
+  it('fails a claimed stage job when the SHA is no longer eligible', async () => {
+    const app = await makeApp();
+    const stager = await user('stager');
+    const jobs = await import('../ops-jobs.js');
+    const stage = await import('../ops-stage.js');
+    const job = jobs.insertOpsJob({
+      kind: 'stage', role: 'stager', status: 'queued', requester: 'denis', payload: jobs.stagePayload(SHA),
+    });
+    vi.spyOn(stage, 'opsStageRefusal').mockResolvedValue('would roll staging back: missing 3');
+    const claimed = await call(app, 'POST', '/api/ops/jobs/claim', stager.token, { role: 'stager' });
+    expect(claimed.status).toBe(200);
+    expect(claimed.json.reason).toBe('would roll staging back: missing 3');
+    expect(claimed.json.job).toMatchObject({ id: job.id, status: 'failed' });
+    expect(jobs.getOpsJob(job.id)?.status).toBe('failed');
+  });
+
+  it('holds every inflected write, and an explicit write, for the owner', async () => {
+    const app = await makeApp();
+    const ana = await user('ana');
+    const phrases = [
+      'deleted invoice 4',
+      'changed the posted amount',
+      'updated the customer row',
+      'set the salary to 0',
+      'add a bonus of 500',
+      'izbriši račun 4',
+      'spremeni knjiženi znesek',
+      'obriši račun 4',
+      'promijeni knjiženi iznos',
+    ];
+    for (const question of phrases) {
+      const res = await call(app, 'POST', '/api/ops/ask', ana.token, {
+        company: 'hipsl', env: 'staging', question, intent: 'read',
+      });
+      expect(res.status, question).toBe(201);
+      expect(res.json.job, question).toMatchObject({ kind: 'scribe_write', status: 'awaiting_owner', role: 'scribe-hipsl' });
+    }
+    const forced = await call(app, 'POST', '/api/ops/ask', ana.token, {
+      company: 'hipsl', env: 'staging', question: 'what is the payroll total for September', intent: 'write',
+    });
+    expect(forced.json.job).toMatchObject({ kind: 'scribe_write', status: 'awaiting_owner' });
+    for (const question of ['what is the payroll total for September', 'show GL balance 1200']) {
+      const res = await call(app, 'POST', '/api/ops/ask', ana.token, {
+        company: 'hipsl', env: 'prod', question,
+      });
+      expect(res.json.job, question).toMatchObject({ kind: 'ask_data', role: 'scout', status: 'queued' });
+    }
   });
 
   it('shows status, role, requester, receipts and approval', async () => {

@@ -127,7 +127,7 @@ describe('Ops lanes page', () => {
     fireEvent.change(screen.getByTestId('ask-question'), { target: { value: 'what is the payroll total' } });
     fireEvent.click(screen.getByTestId('ask-submit'));
     await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/ops/ask', {
-      company: 'hipsl', env: 'staging', question: 'what is the payroll total',
+      company: 'hipsl', env: 'staging', question: 'what is the payroll total', intent: 'read',
     }));
     expect(await screen.findByTestId('ask-note')).toHaveTextContent('Queued for the scout');
   });

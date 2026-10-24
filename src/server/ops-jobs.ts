@@ -194,6 +194,45 @@ export function stagePayload(sha: string): { sha: string; steps: string[] } {
   return { sha: sha.toLowerCase(), steps: [...STAGE_STEPS] };
 }
 
+/**
+ * Insert a queued stage job. A second open job for the same SHA hits the
+ * partial unique index and comes back as the row already stored.
+ */
+export function insertStageJob(input: { requester: string; sha: string; createdAt?: string }): { job: OpsJob; deduped: boolean } {
+  const id = generateId();
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const payload = redactPayload(stagePayload(input.sha));
+  const row = getDb().prepare(`
+    INSERT INTO ops_jobs (id, kind, role, status, requester, payload_json, created_at)
+    VALUES (?, 'stage', 'stager', 'queued', ?, ?, ?)
+    ON CONFLICT(kind, stage_sha) WHERE kind = 'stage' AND status IN ('queued', 'claimed')
+    DO NOTHING
+    RETURNING *
+  `).get(id, input.requester, JSON.stringify(payload), createdAt) as OpsJobRow | undefined;
+  if (row) {
+    const job = mapOpsJob(row);
+    if (!job) throw new Error('stage job insert did not persist');
+    return { job, deduped: false };
+  }
+  const existing = openStageJob(input.sha);
+  if (!existing) throw new Error('stage job conflict had no open row');
+  return { job: existing, deduped: true };
+}
+
+/** The SHA is no longer stageable. The claimed row becomes failed and leaves the open index. */
+export function failClaimedJob(id: string, reason: string, finishedAt = new Date().toISOString()): OpsJob | null {
+  const existing = getOpsJob(id);
+  if (!existing || existing.status !== 'claimed') return null;
+  const payload = redactPayload({ ...existing.payload, refusal: reason });
+  const row = getDb().prepare(`
+    UPDATE ops_jobs
+    SET status = 'failed', finished_at = ?, payload_json = ?
+    WHERE id = ? AND status = 'claimed'
+    RETURNING *
+  `).get(finishedAt, JSON.stringify(payload), id) as OpsJobRow | undefined;
+  return row ? mapOpsJob(row) : null;
+}
+
 /** Claim the oldest queued job for this role. A second caller gets nothing. */
 export function claimOpsJob(role: OpsJobRole, claimedBy: string, claimedAt = new Date().toISOString()): OpsJob | null {
   const row = getDb().prepare(CLAIM_SQL).get(claimedBy, claimedAt, role) as OpsJobRow | undefined;

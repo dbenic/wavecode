@@ -7,12 +7,12 @@ import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { emit } from '../event-bus.js';
 import { canMutate } from '../users.js';
-import { asksToChangeData } from '../ops-ask.js';
+import { askNeedsOwner, parseAskIntent } from '../ops-ask.js';
 import { isOpsJobRole, type OpsJobRole } from '../ops-lanes-config.js';
 import {
   approveOpsJob, checkReceiptPaths, claimOpsJob, completeOpsJob, currentOpsConfig,
-  getOpsJob, insertOpsJob, listOpsJobs, openStageJob, publicOpsJob, READ_ANSWER_POLICY,
-  roleBoundTo, stagePayload, userIsOpsOwner, type OpsJob,
+  failClaimedJob, getOpsJob, insertOpsJob, insertStageJob, listOpsJobs, openStageJob, publicOpsJob, READ_ANSWER_POLICY,
+  roleBoundTo, userIsOpsOwner, type OpsJob,
 } from '../ops-jobs.js';
 import { opsStageRefusal } from '../ops-stage.js';
 
@@ -33,19 +33,34 @@ export function registerOpsJobRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(listOpsJobs().map(publicOpsJob));
   });
 
-  app.post('/api/ops/jobs/claim', (c) => {
+  app.post('/api/ops/jobs/claim', async (c) => {
     const user = getActingUser(c);
     if (seatDenied(user)) return c.json({ error: SEAT_DENIED }, 403);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
-    return c.req.json<{ role?: unknown }>().then((body) => {
-      const role = typeof body.role === 'string' ? body.role.trim() : '';
-      if (!isOpsJobRole(role)) return c.json({ error: 'role must be stager, scout, scribe-hipsl, or scribe-clients' }, 400);
-      const bound = roleBoundTo(user);
-      if (bound !== role) return c.json({ error: `this token cannot claim ${role}` }, 403);
-      const job = claimOpsJob(role, user.id);
-      if (job) emit('ops.job.claimed', 'ops_job', job.id, { role, status: 'claimed' });
-      return c.json({ job: job ? publicOpsJob(job) : null });
-    }).catch(() => c.json({ error: 'Malformed request body' }, 400));
+    const body = await c.req.json<{ role?: unknown }>().catch(() => null);
+    if (!body) return c.json({ error: 'Malformed request body' }, 400);
+    const role = typeof body.role === 'string' ? body.role.trim() : '';
+    if (!isOpsJobRole(role)) return c.json({ error: 'role must be stager, scout, scribe-hipsl, or scribe-clients' }, 400);
+    const bound = roleBoundTo(user);
+    if (bound !== role) return c.json({ error: `this token cannot claim ${role}` }, 403);
+    const job = claimOpsJob(role, user.id);
+    if (!job) return c.json({ job: null });
+    if (job.kind === 'stage') {
+      const sha = typeof job.payload.sha === 'string' ? job.payload.sha : '';
+      let reason: string | null;
+      try {
+        reason = sha ? await opsStageRefusal(sha) : 'no sha on this stage job';
+      } catch {
+        reason = 'staging checks are not ready';
+      }
+      if (reason) {
+        const failed = failClaimedJob(job.id, reason);
+        emit('ops.job.failed', 'ops_job', job.id, { role, status: 'failed' });
+        return c.json({ job: failed ? publicOpsJob(failed) : null, reason });
+      }
+    }
+    emit('ops.job.claimed', 'ops_job', job.id, { role, status: 'claimed' });
+    return c.json({ job: publicOpsJob(job) });
   });
 
   app.post('/api/ops/jobs/:id/complete', async (c) => {
@@ -103,21 +118,15 @@ export function registerOpsJobRoutes(app: Hono<NodeAppEnv>): void {
       reason = 'staging checks are not ready';
     }
     if (reason) return c.json({ error: reason }, 409);
-    const job = insertOpsJob({
-      kind: 'stage',
-      role: 'stager',
-      status: 'queued',
-      requester: user.name,
-      payload: stagePayload(sha),
-    });
-    emit('ops.job.queued', 'ops_job', job.id, { role: 'stager', kind: 'stage', sha });
-    return c.json(jsonJob(job, { deduped: false }), 201);
+    const inserted = insertStageJob({ requester: user.name, sha });
+    if (!inserted.deduped) emit('ops.job.queued', 'ops_job', inserted.job.id, { role: 'stager', kind: 'stage', sha });
+    return c.json(jsonJob(inserted.job, { deduped: inserted.deduped }), inserted.deduped ? 200 : 201);
   });
 
   app.post('/api/ops/ask', async (c) => {
     const user = getActingUser(c);
     if (!canMutate(user) || seatDenied(user)) return c.json({ error: seatDenied(user) ? SEAT_DENIED : 'Forbidden' }, 403);
-    const body = await c.req.json<{ company?: unknown; env?: unknown; question?: unknown }>().catch(() => null);
+    const body = await c.req.json<{ company?: unknown; env?: unknown; question?: unknown; intent?: unknown }>().catch(() => null);
     if (!body) return c.json({ error: 'Malformed request body' }, 400);
     const company = typeof body.company === 'string' ? body.company.trim() : '';
     const env = body.env === 'staging' || body.env === 'prod' ? body.env : null;
@@ -125,7 +134,9 @@ export function registerOpsJobRoutes(app: Hono<NodeAppEnv>): void {
     if (!COMPANY_RE.test(company)) return c.json({ error: 'company must be an id' }, 400);
     if (!env) return c.json({ error: 'env must be staging or prod' }, 400);
     if (!question || question.length > 4000) return c.json({ error: 'question is required' }, 400);
-    const write = asksToChangeData(question);
+    const intent = parseAskIntent(body.intent);
+    if (!intent) return c.json({ error: 'intent must be read or write' }, 400);
+    const write = askNeedsOwner(question, intent);
     const cfg = currentOpsConfig();
     let role: OpsJobRole = 'scout';
     if (write) {
@@ -141,8 +152,8 @@ export function registerOpsJobRoutes(app: Hono<NodeAppEnv>): void {
       status: write ? 'awaiting_owner' : 'queued',
       requester: user.name,
       payload: write
-        ? { company, env, question, read_only: false }
-        : { company, env, question, read_only: true, answer_policy: { ...READ_ANSWER_POLICY } },
+        ? { company, env, question, intent, read_only: false }
+        : { company, env, question, intent, read_only: true, answer_policy: { ...READ_ANSWER_POLICY } },
     });
     emit('ops.job.queued', 'ops_job', job.id, { role, kind: job.kind, status: job.status });
     return c.json(jsonJob(job), 201);

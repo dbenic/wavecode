@@ -22,6 +22,7 @@ export default function OpsLanes() {
   const [error, setError] = useState<string | null>(null);
   const [company, setCompany] = useState('');
   const [env, setEnv] = useState<'staging' | 'prod'>('staging');
+  const [intent, setIntent] = useState<'read' | 'write'>('read');
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [askNote, setAskNote] = useState<string | null>(null);
@@ -138,7 +139,7 @@ export default function OpsLanes() {
             if (asking) return;
             setAsking(true);
             setAskNote(null);
-            apiPost<OpsJobView>('/ops/ask', { company, env, question })
+            apiPost<OpsJobView>('/ops/ask', { company, env, question, intent })
               .then((job) => {
                 const recorded = (job as unknown as { job?: OpsJobView }).job ?? job;
                 setAskNote(recorded.status === 'awaiting_owner'
@@ -171,6 +172,18 @@ export default function OpsLanes() {
             >
               <option value="staging">staging</option>
               <option value="prod">prod</option>
+            </select>
+          </label>
+          <label className="block text-[10px] text-slate-500">
+            Intent
+            <select
+              data-testid="ask-intent"
+              value={intent}
+              onChange={(event) => setIntent(event.target.value === 'write' ? 'write' : 'read')}
+              className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-100"
+            >
+              <option value="read">read</option>
+              <option value="write">write</option>
             </select>
           </label>
           <label className="block text-[10px] text-slate-500">

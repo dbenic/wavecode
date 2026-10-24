@@ -58,14 +58,19 @@ describe('ops jobs store', () => {
 
   it('bumps the schema and creates ops_jobs', async () => {
     const db = await import('./db.js');
-    expect(db.SCHEMA_VERSION).toBeGreaterThanOrEqual(27);
+    expect(db.SCHEMA_VERSION).toBeGreaterThanOrEqual(28);
     const version = db.getDb().pragma('user_version', { simple: true });
     expect(version).toBe(db.SCHEMA_VERSION);
-    const columns = db.getDb().prepare('PRAGMA table_info(ops_jobs)').all() as { name: string }[];
+    const columns = db.getDb().prepare('PRAGMA table_xinfo(ops_jobs)').all() as { name: string }[];
     expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
       'id', 'kind', 'role', 'status', 'requester', 'payload_json', 'created_at',
       'claimed_by', 'claimed_at', 'finished_at', 'receipt_paths_json', 'approval_by', 'approval_at',
+      'stage_sha',
     ]));
+    const index = db.getDb().prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_ops_jobs_open_stage'").get() as { sql: string } | undefined;
+    expect(index?.sql).toMatch(/UNIQUE/i);
+    expect(index?.sql).toMatch(/queued/);
+    expect(index?.sql).toMatch(/claimed/);
   });
 
   it('claims the oldest queued job for that role only', () => {
