@@ -262,4 +262,15 @@ describe('lane cards', () => {
     expect(conflictFilesFromNote('auto: merge conflict in src/tax/invoice.ts, lib/tax.ts — @ales')).toEqual(['invoice.ts', 'tax.ts']);
     expect(conflictFilesFromNote('reassigned @a → @b')).toEqual([]);
   });
+
+  it('greys Push to staging with the stored reason, and enables it only when that reason is empty', () => {
+    const blocked = buildLaneCards([
+      fact({ sha: 'd'.repeat(40), lane: 'wc-s3-104', ops_stage_block: 'needs green quick check on dddddddd' }),
+    ], [], null, OWNERS)[0];
+    expect(blocked.ops_push).toEqual({ enabled: false, reason: 'needs green quick check on dddddddd' });
+    const open = buildLaneCards([
+      fact({ sha: 'e'.repeat(40), lane: 'wc-s3-105', ops_stage_block: null }),
+    ], [], null, OWNERS)[0];
+    expect(open.ops_push).toEqual({ enabled: true, reason: null });
+  });
 });

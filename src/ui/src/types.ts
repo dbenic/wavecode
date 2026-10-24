@@ -232,6 +232,8 @@ export interface ReviewItem {
   /** One line: what is missing before this lane can move, and who does it. */
   status_line?: string | null;
   stage_block?: string | null;
+  /** Why Push to staging stays grey. Null when this SHA may be queued. */
+  ops_stage_block?: string | null;
   promote_block?: string | null;
   full_fail_flag?: string | null;
   test_run?: TestRunChip | null;
@@ -324,6 +326,8 @@ export interface LaneCard {
   older: Array<{ sha: string; title: string; when: string }>;
   link: { label: string; path: string } | null;
   version: string | null;
+  /** Push to staging. Absent on a card that has not been measured. */
+  ops_push?: { enabled: boolean; reason: string | null } | null;
 }
 
 export interface ReleaseView {
@@ -815,4 +819,22 @@ export interface OpsLanesReport {
   stale_min: number;
   dir_error: 'missing' | 'unavailable' | null;
   lanes: OpsLaneRow[];
+}
+
+export interface OpsJobView {
+  id: string;
+  kind: 'stage' | 'ask_data' | 'scribe_write';
+  role: string;
+  status: string;
+  requester: string;
+  payload: {
+    sha?: string;
+    company?: string;
+    env?: string;
+    question?: string;
+    read_only?: boolean;
+  };
+  created_at: string;
+  receipt_paths: string[];
+  approval: { by: string; at: string } | null;
 }

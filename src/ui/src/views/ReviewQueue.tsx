@@ -140,6 +140,31 @@ function LaneCardView({ card, onDone }: { card: LaneCard; onDone: () => void }) 
           {busy ? 'Sending…' : card.button.label}
         </button>
       )}
+      {card.ops_push && card.sha && (
+        <>
+          <button
+            type="button"
+            data-testid="push-staging"
+            disabled={busy || !card.ops_push.enabled}
+            title={card.ops_push.reason ?? 'Record a stager job. A bot pulls it. WaveCode does not run the scripts.'}
+            onClick={() => {
+              if (!card.ops_push?.enabled || busy) return;
+              setBusy(true);
+              setError(null);
+              apiPost('/ops/stage', { sha: card.sha })
+                .then(() => onDone())
+                .catch((e: Error) => setError(e.message || 'That did not go through'))
+                .finally(() => setBusy(false));
+            }}
+            className="mt-1 w-full rounded-lg border border-sky-500/40 px-3 py-2 text-sm font-semibold text-sky-100 disabled:opacity-40"
+          >
+            Push to staging
+          </button>
+          {!card.ops_push.enabled && card.ops_push.reason && (
+            <p className="text-[11px] text-amber-200/90" data-testid="push-staging-reason">{card.ops_push.reason}</p>
+          )}
+        </>
+      )}
       {error && <p className="text-[11px] text-red-300">{error}</p>}
       {card.older.length > 0 && (
         <div>

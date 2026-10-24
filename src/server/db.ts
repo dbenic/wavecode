@@ -283,7 +283,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 26;
+export const SCHEMA_VERSION = 28;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -625,6 +625,29 @@ const SCHEMA_SQL = `
     paused_at TEXT,
     reason TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS ops_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('stage', 'ask_data', 'scribe_write')),
+    role TEXT NOT NULL CHECK (role IN ('stager', 'scout', 'scribe-hipsl', 'scribe-clients')),
+    status TEXT NOT NULL CHECK (status IN ('queued', 'claimed', 'done', 'failed', 'awaiting_owner', 'rejected')),
+    requester TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    claimed_by TEXT,
+    claimed_at TEXT,
+    finished_at TEXT,
+    receipt_paths_json TEXT,
+    approval_by TEXT,
+    approval_at TEXT,
+    stage_sha TEXT GENERATED ALWAYS AS (
+      CASE WHEN kind = 'stage' THEN lower(json_extract(payload_json, '$.sha')) ELSE NULL END
+    ) VIRTUAL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ops_jobs_claim ON ops_jobs(role, status, created_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_jobs_open_stage
+    ON ops_jobs(kind, stage_sha)
+    WHERE kind = 'stage' AND status IN ('queued', 'claimed');
 `;
 
 /**
@@ -940,6 +963,35 @@ const MIGRATIONS: Record<number, string> = {
       paused_at TEXT,
       reason TEXT
     );
+  `,
+  // v26 → v27: ops jobs. WaveCode records them. Bots pull them. Nothing here runs a script.
+  26: `
+    CREATE TABLE IF NOT EXISTS ops_jobs (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('stage', 'ask_data', 'scribe_write')),
+      role TEXT NOT NULL CHECK (role IN ('stager', 'scout', 'scribe-hipsl', 'scribe-clients')),
+      status TEXT NOT NULL CHECK (status IN ('queued', 'claimed', 'done', 'failed', 'awaiting_owner', 'rejected')),
+      requester TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      claimed_by TEXT,
+      claimed_at TEXT,
+      finished_at TEXT,
+      receipt_paths_json TEXT,
+      approval_by TEXT,
+      approval_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ops_jobs_claim ON ops_jobs(role, status, created_at);
+  `,
+  // v27 → v28: one open stage job per SHA. The insert conflicts instead of racing the git check.
+  27: `
+    ALTER TABLE ops_jobs ADD COLUMN stage_sha TEXT
+      GENERATED ALWAYS AS (
+        CASE WHEN kind = 'stage' THEN lower(json_extract(payload_json, '$.sha')) ELSE NULL END
+      ) VIRTUAL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_jobs_open_stage
+      ON ops_jobs(kind, stage_sha)
+      WHERE kind = 'stage' AND status IN ('queued', 'claimed');
   `,
 };
 

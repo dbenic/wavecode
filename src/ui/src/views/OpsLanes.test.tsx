@@ -2,13 +2,13 @@
 
 import '../../test-setup';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import OpsLanes, { fmtAge } from './OpsLanes';
 import DesktopNav from '../components/DesktopNav';
 import type { OpsLanesReport } from '../types';
 
-vi.mock('../hooks/useApi', () => ({ apiGet: vi.fn() }));
+vi.mock('../hooks/useApi', () => ({ apiGet: vi.fn(), apiPost: vi.fn() }));
 
 const REPORT: OpsLanesReport = {
   collected_at: '2026-10-24T20:00:00.000Z',
@@ -95,6 +95,41 @@ describe('Ops lanes page', () => {
     expect(screen.getByTestId('ops-lane-stager').getAttribute('data-red')).toBe('false');
     expect(screen.getByTestId('ops-dir-error').textContent).toContain('directory missing');
     expect(screen.getByTestId('ops-collected').textContent).toContain('2026-10-24T20:00:00.000Z');
+    expect(screen.getByTestId('ops-jobs-empty').textContent).toContain('No jobs yet');
+  });
+
+  it('lists a job and asks for data', async () => {
+    const api = await import('../hooks/useApi');
+    vi.mocked(api.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/ops/jobs') {
+        return [{
+          id: 'job1',
+          kind: 'ask_data',
+          role: 'scout',
+          status: 'queued',
+          requester: 'denis',
+          payload: {},
+          created_at: '2026-10-24T20:00:00.000Z',
+          receipt_paths: ['/srv/opsbots/receipts/scout/answer.md'],
+          approval: null,
+        }] as never;
+      }
+      return REPORT as never;
+    });
+    vi.mocked(api.apiPost).mockResolvedValue({ job: { status: 'queued' } } as never);
+    render(<MemoryRouter><OpsLanes /></MemoryRouter>);
+    const row = await screen.findByTestId('ops-job-job1');
+    expect(row.textContent).toContain('queued');
+    expect(row.textContent).toContain('scout');
+    expect(row.textContent).toContain('denis');
+    expect(row.textContent).toContain('/srv/opsbots/receipts/scout/answer.md');
+    fireEvent.change(screen.getByTestId('ask-company'), { target: { value: 'hipsl' } });
+    fireEvent.change(screen.getByTestId('ask-question'), { target: { value: 'what is the payroll total' } });
+    fireEvent.click(screen.getByTestId('ask-submit'));
+    await waitFor(() => expect(api.apiPost).toHaveBeenCalledWith('/ops/ask', {
+      company: 'hipsl', env: 'staging', question: 'what is the payroll total', intent: 'read',
+    }));
+    expect(await screen.findByTestId('ask-note')).toHaveTextContent('Queued for the scout');
   });
 
   it('puts Ops lanes next to Tests', () => {

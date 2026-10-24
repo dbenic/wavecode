@@ -13,7 +13,26 @@ import * as freezes from '../release-freezes.js';
 import * as devLanes from '../dev-lanes.js';
 import * as deployState from '../deploy-state.js';
 import { shaStageBlock } from '../sha-stage-block.js';
+import { opsStageBlockFromChecks } from '../ops-stage.js';
 import logger from '../logger.js';
+
+async function opsStageBlockFor(
+  freeze: { sha: string; project: string | null; lane: string | null; gate: string | null; freeze_path?: string | null; verdict: string | null } | null,
+  stageBlock: string | null,
+): Promise<string | null | undefined> {
+  if (!freeze) return undefined;
+  try {
+    const view = await freezes.viewShaChecks(freeze);
+    return opsStageBlockFromChecks({
+      sha: freeze.sha,
+      quick: view.quick,
+      verdict: freeze.verdict,
+      stageBlock,
+    });
+  } catch {
+    return 'staging checks are not ready';
+  }
+}
 
 export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/reviews/:runId/ai-review', async (c) => {
@@ -131,11 +150,13 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
         try { stage_block = await shaStageBlock(item.freeze); } catch { stage_block = null; }
       }
       if (!stage_block && lane?.freeze_sha && item.freeze?.sha === lane.freeze_sha) stage_block = lane.stage_block;
-      if (!lane) return { ...item, stage_block };
+      const ops_stage_block = await opsStageBlockFor(item.freeze, stage_block);
+      if (!lane) return { ...item, stage_block, ops_stage_block };
       return {
         ...item,
         status_line: lane.status_line,
         stage_block,
+        ops_stage_block,
         freeze: item.freeze ? { ...item.freeze, gate: lane.gate } : item.freeze,
         promote_block: lane.promote_block,
         full_fail_flag: lane.full_fail_flag,
@@ -155,7 +176,8 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     if (result.data.freeze) {
       try { stage_block = await shaStageBlock(result.data.freeze); } catch { stage_block = null; }
     }
-    return c.json({ ...result.data, stage_block });
+    const ops_stage_block = await opsStageBlockFor(result.data.freeze, stage_block);
+    return c.json({ ...result.data, stage_block, ops_stage_block });
   });
 
   app.post('/api/reviews/:runId/promote', async (c) => {
