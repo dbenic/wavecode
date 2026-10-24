@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import yaml from 'js-yaml';
 import { defaultFableBots, DEFAULT_FABLE_CARDS, DEFAULT_PENDING_ALERT_MIN, DEFAULT_POLL_S, type FableQueueConfig } from './fable-queue-config.js';
+import { DEFAULT_OPS_DIR, DEFAULT_OPS_POLL_S, DEFAULT_OPS_ROLES, DEFAULT_OPS_STALE_MIN, type OpsLanesConfig } from './ops-lanes-config.js';
 import { validateProfilesConfig } from './profile-validation.js';
 
 export interface RuntimeConfig {
@@ -393,6 +394,12 @@ export interface WaveConfig {
    * (fable on socket `fable`, fable2..fable5 on socket `fableN`).
    */
   fable_queue?: FableQueueConfig;
+  /**
+   * Read-only Ops lanes Live board. One `<role>.json` in `dir`.
+   * Defaults: `/srv/opsbots/heartbeat`, poll 10s, stale after 2 minutes,
+   * roles pilot, stager, scout, scribe-hipsl, scribe-clients.
+   */
+  ops_lanes?: OpsLanesConfig;
   product_desk?: {
     enabled?: boolean;
     url?: string;
@@ -927,6 +934,12 @@ function buildDefaults(baseDir: string): WaveConfig {
       cards: [...DEFAULT_FABLE_CARDS],
       bots: defaultFableBots(),
     },
+    ops_lanes: {
+      dir: DEFAULT_OPS_DIR,
+      poll_s: DEFAULT_OPS_POLL_S,
+      stale_min: DEFAULT_OPS_STALE_MIN,
+      roles: [...DEFAULT_OPS_ROLES],
+    },
     developers: [],
     llm: {
       provider: 'anthropic',
@@ -964,6 +977,10 @@ function normalizeConfigPaths(cfg: WaveConfig, baseDir: string): WaveConfig {
   }
   if (normalized.fable_queue?.note_dirs) {
     normalized.fable_queue.note_dirs = normalized.fable_queue.note_dirs.map((dir) => normalizePathSetting(dir, baseDir));
+  }
+  if (normalized.ops_lanes) {
+    const dir = normalized.ops_lanes.dir?.trim() ?? '';
+    normalized.ops_lanes.dir = dir ? normalizePathSetting(dir, baseDir) : '';
   }
 
   return normalized;

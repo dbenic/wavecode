@@ -29,6 +29,7 @@ import { startPaneMigration } from './pane-migrate.js';
 import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import { startFableQueue, stopFableQueue } from './fable-queue.js';
+import { startOpsLanes, stopOpsLanes } from './ops-lanes.js';
 import logger from './logger.js';
 
 /** Pick up out-of-band pending inserts (CLI fallback, scripts) that skipped HTTP. */
@@ -69,6 +70,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   startLaneBoard();
   startDeployReconciler();
   startFableQueue();
+  startOpsLanes();
 
   const startupReconciliation = await reconcileStartupState();
 
@@ -104,6 +106,7 @@ export function shutdownApplication(): void {
   stopLaneBoard();
   stopDeployReconciler();
   stopFableQueue();
+  stopOpsLanes();
   outputWatcher.stopAll();
   teamManager.stopAllCommsWatchers();
 

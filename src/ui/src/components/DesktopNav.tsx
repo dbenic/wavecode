@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { path: '/review', label: 'Review', icon: '✓' },
   { path: '/release', label: 'Release', icon: '⇪' },
   { path: '/tests', label: 'Tests', icon: '⚗' },
+  { path: '/ops-lanes', label: 'Ops lanes', icon: '▣' },
   { path: '/artifacts', label: 'Files', icon: '◫' },
   { path: '/docs', label: 'Docs', icon: '◈' },
   { path: '/library', label: 'Library', icon: '◊' },
