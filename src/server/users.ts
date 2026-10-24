@@ -10,6 +10,10 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   deleteUser,
+  getUser,
+  getUserByName,
+  updateUserRole,
+  USER_ROLES,
   getUserByTokenHash,
   getUserBySeatTokenHash,
   insertUser,
@@ -106,7 +110,36 @@ export function parseExpiry(input: unknown, now: number = Date.now()): Result<st
 }
 
 export function canMutate(user: Pick<User, 'role'>): boolean {
-  return user.role !== 'observer';
+  return user.role === 'admin' || user.role === 'developer';
+}
+
+export function isOpsBot(user: Pick<User, 'role'>): boolean {
+  return user.role === 'opsbot';
+}
+
+/**
+ * The whole surface an `opsbot` token may touch. Everything else — tasks,
+ * agents, approve, stage, ask, rooms, MCP, the event stream — is 403.
+ */
+export function opsBotPathAllowed(method: string, pathname: string): boolean {
+  if (method === 'GET' || method === 'HEAD') {
+    return pathname === '/api/ops-lanes' || pathname === '/api/ops/jobs' || pathname === '/api/me';
+  }
+  if (method === 'POST') {
+    return pathname === '/api/ops/jobs/claim' || /^\/api\/ops\/jobs\/[^/]+\/complete$/.test(pathname);
+  }
+  return method === 'OPTIONS';
+}
+
+/** Admin-only role change (no raw DB edits). The synthetic owner cannot be changed. */
+export function setUserRole(ref: unknown, role: unknown): Result<User> {
+  if (!isUserRole(role)) return { ok: false, error: `role must be one of: ${USER_ROLES.join(', ')}` };
+  if (typeof ref !== 'string' || !ref.trim()) return { ok: false, error: 'user is required' };
+  const key = ref.trim();
+  let found = getUser(key);
+  if (!found.ok) found = getUserByName(key.toLowerCase());
+  if (!found.ok) return { ok: false, error: `User ${key} not found` };
+  return updateUserRole(found.data.id, role);
 }
 
 export function isAdmin(user: Pick<User, 'role'>): boolean {
@@ -143,7 +176,7 @@ export function createUser(input: CreateUserInput): Result<CreatedUser> {
   const role: UserRole | null = input.role === undefined || input.role === null
     ? 'developer'
     : isUserRole(input.role) ? input.role : null;
-  if (!role) return { ok: false, error: 'role must be one of: admin, developer, observer' };
+  if (!role) return { ok: false, error: `role must be one of: ${USER_ROLES.join(', ')}` };
 
   let color: string;
   if (input.color === undefined || input.color === null || input.color === '') {

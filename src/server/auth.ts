@@ -5,7 +5,7 @@ import { getConfig, type WaveConfig } from './config.js';
 import { emit } from './event-bus.js';
 import type { User } from './db.js';
 import { runWithActor } from './request-context.js';
-import { canMutate, isAdmin, OWNER_USER, resolveUserByToken, isRestrictedUser, restrictedAgentRefs } from './users.js';
+import { canMutate, isAdmin, isOpsBot, opsBotPathAllowed, OWNER_USER, resolveUserByToken, isRestrictedUser, restrictedAgentRefs } from './users.js';
 
 export interface NodeAppBindings {
   incoming?: IncomingMessage | Http2ServerRequest | {
@@ -238,7 +238,12 @@ export function createAuthMiddleware(
       user = OWNER_USER;
     }
 
-    if (!canMutate(user) && c.req.path.startsWith('/api/') && !READ_ONLY_METHODS.has(c.req.method)) {
+    // An ops bot gets the ops-job surface only, on every mounted path (including /mcp).
+    if (isOpsBot(user)) {
+      if (!opsBotPathAllowed(c.req.method, c.req.path)) {
+        return deny(403, `'${user.name}' is an ops bot (ops jobs only)`, user);
+      }
+    } else if (!canMutate(user) && c.req.path.startsWith('/api/') && !READ_ONLY_METHODS.has(c.req.method)) {
       return deny(403, `'${user.name}' is an observer (read-only)`, user);
     }
 
