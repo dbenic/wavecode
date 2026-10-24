@@ -16,6 +16,7 @@ import FileView from './views/FileView';
 import Release from './views/Release';
 import Tests from './views/Tests';
 import Overview from './views/Overview';
+import Queue from './views/Queue';
 import BottomNav from './components/BottomNav';
 import DesktopNav from './components/DesktopNav';
 import ErrorBanner from './components/ErrorBanner';
@@ -73,6 +74,7 @@ export default function App() {
             <Route path="/release" element={<Release />} />
             <Route path="/tests" element={<Tests />} />
             <Route path="/overview" element={<Overview />} />
+            <Route path="/queue" element={<Queue />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           <BottomNav />
