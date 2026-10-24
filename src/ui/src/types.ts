@@ -790,3 +790,29 @@ export interface FableQueueReport {
   >;
   pipeline: Array<{ card: string; stages: Record<FableStageName, FableStageCell> }>;
 }
+
+export type OpsKeyStatus = 'ok' | 'expired' | 'auth_error' | 'unknown';
+export type OpsLaneReason = 'stale' | 'key' | 'missing' | 'invalid';
+export interface OpsLaneRow {
+  id: string;
+  bot: string;
+  file: 'ok' | 'missing' | 'invalid' | 'unknown';
+  red: boolean;
+  reasons: OpsLaneReason[];
+  role: string;
+  model: string;
+  key_status: OpsKeyStatus;
+  key_checked_at: string;
+  current_job: string;
+  heartbeat_at: string;
+  heartbeat_age_s: number | null;
+  last_receipt_path: string;
+  last_receipt_at: string;
+}
+export interface OpsLanesReport {
+  collected_at: string | null;
+  poll_s: number;
+  stale_min: number;
+  dir_error: 'missing' | 'unavailable' | null;
+  lanes: OpsLaneRow[];
+}
