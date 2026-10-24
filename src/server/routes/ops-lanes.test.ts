@@ -49,7 +49,7 @@ describe('GET /api/ops-lanes', () => {
       readHeartbeat: async (_dir, bot) => (bot === 'pilot'
         ? { raw: JSON.stringify({ bot: 'pilot', key_status: 'ok', current_job: `password=${secret}`, heartbeat_at: '2026-10-24T19:59:00.000Z' }) }
         : { error: 'missing' as const }),
-      config: resolveOpsLanes({ ops_lanes: { dir: '/lanes', bots: ['pilot', 'stager'] } }),
+      config: resolveOpsLanes({ ops_lanes: { dir: '/lanes', roles: ['pilot', 'stager'] } }),
     });
     const after = await call(app, FALLBACK);
     expect(after.status).toBe(200);

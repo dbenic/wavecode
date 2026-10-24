@@ -55,8 +55,8 @@ export default function OpsLanes() {
             <table className="w-full text-left">
               <thead className="text-[9px] uppercase tracking-wider text-slate-500">
                 <tr>
-                  <th className="px-3 py-2 font-semibold">Bot</th>
                   <th className="px-3 py-2 font-semibold">Role</th>
+                  <th className="px-3 py-2 font-semibold">Bot</th>
                   <th className="px-3 py-2 font-semibold">Model</th>
                   <th className="px-3 py-2 font-semibold">Key</th>
                   <th className="px-3 py-2 font-semibold">Checked</th>
@@ -75,7 +75,7 @@ export default function OpsLanes() {
                     className={`border-t border-slate-800/80 ${lane.red ? 'bg-red-950/40 text-red-200' : 'text-slate-300'}`}
                   >
                     <td className="px-3 py-2 text-slate-100">{lane.id}</td>
-                    <td className="px-3 py-2">{cell(lane.role)}</td>
+                    <td className="px-3 py-2">{cell(lane.bot)}</td>
                     <td className="px-3 py-2">{cell(lane.model)}</td>
                     <td className="px-3 py-2">{lane.key_status}</td>
                     <td className="px-3 py-2">{cell(lane.key_checked_at)}</td>

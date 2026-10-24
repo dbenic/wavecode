@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseHeartbeat, unreadLane } from './ops-lanes-classify.js';
-import { DEFAULT_OPS_BOTS, DEFAULT_OPS_DIR, resolveOpsLanes } from './ops-lanes-config.js';
+import { DEFAULT_OPS_DIR, DEFAULT_OPS_ROLES, resolveOpsLanes } from './ops-lanes-config.js';
 
 const NOW = Date.parse('2026-10-24T20:00:00.000Z');
 const STALE_S = 120;
@@ -16,15 +16,15 @@ function heartbeat(fields: Record<string, unknown>): string {
 
 describe('ops lane parsing', () => {
   it('keeps known fields and shows unknown for anything missing', () => {
-    const row = parseHeartbeat('pilot', heartbeat({ role: 'dispatch' }), NOW, STALE_S);
+    const row = parseHeartbeat('pilot', heartbeat({ role: 'pilot', bot: 'fable', model: 'opus' }), NOW, STALE_S);
     expect(row).toMatchObject({
       id: 'pilot',
-      bot: 'pilot',
+      bot: 'fable',
       file: 'ok',
       red: false,
       reasons: [],
-      role: 'dispatch',
-      model: 'unknown',
+      role: 'pilot',
+      model: 'opus',
       key_status: 'ok',
       key_checked_at: 'unknown',
       current_job: 'unknown',
@@ -46,11 +46,12 @@ describe('ops lane parsing', () => {
     expect(badTime.heartbeat_age_s).toBeNull();
     expect(badTime.file).toBe('invalid');
 
-    const other = parseHeartbeat('pilot', heartbeat({ bot: 'stager', role: 'should-not-stick' }), NOW, STALE_S);
+    const other = parseHeartbeat('pilot', heartbeat({ bot: 'fable', role: 'stager' }), NOW, STALE_S);
     expect(other.file).toBe('invalid');
     expect(other.bot).toBe('unknown');
     expect(other.role).toBe('unknown');
-    expect(JSON.stringify(other)).not.toContain('should-not-stick');
+    expect(JSON.stringify(other)).not.toContain('stager');
+    expect(JSON.stringify(other)).not.toContain('fable');
   });
 });
 
@@ -116,7 +117,7 @@ describe('ops lane redaction', () => {
   it('redacts secret-looking values and drops every other field', () => {
     const row = parseHeartbeat('pilot', JSON.stringify({
       bot: 'pilot',
-      role: 'dispatch',
+      role: 'pilot',
       model: 'claude',
       key_status: 'ok',
       current_job: 'password=hunter2 token=sk-do-not-leak',
@@ -146,14 +147,15 @@ describe('ops lane defaults', () => {
   it('uses the countix directory, a 10s poll, a 2 minute stale line, and the five bots', () => {
     const resolved = resolveOpsLanes(undefined);
     expect(resolved.dir).toBe(DEFAULT_OPS_DIR);
+    expect(resolved.dir).toBe('/srv/opsbots/heartbeat');
     expect(resolved.pollS).toBe(10);
     expect(resolved.staleMin).toBe(2);
     expect(resolved.staleS).toBe(120);
-    expect(resolved.bots).toEqual([...DEFAULT_OPS_BOTS]);
-    const custom = resolveOpsLanes({ ops_lanes: { stale_min: 1, poll_s: 5, bots: [], dir: '' } });
+    expect(resolved.roles).toEqual([...DEFAULT_OPS_ROLES]);
+    const custom = resolveOpsLanes({ ops_lanes: { stale_min: 1, poll_s: 5, roles: [], dir: '' } });
     expect(custom.staleS).toBe(60);
     expect(custom.pollS).toBe(5);
-    expect(custom.bots).toEqual([]);
+    expect(custom.roles).toEqual([]);
     expect(custom.dir).toBe('');
   });
 });

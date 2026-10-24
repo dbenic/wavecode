@@ -22,7 +22,7 @@ describe('ops lanes collector', () => {
     const src = fs.readFileSync(new URL('./ops-lanes.ts', import.meta.url), 'utf8');
     expect(src).not.toMatch(/\b(execFileSync|execSync|spawnSync|Atomics\.wait|readFileSync)\b/);
     expect(src).toContain('fs.promises.readFile');
-    expect(src).toContain('`${bot}.json`');
+    expect(src).toContain('`${role}.json`');
   });
 
   it('reads the configured JSON files, redacts them, and ignores every other path', async () => {
@@ -36,7 +36,7 @@ describe('ops lanes collector', () => {
     fs.writeFileSync(path.join(real, 'notes.json'), JSON.stringify({ leak: SECRET }));
     fs.writeFileSync(path.join(real, 'pilot.json'), JSON.stringify({
       bot: 'pilot',
-      role: 'dispatch',
+      role: 'pilot',
       model: 'opus',
       key_status: 'ok',
       current_job: `password=${SECRET}`,
@@ -51,7 +51,7 @@ describe('ops lanes collector', () => {
     const report = await collectOnce({
       now: () => NOW,
       config: resolveOpsLanes({
-        ops_lanes: { dir: link, stale_min: 2, bots: ['pilot', 'stager', 'scout', 'scribe-hipsl'] },
+        ops_lanes: { dir: link, stale_min: 2, roles: ['pilot', 'stager', 'scout', 'scribe-hipsl'] },
       }),
     });
 
@@ -82,7 +82,7 @@ describe('ops lanes collector', () => {
   it('reports a missing directory without throwing', async () => {
     const report = await collectOnce({
       now: () => NOW,
-      config: resolveOpsLanes({ ops_lanes: { dir: path.join(os.tmpdir(), 'wc-ops-missing-dir'), bots: ['pilot'] } }),
+      config: resolveOpsLanes({ ops_lanes: { dir: path.join(os.tmpdir(), 'wc-ops-missing-dir'), roles: ['pilot'] } }),
     });
     expect(report.dir_error).toBe('missing');
     expect(report.lanes[0]).toMatchObject({ id: 'pilot', file: 'missing', red: true, role: 'unknown' });

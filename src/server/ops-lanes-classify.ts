@@ -14,9 +14,9 @@ export type LaneReason = 'stale' | 'key' | 'missing' | 'invalid';
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export interface OpsLaneRow {
-  /** Configured lane. This comes from config, not from the file. */
+  /** Role from the filename `<role>.json`. This comes from config, not from the file body. */
   id: string;
-  /** `bot` field from the file, or `unknown` when it is missing or does not match. */
+  /** `bot` field from the file, or `unknown` when it is missing. */
   bot: string;
   file: LaneFile;
   red: boolean;
@@ -106,29 +106,30 @@ function asKeyStatus(value: unknown, invalid: { current: boolean }): KeyStatus {
 /**
  * Parse one heartbeat. Missing fields are `unknown`. A value that is the wrong
  * type, an unknown key status, or a non-ISO timestamp makes the file invalid
- * and is not returned. Extra fields are dropped.
+ * and is not returned. A `role` that names a different file is invalid.
+ * Extra fields are dropped. `bot` is its own field and is not taken from the filename.
  */
-export function parseHeartbeat(id: string, raw: string, nowMs: number, staleS: number): OpsLaneRow {
+export function parseHeartbeat(role: string, raw: string, nowMs: number, staleS: number): OpsLaneRow {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return unreadLane(id, 'invalid', nowMs, staleS);
+    return unreadLane(role, 'invalid', nowMs, staleS);
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return unreadLane(id, 'invalid', nowMs, staleS);
+    return unreadLane(role, 'invalid', nowMs, staleS);
   }
   const obj = parsed as Record<string, unknown>;
   const invalid = { current: false };
-  const claimed = asText(obj.bot, invalid);
-  if (claimed !== 'unknown' && claimed !== id) {
-    return unreadLane(id, 'invalid', nowMs, staleS);
+  const claimedRole = asText(obj.role, invalid);
+  if (claimedRole !== 'unknown' && claimedRole !== role) {
+    return unreadLane(role, 'invalid', nowMs, staleS);
   }
   const row: Omit<OpsLaneRow, 'red' | 'reasons' | 'heartbeat_age_s'> = {
-    id,
-    bot: claimed,
+    id: role,
+    bot: asText(obj.bot, invalid),
     file: 'ok',
-    role: asText(obj.role, invalid),
+    role: claimedRole,
     model: asText(obj.model, invalid),
     key_status: asKeyStatus(obj.key_status, invalid),
     key_checked_at: asTime(obj.key_checked_at, invalid),
