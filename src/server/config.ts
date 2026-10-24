@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import yaml from 'js-yaml';
 import { defaultFableBots, DEFAULT_FABLE_CARDS, DEFAULT_PENDING_ALERT_MIN, DEFAULT_POLL_S, type FableQueueConfig } from './fable-queue-config.js';
-import { DEFAULT_OPS_DIR, DEFAULT_OPS_POLL_S, DEFAULT_OPS_ROLES, DEFAULT_OPS_STALE_MIN, type OpsLanesConfig } from './ops-lanes-config.js';
+import { DEFAULT_OPS_DIR, DEFAULT_OPS_OWNERS, DEFAULT_OPS_POLL_S, DEFAULT_OPS_RECEIPTS, DEFAULT_OPS_ROLES, DEFAULT_OPS_STALE_MIN, type OpsLanesConfig } from './ops-lanes-config.js';
 import { validateProfilesConfig } from './profile-validation.js';
 
 export interface RuntimeConfig {
@@ -395,9 +395,10 @@ export interface WaveConfig {
    */
   fable_queue?: FableQueueConfig;
   /**
-   * Read-only Ops lanes Live board. One `<role>.json` in `dir`.
-   * Defaults: `/srv/opsbots/heartbeat`, poll 10s, stale after 2 minutes,
-   * roles pilot, stager, scout, scribe-hipsl, scribe-clients.
+   * Ops lanes Live board and job store. One `<role>.json` in `dir`.
+   * Defaults: `/srv/opsbots/heartbeat`, receipts under `/srv/opsbots/receipts`,
+   * poll 10s, stale after 2 minutes, owners denis and antonio.
+   * WaveCode records jobs. It does not run the opsbots scripts.
    */
   ops_lanes?: OpsLanesConfig;
   product_desk?: {
@@ -939,6 +940,8 @@ function buildDefaults(baseDir: string): WaveConfig {
       poll_s: DEFAULT_OPS_POLL_S,
       stale_min: DEFAULT_OPS_STALE_MIN,
       roles: [...DEFAULT_OPS_ROLES],
+      receipts_root: DEFAULT_OPS_RECEIPTS,
+      owners: [...DEFAULT_OPS_OWNERS],
     },
     developers: [],
     llm: {
@@ -981,6 +984,8 @@ function normalizeConfigPaths(cfg: WaveConfig, baseDir: string): WaveConfig {
   if (normalized.ops_lanes) {
     const dir = normalized.ops_lanes.dir?.trim() ?? '';
     normalized.ops_lanes.dir = dir ? normalizePathSetting(dir, baseDir) : '';
+    const receipts = normalized.ops_lanes.receipts_root?.trim() ?? '';
+    if (receipts) normalized.ops_lanes.receipts_root = normalizePathSetting(receipts, baseDir);
   }
 
   return normalized;

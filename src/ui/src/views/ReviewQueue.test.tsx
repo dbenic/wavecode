@@ -166,6 +166,47 @@ describe('ReviewQueue', () => {
     expect(screen.getByTestId('reviewer-load-codex3')).toHaveTextContent('@c3 idle · queue 0');
   });
 
+  it('greys Push to staging with the reason, and posts the SHA when it is enabled', async () => {
+    const useApi = await import('../hooks/useApi');
+    vi.mocked(useApi.apiPost).mockResolvedValue({} as never);
+    const sha = 'a'.repeat(40);
+    await renderBoard(board({
+      cards: [card({
+        key: 'wc-s3-104',
+        lane: 'wc-s3-104',
+        title: '#104 S3',
+        status: 'Ready to stage',
+        action: 'Press Stage',
+        sha,
+        ops_push: { enabled: false, reason: "Stage needs the reviewer's PASS on this exact SHA" },
+      })],
+    }));
+    const grey = await screen.findByTestId('push-staging');
+    expect((grey as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('push-staging-reason')).toHaveTextContent("Stage needs the reviewer's PASS on this exact SHA");
+    fireEvent.click(grey);
+    expect(useApi.apiPost).not.toHaveBeenCalled();
+  });
+
+  it('posts Push to staging for an eligible SHA', async () => {
+    const useApi = await import('../hooks/useApi');
+    vi.mocked(useApi.apiPost).mockResolvedValue({} as never);
+    const sha = 'b'.repeat(40);
+    await renderBoard(board({
+      cards: [card({
+        key: 'wc-s3-104',
+        lane: 'wc-s3-104',
+        title: '#104 S3',
+        status: 'Ready to stage',
+        action: 'Press Stage',
+        sha,
+        ops_push: { enabled: true, reason: null },
+      })],
+    }));
+    fireEvent.click(await screen.findByTestId('push-staging'));
+    await waitFor(() => expect(useApi.apiPost).toHaveBeenCalledWith('/ops/stage', { sha }));
+  });
+
   it('does not show a file path as the thing to do', async () => {
     await renderBoard(board({
       cards: [card({

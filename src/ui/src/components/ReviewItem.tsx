@@ -116,6 +116,24 @@ export default function ReviewItem({
 
   const verdict = item.latestReview?.verdict ?? aiReviews.find((r) => r.status === 'done')?.verdict ?? null;
   const freeze = item.freeze;
+  const pushReason = !freeze
+    ? null
+    : item.ops_stage_block === null
+      ? null
+      : (item.ops_stage_block || 'staging checks are not ready');
+
+  const pushStaging = async () => {
+    if (!freeze || pushReason || acting) return;
+    setActing('push');
+    try {
+      await apiPost('/ops/stage', { sha: freeze.sha });
+      onAction();
+    } catch {
+      // the banner shows the 409 reason
+    } finally {
+      setActing(null);
+    }
+  };
   const deploy = item.deploy ?? null;
   const cardTitle = deploy?.title || item.task.prompt;
   const cardDesk = deploy ? deploy.desk : freeze?.desk ?? null;
@@ -405,6 +423,21 @@ export default function ReviewItem({
             {acting === 'reject' ? '...' : 'REJECT'}
           </button>
           </>)}
+          {freeze && (
+            <button
+              type="button"
+              data-testid="push-staging"
+              onClick={() => { void pushStaging(); }}
+              disabled={acting !== null || pushReason !== null}
+              title={pushReason ?? 'Record a stager job. A bot pulls it. WaveCode does not run the scripts.'}
+              className="px-2.5 py-1 rounded border border-sky-500/30 text-[10px] font-semibold tracking-wider text-sky-300 hover:bg-sky-500/10 hover:border-sky-500/50 transition-all active:scale-95 disabled:opacity-40"
+            >
+              {acting === 'push' ? '...' : 'Push to staging'}
+            </button>
+          )}
+          {freeze && pushReason && (
+            <span className="text-[10px] text-amber-200/90" data-testid="push-staging-reason">{pushReason}</span>
+          )}
         </div>
 
         {/* Hand-off agent selector */}

@@ -152,6 +152,8 @@ describe('ops lane defaults', () => {
     expect(resolved.staleMin).toBe(2);
     expect(resolved.staleS).toBe(120);
     expect(resolved.roles).toEqual([...DEFAULT_OPS_ROLES]);
+    expect(resolved.receiptsRoot).toBe('/srv/opsbots/receipts');
+    expect(resolved.owners).toEqual(['denis', 'antonio']);
     const custom = resolveOpsLanes({ ops_lanes: { stale_min: 1, poll_s: 5, roles: [], dir: '' } });
     expect(custom.staleS).toBe(60);
     expect(custom.pollS).toBe(5);

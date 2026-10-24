@@ -50,6 +50,7 @@ import {
   resolveStagingTip,
 } from './releases.js';
 import { stageEligibility } from './sha-stage-block.js';
+import { opsStageBlockFromChecks } from './ops-stage.js';
 import { readProdHealth } from './staging-forward.js';
 import { reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
@@ -1125,6 +1126,15 @@ function factFor(
     unknown_reason: view.unknown_reason,
     live_at: row?.last_reconciled_at ?? freeze.updated_at,
     same_owner_pool: sameOwnerOnCard(freeze),
+    ops_stage_block: row
+      ? opsStageBlockFromChecks({
+        sha: freeze.sha,
+        quick: (row.quick as 'green' | 'red' | 'pending' | 'missing' | 'unconfigured' | 'unknown' | null) ?? 'unknown',
+        verdict: row.verdict ?? freeze.verdict,
+        stageBlock: row.stage_block,
+        behindMain: row.behind_main === 1,
+      })
+      : 'staging checks are not ready',
   };
 }
 

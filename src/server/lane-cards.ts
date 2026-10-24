@@ -56,6 +56,8 @@ export interface LaneCard {
   older: LaneOlder[];
   link: LaneLink | null;
   version: string | null;
+  /** Push to staging. Null when this card has no measured SHA. */
+  ops_push: { enabled: boolean; reason: string | null } | null;
 }
 
 export interface ReleaseLane {
@@ -115,6 +117,11 @@ export interface LaneFreezeFact {
   open_request_at?: string | null;
   /** Admin viewer: the card may clear that request. */
   can_clear?: boolean;
+  /**
+   * Why Push to staging stays grey. Null when the stored checks allow it.
+   * Undefined on a fact that has not been measured.
+   */
+  ops_stage_block?: string | null;
 }
 
 export interface WorkingLaneFact {
@@ -531,6 +538,10 @@ function finish(fact: LaneFreezeFact, presented: Presented, older: LaneOlder[], 
     older,
     link: shown.link,
     version: versionOf(fact.version),
+    ops_push: fact.ops_stage_block === undefined ? null : {
+      enabled: fact.ops_stage_block === null,
+      reason: fact.ops_stage_block,
+    },
   };
 }
 
@@ -555,6 +566,7 @@ function workingCard(fact: WorkingLaneFact, viewer: LaneViewer | null, owners: A
     older,
     link: null,
     version: null,
+    ops_push: null,
   };
 }
 

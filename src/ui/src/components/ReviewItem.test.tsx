@@ -43,6 +43,26 @@ function renderItem(it: ReviewItemType) {
 }
 
 describe('ReviewItem freeze card', () => {
+  it('greys Push to staging with the reason, and posts the SHA when the checks pass', async () => {
+    const api = await import('../hooks/useApi');
+    const blocked = item({});
+    blocked.ops_stage_block = 'needs green quick check on 2431f684';
+    const view = renderItem(blocked);
+    const grey = screen.getByTestId('push-staging');
+    expect((grey as HTMLButtonElement).disabled).toBe(true);
+    expect(grey.getAttribute('title')).toBe('needs green quick check on 2431f684');
+    expect(screen.getByTestId('push-staging-reason').textContent).toBe('needs green quick check on 2431f684');
+    view.unmount();
+
+    const ready = item({});
+    ready.ops_stage_block = null;
+    renderItem(ready);
+    const push = screen.getByTestId('push-staging');
+    expect((push as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(push);
+    await waitFor(() => expect(vi.mocked(api.apiPost)).toHaveBeenCalledWith('/ops/stage', { sha: SHA }));
+  });
+
   it('shows repo, desk, lane, SHA, author, reviewer, gate and both file links; PROMOTE on a PASS; no retry/hand-off', async () => {
     renderItem(item({}));
     const card = screen.getByTestId('freeze-card');
