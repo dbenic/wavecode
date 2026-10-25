@@ -38,8 +38,9 @@ describe('runner command budget', () => {
       const now = Date.now();
       const iso = (ms: number) => new Date(now - ms).toISOString().replace('T', ' ').slice(0, 19);
       const freeze = (sha: string, status: string, ageMs: number) => ({ project: 'budget', lane: 'wc-x', sha, status, created_at: iso(ageMs) });
-      // closed: cache or nothing, no command
+      // closed or behind main: cache or nothing, no command
       expect(await readLaneTestsSparingly(freeze('e'.repeat(40), 'merged', 1000), { settled: false, pending: false })).toBeNull();
+      expect(await readLaneTestsSparingly(freeze('e'.repeat(40), 'behind-main', 1000), { settled: false, pending: false })).toBeNull();
       expect(calls).toHaveLength(4);
       // old open freeze with settled words: cache or nothing
       expect(await readLaneTestsSparingly(freeze('e'.repeat(40), 'open', 4 * 24 * 3600_000), { settled: true, pending: false })).toBeNull();

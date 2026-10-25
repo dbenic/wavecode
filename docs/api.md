@@ -1246,7 +1246,7 @@ The reconcile pass asked the test server for status and history on every freeze
 (4,923 of them), about 950 runner commands a minute. Now: identical reads share one
 command, at most three runner commands run at once, and a pass reads sparingly
 (`readLaneTestsSparingly`): an open freeze under three days old live, an older open one
-at most every six hours and not at all once its words are settled, a closed one from
-the cache only (unless it closed while pending). The merge queue evaluates only the
+at most every six hours and not at all once its words are settled, every other one
+(behind main, merged, stale) from the cache only, unless its words were still pending. The merge queue evaluates only the
 newest open freeze per lane frozen within two weeks, and one `ls-remote --heads` per
 pass replaces a `git fetch` per lane.

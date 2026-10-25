@@ -483,9 +483,10 @@ export const TEST_WORDS_SETTLED: ReadonlySet<string> = new Set(['green', 'red', 
 /**
  * Test runs for a reconcile pass, read sparingly. An open freeze under three days
  * old is read live (the TTL); an older open one at most every six hours, and not at
- * all once its words are settled; a closed freeze is answered from the cache, unless
- * it was still pending when it closed. `null` means nothing is cached: the caller
- * keeps the words it already has.
+ * all once its words are settled. Every other freeze — behind main, merged, stale —
+ * is answered from the cache, unless its words were still pending: its runs were
+ * submitted while it was open, and the hot poller keeps a run in flight fresh.
+ * `null` means nothing is cached: the caller keeps the words it already has.
  */
 export async function readLaneTestsSparingly(
   freeze: { project: string | null; lane: string | null; sha: string; status: string; created_at: string },
@@ -494,8 +495,7 @@ export async function readLaneTestsSparingly(
 ): Promise<TestRun[] | null> {
   if (!freeze.project || !testsConfigured(freeze.project)) return [];
   const lane = freeze.lane ?? '';
-  const open = freeze.status === 'open' || freeze.status === 'behind-main';
-  if (!open) {
+  if (freeze.status !== 'open') {
     return words.pending ? readLaneTests(freeze.project, lane, freeze.sha, { staleOkMs: OLD_FREEZE_STALE_OK_MS }) : readCachedLaneTests(freeze.project, lane, freeze.sha);
   }
   const age = freezeAgeMs(freeze.created_at, now);
