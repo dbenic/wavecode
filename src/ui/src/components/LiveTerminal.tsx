@@ -37,7 +37,7 @@ interface InitMsg { t: 'init'; session: string; cols: number; rows: number; hist
 interface ErrorMsg { t: 'error'; message: string }
 
 const MIN_FONT = 5;
-const MAX_FONT = 13; // the embedded view on the agent page
+const MAX_FONT = 12; // the embedded view on the agent page (the text view uses 12px)
 const MAX_FONT_FULL = 18; // the full-screen page
 const SCROLLBACK = 20000;
 const CHAR_WIDTH_RATIO = 0.62; // a monospace glyph is about this many em wide
@@ -87,6 +87,9 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
   const [geometry, setGeometry] = useState<{ cols: number; rows: number } | null>(null);
   const [behind, setBehind] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The embedded view's own A−/A+ choice; null = fit. The full-screen page passes `fontSize` instead. */
+  const [ownSize, setOwnSize] = useState<number | null>(null);
+  const effectiveSize = fontSize ?? ownSize;
   const unmountedRef = useRef(false);
   const retryRef = useRef(0);
   /** Bytes that arrive while xterm.js is still loading (the seed comes right after init). */
@@ -97,8 +100,8 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
     const term = termRef.current;
     const host = hostRef.current;
     if (!term || !host) return;
-    if (fontSize) {
-      term.options.fontSize = fontSize;
+    if (effectiveSize) {
+      term.options.fontSize = effectiveSize;
       return;
     }
     const width = host.clientWidth;
@@ -119,7 +122,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
       size -= 1;
       term.options.fontSize = size;
     }
-  }, [fit, fontSize, bare]);
+  }, [fit, effectiveSize, bare]);
 
   const jumpToLive = useCallback(() => {
     termRef.current?.scrollToBottom();
@@ -269,13 +272,19 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
 
-  useEffect(() => { fitFont(); }, [fit, fontSize, fitFont]);
+  useEffect(() => { fitFont(); }, [fit, effectiveSize, fitFont]);
 
   return (
     <div className={bare ? 'relative flex-1 min-h-0 flex flex-col' : 'relative'} data-testid="live-terminal">
       {!bare && (
       <div className="px-3 py-1.5 border-b border-slate-800/30 flex items-center justify-between">
         <span className="text-[9px] text-slate-600 tracking-[0.2em] uppercase">Live terminal</span>
+        <span className="flex items-center gap-1 text-[10px] font-mono text-slate-500">
+          <button type="button" onClick={() => setOwnSize((c) => Math.max(6, (c ?? 12) - 1))} className="px-1.5 hover:text-slate-200" title="smaller text">A−</button>
+          <span className="text-slate-600">{ownSize ? `${ownSize}px` : 'auto'}</span>
+          <button type="button" onClick={() => setOwnSize((c) => Math.min(24, (c ?? 12) + 1))} className="px-1.5 hover:text-slate-200" title="larger text">A+</button>
+          {ownSize && <button type="button" onClick={() => setOwnSize(null)} className="px-1.5 text-slate-600 hover:text-slate-200" title="fit again">auto</button>}
+        </span>
         <span className="text-[9px] text-slate-700 font-mono flex items-center gap-1.5">
           <span className={`w-1 h-1 rounded-full ${status === 'live' ? 'bg-emerald-500 animate-pulse' : status === 'unavailable' ? 'bg-red-500' : 'bg-amber-500'}`} />
           {status}{geometry ? ` · ${geometry.cols}×${geometry.rows}` : ''}
