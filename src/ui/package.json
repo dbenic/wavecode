@@ -12,6 +12,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "dependencies": {
+    "@xterm/addon-webgl": "^0.18.0",
+    "@xterm/xterm": "^5.5.0",
     "mermaid": "^12.1.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

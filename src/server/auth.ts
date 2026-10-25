@@ -154,7 +154,8 @@ export function resolveRequestToken(pathname: string, headers: Headers, queryTok
     return authHeader.slice('Bearer '.length).trim();
   }
 
-  if (pathname === '/api/events') {
+  // EventSource and WebSocket cannot set headers: these two carry the token in the query.
+  if (pathname === '/api/events' || /^\/api\/agents\/[^/]+\/terminal$/.test(pathname)) {
     return queryToken?.trim() || null;
   }
 

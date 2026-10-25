@@ -99,6 +99,11 @@ function bindSession(session: string): void {
   if (agent) bindAgent(agent);
 }
 
+/** Point tmux calls for this session at its server socket (adopted sessions on `-L` sockets). */
+export function ensureSessionBound(session: string): void {
+  bindSession(session);
+}
+
 export async function scan(socket?: string | null): Promise<Result<TmuxSession[]>> {
   if (socket?.trim() && !tmux.isValidSocketName(socket.trim())) {
     return { ok: false, error: 'Invalid tmux socket name' };

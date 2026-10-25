@@ -6,6 +6,7 @@ import logger, { installUnhandledRejectionLogger } from './logger.js';
 import { app } from './app.js';
 import { bootstrapApplication, shutdownApplication } from './bootstrap.js';
 import type { NodeAppEnv } from './auth.js';
+import { attachTerminalWs } from './terminal-ws.js';
 
 installUnhandledRejectionLogger();
 loadConfig();
@@ -29,6 +30,7 @@ const server = createServer(
   }),
 );
 
+attachTerminalWs(server, app); // the live terminal view; the only WebSocket (everything else is SSE)
 server.listen(config.server.port, config.server.host);
 
 logger.info(`WaveCode running at http://${config.server.host}:${config.server.port}`);

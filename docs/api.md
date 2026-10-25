@@ -131,6 +131,16 @@ Get recent output for an agent.
 Query:
 `lines`, `ansi`
 
+### `GET /api/agents/:id/terminal`
+The live terminal view. As a plain GET: `{ enabled, session, cols, rows, history_size, cursor_x, cursor_y, viewers }`
+(`enabled: false` when `terminal_stream.enabled` is off). As a WebSocket upgrade of the same URL
+(token in `access_token` like `/api/events`): text frames are JSON control messages
+(`{ t: 'init', session, cols, rows, history_size }`, `{ t: 'error', message }`), binary frames are the
+pane's bytes — first the current pane (history + screen with escapes, cursor restored), then live output from
+`tmux pipe-pane`. Alternate-screen and mouse-tracking switches are removed so the viewer keeps scrollback and
+its own scrolling. Read-only: client frames are ignored; prompts go through `POST /api/agents/:id/send`.
+This is WaveCode's only WebSocket; everything else is SSE.
+
 ### `GET /api/agents/:id/scrollback`
 Get a scrollback window and total buffer size.
 

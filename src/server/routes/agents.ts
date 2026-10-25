@@ -25,6 +25,7 @@ import type { User } from '../db.js';
 import * as leases from '../leases.js';
 import * as modelSwitch from '../model-switch.js';
 import { splitPayload } from '../pane-split.js';
+import * as terminalStream from '../terminal-stream.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
 import * as replyCapture from '../reply-capture.js';
 import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
@@ -182,6 +183,25 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!result.ok) return c.json({ error: result.error }, 500);
 
     return c.json({ output: cleanCapturedOutput(result.data) });
+  });
+
+  /**
+   * The live terminal view (terminal-ws.ts upgrades this same URL to a
+   * WebSocket). As a plain GET it answers whether the stream is on and the
+   * pane's size, and it is the auth check the upgrade relies on.
+   */
+  app.get('/api/agents/:id/terminal', async (c) => {
+    const agentResult = sessionManager.get(c.req.param('id'));
+    if (!agentResult.ok) return c.json({ error: agentResult.error }, 404);
+    if (!agentAllowedFor(getActingUser(c), agentResult.data)) return c.json({ error: 'Forbidden: not one of this token\'s agents' }, 403);
+    const session = agentResult.data.tmux_session;
+    if (!terminalStream.terminalStreamEnabled()) {
+      return c.json({ enabled: false, session, cols: 0, rows: 0, history_size: 0, viewers: 0 });
+    }
+    sessionManager.ensureSessionBound(session);
+    const geometry = await terminalStream.paneGeometry(session);
+    if (!geometry.ok) return c.json({ error: geometry.error }, 503);
+    return c.json({ enabled: true, session, ...geometry.data, viewers: terminalStream.viewerCount(session) });
   });
 
   app.get('/api/agents/:id/scrollback', async (c) => {
@@ -546,6 +566,8 @@ function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null,
     live_model: live,
     /** A pin exists and the CLI shows something else: the guard reapplies it when the agent is idle. */
     model_mismatch: mismatch,
+    /** The agent page may open the live terminal view (GET /api/agents/:id/terminal as a WebSocket). */
+    terminal_live: terminalStream.terminalStreamEnabled(),
     /** Group tags (spec §5c) */
     tags: tags ?? safeAllTags()?.get(agent.id) ?? [],
     /** The Command Center's default recipient (spec §5b). */

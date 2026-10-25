@@ -393,6 +393,16 @@ export interface WaveConfig {
    * Read-only Fable Queue monitor. Defaults are the wavecode-countix bots
    * (fable on socket `fable`, fable2..fable5 on socket `fableN`).
    */
+  /**
+   * Live terminal view on the agent page: `tmux pipe-pane` → FIFO → WebSocket →
+   * xterm.js. `enabled` default true; `fifo_dir` default `<data>/terminal`;
+   * `max_viewers` default 20 (open sockets across all agents).
+   */
+  terminal_stream?: {
+    enabled?: boolean;
+    fifo_dir?: string;
+    max_viewers?: number;
+  };
   fable_queue?: FableQueueConfig;
   /**
    * Ops lanes Live board and job store. One `<role>.json` in `dir`.
@@ -647,6 +657,7 @@ export function validateConfig(cfg: WaveConfig): void {
   if (cfg.product_desk?.url && !/^https?:\/\/[^\s]+$/.test(cfg.product_desk.url)) throw new Error('product_desk.url must be an http(s) URL');
   if (cfg.test_portal?.url && !/^https?:\/\/[^\s/]+(?::\d+)?\/?$/.test(cfg.test_portal.url)) throw new Error('test_portal.url must be an http(s) origin like http://countix-testing.tailf32df0.ts.net:8088');
   if (cfg.test_portal?.poll_s !== undefined && (typeof cfg.test_portal.poll_s !== 'number' || !(cfg.test_portal.poll_s >= 5))) throw new Error('test_portal.poll_s must be a number >= 5');
+  if (cfg.terminal_stream?.max_viewers !== undefined && (typeof cfg.terminal_stream.max_viewers !== 'number' || !(cfg.terminal_stream.max_viewers >= 1))) throw new Error('terminal_stream.max_viewers must be a number >= 1');
   if (cfg.overlord) {
     const o = cfg.overlord;
     if (o.model !== undefined && (typeof o.model !== 'string' || !/^[\w.-]{3,64}$/.test(o.model))) throw new Error('overlord.model must be a model id like claude-sonnet-5-5');
@@ -935,6 +946,11 @@ function buildDefaults(baseDir: string): WaveConfig {
       cards: [...DEFAULT_FABLE_CARDS],
       bots: defaultFableBots(),
     },
+    terminal_stream: {
+      enabled: true,
+      fifo_dir: path.join(dataRoot, 'terminal'),
+      max_viewers: 20,
+    },
     ops_lanes: {
       dir: DEFAULT_OPS_DIR,
       poll_s: DEFAULT_OPS_POLL_S,
@@ -980,6 +996,9 @@ function normalizeConfigPaths(cfg: WaveConfig, baseDir: string): WaveConfig {
   }
   if (normalized.fable_queue?.note_dirs) {
     normalized.fable_queue.note_dirs = normalized.fable_queue.note_dirs.map((dir) => normalizePathSetting(dir, baseDir));
+  }
+  if (normalized.terminal_stream?.fifo_dir?.trim()) {
+    normalized.terminal_stream.fifo_dir = normalizePathSetting(normalized.terminal_stream.fifo_dir.trim(), baseDir);
   }
   if (normalized.ops_lanes) {
     const dir = normalized.ops_lanes.dir?.trim() ?? '';

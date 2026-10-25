@@ -52,7 +52,8 @@
     "playwright": "^1.59.1",
     "simple-git": "^3.33.0",
     "ulid": "^3.0.2",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
@@ -60,6 +61,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.5.0",
     "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.18.2",
     "@vitest/coverage-v8": "^4.1.4",
     "jsdom": "^29.0.1",
     "tsx": "^4.21.0",

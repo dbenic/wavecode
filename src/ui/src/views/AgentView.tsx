@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ModelSwitch from '../components/ModelSwitch';
 import { bufferText, mergeHistory, prependOlder, type TermLine } from '../utils/terminal-buffer';
+import LiveTerminal from '../components/LiveTerminal';
 import { useParams, useNavigate } from 'react-router-dom';
 import { apiGet, apiPost, apiUpload, apiDelete } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
@@ -110,6 +111,9 @@ export default function AgentView() {
   const [screenLines, setScreenLines] = useState<TermLine[]>([]);
   const [unseen, setUnseen] = useState(0);
   const [historyTotal, setHistoryTotal] = useState(0);
+  // 'live' is xterm.js over the pane's byte stream; 'text' the captured-output buffer. Live is the default where the server streams.
+  const [outputView, setOutputView] = useState<'live' | 'text' | null>(null);
+  const [liveNote, setLiveNote] = useState<string | null>(null);
   const touchStartX = useRef(0);
   const touchEndX = useRef(0);
   const outputRef = useRef<HTMLDivElement>(null);
@@ -622,6 +626,29 @@ export default function AgentView() {
       {/* Output */}
       <main className="flex-1 max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto w-full px-4 py-4">
         <div className="rounded-lg border border-slate-800/50 bg-black/40 overflow-hidden">
+          {agent.terminal_live && (
+            <div className="px-3 py-1 border-b border-slate-800/30 flex items-center gap-1 text-[9px] tracking-[0.15em] uppercase" data-testid="output-view-tabs">
+              {(['live', 'text'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => { setOutputView(v); if (v === 'live') setLiveNote(null); }}
+                  className={`px-2 py-0.5 rounded ${(outputView ?? 'live') === v ? 'bg-cyan-500/15 text-cyan-200' : 'text-slate-600 hover:text-slate-300'}`}
+                >
+                  {v === 'live' ? 'Live terminal' : 'Text'}
+                </button>
+              ))}
+              {liveNote && <span className="ml-2 normal-case tracking-normal text-amber-400/80">{liveNote}</span>}
+            </div>
+          )}
+          {agent.terminal_live && (outputView ?? 'live') === 'live' ? (
+            <LiveTerminal
+              key={agent.id}
+              agentId={agent.id}
+              onUnavailable={(reason) => { setLiveNote(reason); setOutputView('text'); }}
+            />
+          ) : (
+          <>
           <div className="px-3 py-1.5 border-b border-slate-800/30 flex items-center justify-between">
             <span className="text-[9px] text-slate-600 tracking-[0.2em] uppercase">
               Captured Output
@@ -682,6 +709,8 @@ export default function AgentView() {
               </button>
             )}
           </div>
+          </>
+          )}
         </div>
       </main>
 

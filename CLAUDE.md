@@ -35,7 +35,7 @@ Phone/Desktop (PWA over Tailscale)
 - **Web framework**: Hono (server) — lightweight, fast
 - **Database**: SQLite via `better-sqlite3` (synchronous API, WAL mode)
 - **Frontend**: React 19 + Tailwind CSS — built as static PWA
-- **Live updates**: SSE (EventSource) for dashboard/tasks/review. WebSocket (`ws`) ONLY for terminal fallback.
+- **Live updates**: SSE (EventSource) for dashboard/tasks/review. WebSocket (`ws`) ONLY for the live terminal view (xterm.js on the agent page).
 - **Push notifications**: `web-push` npm package + ntfy.sh + Telegram Bot API
 - **Runner wrapper**: Node.js `child_process` + ndjson event emitter
 - **Terminal**: tmux (via `child_process.exec`)
@@ -55,6 +55,8 @@ wavecode/
       index.ts              # Hono app, SSE endpoints, WS setup
       db.ts                 # Schema init, query helpers
       session-manager.ts    # tmux scan/adopt/spawn/kill
+      terminal-stream.ts    # live pane bytes: tmux pipe-pane → FIFO → viewers (alt-screen/mouse modes filtered)
+      terminal-ws.ts        # the one WebSocket: GET /api/agents/:id/terminal upgraded, auth via the Hono route
       output-watcher.ts     # capture-pane polling + regex matching
       runner.ts             # Runner wrapper for spawn mode
       task-dispatcher.ts    # DAG resolver, auto-chain
@@ -287,7 +289,7 @@ Spawned agents emit these events. Adopted agents use capture-pane fallback.
 - Do NOT use `localStorage` or `sessionStorage` in the PWA. Use React state.
 - Do NOT create separate CSS files. Tailwind only.
 - Do NOT implement git push functionality. The sandbox explicitly prevents it.
-- Do NOT build a full terminal emulator (xterm.js) in v0.1. Captured output + manual send-keys is sufficient.
+- The live terminal view (xterm.js over `terminal-ws.ts`) is read-only. Input stays on send-keys through `/api/agents/:id/send`; never pipe keystrokes from the socket into a pane.
 
 ## Build Order (M0 first)
 

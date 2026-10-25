@@ -104,6 +104,14 @@ export function buildEventStreamUrl(
   return url.toString();
 }
 
+/** The live terminal socket for an agent (terminal-ws.ts); the token rides in the query like the event stream. */
+export function buildTerminalUrl(origin: string, agentId: string, token: string | null): string {
+  const url = new URL(`${BASE_URL}/agents/${encodeURIComponent(agentId)}/terminal`, origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (token) url.searchParams.set('access_token', token);
+  return url.toString();
+}
+
 export function getAccessToken(): string | null {
   return authState.token;
 }

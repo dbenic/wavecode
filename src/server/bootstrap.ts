@@ -30,6 +30,7 @@ import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import { startFableQueue, stopFableQueue } from './fable-queue.js';
 import { startOpsLanes, stopOpsLanes } from './ops-lanes.js';
+import { closeAllPaneStreams, resetStalePipes } from './terminal-stream.js';
 import logger from './logger.js';
 
 /** Pick up out-of-band pending inserts (CLI fallback, scripts) that skipped HTTP. */
@@ -60,6 +61,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   notifications.getVapidPublicKey();
 
   await tmux.applyAgentPaneDefaults();
+  await resetStalePipes(); // a pipe-pane left by an earlier daemon has no reader
   await rebindAgentSockets();
   startEventLoopMonitor();
   startPerfMonitor();
@@ -107,6 +109,7 @@ export function shutdownApplication(): void {
   stopDeployReconciler();
   stopFableQueue();
   stopOpsLanes();
+  closeAllPaneStreams();
   outputWatcher.stopAll();
   teamManager.stopAllCommsWatchers();
 
