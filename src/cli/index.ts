@@ -509,7 +509,7 @@ const userCmd = program
 userCmd
   .command('add <name>')
   .description('Create a user and print its bearer token once')
-  .option('--role <role>', 'admin | developer | observer', 'developer')
+  .option('--role <role>', 'admin | developer | observer | opsbot', 'developer')
   .option('--color <hex>', 'UI color, e.g. #2563eb (default: derived from name)')
   .option('--profile <profile>', 'Credential profile for this user\'s agents (default: the user name)')
   .option('--only-agents <refs>', 'Restrict the token to these agents (comma-separated alias/name/id) — a peer\'s ask-only token (docs/peers.md)')
@@ -523,6 +523,20 @@ userCmd
       process.exit(1);
     }
     console.log(formatCreatedUser(result.data));
+  });
+
+userCmd
+  .command('set-role <user> <role>')
+  .description('Change a user\'s role (admin | developer | observer | opsbot); tokens are kept')
+  .action(async (ref: string, role: string) => {
+    initDb();
+    const { setRoleCommand } = await import('./user-command.js');
+    const result = setRoleCommand(ref, role);
+    if (!result.ok) {
+      console.error(`Failed to set role: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(`User ${result.data.name} is now ${result.data.role}`);
   });
 
 // --- purge stale reviews ---

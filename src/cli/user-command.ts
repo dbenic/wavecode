@@ -6,7 +6,8 @@
  */
 
 import type { Result } from '../server/db.js';
-import { createUser, type CreatedUser } from '../server/users.js';
+import type { User } from '../server/db.js';
+import { createUser, setUserRole, type CreatedUser } from '../server/users.js';
 
 export interface AddUserOptions {
   role?: string;
@@ -28,4 +29,9 @@ export function formatCreatedUser({ user, token }: CreatedUser): string {
     `Token (shown once, store it now): ${token}`,
     'Use it as: Authorization: Bearer <token>  (or WAVECODE_TOKEN=<token>)',
   ].join('\n');
+}
+
+/** `wavecode user set-role <name|id> <role>` — local, like `user add`. Prints no token. */
+export function setRoleCommand(ref: string, role: string): Result<User> {
+  return setUserRole(ref, role);
 }

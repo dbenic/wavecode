@@ -3,7 +3,7 @@ import type { NodeAppEnv } from '../auth.js';
 import { listUsers } from '../db.js';
 import { emit } from '../event-bus.js';
 import logger from '../logger.js';
-import { createUser, isAdmin, OWNER_USER, revokeUser, restrictedAgentRefs } from '../users.js';
+import { createUser, isAdmin, setUserRole, OWNER_USER, revokeUser, restrictedAgentRefs } from '../users.js';
 import { getSeatStatus, removeSeatOf } from '../seats.js';
 import { releaseLeasesOf } from '../leases.js';
 
@@ -55,6 +55,21 @@ export function registerUserRoutes(app: Hono<NodeAppEnv>): void {
     emit('user.created', 'user', user.id, { name: user.name, role: user.role });
     // The plaintext token is returned exactly once; only its hash is stored.
     return c.json({ ...publicUser(user), created_at: user.created_at, token }, 201);
+  });
+
+  // Change a user's role (e.g. downgrade an ops bot to 'opsbot'). Admin only; seat tokens are refused by auth.
+  app.put('/api/users/:id/role', async (c) => {
+    const actor = c.get('user');
+    if (!isAdmin(actor)) return c.json({ error: 'Forbidden: admin only' }, 403);
+    const id = c.req.param('id');
+    if (id === actor.id || id === OWNER_USER.id) return c.json({ error: 'You cannot change your own role' }, 400);
+    const body = await c.req.json<{ role?: unknown }>().catch(() => null);
+    if (!body || typeof body !== 'object') return c.json({ error: 'Malformed JSON body' }, 400);
+    const result = setUserRole(id, body.role);
+    if (!result.ok) return c.json({ error: result.error }, result.error.includes('not found') ? 404 : 400);
+    logger.info({ userId: result.data.id, role: result.data.role, actorId: actor.id }, 'User role changed');
+    emit('user.role_changed', 'user', result.data.id, { name: result.data.name, role: result.data.role });
+    return c.json(publicUser(result.data));
   });
 
   app.delete('/api/users/:id', async (c) => {

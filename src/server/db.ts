@@ -149,7 +149,8 @@ export interface WaveEvent {
   created_at: string;
 }
 
-export const USER_ROLES = ['admin', 'developer', 'observer'] as const;
+/** `opsbot`: an ops-lane puller. It claims and completes jobs for its bound role and reads the board — nothing else. */
+export const USER_ROLES = ['admin', 'developer', 'observer', 'opsbot'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
 export function isUserRole(value: unknown): value is UserRole {
@@ -1847,6 +1848,12 @@ export function getTaskByNum(num: number): Result<Task> {
 
 export function listUsers(): User[] {
   return getDb().prepare(`SELECT ${USER_COLUMNS} FROM users ORDER BY created_at ASC, id ASC`).all() as User[];
+}
+
+/** Change a user's role. Tokens and seats are untouched. */
+export function updateUserRole(id: string, role: UserRole): Result<User> {
+  getDb().prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+  return getUser(id);
 }
 
 export function deleteUser(id: string): boolean {

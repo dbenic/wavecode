@@ -6,7 +6,12 @@
 import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { emit } from '../event-bus.js';
-import { canMutate } from '../users.js';
+import { canMutate, isOpsBot } from '../users.js';
+
+/** Claim/complete: developers, admins, and ops bots. Observers never. */
+function canWorkJobs(user: { role: string }): boolean {
+  return canMutate(user as never) || isOpsBot(user as never);
+}
 import { askNeedsOwner, parseAskIntent } from '../ops-ask.js';
 import { isOpsJobRole, type OpsJobRole } from '../ops-lanes-config.js';
 import {
@@ -30,13 +35,19 @@ function jsonJob(job: OpsJob, extra?: Record<string, unknown>) {
 
 export function registerOpsJobRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/ops/jobs', (c) => {
+    const user = getActingUser(c);
+    if (isOpsBot(user)) {
+      // An ops bot sees only its own lane's jobs.
+      const bound = roleBoundTo(user);
+      return c.json(listOpsJobs().filter((job) => job.role === bound || job.claimed_by === user.id).map(publicOpsJob));
+    }
     return c.json(listOpsJobs().map(publicOpsJob));
   });
 
   app.post('/api/ops/jobs/claim', async (c) => {
     const user = getActingUser(c);
     if (seatDenied(user)) return c.json({ error: SEAT_DENIED }, 403);
-    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    if (!canWorkJobs(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<{ role?: unknown }>().catch(() => null);
     if (!body) return c.json({ error: 'Malformed request body' }, 400);
     const role = typeof body.role === 'string' ? body.role.trim() : '';
@@ -66,7 +77,7 @@ export function registerOpsJobRoutes(app: Hono<NodeAppEnv>): void {
   app.post('/api/ops/jobs/:id/complete', async (c) => {
     const user = getActingUser(c);
     if (seatDenied(user)) return c.json({ error: SEAT_DENIED }, 403);
-    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    if (!canWorkJobs(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<{ status?: unknown; receipt_paths?: unknown }>().catch(() => null);
     if (!body) return c.json({ error: 'Malformed request body' }, 400);
     if (body.status !== 'done' && body.status !== 'failed') return c.json({ error: 'status must be done or failed' }, 400);
