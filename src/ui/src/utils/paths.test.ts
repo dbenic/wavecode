@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { fileViewHref, linkifyPathsHtml } from './paths';
+import { fileViewHref, findFilePaths, linkifyPathsHtml } from './paths';
 import { renderMarkdown } from './markdown';
 
 describe('path links', () => {
@@ -52,5 +52,19 @@ describe('wrapped paths', () => {
     expect(linkifyPathsHtml(console)).toContain(fileViewHref('/home/wave/inbox/codex1-verdict-si-aop-r2.md'));
     // a line ending with a word (no hyphen/slash) is not joined with the next line
     expect(joinWrappedPaths('path /home/wave/inbox/a<br/>  b.md')).toBe('path /home/wave/inbox/a<br/>  b.md');
+  });
+});
+
+describe('findFilePaths', () => {
+  it('returns every path with its offsets', () => {
+    const text = 'see /home/wave/inbox/a-note.md and ~/x/y.ts now';
+    expect(findFilePaths(text)).toEqual([
+      { start: 4, end: 30, path: '/home/wave/inbox/a-note.md' },
+      { start: 35, end: 43, path: '~/x/y.ts' },
+    ]);
+  });
+
+  it('ignores bare words and files without an allowed extension', () => {
+    expect(findFilePaths('run /usr/bin/node and /tmp/a.bin')).toEqual([]);
   });
 });

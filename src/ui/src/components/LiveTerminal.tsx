@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { Terminal as XTerm } from '@xterm/xterm';
+import { useNavigate } from 'react-router-dom';
 import { buildTerminalUrl, getAccessToken } from '../hooks/useApi';
+import { fileViewHref, findFilePaths } from '../utils/paths';
 
 /**
  * The agent's pane rendered by xterm.js from the server's byte stream
@@ -41,7 +43,43 @@ const SCROLLBACK = 20000;
 const CHAR_WIDTH_RATIO = 0.62; // a monospace glyph is about this many em wide
 const LINE_HEIGHT = 1.1;
 
+/**
+ * A path in the pane is a link to the file viewer. The provider works on the
+ * logical line (a wrapped path continues on the next buffer rows), so a long
+ * /home/wave/inbox/... path broken over two rows is still one link.
+ */
+function filePathLinkProvider(term: XTerm, open: (href: string) => void) {
+  return {
+    provideLinks(bufferLineNumber: number, callback: (links: Array<{ range: { start: { x: number; y: number }; end: { x: number; y: number } }; text: string; activate: () => void }> | undefined) => void) {
+      const buf = term.buffer.active;
+      let first = bufferLineNumber - 1; // 0-based row of the logical line's first row
+      while (first > 0 && buf.getLine(first)?.isWrapped) first -= 1;
+      const rows: string[] = [];
+      for (let y = first; y < buf.length; y++) {
+        const line = buf.getLine(y);
+        if (!line || (y > first && !line.isWrapped)) break;
+        rows.push(line.translateToString(false)); // untrimmed: exactly `cols` characters
+      }
+      if (rows.length === 0) { callback(undefined); return; }
+      const cols = term.cols;
+      // Row strings are padded to `cols` (translateToString without trimming), so offset → (row, col) is arithmetic.
+      const text = rows.map((r) => r.padEnd(cols)).join('');
+      const links = findFilePaths(text.replace(/\s+$/, '')).map((m) => {
+        const startRow = Math.floor(m.start / cols);
+        const endRow = Math.floor((m.end - 1) / cols);
+        return {
+          text: m.path,
+          range: { start: { x: (m.start % cols) + 1, y: first + startRow + 1 }, end: { x: ((m.end - 1) % cols) + 1, y: first + endRow + 1 } },
+          activate: () => open(fileViewHref(m.path)),
+        };
+      });
+      callback(links.length > 0 ? links : undefined);
+    },
+  };
+}
+
 export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', bare = false, fontSize = null }: Props) {
+  const navigate = useNavigate();
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -144,6 +182,12 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
         const b = term.buffer.active;
         setBehind(b.viewportY < b.baseY);
       });
+      // Links, as in the text view: http(s) URLs open in a new tab, file paths open the in-app viewer.
+      try {
+        const { WebLinksAddon } = await import('@xterm/addon-web-links');
+        term.loadAddon(new WebLinksAddon((_e, uri) => window.open(uri, '_blank', 'noopener')));
+      } catch { /* optional */ }
+      term.registerLinkProvider(filePathLinkProvider(term, (href) => navigate(href)));
       termRef.current = term;
       observer = new ResizeObserver(() => fitFont());
       observer.observe(hostRef.current);

@@ -9,6 +9,17 @@ const EXT = 'md|markdown|txt|log|json|ya?ml|csv|tsv|ts|tsx|js|jsx|mjs|py|sql|sh|
 // Not preceded by a word char, slash, quote or `=` (inside an attribute / URL), not followed by a path char.
 const PATH_RE = new RegExp(`(?<![\\w/="'.-])(~?/(?:[\\w.@+-]+/)+[\\w.@+-]+\\.(?:${EXT}))(?![\\w/])`, 'g');
 
+/** Every file path in a plain-text line, with its character offsets (the live terminal's link provider). */
+export function findFilePaths(text: string): Array<{ start: number; end: number; path: string }> {
+  const out: Array<{ start: number; end: number; path: string }> = [];
+  for (const m of text.matchAll(PATH_RE)) {
+    const path = m[1];
+    const start = m.index ?? 0;
+    out.push({ start, end: start + path.length, path });
+  }
+  return out;
+}
+
 export function fileViewHref(filePath: string): string {
   return `/file?path=${encodeURIComponent(filePath)}`;
 }
