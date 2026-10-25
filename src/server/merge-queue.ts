@@ -404,7 +404,6 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
   const project = freeze.project;
   const cfg = mqConfig(project);
   if (!project || !cfg || !freeze.lane) return { ...none, reason: 'not a merge-queue project' };
-  if (!queueEnabled(project)) return { ...none, reason: 'merge queue is off' };
   const laneErr = laneRefError(project, freeze.lane);
   if (laneErr) return { ...none, reason: laneErr };
   const repo = projectRepo(project);
@@ -659,6 +658,7 @@ async function refreshProject(project: string): Promise<MergeQueueRow | null> {
       continue;
     }
     const wasQueued = existing?.state === 'queued';
+    if (result.state === 'queued' && !queueEnabled(project)) result.reason = 'merge queue is off';
     upsert({
       sha: freeze.sha, project, lane, tier: result.tier, state: result.state, reason: result.reason, pr: result.pr,
       verdict_files: result.verdictFiles.join('\n'),
@@ -682,16 +682,16 @@ export async function mergeQueueTick(opts: { wait?: boolean } = {}): Promise<voi
   recoverOnce();
   for (const project of configuredProjects()) {
     if (inflight.has(project)) { if (opts.wait) await inflight.get(project); continue; }
-    if (!queueEnabled(project)) {
-      // Rows keep their place; the reason says why nothing moves.
-      for (const row of listQueue(project)) {
-        if (row.state === 'queued' || row.state === 'waiting') upsert({ sha: row.sha, project, lane: row.lane, reason: 'merge queue is off' });
-      }
-      continue;
-    }
     let head: MergeQueueRow | null = null;
     try { head = await refreshProject(project); } catch (e) {
       logger.warn({ project, error: (e as Error).message }, 'Merge queue: refresh failed');
+    }
+    if (!queueEnabled(project)) {
+      // The switch is off: the cards still show who is eligible, nothing is merged.
+      for (const row of listQueue(project)) {
+        if (row.state === 'queued') upsert({ sha: row.sha, project, lane: row.lane, reason: 'merge queue is off' });
+      }
+      continue;
     }
     if (!head) continue;
     const job = runMerge(head)

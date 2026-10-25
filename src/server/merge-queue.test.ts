@@ -365,8 +365,9 @@ describe('merge queue — on a scratch repository', () => {
     expect(queueSwitch('wave')).toMatchObject({ project: 'wave', config_enabled: true, enabled: false, enabled_by: 'denis' });
     await tick();
     expect(originMain()).toBe(main);
-    expect(getQueueRow(sha)).toBeNull();
-    expect((await evaluate(getFreeze(sha)!)).reason).toBe('merge queue is off');
+    // Eligibility is still shown while the switch is off; nothing merges.
+    expect(getQueueRow(sha)).toMatchObject({ state: 'queued', reason: 'merge queue is off' });
+    expect((await evaluate(getFreeze(sha)!)).state).toBe('queued');
 
     setQueueSwitch('wave', true, 'denis');
     await tick();

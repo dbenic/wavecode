@@ -106,7 +106,7 @@ payroll, payments, billing, RLS, auth and migration paths are `ask` whatever the
 Over ssh, read-only:
 
 ```bash
-sqlite3 -readonly /home/wave/.wavecode-data/wavecode.db "select created_at, type, entity_id, payload_json from events where type like 'pipeline.%' order by id desc limit 50"
+sqlite3 -readonly /home/wave/wavecode/wavecode.db "select created_at, type, entity_id, payload_json from events where type like 'pipeline.%' order by id desc limit 50"
 ```
 
 ## Endpoints maestro may use

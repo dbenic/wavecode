@@ -87,7 +87,7 @@ the log lines carry lanes, SHAs, PR numbers and run ids only.
 Over ssh:
 
 ```bash
-sqlite3 -readonly /home/wave/.wavecode-data/wavecode.db "select created_at, type, entity_id, payload_json from events where type like 'merge_queue.%' order by id desc limit 30"
+sqlite3 -readonly /home/wave/wavecode/wavecode.db "select created_at, type, entity_id, payload_json from events where type like 'merge_queue.%' order by id desc limit 30"
 ```
 
 ## Endpoints
