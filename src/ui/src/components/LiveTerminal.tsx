@@ -35,7 +35,8 @@ interface InitMsg { t: 'init'; session: string; cols: number; rows: number; hist
 interface ErrorMsg { t: 'error'; message: string }
 
 const MIN_FONT = 5;
-const MAX_FONT = 18;
+const MAX_FONT = 13; // the embedded view on the agent page
+const MAX_FONT_FULL = 18; // the full-screen page
 const SCROLLBACK = 20000;
 const CHAR_WIDTH_RATIO = 0.62; // a monospace glyph is about this many em wide
 const LINE_HEIGHT = 1.1;
@@ -68,7 +69,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
     let size = Math.floor(width / (term.cols * CHAR_WIDTH_RATIO));
     // Glyph height is about 1.2em, times xterm's lineHeight option.
     if (height) size = Math.min(size, Math.floor(height / (term.rows * 1.2 * LINE_HEIGHT)));
-    size = Math.max(MIN_FONT, Math.min(MAX_FONT, size));
+    size = Math.max(MIN_FONT, Math.min(bare ? MAX_FONT_FULL : MAX_FONT, size));
     term.options.fontSize = size;
     // Measure what xterm actually drew; the ratios above are only a first guess.
     for (let i = 0; i < 4; i++) {
@@ -80,7 +81,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
       size -= 1;
       term.options.fontSize = size;
     }
-  }, [fit, fontSize]);
+  }, [fit, fontSize, bare]);
 
   const jumpToLive = useCallback(() => {
     termRef.current?.scrollToBottom();
