@@ -176,6 +176,30 @@ export interface ProjectConfig {
     review_reassign_minutes?: number;
     /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
     freeze_dir?: string;
+    /**
+     * One remote run per freeze: skip the separate quick check and submit the
+     * full gate as soon as the freeze lands, while the review runs. For a
+     * dispatcher that refuses the same SHA twice.
+     */
+    gate_with_quick?: boolean;
+    /** How long the full gate may run before it counts as RED. Default 120. */
+    gate_timeout_min?: number;
+    /** How long the quick check may run. Default 20. */
+    quick_check_timeout_min?: number;
+    /** A lane that changes more files than this gets a size warning in the review ping. 0 disables. Default 40. */
+    max_lane_files?: number;
+    /**
+     * When set, only these seats (name or alias) may be picked as reviewers,
+     * besides the prefer tiers and the author-glob pools. Keeps the open
+     * ladder away from other people's seats.
+     */
+    reviewer_allow?: string[];
+    /**
+     * Credential profiles that are service pools, not one person's seats
+     * (`denis20x` runs codex4 to codex8 and claude3 to claude6). Two seats on
+     * such a profile may review each other.
+     */
+    service_profiles?: string[];
   };
   /**
    * Operational checks named by a freeze note's `prereqs:` block. Absent
@@ -322,6 +346,26 @@ export interface WaveConfig {
      * Unset = off (a deploy box's inbox holds GO files, not freezes).
      */
     freeze_inbox?: string[];
+    /**
+     * A seat whose plan (5-hour or weekly window, read by the usage probe)
+     * has less than this left is not picked as a reviewer. Default 10.
+     */
+    min_capacity_pct?: number;
+    /**
+     * Token-cheap first pass on every freeze, run on a seat: the least-loaded
+     * listed seat with capacity gets the one-pass prompt and writes
+     * `wave-firstpass-<sha8>-<date>.md` into `dir` (default: the freeze
+     * inbox). The result is announced to the reviewer and, on NEEDS FIXES,
+     * to the author. It is never a verdict. Off by default.
+     */
+    first_pass?: {
+      enabled?: boolean;
+      /** Seats (name or alias) that may run the first pass. Never the author or the author's own seats. */
+      seats?: string[];
+      dir?: string;
+      /** Minutes until a missing first pass is noted as such. Default 20. */
+      timeout_min?: number;
+    };
   };
   /**
    * Who is looking at Reviews. `users` matches the logged-in user name.
@@ -516,9 +560,31 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
       throw new Error(`projects.${name}.pipeline.${flag} must be a boolean`);
     }
   }
-  validateArgvTemplate(`projects.${name}.pipeline.quick_check_command`, pipeline.quick_check_command, '{sha}');
-  validateArgvTemplate(`projects.${name}.pipeline.gate_command`, pipeline.gate_command, '{sha}');
+  // Quick check and gate run in a checkout of the exact SHA (the author's worktree, or a
+  // detached checkout WaveCode makes), with WAVECODE_SHA / WAVECODE_LANE / COUNTIX_REMOTE_TEST_WHO
+  // in the environment, so a tool that tests HEAD needs no placeholder.
+  validateArgvList(`projects.${name}.pipeline.quick_check_command`, pipeline.quick_check_command);
+  validateLanePlaceholder(`projects.${name}.pipeline.quick_check_command`, pipeline.quick_check_command ?? []);
+  validateArgvList(`projects.${name}.pipeline.gate_command`, pipeline.gate_command);
+  validateLanePlaceholder(`projects.${name}.pipeline.gate_command`, pipeline.gate_command ?? []);
   validateArgvTemplate(`projects.${name}.pipeline.push_command`, pipeline.push_command, '{lane}');
+  for (const flag of ['gate_with_quick'] as const) {
+    if (pipeline[flag] !== undefined && typeof pipeline[flag] !== 'boolean') {
+      throw new Error(`projects.${name}.pipeline.${flag} must be a boolean`);
+    }
+  }
+  for (const [key, max] of [['gate_timeout_min', 24 * 60], ['quick_check_timeout_min', 24 * 60], ['max_lane_files', 10_000]] as const) {
+    const value = pipeline[key];
+    if (value !== undefined && (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > max)) {
+      throw new Error(`projects.${name}.pipeline.${key} must be a whole number from 0 to ${max}`);
+    }
+  }
+  if (pipeline.reviewer_allow !== undefined && (!Array.isArray(pipeline.reviewer_allow) || pipeline.reviewer_allow.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
+    throw new Error(`projects.${name}.pipeline.reviewer_allow must be a list of agent names or aliases`);
+  }
+  if (pipeline.service_profiles !== undefined && (!Array.isArray(pipeline.service_profiles) || pipeline.service_profiles.some((s) => typeof s !== 'string' || !/^[A-Za-z0-9][\w.-]{0,63}$/.test(s)))) {
+    throw new Error(`projects.${name}.pipeline.service_profiles must be a list of profile names`);
+  }
   if (pipeline.freeze_dir !== undefined && (typeof pipeline.freeze_dir !== 'string' || !pipeline.freeze_dir.trim() || pipeline.freeze_dir.includes('..'))) {
     throw new Error(`projects.${name}.pipeline.freeze_dir must be a directory path`);
   }
@@ -694,6 +760,25 @@ export function validateConfig(cfg: WaveConfig): void {
   if (cfg.review.freeze_inbox !== undefined) {
     if (!Array.isArray(cfg.review.freeze_inbox) || cfg.review.freeze_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
       throw new Error('review.freeze_inbox must be a list of directory paths');
+    }
+  }
+  if (cfg.review.min_capacity_pct !== undefined) {
+    const pct = cfg.review.min_capacity_pct;
+    if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < 0 || pct > 100) {
+      throw new Error('review.min_capacity_pct must be a percentage from 0 to 100');
+    }
+  }
+  if (cfg.review.first_pass !== undefined) {
+    const fp = cfg.review.first_pass;
+    if (typeof fp !== 'object' || fp === null || Array.isArray(fp)) throw new Error('review.first_pass must be a map');
+    if (fp.enabled !== undefined && typeof fp.enabled !== 'boolean') throw new Error('review.first_pass.enabled must be a boolean');
+    if (fp.seats !== undefined && (!Array.isArray(fp.seats) || fp.seats.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
+      throw new Error('review.first_pass.seats must be a list of agent names or aliases');
+    }
+    if (fp.enabled && !(fp.seats?.length)) throw new Error('review.first_pass.seats must name at least one seat when first_pass is enabled');
+    if (fp.dir !== undefined && (typeof fp.dir !== 'string' || !fp.dir.trim() || fp.dir.includes('..'))) throw new Error('review.first_pass.dir must be a directory path');
+    if (fp.timeout_min !== undefined && (typeof fp.timeout_min !== 'number' || !Number.isInteger(fp.timeout_min) || fp.timeout_min < 1 || fp.timeout_min > 1440)) {
+      throw new Error('review.first_pass.timeout_min must be a number of minutes from 1 to 1440');
     }
   }
   validateDevelopers(cfg.developers);

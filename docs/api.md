@@ -1162,3 +1162,40 @@ Artifact lifecycle. `artifact.created` payload is the full `Artifact` object.
 #### `heartbeat`
 A periodic keep-alive (every ~15 s). Empty payload. Clients can use it to detect a
 dropped connection that wasn't otherwise signalled.
+
+### Lane pipeline: push check, background gate, capacity-aware reviewers, first pass
+
+Added 25 Oct 2026 for the review speed-up (see `docs/maestro-contract.md` for the file and
+event contract).
+
+- **Push check.** A freeze whose exact SHA is not an ancestor of `origin/<lane>` is held:
+  event `pipeline.refused`, a `push` note, one line to the author, and a re-check every two
+  minutes for twelve hours. WaveCode never pushes a lane; `push_command` is for projects
+  that want it to.
+- **Gate in the background.** With `auto_gate`, the freeze shows `QUEUED` the moment it
+  lands and the gate command runs in a clean detached worktree of the exact SHA
+  (`<repos>/.wavecode-gates/<repo>-<sha9>`) with `COUNTIX_REMOTE_TEST_WHO=<author>`,
+  `WAVECODE_SHA`, `WAVECODE_LANE` and `WAVECODE_CHECKOUT` in the environment, for up to
+  `pipeline.gate_timeout_min` (default 120). The exit code decides: 0 GREEN, 1 RED, 7 (the
+  dispatcher's duplicate) stays QUEUED; a submit-only tool may print QUEUED or RUNNING on its
+  last line instead. `pipeline.gate_with_quick` skips the pipeline's own quick check so one
+  remote run per freeze is submitted while the review runs. Quick and gate commands no longer
+  need a `{sha}` placeholder; `{checkout}` is available.
+- **Reviewer capacity.** A seat whose profile has less than `review.min_capacity_pct`
+  (default 10) left on its 5-hour or weekly window, as read by the usage probe, is not
+  picked. An unprobed profile is not excluded. `pipeline.reviewer_allow` limits the open
+  ladder to named seats (prefer tiers and author-glob pools stay eligible).
+  `pipeline.service_profiles` names shared logins whose seats may review each other.
+- **Lane size.** A lane that changes more than `pipeline.max_lane_files` (default 40) files
+  gets a `size` note once and a warning sentence in the review ping.
+- **First pass on a seat.** `review.first_pass` (`enabled`, `seats`, `dir`, `timeout_min`)
+  asks the least-loaded listed seat with capacity, never the author or a seat of the same
+  person, to read the diff once and write `wave-firstpass-<sha8>-<yyyymmdd>.md` ending in
+  `FIRST PASS: PASS` or `FIRST PASS: NEEDS FIXES`. Events `pipeline.first_pass_requested`,
+  `pipeline.first_pass`, `pipeline.first_pass_timeout`. The result is one line to the
+  assigned reviewer and, on NEEDS FIXES, to the author. It is never a verdict and cannot
+  stage anything; the freeze ingester does not read the file.
+- **Shared inbox routing.** `paths.inbox_watch` may include the freeze inbox. There only
+  `.md`/`.txt` files with a `To: @seat` line or a `<author>-to-<recipient>-…` name are
+  announced; `-to-` names go to the recipient, never the author; logs, receipts, freeze and
+  verdict files are left to the freeze watcher; `wave-firstpass-*` files are recorded.

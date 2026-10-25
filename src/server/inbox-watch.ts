@@ -2,9 +2,16 @@
  * Watch hand-off folders (default `~/inbox/from-fable/`): a new file there is
  * announced into each addressed agent's pane when that agent is idle.
  * An address line (`To:` / `For:` / `Recipient:` or a heading that names `@agent`)
- * goes to every agent that resolves. Otherwise the longest hyphen-prefix of the
- * file name that resolves (`ales-codex1-foo.md` → `ales-codex1`) is the recipient.
- * When nothing resolves, the file is still posted to the thread as an unrouted hand-off.
+ * goes to every agent that resolves. A name of the form
+ * `<author>-to-<recipient>-…` goes to the recipient. Otherwise the longest
+ * hyphen-prefix of the file name that resolves (`ales-codex1-foo.md` →
+ * `ales-codex1`) is the recipient. When nothing resolves, the file is still
+ * posted to the thread as an unrouted hand-off.
+ *
+ * A folder that is also a freeze inbox (`review.freeze_inbox`) is busy with
+ * logs, receipts, freeze notes and verdicts. There only explicitly addressed
+ * text files are announced; freeze and verdict files belong to the freeze
+ * watcher, and `wave-firstpass-*` files are recorded as first-pass results.
  */
 
 import fs from 'node:fs';
@@ -13,9 +20,13 @@ import path from 'node:path';
 import { getConfig } from './config.js';
 import { insertAgentMessage, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
+import { isFirstPassFileName, recordFirstPassFile } from './first-pass.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { archiveDocumentFile } from './fixtures.js';
+
+const TEXT_FILE_RE = /\.(md|markdown|txt)$/i;
+const FREEZE_FILE_RE = /(freeze|verdict)/i;
 
 const watchers = new Map<string, fs.FSWatcher>();
 const seen = new Map<string, number>(); // path → mtimeMs announced
@@ -30,6 +41,26 @@ export function watchedInboxDirs(): string[] {
   const cfg = getConfig();
   const dirs = cfg.paths.inbox_watch ?? ['~/inbox/from-fable'];
   return dirs.map(expand);
+}
+
+/** True when the folder is also a freeze inbox: only addressed files are announced there. */
+export function isFreezeInboxDir(dir: string): boolean {
+  let dirs: string[] = [];
+  try { dirs = (getConfig().review?.freeze_inbox ?? []).map(expand); } catch { dirs = []; }
+  const resolved = path.resolve(dir);
+  return dirs.some((d) => path.resolve(d) === resolved);
+}
+
+/** `<author>-to-<recipient>-rest` → the longest prefix of `<recipient>-rest` that resolves. */
+function recipientAfterTo(stem: string): ReturnType<typeof resolveAgent> | null | 'none' {
+  const idx = stem.toLowerCase().indexOf('-to-');
+  if (idx <= 0) return null;
+  const parts = stem.slice(idx + 4).split('-').filter(Boolean);
+  for (let i = parts.length; i >= 1; i--) {
+    const r = resolveAgent(parts.slice(0, i).join('-'));
+    if (r.ok) return r;
+  }
+  return 'none';
 }
 
 function addressedNames(content: string): string[] | null {
@@ -48,6 +79,10 @@ function addressedNames(content: string): string[] | null {
 /** Longest hyphen-prefix of the file name that resolves to an agent (`ales-codex1-foo` → `ales-codex1`). */
 function recipientFromName(file: string): ReturnType<typeof resolveAgent> | null {
   const stem = path.basename(file).replace(/\.[^.]+$/, '');
+  // `codex6-to-codex3-…` is for codex3, never for its author codex6.
+  const addressed = recipientAfterTo(stem);
+  if (addressed === 'none') return null;
+  if (addressed) return addressed;
   const parts = stem.split('-').filter(Boolean);
   for (let i = parts.length; i >= 1; i--) {
     const r = resolveAgent(parts.slice(0, i).join('-'));
@@ -84,10 +119,21 @@ export function announceFile(file: string, label: string): void {
   if (!st.isFile()) return;
   if (seen.get(file) === st.mtimeMs) return;
   seen.set(file, st.mtimeMs);
+  const base = path.basename(file);
+  if (isFirstPassFileName(base)) {
+    recordFirstPassFile(file);
+    return;
+  }
+  const busy = isFreezeInboxDir(path.dirname(file));
+  if (busy && (!TEXT_FILE_RE.test(base) || FREEZE_FILE_RE.test(base))) return;
   let head = '';
   try {
     head = fs.readFileSync(file, 'utf8').slice(0, 4000);
   } catch { /* unreadable: still announce by path */ }
+  if (busy && !addressedNames(head) && !/-to-/i.test(base)) {
+    logger.debug({ file }, 'Inbox file not addressed; not announced');
+    return;
+  }
   const recipients = recipientsFor(file, head);
   // The hand-off stays reviewable after the inbox moves on: archive it as a library document.
   let archive = '';

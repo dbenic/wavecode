@@ -774,6 +774,7 @@ async function runOnce(reason: string): Promise<void> {
     try {
       const pipeline = await import('./lane-pipeline.js');
       pipeline.reassignWaitingReviews();
+      await pipeline.pipelineTick();
     } catch (e) {
       logger.warn({ reason, error: (e as Error).message }, 'Review reassignment skipped');
     }

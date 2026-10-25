@@ -19,6 +19,7 @@
 
 import { getConfig } from './config.js';
 import { getDb, listAgents, type Agent } from './db.js';
+import { usageFor } from './usage-probe.js';
 
 /** Lowercased `review_deny` and `agent_deny` across every project. */
 export function deniedReviewerHandles(): Set<string> {
@@ -50,6 +51,41 @@ export interface ReviewerLoad {
   runningTasks: number;
   /** Epoch ms of the last assignment. 0 means never assigned. */
   lastAssignedAt: number;
+  /** Plan capacity left on the seat's profile (the smaller of the 5-hour and weekly windows). Null when never probed. */
+  leftPct?: number | null;
+}
+
+/** Default floor for `review.min_capacity_pct`. */
+export const DEFAULT_MIN_CAPACITY_PCT = 10;
+
+/**
+ * Capacity left on the seat's plan, from the usage probe: the smallest
+ * `left_pct` over the 5-hour and weekly windows. Context-window and credit
+ * rows are not capacity. Null when the profile was never probed.
+ */
+export function capacityLeftPct(agent: { runtime: string; profile?: string | null }): number | null {
+  let usage: ReturnType<typeof usageFor> = null;
+  try { usage = usageFor(agent.runtime, agent.profile ?? null); } catch { usage = null; }
+  if (!usage) return null;
+  const values = usage.metrics
+    .filter((m) => m.label === '5h' || m.label === 'weekly' || m.label === 'weekly-model')
+    .map((m) => m.left_pct)
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  return values.length ? Math.min(...values) : null;
+}
+
+export function minCapacityPct(): number {
+  try {
+    const pct = getConfig().review?.min_capacity_pct;
+    return typeof pct === 'number' && Number.isFinite(pct) ? pct : DEFAULT_MIN_CAPACITY_PCT;
+  } catch {
+    return DEFAULT_MIN_CAPACITY_PCT;
+  }
+}
+
+/** True when the seat's plan is below the floor. An unprobed profile is not excluded. */
+export function belowCapacity(load: Pick<ReviewerLoad, 'leftPct'>, floor: number): boolean {
+  return typeof load.leftPct === 'number' && load.leftPct < floor;
 }
 
 export interface ReviewerLoadView {
@@ -72,7 +108,7 @@ export function personStem(name: string): string | null {
   return null;
 }
 
-function identityKeys(agent: { name: string; alias?: string | null; profile?: string | null }): Set<string> {
+function identityKeys(agent: { name: string; alias?: string | null; profile?: string | null }, serviceProfiles?: ReadonlySet<string>): Set<string> {
   const keys = new Set<string>();
   const add = (raw: string | null | undefined) => {
     if (!raw) return;
@@ -86,7 +122,9 @@ function identityKeys(agent: { name: string; alias?: string | null; profile?: st
   };
   add(agent.name);
   add(agent.alias);
-  if (agent.profile) keys.add(`profile:${agent.profile.toLowerCase()}`);
+  // A service pool profile (`pipeline.service_profiles`) is not a person: codex4 and claude3 on
+  // the same shared login are independent seats.
+  if (agent.profile && !serviceProfiles?.has(agent.profile.toLowerCase())) keys.add(`profile:${agent.profile.toLowerCase()}`);
   return keys;
 }
 
@@ -94,9 +132,11 @@ function identityKeys(agent: { name: string; alias?: string | null; profile?: st
 export function samePerson(
   a: { name: string; alias?: string | null; profile?: string | null },
   b: { name: string; alias?: string | null; profile?: string | null },
+  serviceProfiles?: Iterable<string>,
 ): boolean {
-  const left = identityKeys(a);
-  for (const key of identityKeys(b)) if (left.has(key)) return true;
+  const shared = serviceProfiles ? new Set([...serviceProfiles].map((p) => p.toLowerCase())) : undefined;
+  const left = identityKeys(a, shared);
+  for (const key of identityKeys(b, shared)) if (left.has(key)) return true;
   return false;
 }
 
@@ -144,6 +184,12 @@ export interface AssignInput {
   autoPick: boolean;
   reviewTagIds: Set<string>;
   load: (agent: Agent) => ReviewerLoad;
+  /** Seats below this plan capacity are excluded. Default `DEFAULT_MIN_CAPACITY_PCT`. */
+  minCapacityPct?: number;
+  /** When non-empty, the open ladder is limited to these handles (prefer tiers and pools stay eligible). */
+  allow?: string[];
+  /** Profiles whose seats are independent of each other (`pipeline.service_profiles`). */
+  serviceProfiles?: string[];
 }
 
 function listed(agent: Agent, names: Set<string>): boolean {
@@ -168,19 +214,27 @@ export function selectReviewer(input: AssignInput): Agent | null {
       .map((s) => s.toLowerCase()),
   );
   const wanted = input.defaultReviewer?.toLowerCase() ?? '';
+  const floor = input.minCapacityPct ?? DEFAULT_MIN_CAPACITY_PCT;
+  const allow = new Set((input.allow ?? []).map((s) => s.toLowerCase()));
+  const service = input.serviceProfiles ?? [];
+  const isSamePerson = (agent: Agent): boolean => samePerson(input.author, agent, service);
 
   const excluded = (agent: Agent): boolean => {
     if (agent.id === input.author.id) return true;
     if (handles(agent).some((h) => handles(input.author).includes(h))) return true;
     if (handles(agent).some((h) => deny.has(h))) return true;
-    if (samePerson(input.author, agent) && !listed(agent, pool)) return true;
+    if (isSamePerson(agent) && !listed(agent, pool)) return true;
+    // A seat whose plan is nearly spent would stall the review at the usage-limit screen.
+    if (belowCapacity(input.load(agent), floor)) return true;
     return false;
   };
   const isDefault = (agent: Agent): boolean =>
     !!wanted && (handles(agent).includes(wanted) || agent.runtime.toLowerCase() === wanted);
-  // The open ladder (anyone, then the tagged subset) needs auto-pick.
+  // The open ladder (anyone, then the tagged subset) needs auto-pick, and is
+  // limited to `reviewer_allow` when that list is set.
   // A configured default is eligible even when auto-pick is off.
-  const fromLadder = (agent: Agent): boolean => input.autoPick || isDefault(agent);
+  const fromLadder = (agent: Agent): boolean =>
+    (input.autoPick && (allow.size === 0 || listed(agent, allow))) || isDefault(agent);
 
   const eligible = input.agents.filter((agent) => {
     if (agent.mode === 'file' || agent.role === 'orchestrator') return false;
@@ -188,7 +242,7 @@ export function selectReviewer(input: AssignInput): Agent | null {
     return fromLadder(agent) || listed(agent, routeNames) || listed(agent, prefer) || listed(agent, pool);
   });
 
-  const independent = (agent: Agent): boolean => !samePerson(input.author, agent);
+  const independent = (agent: Agent): boolean => !isSamePerson(agent);
   const routeTarget = input.routeTarget?.toLowerCase() ?? '';
   const tiers = [
     eligible.filter((agent) => independent(agent) && listed(agent, prefer)),
@@ -196,7 +250,7 @@ export function selectReviewer(input: AssignInput): Agent | null {
     eligible.filter((agent) => independent(agent) && isDefault(agent)),
     eligible.filter((agent) => independent(agent) && input.reviewTagIds.has(agent.id)),
     eligible.filter(independent),
-    eligible.filter((agent) => samePerson(input.author, agent) && listed(agent, pool)),
+    eligible.filter((agent) => isSamePerson(agent) && listed(agent, pool)),
   ];
   const best = tiers.find((tier) => tier.length > 0) ?? [];
   return pickLeastLoaded(best, input.load);
@@ -207,8 +261,9 @@ export function sameOwnerPoolReviewer(
   author: { name: string; alias?: string | null; profile?: string | null },
   reviewer: { name: string; alias?: string | null; profile?: string | null },
   pools: Record<string, string[]>,
+  serviceProfiles?: string[],
 ): boolean {
-  if (!samePerson(author, reviewer)) return false;
+  if (!samePerson(author, reviewer, serviceProfiles)) return false;
   const pool = poolNamesFor(author.name, pools);
   if (author.alias) {
     for (const name of poolNamesFor(author.alias, pools)) pool.add(name);
@@ -263,6 +318,7 @@ export function loadFor(agent: Agent, events?: ReviewEvent[]): ReviewerLoad {
     openReviews: openReviews(agent.id),
     runningTasks: runningTasks(agent.id),
     lastAssignedAt: lastAssignedAt(agent.id, events),
+    leftPct: capacityLeftPct(agent),
   };
 }
 

@@ -268,3 +268,65 @@ artifacts:
     fs.chmodSync(storageDir, 0o755);
   });
 });
+
+describe('config.ts — pipeline speed-ups and first pass', () => {
+  let tmpDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-test-'));
+    configPath = path.join(tmpDir, 'config.yaml');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it('loads the gate, capacity, allowlist and first-pass settings; quick and gate commands need no {sha}', async () => {
+    fs.writeFileSync(configPath, `
+review:
+  min_capacity_pct: 10
+  first_pass:
+    enabled: true
+    seats: [codex2, codex3]
+    dir: /home/wave/inbox
+    timeout_min: 20
+projects:
+  demo:
+    pipeline:
+      auto_gate: true
+      gate_with_quick: true
+      gate_timeout_min: 120
+      quick_check_timeout_min: 20
+      max_lane_files: 40
+      quick_check_command: [countix-remote-test, tier1]
+      gate_command: [countix-remote-test, --suite, api]
+      reviewer_allow: [codex4, codex5, codex2, codex3, claude1, claude2]
+      service_profiles: [denis20x]
+`, 'utf8');
+    const { loadConfig } = await import('./config.js');
+    const loaded = loadConfig(configPath);
+    expect(loaded.review.min_capacity_pct).toBe(10);
+    expect(loaded.review.first_pass).toEqual({ enabled: true, seats: ['codex2', 'codex3'], dir: '/home/wave/inbox', timeout_min: 20 });
+    const pipe = loaded.projects?.demo.pipeline;
+    expect(pipe?.gate_with_quick).toBe(true);
+    expect(pipe?.gate_command).toEqual(['countix-remote-test', '--suite', 'api']);
+    expect(pipe?.reviewer_allow).toEqual(['codex4', 'codex5', 'codex2', 'codex3', 'claude1', 'claude2']);
+    expect(pipe?.service_profiles).toEqual(['denis20x']);
+
+    const refuse = async (yaml: string, pattern: RegExp) => {
+      fs.writeFileSync(configPath, yaml, 'utf8');
+      vi.resetModules();
+      const fresh = await import('./config.js');
+      expect(() => fresh.loadConfig(configPath)).toThrow(pattern);
+    };
+    await refuse('projects:\n  demo:\n    pipeline:\n      gate_timeout_min: -1\n', /gate_timeout_min must be a whole number/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      gate_with_quick: yes please\n', /gate_with_quick must be a boolean/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      reviewer_allow: ["not a name"]\n', /reviewer_allow must be a list of agent names/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      gate_command: [sh, -c, "echo {lane}"]\n', /must not pass \{lane\} through a shell/);
+    await refuse('review:\n  min_capacity_pct: 101\n', /min_capacity_pct must be a percentage/);
+    await refuse('review:\n  first_pass:\n    enabled: true\n', /first_pass.seats must name at least one seat/);
+    await refuse('review:\n  first_pass:\n    seats: [codex2]\n    timeout_min: 0\n', /first_pass.timeout_min/);
+  });
+});

@@ -26,7 +26,8 @@ import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
-import { assignmentFacts, loadFor, projectReassignMs, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign } from './reviewer-assign.js';
+import { assignmentFacts, loadFor, minCapacityPct, projectReassignMs, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign } from './reviewer-assign.js';
+import { firstPassFor, firstPassHooks, overdueFirstPasses, requestFirstPass, type FirstPassResult } from './first-pass.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 export const PIPELINE_ACTION = 'pipeline.action';
@@ -55,12 +56,23 @@ export interface PipelineSwitches {
   /** Minutes a busy seat may hold a review with no verdict. 0 disables. Default 15. */
   review_reassign_minutes: number;
   freeze_dir: string | null;
+  /** One remote run per freeze: no separate quick check, the gate is submitted at freeze time. */
+  gate_with_quick: boolean;
+  gate_timeout_min: number;
+  quick_check_timeout_min: number;
+  /** Lane size warning threshold in changed files. 0 disables. */
+  max_lane_files: number;
+  /** Open-ladder allowlist (lowercased). Empty = anyone not denied. */
+  reviewer_allow: string[];
+  /** Shared service profiles (lowercased): seats on one are independent of each other. */
+  service_profiles: string[];
 }
 
 type ExecResult = { code: number; stdout: string };
-let execForTest: ((argv: string[]) => ExecResult) | null = null;
+export interface ExecOptions { cwd?: string; env?: Record<string, string>; timeoutMs?: number }
+let execForTest: ((argv: string[], opts: ExecOptions) => ExecResult) | null = null;
 
-export function setPipelineExecForTest(fn: ((argv: string[]) => ExecResult) | null): void {
+export function setPipelineExecForTest(fn: ((argv: string[], opts: ExecOptions) => ExecResult) | null): void {
   execForTest = fn;
 }
 
@@ -71,6 +83,8 @@ export function pipelineOf(project: string | null): PipelineSwitches {
     quick_check_command: null, push_command: null, gate_command: null, review_routes: {}, review_deny: [],
     lane_deny: [], agent_deny: [], reviewer_prefer: {}, reviewer_pool_by_author_glob: {},
     review_reassign_minutes: 15, freeze_dir: null,
+    gate_with_quick: false, gate_timeout_min: 120, quick_check_timeout_min: 20, max_lane_files: 40,
+    reviewer_allow: [], service_profiles: [],
   };
   if (!raw) return off;
   const reviewDeny = (raw.review_deny ?? []).map((s) => s.toLowerCase());
@@ -92,7 +106,17 @@ export function pipelineOf(project: string | null): PipelineSwitches {
     reviewer_pool_by_author_glob: lowerMap(raw.reviewer_pool_by_author_glob),
     review_reassign_minutes: reassignMinutes(raw.review_reassign_minutes),
     freeze_dir: raw.freeze_dir ?? null,
+    gate_with_quick: raw.gate_with_quick === true,
+    gate_timeout_min: minutesOr(raw.gate_timeout_min, 120),
+    quick_check_timeout_min: minutesOr(raw.quick_check_timeout_min, 20),
+    max_lane_files: minutesOr(raw.max_lane_files, 40),
+    reviewer_allow: (raw.reviewer_allow ?? []).map((s) => s.toLowerCase()),
+    service_profiles: (raw.service_profiles ?? []).map((s) => s.toLowerCase()),
   };
+}
+
+function minutesOr(raw: number | undefined, fallback: number): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : fallback;
 }
 
 function lowerMap(raw: Record<string, string[]> | undefined): Record<string, string[]> {
@@ -110,7 +134,23 @@ function reassignMinutes(raw: number | undefined): number {
 }
 
 function fill(template: string[], vars: Record<string, string>): string[] {
-  return template.map((arg) => arg.replace(/\{(workspace|lane|sha|remote|project)\}/g, (_, key: string) => vars[key] ?? ''));
+  return template.map((arg) => arg.replace(/\{(workspace|lane|sha|remote|project|checkout)\}/g, (_, key: string) => vars[key] ?? ''));
+}
+
+/**
+ * Environment for a quick check or gate: the exact SHA and lane, and the
+ * author's name as the dispatcher's `who` (agents set COUNTIX_REMOTE_TEST_WHO
+ * themselves today; the receipts keep attributing the run to the author).
+ */
+function runEnv(vars: { sha: string; lane: string; author: string; checkout?: string }): Record<string, string> {
+  const env: Record<string, string> = {
+    WAVECODE_SHA: vars.sha,
+    WAVECODE_LANE: vars.lane,
+    WAVECODE_AUTHOR: vars.author,
+    COUNTIX_REMOTE_TEST_WHO: vars.author,
+  };
+  if (vars.checkout) env.WAVECODE_CHECKOUT = vars.checkout;
+  return env;
 }
 
 /** Branch names git accepts, with no shell metacharacters. */
@@ -136,16 +176,80 @@ export function laneRefError(project: string, lane: string): string | null {
   return null;
 }
 
-async function runArgv(argv: string[]): Promise<ExecResult> {
+async function runArgv(argv: string[], opts: ExecOptions = {}): Promise<ExecResult> {
   if (argv.length === 0) return { code: 1, stdout: '' };
-  if (execForTest) return execForTest(argv);
+  if (execForTest) return execForTest(argv, opts);
   try {
-    const stdout = await execFileAsync(argv[0], argv.slice(1), { timeout: 20000, maxBuffer: 2 * 1024 * 1024 });
+    const stdout = await execFileAsync(argv[0], argv.slice(1), {
+      timeout: opts.timeoutMs ?? 20000,
+      maxBuffer: 4 * 1024 * 1024,
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+    });
     return { code: 0, stdout };
   } catch (e) {
-    const err = e as { status?: number | null; stdout?: string };
-    return { code: typeof err.status === 'number' ? err.status : 1, stdout: String(err.stdout ?? '') };
+    const err = e as { status?: number | null; code?: number | string | null; stdout?: string; killed?: boolean };
+    const code = typeof err.status === 'number' ? err.status : typeof err.code === 'number' ? err.code : 1;
+    return { code, stdout: String(err.stdout ?? '') };
   }
+}
+
+/**
+ * The freeze's exact SHA must already be on the remote lane branch: agents push
+ * their lane themselves before they freeze, and WaveCode never pushes for them.
+ * Null when it is; otherwise the reason. Unknown repos and lanes are not checked.
+ */
+export async function pushedShaError(project: string, lane: string | null, sha: string): Promise<string | null> {
+  const repo = projectRepo(project);
+  if (!repo || !lane || !SAFE_LANE.test(lane)) return null;
+  const spec = mainSpec(project);
+  try {
+    await git(repo, ['fetch', '--quiet', spec.remote, lane]);
+  } catch (e) {
+    const message = (e as Error).message ?? '';
+    if (/couldn't find remote ref|not found|no such ref/i.test(message)) return `${lane} is not on ${spec.remote} — push the lane first`;
+    logger.debug({ project, lane, error: message }, 'Lane fetch failed; push check skipped');
+    return null;
+  }
+  try {
+    await git(repo, ['merge-base', '--is-ancestor', sha, `${spec.remote}/${lane}`]);
+    return null;
+  } catch {
+    let tip = '';
+    try { tip = (await git(repo, ['rev-parse', '--short=9', `${spec.remote}/${lane}`])) || ''; } catch { /* no tip */ }
+    return `${sha.slice(0, 9)} is not on ${spec.remote}/${lane}${tip ? ` (remote tip ${tip})` : ''} — push the exact SHA first`;
+  }
+}
+
+/** A clean detached checkout of the exact SHA for a gate run. Removed by `dropCheckout`. */
+async function makeCheckout(project: string, lane: string | null, sha: string): Promise<string | null> {
+  const repo = projectRepo(project);
+  if (!repo) return null;
+  const dir = path.join(path.dirname(repo), '.wavecode-gates', `${path.basename(repo)}-${sha.slice(0, 9)}`);
+  try {
+    if (lane && SAFE_LANE.test(lane)) {
+      try { await git(repo, ['fetch', '--quiet', mainSpec(project).remote, lane]); } catch { /* the SHA may already be local */ }
+    }
+    if (fs.existsSync(dir)) {
+      try { await git(repo, ['worktree', 'remove', '--force', dir]); } catch { fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    await git(repo, ['worktree', 'add', '--detach', dir, sha]);
+    return dir;
+  } catch (e) {
+    logger.warn({ project, sha, error: (e as Error).message }, 'Gate checkout failed');
+    return null;
+  }
+}
+
+async function dropCheckout(project: string, dir: string | null): Promise<void> {
+  if (!dir) return;
+  const repo = projectRepo(project);
+  try {
+    if (repo) await git(repo, ['worktree', 'remove', '--force', dir]);
+  } catch { /* fall through */ }
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* already gone */ }
+  try { if (repo) await git(repo, ['worktree', 'prune']); } catch { /* best effort */ }
 }
 
 async function git(repo: string, args: string[]): Promise<string> {
@@ -267,18 +371,32 @@ async function publishFreeze(opts: {
   const refused = laneRefError(opts.project, opts.lane);
   if (refused) return { ok: false, error: refused };
   const spec = mainSpec(opts.project);
-  const vars = { workspace: opts.workspace, lane: opts.lane, sha: opts.sha, remote: spec.remote, project: opts.project };
+  const vars = { workspace: opts.workspace, lane: opts.lane, sha: opts.sha, remote: spec.remote, project: opts.project, checkout: opts.workspace };
   if (opts.pipe.push_command?.length) {
-    const pushed = await runArgv(fill(opts.pipe.push_command, vars));
+    const pushed = await runArgv(fill(opts.pipe.push_command, vars), { cwd: opts.workspace, timeoutMs: 60_000 });
     if (pushed.code !== 0) {
       const text = `push of ${opts.lane} failed. The freeze was not written.`;
       tell(opts.author.id, text);
       note(opts.project, opts.lane, opts.sha, 'push', `auto: push failed for ${opts.lane}`);
       return { ok: false, error: text };
     }
+  } else {
+    // No push command: the author pushed. The exact SHA must be on the remote lane.
+    const missing = await pushedShaError(opts.project, opts.lane, opts.sha);
+    if (missing) {
+      const text = `freeze refused: ${missing}. The freeze was not written.`;
+      tell(opts.author.id, text);
+      note(opts.project, opts.lane, opts.sha, 'push', `auto: freeze refused — ${missing}`);
+      return { ok: false, error: text };
+    }
   }
-  if (opts.pipe.quick_check_command?.length) {
-    const checked = await runArgv(fill(opts.pipe.quick_check_command, vars));
+  // With gate_with_quick the full gate is the one remote run per freeze; the quick check is the author's.
+  if (opts.pipe.quick_check_command?.length && !opts.pipe.gate_with_quick) {
+    const checked = await runArgv(fill(opts.pipe.quick_check_command, vars), {
+      cwd: opts.workspace,
+      env: runEnv({ sha: opts.sha, lane: opts.lane, author: opts.author.name, checkout: opts.workspace }),
+      timeoutMs: Math.max(1, opts.pipe.quick_check_timeout_min) * 60_000,
+    });
     if (checked.code !== 0) {
       const text = `quick check failed on ${opts.sha.slice(0, 8)}. The freeze was not written.`;
       tell(opts.author.id, text);
@@ -350,7 +468,38 @@ export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: s
     autoPick: review?.auto_pick !== false,
     reviewTagIds: reviewTagIds(),
     load: loadFor,
+    minCapacityPct: minCapacityPct(),
+    allow: pipe.reviewer_allow,
+    serviceProfiles: pipe.service_profiles,
   });
+}
+
+/** One sentence about a first pass already on file, for the reviewer's ping. */
+function firstPassSentence(sha: string): string | null {
+  const fp = firstPassFor(sha);
+  if (!fp) return null;
+  const word = fp.result === 'pass' ? 'PASS' : `NEEDS FIXES (${fp.issues} issue${fp.issues === 1 ? '' : 's'})`;
+  return `First pass${fp.seat ? ` by @${fp.seat}` : ''}: ${word}, see ${fp.file} — a checklist, your verdict decides.`;
+}
+
+/** A size warning when the lane changes more files than `max_lane_files`. Noted once per SHA. */
+async function laneSizeSentence(freeze: ReleaseFreeze, pipe: PipelineSwitches): Promise<string | null> {
+  if (!pipe.max_lane_files || !freeze.project) return null;
+  const repo = projectRepo(freeze.project);
+  if (!repo) return null;
+  try {
+    const mainRef = await resolveMainRef(repo, freeze.project);
+    if (!mainRef) return null;
+    const n = (await changedFiles(repo, freeze.sha, mainRef)).length;
+    if (n <= pipe.max_lane_files) return null;
+    if (!acted(`${freeze.sha}:size`, PIPELINE_ACTION)) {
+      emit(PIPELINE_ACTION, 'run', `${freeze.sha}:size`, { action: 'size', sha: freeze.sha, project: freeze.project, lane: freeze.lane, files: n, limit: pipe.max_lane_files, note: `auto: large lane — ${n} files changed (limit ${pipe.max_lane_files})` }, null);
+      note(freeze.project, freeze.lane, freeze.sha, 'size', `auto: large lane — ${n} files changed (limit ${pipe.max_lane_files})`);
+    }
+    return `Large lane: ${n} files changed (limit ${pipe.max_lane_files}) — review in chunks and ask for a split if it is more than one change.`;
+  } catch {
+    return null;
+  }
 }
 
 async function deltaSentence(project: string, lane: string, sha: string): Promise<string | null> {
@@ -381,15 +530,17 @@ async function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 
   }
   const delta = freeze.lane ? await deltaSentence(freeze.project, freeze.lane, freeze.sha) : null;
   const sha8 = freeze.sha.slice(0, 8);
+  const extras = [firstPassSentence(freeze.sha), await laneSizeSentence(freeze, pipe)].filter((s): s is string => !!s);
+  const tail = extras.length ? ` ${extras.join(' ')}` : '';
   const text = delta
-    ? `[from WaveCode] ${delta}. New SHA ${sha8} on ${freeze.lane}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).`
-    : `[from WaveCode] Please review freeze ${sha8} on ${freeze.lane ?? 'the lane'} by @${author.data.name}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).`;
+    ? `[from WaveCode] ${delta}. New SHA ${sha8} on ${freeze.lane}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).${tail}`
+    : `[from WaveCode] Please review freeze ${sha8} on ${freeze.lane ?? 'the lane'} by @${author.data.name}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).${tail}`;
   deliverSystemLine(reviewer, text, { kind: 'info', source: 'review' });
   emit('pipeline.review', 'run', `${freeze.sha}:${kind}`, {
     sha: freeze.sha, reviewer_id: reviewer.id, kind, assigned_at_ms: Date.now(), reassigned: false,
   }, null);
   if (!freeze.verdict) setFreezeReviewer(freeze.sha, { id: reviewer.id, name: reviewer.name });
-  const own = sameOwnerPoolReviewer(author.data, reviewer, pipe.reviewer_pool_by_author_glob)
+  const own = sameOwnerPoolReviewer(author.data, reviewer, pipe.reviewer_pool_by_author_glob, pipe.service_profiles)
     ? ` — ${SAME_OWNER_POOL_NOTE}`
     : '';
   const shown = kind === 'green'
@@ -437,7 +588,7 @@ export function reassignWaitingReviews(now = Date.now()): number {
     deliverSystemLine(next, ask, { kind: 'info', source: 'review' });
     const from = current.data.alias ?? current.data.name;
     const to = next.alias ?? next.name;
-    const own = sameOwnerPoolReviewer(author.data, next, pipe.reviewer_pool_by_author_glob)
+    const own = sameOwnerPoolReviewer(author.data, next, pipe.reviewer_pool_by_author_glob, pipe.service_profiles)
       ? ` — ${SAME_OWNER_POOL_NOTE}`
       : '';
     const text = `reassigned @${from} → @${to} (busy, no verdict)${own}`;
@@ -459,6 +610,28 @@ function gateWord(stdout: string): 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED' | null
   return null;
 }
 
+/**
+ * The gate's word once the command has returned. A tool that waits for the
+ * remote suite answers with its exit code (0 green, 1 red); 7 is the
+ * dispatcher's "same SHA already running or queued", which the tests history
+ * then reports. A submit-only tool prints QUEUED or RUNNING instead.
+ */
+export function gateOutcome(result: ExecResult): 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED' {
+  // Only the last line speaks for the outcome: "queued #2" earlier in a waiting tool's output is history.
+  const last = result.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() ?? '';
+  const word = gateWord(last);
+  if (result.code === 0) return word && word !== 'GREEN' ? word : 'GREEN';
+  if (result.code === 7) return 'QUEUED';
+  return word === 'GREEN' ? 'GREEN' : 'RED';
+}
+
+/**
+ * One full gate per SHA, submitted the moment the freeze lands and run in a
+ * clean detached checkout of the exact SHA, with the author as `who`. The
+ * freeze shows QUEUED at once; the final word lands when the command returns,
+ * which for a tool that waits on the remote suite is as long as the suite.
+ * Callers do not await this.
+ */
 async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
   if (!freeze.project) return;
   if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
@@ -466,14 +639,28 @@ async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
   if (!pipe.auto_gate || !pipe.gate_command?.length) return;
   if (acted(`${freeze.sha}:full`, GATED)) return;
   const spec = mainSpec(freeze.project);
+  const sha8 = freeze.sha.slice(0, 8);
+  setFreezeGate(freeze.sha, 'QUEUED');
+  emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: 'QUEUED' }, null);
+  note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate submitted on ${sha8}`);
+  const checkout = await makeCheckout(freeze.project, freeze.lane, freeze.sha);
+  const author = freeze.author_name ?? 'wavecode';
   const argv = fill(pipe.gate_command, {
-    sha: freeze.sha, lane: freeze.lane ?? '', workspace: '', remote: spec.remote, project: freeze.project,
+    sha: freeze.sha, lane: freeze.lane ?? '', workspace: checkout ?? '', checkout: checkout ?? '', remote: spec.remote, project: freeze.project,
   });
-  const result = await runArgv(argv);
-  const word = gateWord(result.stdout) ?? (result.code === 0 ? 'QUEUED' : 'RED');
+  const result = await runArgv(argv, {
+    ...(checkout ? { cwd: checkout } : {}),
+    env: runEnv({ sha: freeze.sha, lane: freeze.lane ?? '', author, ...(checkout ? { checkout } : {}) }),
+    timeoutMs: Math.max(1, pipe.gate_timeout_min) * 60_000,
+  });
+  await dropCheckout(freeze.project, checkout);
+  const word = gateOutcome(result);
   setFreezeGate(freeze.sha, word);
-  emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: word }, null);
-  note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate ${word} on ${freeze.sha.slice(0, 8)}`);
+  emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: word, exit_code: result.code }, null);
+  note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate ${word} on ${sha8}`);
+  if (word === 'RED') {
+    tell(freeze.author_agent_id, `[from WaveCode] full gate RED on ${sha8} (${freeze.lane ?? 'lane'}). Read the failing step with countix-remote-test log, fix, push, and refreeze.`);
+  }
   if (word === 'GREEN') {
     pingReviewersForGreenSha(freeze.sha);
     const fresh = getFreeze(freeze.sha);
@@ -764,14 +951,99 @@ export async function onMainAdvanced(project: string, mainSha?: string): Promise
   }
 }
 
+/** Freezes refused because the SHA was not on the remote lane yet; re-checked on the tick. */
+const refusedFreezes = new Map<string, number>();
+const REFUSED_RECHECK_MS = 2 * 60_000;
+const REFUSED_TTL_MS = 12 * 60 * 60_000;
+
 export async function onFreezeRecorded(sha: string): Promise<void> {
   const freeze = getFreeze(sha);
   if (!freeze || (freeze.status !== 'open' && freeze.status !== 'behind-main')) return;
   if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
-  try { await queueFullGate(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'); }
+  const pipe = pipelineOf(freeze.project);
+  if (freeze.project && (pipe.auto_gate || pipe.auto_review)) {
+    const missing = await pushedShaError(freeze.project, freeze.lane, sha);
+    if (missing) {
+      refusedFreezes.set(sha, Date.now());
+      if (!acted(sha, 'pipeline.refused')) {
+        emit('pipeline.refused', 'run', sha, { sha, project: freeze.project, lane: freeze.lane, reason: missing }, null);
+        note(freeze.project, freeze.lane, sha, 'push', `auto: freeze refused — ${missing}`);
+        tell(freeze.author_agent_id, `[from WaveCode] freeze ${sha.slice(0, 8)} on hold: ${missing}. Push the exact SHA; WaveCode re-checks every few minutes.`);
+      }
+      return;
+    }
+    refusedFreezes.delete(sha);
+  }
+  // The gate runs for as long as the remote suite takes; the review starts now.
+  void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
+  try { await requestFirstPassFor(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'First pass skipped'); }
   try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
   try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
 }
+
+async function requestFirstPassFor(freeze: ReleaseFreeze): Promise<void> {
+  if (!freeze.project || !freeze.author_agent_id) return;
+  const pipe = pipelineOf(freeze.project);
+  if (!pipe.auto_review) return;
+  const author = getAgent(freeze.author_agent_id);
+  if (!author.ok) return;
+  const result = await requestFirstPass(freeze, author.data, {
+    repo: projectRepo(freeze.project), remote: mainSpec(freeze.project).remote,
+    serviceProfiles: pipe.service_profiles, deny: pipe.review_deny,
+  });
+  if (result.ok) {
+    note(freeze.project, freeze.lane, freeze.sha, 'first-pass', `auto: first pass asked from @${result.data.seat.alias ?? result.data.seat.name}`);
+  } else if (result.error !== 'off' && result.error !== 'already requested') {
+    note(freeze.project, freeze.lane, freeze.sha, 'first-pass', `auto: no first pass — ${result.error}`);
+  }
+}
+
+function announceFirstPass(result: FirstPassResult): void {
+  const freeze = getFreeze(result.sha);
+  if (!freeze?.project) return;
+  const sha8 = result.sha.slice(0, 8);
+  const word = result.result === 'pass' ? 'PASS' : `NEEDS FIXES (${result.issues} issue${result.issues === 1 ? '' : 's'})`;
+  const by = result.seat ? ` by @${result.seat}` : '';
+  note(freeze.project, freeze.lane, freeze.sha, 'first-pass', `auto: first pass${by} — ${word}`);
+  if (freeze.reviewer_agent_id && !freeze.verdict) {
+    const reviewer = getAgent(freeze.reviewer_agent_id);
+    if (reviewer.ok) {
+      deliverSystemLine(reviewer.data, `[from WaveCode] First pass on ${sha8}${by}: ${word}, see ${result.file}. Use it as a checklist; your verdict decides.`, { kind: 'info', source: 'first-pass' });
+    }
+  }
+  if (result.result === 'needs-fixes') {
+    tell(freeze.author_agent_id, `[from WaveCode] First pass on ${sha8}${by}: NEEDS FIXES, ${result.issues} issue${result.issues === 1 ? '' : 's'} in ${result.file}. Fix what is real now, push, and refreeze; the reviewer has the same list.`);
+  }
+}
+
+/**
+ * Periodic pipeline work beyond review reassignment: re-check freezes that
+ * were refused for an unpushed SHA, and note first passes that never arrived.
+ */
+export async function pipelineTick(now = Date.now()): Promise<void> {
+  for (const [sha, at] of [...refusedFreezes.entries()]) {
+    if (now - at > REFUSED_TTL_MS) { refusedFreezes.delete(sha); continue; }
+    if (now - at < REFUSED_RECHECK_MS) continue;
+    refusedFreezes.set(sha, now);
+    const freeze = getFreeze(sha);
+    if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { refusedFreezes.delete(sha); continue; }
+    if (await pushedShaError(freeze.project, freeze.lane, sha)) continue;
+    refusedFreezes.delete(sha);
+    note(freeze.project, freeze.lane, sha, 'push', `auto: ${sha.slice(0, 8)} is now on the remote lane — continuing`);
+    await onFreezeRecorded(sha);
+  }
+  for (const req of overdueFirstPasses(now)) {
+    const freeze = getFreeze(req.sha);
+    if (!freeze?.project) continue;
+    note(freeze.project, freeze.lane, req.sha, 'first-pass', `auto: no first pass from @${req.seat} after ${Math.round((now - req.atMs) / 60_000)} min — the reviewer continues without it`);
+  }
+}
+
+export function resetPipelineForTest(): void {
+  refusedFreezes.clear();
+}
+
+firstPassHooks.onResult = announceFirstPass;
 
 export async function onStagingDeployed(releaseId: string): Promise<void> {
   const release = getRelease(releaseId);

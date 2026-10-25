@@ -8,7 +8,12 @@ vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('./notifications.js', () => ({ notify: vi.fn(async () => undefined) }));
 
-const review = {
+const review: {
+  auto_review: boolean; default_reviewer: string; self_review: boolean; max_fix_loops: number;
+  require_pass_to_promote: boolean; gate_dependents_on_approval: boolean; auto_pick: boolean; freeze_inbox: string[];
+  min_capacity_pct?: number;
+  first_pass?: { enabled?: boolean; seats?: string[]; dir?: string; timeout_min?: number };
+} = {
   auto_review: false, default_reviewer: 'codex3', self_review: true, max_fix_loops: 2,
   require_pass_to_promote: false, gate_dependents_on_approval: false, auto_pick: true, freeze_inbox: [] as string[],
 };
@@ -24,8 +29,10 @@ import { commitsBehind } from './lane-main.js';
 import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
-  considerAutoStage, drainStagingQueue, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, reassignWaitingReviews, setPipelineExecForTest,
+  considerAutoStage, drainStagingQueue, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
+  reassignWaitingReviews, resetPipelineForTest, setPipelineExecForTest, type ExecOptions,
 } from './lane-pipeline.js';
+import { firstPassFor, recordFirstPassFile } from './first-pass.js';
 import { listPendingReviews } from './review-queue.js';
 import { ensureReleaseFreezeTable, getFreeze, ingestFreezeFile, listReviewFreezes, setFetchDisabledForTest } from './release-freezes.js';
 import { loadDevLanes, requestLaneReview } from './dev-lanes.js';
@@ -33,6 +40,7 @@ import { auditTrail, listReleases, reportRelease, verifyStaging } from './releas
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const calls: string[][] = [];
+const optsSeen: Array<{ argv: string[]; opts: ExecOptions }> = [];
 
 function git(repo: string, ...args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env }).trim();
@@ -63,8 +71,11 @@ describe('hands-free lane pipeline', () => {
     fs.mkdirSync(repo);
     db.initDb(path.join(tmp, 't.db'));
     calls.length = 0;
-    setPipelineExecForTest((argv) => {
+    optsSeen.length = 0;
+    resetPipelineForTest();
+    setPipelineExecForTest((argv, opts) => {
       calls.push(argv);
+      optsSeen.push({ argv, opts: { ...opts, ...(opts.cwd ? { cwd: opts.cwd, cwdExisted: fs.existsSync(opts.cwd) } : {}) } as ExecOptions });
       const text = argv.join(' ');
       if (text.includes('quick-fail')) return { code: 1, stdout: 'RED' };
       if (text.includes('gate-run')) return { code: 0, stdout: 'QUEUED\nGREEN' };
@@ -562,12 +573,29 @@ describe('hands-free lane pipeline', () => {
     ].join('\n'));
     (await ingestFreezeFile(file));
     (await ingestFreezeFile(file));
+    // Submitted at once, run in the background: QUEUED first, the word when the command returns.
+    expect(getFreeze(sha)?.gate).toBe('QUEUED');
+    await vi.waitFor(() => expect(getFreeze(sha)?.gate).toBe('GREEN'), { timeout: 10_000 });
     const gates = calls.filter((argv) => argv[0] === 'gate-run');
     expect(gates).toHaveLength(1);
     expect(gates[0]).toContain(sha);
-    expect(getFreeze(sha)?.gate).toBe('GREEN');
     expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/full gate GREEN/);
     expect(listReleases({ target: 'production' })).toEqual([]);
+    // The gate ran in a clean detached checkout of the exact SHA, as the author, and the checkout is gone.
+    const gateOpts = optsSeen.find((o) => o.argv[0] === 'gate-run')?.opts;
+    expect(gateOpts?.cwd).toContain('.wavecode-gates');
+    expect(gateOpts?.env?.COUNTIX_REMOTE_TEST_WHO).toBe('ales');
+    expect(gateOpts?.env?.WAVECODE_SHA).toBe(sha);
+    expect(fs.existsSync(gateOpts?.cwd ?? '/nonexistent')).toBe(false);
+    expect(git(repo, 'worktree', 'list')).not.toContain('.wavecode-gates');
+  });
+
+  it('gateOutcome: exit code decides for a tool that waits on the suite; 7 is the dispatcher duplicate', () => {
+    expect(gateOutcome({ code: 0, stdout: 'queued #2: sha abc\nRESULT: PASS' })).toBe('GREEN');
+    expect(gateOutcome({ code: 1, stdout: 'RESULT: FAIL' })).toBe('RED');
+    expect(gateOutcome({ code: 7, stdout: 'DUPLICATE: sha already running' })).toBe('QUEUED');
+    expect(gateOutcome({ code: 0, stdout: 'QUEUED' })).toBe('QUEUED');
+    expect(gateOutcome({ code: 2, stdout: '' })).toBe('RED');
   });
 
   function openNote(authorName: string, lane: string, sha: string): string {
@@ -643,5 +671,133 @@ describe('hands-free lane pipeline', () => {
     db.updateAgentStatus(codex2.id, 'idle');
     expect(reassignWaitingReviews(Date.now() + 60 * 60 * 1000)).toBe(0);
     expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+  });
+
+  it('holds a freeze whose SHA is not on the remote lane, and continues once it is pushed', async () => {
+    // A real remote: the fixture's fake origin refs are not enough for a fetch.
+    const bare = path.join(tmp, 'remote.git');
+    execFileSync('git', ['init', '-q', '--bare', bare], { env });
+    git(repo, 'remote', 'add', 'origin', bare);
+    git(repo, 'push', '-q', 'origin', 'main');
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    const author = agent('ales', path.join(tmp, 'ales'));
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    pipe.auto_gate = true;
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { codex: ['codex3'] };
+
+    expect(await pushedShaError('wave', 'wc-ales', sha)).toMatch(/not on origin/);
+    (await ingestFreezeFile(openNote('ales', 'wc-ales', sha)));
+    expect(getFreeze(sha)?.gate).toBeNull();
+    expect(getFreeze(sha)?.reviewer_agent_id).toBeNull();
+    expect(messages(author.id).join('\n')).toMatch(/on hold: wc-ales is not on origin/);
+    expect(messages(codex3.id).join('\n')).not.toMatch(/Please review/);
+    expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/freeze refused/);
+    expect(calls.some((argv) => argv[0] === 'gate-run')).toBe(false);
+
+    git(repo, 'push', '-q', 'origin', 'wc-ales');
+    expect(await pushedShaError('wave', 'wc-ales', sha)).toBeNull();
+    await pipelineTick(Date.now() + 3 * 60_000);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    await vi.waitFor(() => expect(getFreeze(sha)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    expect(messages(codex3.id).join('\n')).toMatch(/Please review freeze/);
+
+    // A SHA behind the pushed tip is fine; a SHA the remote never saw is not.
+    const newer = branch('wc-ales', 'lane2.txt', 'more');
+    expect(await pushedShaError('wave', 'wc-ales', newer)).toMatch(/is not on origin\/wc-ales/);
+  });
+
+  it('skips a reviewer whose plan is below the capacity floor', async () => {
+    const { ensureUsageTable } = await import('./usage-probe.js');
+    ensureUsageTable();
+    const store = (runtime: string, profile: string, left: number) => db.getDb().prepare(
+      'INSERT OR REPLACE INTO profile_usage (runtime, profile, data, probed_at) VALUES (?, ?, ?, ?)',
+    ).run(runtime, profile, JSON.stringify({ runtime, profile, summary: `${left}% left`, probed_at: 'now', metrics: [{ label: 'weekly', left_pct: left, used_pct: 100 - left, resets: null }] }), 'now');
+    store('codex', 'low', 4);
+    store('codex', 'ok', 60);
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex2 = db.getAgent(agent('codex2', path.join(tmp, 'codex2')).id).data!;
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    db.getDb().prepare('UPDATE agents SET profile = ? WHERE id = ?').run('low', codex2.id);
+    db.getDb().prepare('UPDATE agents SET profile = ? WHERE id = ?').run('ok', codex3.id);
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex2', 'codex3'] };
+    (await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha)));
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    expect(messages(codex2.id).join('\n')).not.toMatch(/Please review/);
+  });
+
+  it('seats on a service profile review each other; the open ladder honours reviewer_allow', async () => {
+    const sha = branch('wc-claude3', 'lane.txt', 'lane');
+    const author = agent('claude3', path.join(tmp, 'claude3'), 'claude-code');
+    const codex4 = agent('codex4', path.join(tmp, 'codex4'));
+    const alesCodex = agent('ales-codex2', path.join(tmp, 'ales-codex2'));
+    for (const a of [author, codex4]) db.getDb().prepare('UPDATE agents SET profile = ? WHERE id = ?').run('denis20x', a.id);
+    pipe.auto_review = true;
+    pipe.reviewer_allow = ['codex4'];
+    // Without the service profile, codex4 is "the author's other seat" and nobody is left.
+    (await ingestFreezeFile(openNote('claude3', 'wc-claude3', sha)));
+    expect(getFreeze(sha)?.reviewer_agent_id).toBeNull();
+    expect(messages(alesCodex.id).join('\n')).not.toMatch(/Please review/);
+
+    pipe.service_profiles = ['denis20x'];
+    const sha2 = branch('wc-claude3', 'lane2.txt', 'lane2');
+    (await ingestFreezeFile(openNote('claude3', 'wc-claude3', sha2)));
+    expect(getFreeze(sha2)?.reviewer_agent_id).toBe(codex4.id);
+    expect(messages(alesCodex.id).join('\n')).not.toMatch(/Please review/);
+  });
+
+  it('asks a listed seat for a first pass, announces the file to reviewer and author, and notes a missing one', async () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    const author = agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    const codex9 = agent('codex9', path.join(tmp, 'codex9'));
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex3'] };
+    review.first_pass = { enabled: true, seats: ['codex9'], dir: freezeDir, timeout_min: 20 };
+    try {
+      (await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha)));
+      expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+      const ask = messages(codex9.id).join('\n');
+      expect(ask).toMatch(/First pass, one pass only/);
+      const file = ask.match(/Write (\S+wave-firstpass-[0-9a-f]{8}-\d{8}\.md)/)?.[1];
+      expect(file).toBeTruthy();
+      expect(ask).toMatch(/Never write the word VERDICT/);
+      expect(messages(codex3.id).join('\n')).not.toMatch(/First pass/);
+      expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/review requested/);
+
+      fs.writeFileSync(file!, [
+        '# First pass: wc-claude1',
+        `SHA: ${sha}`,
+        'Lane: wc-claude1',
+        'Author: @claude1',
+        'Seat: @codex9',
+        'ISSUES:',
+        '- [HIGH] src/a.ts:12 — null deref when the list is empty',
+        '- [LOW] src/b.ts:3 — test does not cover the error branch',
+        'FIRST PASS: NEEDS FIXES',
+        '',
+      ].join('\n'));
+      // The file is not a freeze note or a verdict: the ingester refuses it.
+      expect((await ingestFreezeFile(file!)).ok).toBe(false);
+      const recorded = recordFirstPassFile(file!);
+      expect(recorded).toMatchObject({ sha, result: 'needs-fixes', issues: 2, seat: 'codex9' });
+      expect(firstPassFor(sha)?.issues).toBe(2);
+      expect(messages(codex3.id).join('\n')).toMatch(/First pass on \w{8} by @codex9: NEEDS FIXES \(2 issues\)/);
+      expect(messages(author.id).join('\n')).toMatch(/First pass on \w{8} by @codex9: NEEDS FIXES, 2 issues/);
+      expect(getFreeze(sha)?.verdict).toBeNull();
+      expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/first pass by @codex9 — NEEDS FIXES/);
+
+      // A second freeze whose first pass never arrives is noted once after the timeout.
+      const sha2 = branch('wc-claude1', 'lane2.txt', 'lane2');
+      (await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha2)));
+      await pipelineTick(Date.now() + 21 * 60_000);
+      expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/no first pass from @codex9 after 21 min/);
+      await pipelineTick(Date.now() + 22 * 60_000);
+      expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/no first pass from @codex9 after 21 min/);
+    } finally {
+      review.first_pass = undefined;
+    }
   });
 });

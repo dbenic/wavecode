@@ -59,6 +59,9 @@ function choose(
     defaultReviewer: extra.defaultReviewer ?? null,
     autoPick: extra.autoPick ?? true,
     reviewTagIds: extra.reviewTagIds ?? new Set<string>(),
+    minCapacityPct: extra.minCapacityPct,
+    allow: extra.allow,
+    serviceProfiles: extra.serviceProfiles,
     load: (agent) => ({
       busy: agent.status === 'working' || agent.status === 'error',
       openReviews: 0,
@@ -329,5 +332,38 @@ describe('live reviewer load', () => {
     expect(loads.map((row) => row.name)).toEqual(['codex2', 'claude2', 'codex3']);
     expect(loads.find((row) => row.name === 'codex2')).toMatchObject({ busy: true, queue: 1 });
     expect(loads.find((row) => row.name === 'codex3')).toMatchObject({ busy: false, queue: 0 });
+  });
+});
+
+describe('capacity, allowlist and service profiles', () => {
+  const claude = seat('claude1', { runtime: 'claude-code' });
+
+  it('skips a seat whose plan is below the floor; an unprobed seat stays eligible', () => {
+    const codex2 = seat('codex2');
+    const codex3 = seat('codex3');
+    expect(choose(claude, [codex2, codex3], { prefer: { claude: ['codex2', 'codex3'] } }, { codex2: { leftPct: 4 } })?.name).toBe('codex3');
+    expect(choose(claude, [codex2, codex3], { prefer: { claude: ['codex2', 'codex3'] } }, { codex2: { leftPct: null } })?.name).toBe('codex2');
+    expect(choose(claude, [codex2], { prefer: { claude: ['codex2'] } }, { codex2: { leftPct: 9 } })).toBeNull();
+    expect(choose(claude, [codex2], { prefer: { claude: ['codex2'] }, minCapacityPct: 5 }, { codex2: { leftPct: 9 } })?.name).toBe('codex2');
+  });
+
+  it('limits the open ladder to reviewer_allow but keeps prefer tiers and pools', () => {
+    const codex4 = seat('codex4');
+    const alesCodex = seat('ales-codex2');
+    expect(choose(claude, [codex4, alesCodex], { allow: ['codex4'] })?.name).toBe('codex4');
+    expect(choose(claude, [alesCodex], { allow: ['codex4'] })).toBeNull();
+    expect(choose(claude, [alesCodex], { allow: ['codex4'], prefer: { claude: ['ales-codex2'] } })?.name).toBe('ales-codex2');
+  });
+
+  it('treats seats on a service profile as independent of each other', () => {
+    const author = seat('claude3', { runtime: 'claude-code', profile: 'denis20x' });
+    const codex4 = seat('codex4', { profile: 'denis20x' });
+    expect(samePerson(author, codex4)).toBe(true);
+    expect(samePerson(author, codex4, ['denis20x'])).toBe(false);
+    expect(samePerson(seat('ales-claude1', { profile: 'ales' }), seat('ales-codex2', { profile: 'ales' }), ['denis20x'])).toBe(true);
+    expect(choose(author, [codex4], { prefer: { claude: ['codex4'] } })).toBeNull();
+    expect(choose(author, [codex4], { prefer: { claude: ['codex4'] }, serviceProfiles: ['denis20x'] })?.name).toBe('codex4');
+    expect(sameOwnerPoolReviewer(author, codex4, { 'claude*': ['codex4'] })).toBe(true);
+    expect(sameOwnerPoolReviewer(author, codex4, { 'claude*': ['codex4'] }, ['denis20x'])).toBe(false);
   });
 });

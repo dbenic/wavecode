@@ -8,7 +8,8 @@ vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() } }));
 const paths: { inbox_watch?: string[] } = {};
 const artifacts = { storage: '', retention_days: 30 };
-vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ paths, artifacts, projects: {} })) }));
+const review: { freeze_inbox?: string[] } = {};
+vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ paths, artifacts, review, projects: {} })) }));
 
 import * as db from './db.js';
 import { emit } from './event-bus.js';
@@ -24,6 +25,7 @@ beforeEach(() => {
   db.initDb(path.join(tmp, 't.db'));
   paths.inbox_watch = [path.join(tmp, 'from-fable')];
   artifacts.storage = path.join(tmp, 'store');
+  review.freeze_inbox = undefined;
 });
 afterEach(() => { resetInboxWatchForTest(); db.resetDbForTest(); fs.rmSync(tmp, { recursive: true, force: true }); });
 
@@ -124,4 +126,50 @@ describe('hand-off folder watcher', () => {
     expect(typed.some((t) => t.includes('claude1-new.md'))).toBe(true);
     expect(typed.some((t) => t.includes('claude1-old.md'))).toBe(false);
   }, 10000);
+});
+
+describe('shared inbox routing', () => {
+  it('"<author>-to-<recipient>-…" goes to the recipient, never to the author', () => {
+    const codex6 = agent('codex6');
+    const codex3 = agent('codex3');
+    const dir = path.join(tmp, 'from-fable'); fs.mkdirSync(dir);
+    const file = path.join(dir, 'codex6-to-codex3-four-lanes-main-sync-review-20261025.md');
+    fs.writeFileSync(file, '# four lanes\n\nplease review the sync\n');
+    announceFile(file, 'inbox');
+    expect(vi.mocked(sessionManager.sendKeys).mock.calls.map((c) => c[0])).toEqual([codex3.id]);
+    expect(db.listAgentMessages({ to_agent_id: codex6.id })).toHaveLength(0);
+
+    // An unknown recipient after "-to-" is unrouted, not handed back to the author.
+    const stray = path.join(dir, 'codex6-to-maestro-status.md');
+    fs.writeFileSync(stray, 'status\n');
+    announceFile(stray, 'inbox');
+    expect(vi.mocked(sessionManager.sendKeys).mock.calls.map((c) => c[0])).toEqual([codex3.id]);
+    expect(db.listAgentMessages({ limit: 10 }).some((m) => m.message.startsWith('unrouted hand-off:') && m.message.includes('codex6-to-maestro'))).toBe(true);
+  });
+
+  it('in a freeze inbox only addressed text files are announced; logs, freezes and verdicts are left alone; first-pass files are recorded', () => {
+    const codex3 = agent('codex3');
+    const codex7 = agent('codex7');
+    const dir = path.join(tmp, 'inbox'); fs.mkdirSync(dir);
+    review.freeze_inbox = [dir];
+    paths.inbox_watch = [dir];
+    const write = (name: string, body: string) => { const f = path.join(dir, name); fs.writeFileSync(f, body); announceFile(f, 'inbox'); return f; };
+    write('codex7-brain-5a0cfed62-evidence-20261025.md', '# evidence\n');
+    write('codex8-review-brief91-ee371cf23-quick-20261025.log', 'RESULT: PASS\n');
+    write('codex7-freeze-5a0cfed62-20261025.md', '# freeze\nFreeze SHA: 5a0cfed62\n');
+    write('codex3-verdict-codex7-5a0cfed62-20261025.md', 'VERDICT: PASS\n');
+    expect(vi.mocked(sessionManager.sendKeys)).not.toHaveBeenCalled();
+    expect(db.listAgentMessages({ limit: 10 })).toHaveLength(0);
+
+    write('codex7-to-codex3-four-lanes-20261025.md', '# sync\n');
+    write('maestro-note-20261025.md', 'To: @codex3\n\nplease look\n');
+    expect(vi.mocked(sessionManager.sendKeys).mock.calls.map((c) => c[0])).toEqual([codex3.id, codex3.id]);
+    expect(db.listAgentMessages({ to_agent_id: codex7.id })).toHaveLength(0);
+
+    const fp = write('wave-firstpass-5a0cfed6-20261025.md', '# First pass\nSHA: 5a0cfed62e4f1b2c3d4e5f60718293a4b5c6d7e8\nSeat: @codex3\nISSUES:\n- [MED] a.ts:1 — x\nFIRST PASS: PASS\n');
+    expect(vi.mocked(sessionManager.sendKeys)).toHaveBeenCalledTimes(2);
+    const recorded = vi.mocked(emit).mock.calls.find((c) => c[0] === 'pipeline.first_pass');
+    expect(recorded?.[2]).toBe('5a0cfed62e4f1b2c3d4e5f60718293a4b5c6d7e8');
+    expect(recorded?.[3]).toMatchObject({ result: 'pass', issues: 1, seat: 'codex3', file: fp });
+  });
 });
