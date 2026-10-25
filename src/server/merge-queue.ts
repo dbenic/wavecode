@@ -24,7 +24,7 @@ import logger from './logger.js';
 import { fireMainAdvanced } from './pipeline-hooks.js';
 import { execFileAsync } from './proc.js';
 import { getFreeze, listFreezes, listVerdicts, viewShaChecks, type FreezeVerdict, type ReleaseFreeze } from './release-freezes.js';
-import { readLaneTests, testsConfigured } from './test-runs.js';
+import { freezeAgeMs, readLaneTests, readLaneTestsSparingly, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
 export type QueueState = 'waiting' | 'queued' | 'merging' | 'merged' | 'bounced' | 'superseded';
@@ -306,12 +306,39 @@ function fill(template: string[], vars: Record<string, string>): string[] {
 }
 
 /** The remote lane tip, after a fetch. Null when the lane is not on the remote. */
-async function remoteTip(repo: string, remote: string, lane: string): Promise<string | null> {
+/** Inside one refresh pass a single `ls-remote --heads` answers every lane. */
+let headsScope: Map<string, Map<string, string> | null> | null = null;
+
+async function remoteHeads(repo: string, remote: string): Promise<Map<string, string> | null> {
+  const key = `${repo}\0${remote}`;
+  if (headsScope?.has(key)) return headsScope.get(key)!;
+  const out = await tryGit(repo, ['ls-remote', '--heads', remote], 60000);
+  let heads: Map<string, string> | null = null;
+  if (out !== null) {
+    heads = new Map();
+    for (const line of out.split('\n')) {
+      const m = line.match(/^([0-9a-f]{40})\s+refs\/heads\/(.+)$/i);
+      if (m) heads.set(m[2], m[1].toLowerCase());
+    }
+  }
+  headsScope?.set(key, heads);
+  return heads;
+}
+
+/**
+ * The lane's tip on the remote. The lane is fetched only when its tip is the frozen
+ * SHA and the objects are missing: a pass over hundreds of lanes used to be one
+ * `git fetch` per lane.
+ */
+async function remoteTip(repo: string, remote: string, lane: string, want: string): Promise<string | null> {
   if (laneRefErrorFree(lane) === false) return null;
-  const fetched = await tryGit(repo, ['fetch', '--quiet', remote, lane], 60000);
-  if (fetched === null) return null;
-  const sha = await tryGit(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${lane}^{commit}`]);
-  return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+  const heads = await remoteHeads(repo, remote);
+  if (!heads) return null;
+  const sha = heads.get(lane) ?? null;
+  if (sha && sha === want.toLowerCase() && (await tryGit(repo, ['cat-file', '-e', `${sha}^{commit}`])) === null) {
+    await tryGit(repo, ['fetch', '--quiet', remote, lane], 60000);
+  }
+  return sha;
 }
 
 function laneRefErrorFree(lane: string): boolean {
@@ -392,7 +419,7 @@ function readNote(file: string | null): string | null {
 
 async function gateWords(freeze: ReleaseFreeze): Promise<{ quick: string; full: string }> {
   const runs = freeze.project && testsConfigured(freeze.project)
-    ? await readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha).catch(() => [])
+    ? (await readLaneTestsSparingly(freeze, { settled: false, pending: false }).catch(() => null)) ?? []
     : undefined;
   const view = await viewShaChecks(freeze, runs);
   return { quick: view.quick, full: view.full };
@@ -411,18 +438,18 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
   const spec = mainSpec(project);
   const mainRef = await resolveMainRef(repo, project);
   if (!mainRef) return { ...none, reason: `${spec.ref} not found` };
-  const migrationsDir = getConfig().projects?.[project]?.migrations_dir ?? null;
 
+  // Any commit after the review invalidates it: the remote lane must still be this SHA.
+  const tip = await remoteTip(repo, spec.remote, freeze.lane, freeze.sha);
+  if (!tip) return { ...none, reason: `${freeze.lane} is not on ${spec.remote}` };
+  if (tip.toLowerCase() !== freeze.sha.toLowerCase()) return { ...none, reason: `lane moved to ${tip.slice(0, 8)} after the freeze; freeze that SHA` };
+
+  const migrationsDir = getConfig().projects?.[project]?.migrations_dir ?? null;
   const files = await changedFiles(repo, freeze.sha, mainRef).catch(() => [] as string[]);
   const note = readNote(freeze.freeze_path);
   const { tier, forced } = tierFor(note, files, cfg, migrationsDir);
   if (!tier) return { ...none, reason: 'freeze note has no TIER line (ship, show or ask)' };
   const base: Eligibility = { ...none, tier };
-
-  // Any commit after the review invalidates it: the remote lane must still be this SHA.
-  const tip = await remoteTip(repo, spec.remote, freeze.lane);
-  if (!tip) return { ...base, reason: `${freeze.lane} is not on ${spec.remote}` };
-  if (tip.toLowerCase() !== freeze.sha.toLowerCase()) return { ...base, reason: `lane moved to ${tip.slice(0, 8)} after the freeze; freeze that SHA` };
 
   const gates = await gateWords(freeze);
   if (gates.quick !== 'green' || gates.full !== 'green') return { ...base, reason: `waiting gate: quick ${gates.quick}, api ${gates.full}` };
@@ -636,14 +663,45 @@ function recoverOnce(): void {
   });
 }
 
+const MERGE_QUEUE_WINDOW_MS = 14 * 24 * 3600_000;
+
+/** The freezes a pass evaluates: the newest open one per lane, frozen within two weeks. The rest carry a reason instead. */
+function freezesToEvaluate(project: string, now = Date.now()): { open: ReleaseFreeze[]; parked: Map<string, string> } {
+  const open: ReleaseFreeze[] = [];
+  const parked = new Map<string, string>();
+  const lanesSeen = new Set<string>();
+  for (const f of listFreezes()) { // newest first
+    if (f.project !== project || !f.lane || (f.status !== 'open' && f.status !== 'behind-main')) continue;
+    if (lanesSeen.has(f.lane)) { parked.set(f.sha, `newer freeze on ${f.lane}`); continue; }
+    lanesSeen.add(f.lane);
+    const age = freezeAgeMs(f.created_at, now);
+    if (Number.isFinite(age) && age > MERGE_QUEUE_WINDOW_MS) { parked.set(f.sha, 'frozen more than 14 days ago; freeze the lane again to queue it'); continue; }
+    open.push(f);
+  }
+  return { open, parked };
+}
+
 async function refreshProject(project: string): Promise<MergeQueueRow | null> {
-  const open = listFreezes().filter((f) => f.project === project && f.lane && (f.status === 'open' || f.status === 'behind-main'));
+  headsScope = new Map();
+  try {
+    return await refreshProjectPass(project);
+  } finally {
+    headsScope = null;
+  }
+}
+
+async function refreshProjectPass(project: string): Promise<MergeQueueRow | null> {
+  const { open, parked } = freezesToEvaluate(project);
   const openShas = new Set(open.map((f) => f.sha));
   for (const row of listQueue(project)) {
-    if ((row.state === 'waiting' || row.state === 'queued') && !openShas.has(row.sha)) {
-      const freeze = getFreeze(row.sha);
-      upsert({ sha: row.sha, project, lane: row.lane, state: 'superseded', reason: `freeze ${freeze?.status ?? 'gone'}`, finished_at: new Date().toISOString() });
+    if ((row.state !== 'waiting' && row.state !== 'queued') || openShas.has(row.sha)) continue;
+    const why = parked.get(row.sha);
+    if (why) {
+      if (row.state === 'queued' || row.reason !== why) upsert({ sha: row.sha, project, lane: row.lane, state: 'waiting', reason: why, eligible_at: null });
+      continue;
     }
+    const freeze = getFreeze(row.sha);
+    upsert({ sha: row.sha, project, lane: row.lane, state: 'superseded', reason: `freeze ${freeze?.status ?? 'gone'}`, finished_at: new Date().toISOString() });
   }
   for (const freeze of open) {
     const existing = getQueueRow(freeze.sha);
@@ -707,4 +765,5 @@ export function resetMergeQueueForTest(): void {
   inflight.clear();
   recovered = false;
   execForTest = null;
+  headsScope = null;
 }

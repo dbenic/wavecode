@@ -1239,3 +1239,14 @@ parts); the merge queue runs the full suite once on the merged code; a nightly f
 main. In WaveCode: `auto_gate` stays off, and the merge queue always runs
 `merge_queue.gate_command` (default `pipeline.gate_command`) on the merge result instead of
 reusing the lane's gate when the trees matched.
+
+## Test-server polling cut (25 Oct 2026, night)
+
+The reconcile pass asked the test server for status and history on every freeze
+(4,923 of them), about 950 runner commands a minute. Now: identical reads share one
+command, at most three runner commands run at once, and a pass reads sparingly
+(`readLaneTestsSparingly`): an open freeze under three days old live, an older open one
+at most every six hours and not at all once its words are settled, a closed one from
+the cache only (unless it closed while pending). The merge queue evaluates only the
+newest open freeze per lane frozen within two weeks, and one `ls-remote --heads` per
+pass replaces a `git fetch` per lane.

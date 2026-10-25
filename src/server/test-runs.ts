@@ -366,7 +366,7 @@ export function fillTestArgv(template: string[], vars: { sha?: string | null; la
   return out;
 }
 
-type ExecFn = (argv: string[]) => string;
+type ExecFn = (argv: string[]) => string | Promise<string>;
 let testExec: ExecFn | null = null;
 let ttlMs = 20_000;
 const cache = new Map<string, { at: number; report: TestReport }>();
@@ -394,7 +394,7 @@ export function hasLogCommand(project: string | null): boolean {
 async function runCommand(argv: string[]): Promise<string | null> {
   if (argv.length === 0) return null;
   try {
-    if (testExec) return testExec(argv);
+    if (testExec) return await testExec(argv);
     return await execFileAsync(argv[0], argv.slice(1), { timeout: 8000, maxBuffer: 2 * 1024 * 1024 });
   } catch (e) {
     logger.debug({ argv: argv[0], error: (e as Error).message }, 'Test runner command failed');
@@ -402,18 +402,106 @@ async function runCommand(argv: string[]): Promise<string | null> {
   }
 }
 
-async function readCommand(project: string, which: 'status_command' | 'history_command', lane: string, sha: string): Promise<TestReport | null> {
+export interface ReadOptions {
+  /** Serve a cached report up to this old instead of asking the runner (the TTL when smaller). */
+  staleOkMs?: number;
+}
+
+/**
+ * Every runner command is an ssh to the test server. At most this many run at once;
+ * identical reads share one command; a cached report is served while it is fresh.
+ * (On 25 Oct 2026 a pass over 4,923 freezes sent ~950 commands a minute.)
+ */
+const MAX_RUNNER_COMMANDS = 3;
+let runnerActive = 0;
+const runnerWaiters: Array<() => void> = [];
+const pendingReads = new Map<string, Promise<TestReport>>();
+
+async function withRunnerSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (runnerActive >= MAX_RUNNER_COMMANDS) await new Promise<void>((resolve) => runnerWaiters.push(resolve));
+  else runnerActive++;
+  try {
+    return await fn();
+  } finally {
+    const next = runnerWaiters.shift();
+    if (next) next(); // the slot passes straight to the next waiter
+    else runnerActive--;
+  }
+}
+
+export function runnerLoadForTest(): { active: number; waiting: number; pending: number } {
+  return { active: runnerActive, waiting: runnerWaiters.length, pending: pendingReads.size };
+}
+
+async function readCommand(project: string, which: 'status_command' | 'history_command', lane: string, sha: string, opts: ReadOptions = {}): Promise<TestReport | null> {
   const cmd = projectTests(project)?.[which];
   if (!cmd?.length) return null;
   const key = `${which}:${project}:${lane}:${sha}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < ttlMs) return hit.report;
+  if (hit && Date.now() - hit.at < Math.max(ttlMs, opts.staleOkMs ?? 0)) return hit.report;
+  const joined = pendingReads.get(key);
+  if (joined) return joined;
   const argv = fillTestArgv(cmd, { lane, sha });
-  const text = await runCommand(argv);
-  const report = text ? parseTestReport(text) : null;
-  const stored = report ?? { generated_at: null, runs: [], errors: [] };
-  cache.set(key, { at: Date.now(), report: stored });
-  return stored;
+  const job = withRunnerSlot(async () => {
+    const text = await runCommand(argv);
+    const report = text ? parseTestReport(text) : null;
+    const stored = report ?? { generated_at: null, runs: [], errors: [] };
+    cache.set(key, { at: Date.now(), report: stored });
+    return stored;
+  }).finally(() => pendingReads.delete(key));
+  pendingReads.set(key, job);
+  return job;
+}
+
+function cachedReport(project: string, which: 'status_command' | 'history_command', lane: string, sha: string): TestReport | null {
+  return cache.get(`${which}:${project}:${lane}:${sha}`)?.report ?? null;
+}
+
+/** What the cache holds for the SHA, however old; null when nothing was ever read. */
+export function readCachedLaneTests(project: string, lane: string, sha: string): TestRun[] | null {
+  const status = cachedReport(project, 'status_command', lane, sha);
+  const history = cachedReport(project, 'history_command', lane, sha);
+  if (!status && !history) return null;
+  const byId = new Map<string, TestRun>();
+  for (const run of history?.runs ?? []) byId.set(run.id, run);
+  for (const run of status?.runs ?? []) byId.set(run.id, run);
+  return [...byId.values()];
+}
+
+/** Age of a freeze from its `created_at` (sqlite `datetime('now')` or ISO); NaN when unreadable. */
+export function freezeAgeMs(createdAt: string, now = Date.now()): number {
+  const text = createdAt.trim();
+  const parsed = /(?:Z|[+-]\d\d:?\d\d)$/.test(text) ? Date.parse(text) : Date.parse(`${text.replace(' ', 'T')}Z`);
+  return Number.isFinite(parsed) ? now - parsed : Number.NaN;
+}
+
+export const LIVE_TEST_WINDOW_MS = 3 * 24 * 3600_000;
+export const OLD_FREEZE_STALE_OK_MS = 6 * 3600_000;
+/** Words that a new run on the same SHA will not change. */
+export const TEST_WORDS_SETTLED: ReadonlySet<string> = new Set(['green', 'red', 'unconfigured']);
+
+/**
+ * Test runs for a reconcile pass, read sparingly. An open freeze under three days
+ * old is read live (the TTL); an older open one at most every six hours, and not at
+ * all once its words are settled; a closed freeze is answered from the cache, unless
+ * it was still pending when it closed. `null` means nothing is cached: the caller
+ * keeps the words it already has.
+ */
+export async function readLaneTestsSparingly(
+  freeze: { project: string | null; lane: string | null; sha: string; status: string; created_at: string },
+  words: { settled: boolean; pending: boolean },
+  now = Date.now(),
+): Promise<TestRun[] | null> {
+  if (!freeze.project || !testsConfigured(freeze.project)) return [];
+  const lane = freeze.lane ?? '';
+  const open = freeze.status === 'open' || freeze.status === 'behind-main';
+  if (!open) {
+    return words.pending ? readLaneTests(freeze.project, lane, freeze.sha, { staleOkMs: OLD_FREEZE_STALE_OK_MS }) : readCachedLaneTests(freeze.project, lane, freeze.sha);
+  }
+  const age = freezeAgeMs(freeze.created_at, now);
+  if (!Number.isFinite(age) || age <= LIVE_TEST_WINDOW_MS) return readLaneTests(freeze.project, lane, freeze.sha);
+  if (words.settled) return readCachedLaneTests(freeze.project, lane, freeze.sha);
+  return readLaneTests(freeze.project, lane, freeze.sha, { staleOkMs: OLD_FREEZE_STALE_OK_MS });
 }
 
 export interface LaneTests {
@@ -422,9 +510,9 @@ export interface LaneTests {
 }
 
 /** Status and history merged by id. Status wins when both name the same run. Host errors are kept. */
-export async function readLaneReport(project: string, lane: string, sha: string): Promise<LaneTests> {
-  const status = await readCommand(project, 'status_command', lane, sha);
-  const history = await readCommand(project, 'history_command', lane, sha);
+export async function readLaneReport(project: string, lane: string, sha: string, opts: ReadOptions = {}): Promise<LaneTests> {
+  const status = await readCommand(project, 'status_command', lane, sha, opts);
+  const history = await readCommand(project, 'history_command', lane, sha, opts);
   const byId = new Map<string, TestRun>();
   for (const run of history?.runs ?? []) byId.set(run.id, run);
   for (const run of status?.runs ?? []) byId.set(run.id, run);
@@ -432,8 +520,8 @@ export async function readLaneReport(project: string, lane: string, sha: string)
   return { runs: [...byId.values()], errors };
 }
 
-export async function readLaneTests(project: string, lane: string, sha: string): Promise<TestRun[]> {
-  return (await readLaneReport(project, lane, sha)).runs;
+export async function readLaneTests(project: string, lane: string, sha: string, opts: ReadOptions = {}): Promise<TestRun[]> {
+  return (await readLaneReport(project, lane, sha, opts)).runs;
 }
 
 export async function liveGateFor(project: string | null, sha: string, lane?: string | null): Promise<LiveGate | null> {

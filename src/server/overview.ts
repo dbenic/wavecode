@@ -14,7 +14,7 @@ import { commitsBehind, isMergeOnlyDelta, laneAutomationDenied, projectRepo, res
 import { behindMainLine, fullFailFlag, needsGreenFull, needsGreenQuick, QUICK_CHECK_RUNNING } from './lane-status.js';
 import { emit } from './event-bus.js';
 import { ensureReleaseTables, verificationFor, type ReleaseRequest } from './releases.js';
-import { readLaneTests, shaChecks, suiteNames, testsConfigured, type ShaChecks } from './test-runs.js';
+import { readLaneTestsSparingly, shaChecks, suiteNames, testsConfigured, type ShaChecks } from './test-runs.js';
 import { deskConfig, OPEN_STATUSES, type DeskItem } from './product-desk.js';
 import * as productDesk from './product-desk.js';
 import { linksFromIndex, loadDeskWork, trackOpenDesks, type DeskTrackingRow } from './desk-tracking.js';
@@ -293,7 +293,9 @@ function releaseCell(r: ReleaseRequest | null, verified: Map<string, { verified_
 async function liveChecks(f: ReleaseFreeze): Promise<ShaChecks | null> {
   if (!f.project || !testsConfigured(f.project)) return null;
   try {
-    return shaChecks(await readLaneTests(f.project, f.lane ?? '', f.sha), f.sha, suiteNames(f.project));
+    // a promoted SHA may still have a full run in flight; a merged one is answered from the cache
+    const runs = await readLaneTestsSparingly(f, { settled: false, pending: f.status === 'promoted' });
+    return runs ? shaChecks(runs, f.sha, suiteNames(f.project)) : null;
   } catch {
     return null;
   }

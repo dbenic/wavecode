@@ -59,7 +59,7 @@ import {
   buildLaneCards, buildReleaseView, conflictFilesFromNote, type LaneQueueFact,
   type LaneCard, type LaneFreezeFact, type ReleaseView,
 } from './lane-cards.js';
-import { readLaneTests, shaChecks, suiteNames, type TestRun } from './test-runs.js';
+import { readLaneTestsSparingly, shaChecks, suiteNames, TEST_WORDS_SETTLED, type TestRun } from './test-runs.js';
 
 export const RECONCILE_INTERVAL_MS = 90_000;
 export const RECONCILE_STALE_MS = 5 * 60 * 1000;
@@ -304,6 +304,19 @@ export function reconcileIsStale(now = Date.now()): boolean {
   return now - t > RECONCILE_STALE_MS;
 }
 
+const TEST_WORDS: readonly string[] = ['green', 'red', 'pending', 'missing', 'unconfigured', 'unknown'];
+function isTestWord(word: string | null): word is TestWord {
+  return !!word && TEST_WORDS.includes(word);
+}
+
+/** How the stored words steer the next test read: settled words are not re-read for old freezes; pending ones are. */
+function priorWords(prior: DeployRow | null): { settled: boolean; pending: boolean } {
+  return {
+    settled: !!prior && TEST_WORDS_SETTLED.has(prior.quick ?? '') && TEST_WORDS_SETTLED.has(prior.full_result ?? ''),
+    pending: !!prior && (prior.quick === 'pending' || prior.full_result === 'pending'),
+  };
+}
+
 function readRow(sha: string): DeployRow | null {
   return withTable(() => (getDb().prepare('SELECT * FROM deploy_card_states WHERE sha = ?').get(sha) as DeployRow | undefined) ?? null);
 }
@@ -529,12 +542,19 @@ async function factsFor(freeze: ReleaseFreeze, all: ReleaseFreeze[], tips: Map<s
   let quick: TestWord = 'unknown';
   let full: TestWord = 'unknown';
   try {
-    const runs = project ? await readLaneTests(project, freeze.lane ?? '', freeze.sha) : [];
-    const view = await viewShaChecks({
-      project, sha: freeze.sha, lane: freeze.lane, gate: freeze.gate, freeze_path: freeze.freeze_path,
-    }, runs);
-    quick = view.quick;
-    full = view.full;
+    const prior = readRow(freeze.sha);
+    const runs = project ? await readLaneTestsSparingly(freeze, priorWords(prior)) : [];
+    if (runs === null && prior && isTestWord(prior.quick) && isTestWord(prior.full_result)) {
+      // nothing cached for a closed or long-settled freeze: the words it already has stand
+      quick = prior.quick;
+      full = prior.full_result;
+    } else {
+      const view = await viewShaChecks({
+        project, sha: freeze.sha, lane: freeze.lane, gate: freeze.gate, freeze_path: freeze.freeze_path,
+      }, runs ?? []);
+      quick = view.quick;
+      full = view.full;
+    }
   } catch {
     quick = 'unknown';
     full = 'unknown';
@@ -664,17 +684,17 @@ async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean 
     }
     let quick: TestWord = facts.quick;
     let full: TestWord = facts.full;
-    let quickRun: TestRun | null = null;
-    let fullRun: TestRun | null = null;
+    let shown = displayTest(quick, full, null, null);
     try {
-      if (project) {
-        const runs = await readLaneTests(project, freeze.lane ?? '', freeze.sha);
+      const prior = readRow(freeze.sha);
+      const runs = project ? await readLaneTestsSparingly(freeze, priorWords(prior)) : [];
+      if (runs === null && prior) {
+        shown = { kind: prior.test_kind === 'quick' || prior.test_kind === 'full' ? prior.test_kind : null, at: prior.test_at, word: prior.test_word };
+      } else if (project && runs) {
         const checks = shaChecks(runs, freeze.sha, suiteNames(project));
-        quickRun = checks.quickRun;
-        fullRun = checks.fullRun;
+        shown = displayTest(quick, full, checks.quickRun, checks.fullRun);
       }
     } catch { /* times stay empty; the words already failed closed */ }
-    const shown = displayTest(quick, full, quickRun, fullRun);
     const labels = labelsBySha.get(freeze.sha) ?? null;
     const fresh = getFreeze(freeze.sha) ?? freeze;
     const badge = facts.containedInProd === true ? 'prod' : facts.containedInStaging === true ? 'staging' : null;

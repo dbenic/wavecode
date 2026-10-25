@@ -257,6 +257,21 @@ describe('merge queue — on a scratch repository', () => {
     expect((await evaluate(getFreeze(sha2)!)).reason).toMatch(/lane moved to [0-9a-f]{8} after the freeze/);
   });
 
+  it('parks a freeze older than two weeks instead of evaluating it every pass', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'old.txt': 'old' });
+    await freeze('ales', 'wc-ales', sha, 'ship');
+    gateGreen(sha);
+    setQueueSwitch('wave', false, 'denis');
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('queued');
+    db.getDb().prepare("UPDATE release_freezes SET created_at = datetime('now', '-15 days') WHERE sha = ?").run(sha);
+    setQueueSwitch('wave', true, 'denis');
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'waiting', reason: expect.stringMatching(/frozen more than 14 days ago/) });
+    expect(originMain()).not.toBe(sha);
+  });
+
   it('merges two queued lanes in order; the second is merged onto the new main and re-gated on the merge SHA', async () => {
     const ales = agent('ales');
     const toni = agent('toni');

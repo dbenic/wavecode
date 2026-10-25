@@ -111,3 +111,4 @@ describe('shaChecks', () => {
     expect(testChipLabel(queued)).toBe('queued (#2, waiting 2m)');
   });
 });
+
