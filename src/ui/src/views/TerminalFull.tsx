@@ -27,6 +27,9 @@ export default function TerminalFull() {
   const { id } = useParams<{ id: string }>();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [fit, setFit] = useState<'screen' | 'width'>('screen');
+  /** null = fit automatically; a number = that many px, the pane scrolls as needed. */
+  const [fontSize, setFontSize] = useState<number | null>(null);
+  const stepFont = (delta: number) => setFontSize((cur) => Math.max(6, Math.min(32, (cur ?? 12) + delta)));
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -37,6 +40,18 @@ export default function TerminalFull() {
   }, [id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // The page is the pane: keyboard shortcuts for text size (Ctrl/Cmd with - = 0).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key === '=' || e.key === '+') { e.preventDefault(); stepFont(1); }
+      else if (e.key === '-') { e.preventDefault(); stepFont(-1); }
+      else if (e.key === '0') { e.preventDefault(); setFontSize(null); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   useSSE((ev: SSEEvent) => {
     if (ev.entityType === 'agent' && ev.entityId === id && ev.type !== 'agent.output') void load();
@@ -67,7 +82,14 @@ export default function TerminalFull() {
         {agent && <StatusBadge status={agent.status} />}
         {agent?.tmux_session && <span className="hidden sm:inline font-mono text-slate-600">{agent.tmux_session}</span>}
         <span className="ml-auto flex items-center gap-1 uppercase">
-          <span className="text-slate-600">fit</span>
+          <span className="text-slate-600">text</span>
+          <button type="button" onClick={() => stepFont(-1)} className="px-2 py-0.5 rounded text-slate-400 hover:text-slate-100 font-mono" title="smaller text">A−</button>
+          <span className="font-mono text-slate-500 normal-case">{fontSize ? `${fontSize}px` : 'auto'}</span>
+          <button type="button" onClick={() => stepFont(1)} className="px-2 py-0.5 rounded text-slate-400 hover:text-slate-100 font-mono" title="larger text">A+</button>
+          {fontSize && (
+            <button type="button" onClick={() => setFontSize(null)} className="px-2 py-0.5 rounded text-slate-500 hover:text-slate-200" title="fit the text automatically again">auto</button>
+          )}
+          <span className="ml-3 text-slate-600">fit</span>
           {(['screen', 'width'] as const).map((v) => (
             <button
               key={v}
@@ -81,11 +103,11 @@ export default function TerminalFull() {
         </span>
       </div>
 
-      {fit === 'screen' ? (
+      {fit === 'screen' && !fontSize ? (
         <LiveTerminal key={`${id}-screen`} agentId={id} fit="screen" bare onUnavailable={(r) => setNote(r)} />
       ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <LiveTerminal key={`${id}-width`} agentId={id} fit="width" bare onUnavailable={(r) => setNote(r)} />
+        <div className="flex-1 min-h-0 overflow-auto">
+          <LiveTerminal key={`${id}-width`} agentId={id} fit="width" bare fontSize={fontSize} onUnavailable={(r) => setNote(r)} />
         </div>
       )}
 

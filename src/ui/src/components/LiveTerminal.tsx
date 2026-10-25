@@ -27,18 +27,20 @@ interface Props {
   fit?: 'width' | 'screen';
   /** Full-screen page: no own header, the host fills its flex parent. */
   bare?: boolean;
+  /** A fixed font size in px instead of fitting; the pane then scrolls inside the host. */
+  fontSize?: number | null;
 }
 
 interface InitMsg { t: 'init'; session: string; cols: number; rows: number; history_size: number }
 interface ErrorMsg { t: 'error'; message: string }
 
 const MIN_FONT = 5;
-const MAX_FONT = 13;
+const MAX_FONT = 18;
 const SCROLLBACK = 20000;
 const CHAR_WIDTH_RATIO = 0.62; // a monospace glyph is about this many em wide
 const LINE_HEIGHT = 1.1;
 
-export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', bare = false }: Props) {
+export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', bare = false, fontSize = null }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -56,6 +58,10 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
     const term = termRef.current;
     const host = hostRef.current;
     if (!term || !host) return;
+    if (fontSize) {
+      term.options.fontSize = fontSize;
+      return;
+    }
     const width = host.clientWidth;
     const height = fit === 'screen' ? host.clientHeight : 0;
     if (!width) return;
@@ -74,7 +80,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
       size -= 1;
       term.options.fontSize = size;
     }
-  }, [fit]);
+  }, [fit, fontSize]);
 
   const jumpToLive = useCallback(() => {
     termRef.current?.scrollToBottom();
@@ -106,12 +112,14 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
         fontSize: 12,
         lineHeight: LINE_HEIGHT,
+        // Faint CLI text (SGR 2, dark greys) is lifted to a readable contrast against the background.
+        minimumContrastRatio: 4.5,
         theme: {
           background: '#070b14',
-          foreground: '#cbd5e1',
+          foreground: '#f1f5f9',
           cursor: '#22d3ee',
           selectionBackground: 'rgba(34, 211, 238, 0.25)',
-          black: '#0f172a', brightBlack: '#475569',
+          black: '#1e293b', brightBlack: '#94a3b8',
           red: '#f87171', brightRed: '#fca5a5',
           green: '#4ade80', brightGreen: '#86efac',
           yellow: '#facc15', brightYellow: '#fde047',
@@ -216,7 +224,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
 
-  useEffect(() => { fitFont(); }, [fit, fitFont]);
+  useEffect(() => { fitFont(); }, [fit, fontSize, fitFont]);
 
   return (
     <div className={bare ? 'relative flex-1 min-h-0 flex flex-col' : 'relative'} data-testid="live-terminal">

@@ -553,6 +553,17 @@ export default function AgentView() {
                   </span>
                 )}
                 <ModelSwitch agent={agent} onApplied={(next, note) => { setAgent(next); setModelNote(note); }} />
+                {agent.terminal_live && (
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/agent/${agent.id}/terminal`)}
+                    className="rounded border border-cyan-500/40 bg-cyan-950/40 px-1.5 py-px text-[10px] font-semibold text-cyan-200 hover:bg-cyan-900/50"
+                    title="the pane as the whole screen (xterm.js, live)"
+                    data-testid="open-terminal-full"
+                  >
+                    ⛶ TERMINAL
+                  </button>
+                )}
                 {agent.usage?.summary && (
                   <span
                     className={`rounded border px-1.5 py-px text-[10px] font-semibold normal-case ${usageTone(agent.usage)}`}
