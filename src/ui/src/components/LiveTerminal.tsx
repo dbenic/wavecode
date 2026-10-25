@@ -78,6 +78,51 @@ function filePathLinkProvider(term: XTerm, open: (href: string) => void) {
   };
 }
 
+/**
+ * A dotted underline under every file path in view, so links are visible
+ * without hovering (xterm only decorates links under the pointer). Rows are
+ * re-scanned when xterm renders them; a row's decorations are replaced each
+ * time, so a TUI redrawing in place never accumulates stale underlines.
+ */
+function installPathUnderlines(term: XTerm): () => void {
+  const byRow = new Map<number, Array<{ dispose: () => void }>>();
+  const clearRow = (abs: number) => {
+    for (const d of byRow.get(abs) ?? []) d.dispose();
+    byRow.delete(abs);
+  };
+  const scan = (start: number, end: number) => {
+    const buf = term.buffer.active;
+    const cursorAbs = buf.baseY + buf.cursorY;
+    for (let y = start; y <= end; y++) {
+      const abs = buf.viewportY + y;
+      clearRow(abs);
+      const line = buf.getLine(abs);
+      if (!line) continue;
+      const matches = findFilePaths(line.translateToString(true));
+      if (matches.length === 0) continue;
+      const marker = term.registerMarker(abs - cursorAbs);
+      if (!marker) continue;
+      const decos: Array<{ dispose: () => void }> = [];
+      for (const m of matches) {
+        const deco = term.registerDecoration({ marker, x: m.start, width: m.end - m.start, layer: 'top' }); // top: visible over the WebGL canvas (border only, no fill)
+        if (!deco) continue;
+        deco.onRender((el) => {
+          el.style.borderBottom = '1px dotted rgba(103, 232, 249, 0.85)';
+          el.style.boxSizing = 'border-box';
+          el.style.pointerEvents = 'none';
+        });
+        decos.push(deco);
+      }
+      byRow.set(abs, decos);
+    }
+  };
+  const sub = term.onRender(({ start, end }) => { try { scan(start, end); } catch { /* buffer changed under us */ } });
+  return () => {
+    sub.dispose();
+    for (const abs of [...byRow.keys()]) clearRow(abs);
+  };
+}
+
 export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', bare = false, fontSize = null }: Props) {
   const navigate = useNavigate();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -95,6 +140,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
   /** Bytes that arrive while xterm.js is still loading (the seed comes right after init). */
   const pendingRef = useRef<Uint8Array[]>([]);
   const readyRef = useRef(false);
+  const underlinesRef = useRef<(() => void) | null>(null);
 
   const fitFont = useCallback(() => {
     const term = termRef.current;
@@ -192,6 +238,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
         term.loadAddon(new WebLinksAddon((_e, uri) => window.open(uri, '_blank', 'noopener')));
       } catch { /* optional */ }
       term.registerLinkProvider(filePathLinkProvider(term, (href) => navigate(href)));
+      underlinesRef.current = installPathUnderlines(term);
       termRef.current = term;
       observer = new ResizeObserver(() => fitFont());
       observer.observe(hostRef.current);
@@ -270,6 +317,8 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
       observer?.disconnect();
       socketRef.current?.close();
       socketRef.current = null;
+      underlinesRef.current?.();
+      underlinesRef.current = null;
       termRef.current?.dispose();
       termRef.current = null;
     };
