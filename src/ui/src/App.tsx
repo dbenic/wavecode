@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Dashboard from './views/Dashboard';
 import AgentView from './views/AgentView';
+import TerminalFull from './views/TerminalFull';
 import TaskBoard from './views/TaskBoard';
 import ReviewQueue from './views/ReviewQueue';
 import Artifacts from './views/Artifacts';
@@ -58,6 +59,7 @@ export default function App() {
             <Route path="/" element={<CommandCenter />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/agent/:id" element={<AgentView />} />
+            <Route path="/agent/:id/terminal" element={<TerminalFull />} />
             <Route path="/tasks" element={<TaskBoard />} />
             <Route path="/review" element={<ReviewQueue />} />
             <Route path="/artifacts" element={<Artifacts />} />

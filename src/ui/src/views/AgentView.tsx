@@ -639,6 +639,14 @@ export default function AgentView() {
                 </button>
               ))}
               {liveNote && <span className="ml-2 normal-case tracking-normal text-amber-400/80">{liveNote}</span>}
+              <button
+                type="button"
+                onClick={() => navigate(`/agent/${agent.id}/terminal`)}
+                className="ml-auto px-2 py-0.5 rounded text-slate-500 hover:text-cyan-200"
+                title="the pane as the whole screen"
+              >
+                ⛶ Full screen
+              </button>
             </div>
           )}
           {agent.terminal_live && (outputView ?? 'live') === 'live' ? (

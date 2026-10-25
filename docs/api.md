@@ -139,7 +139,8 @@ The live terminal view. As a plain GET: `{ enabled, session, cols, rows, history
 pane's bytes — first the current pane (history + screen with escapes, cursor restored), then live output from
 `tmux pipe-pane`. Alternate-screen and mouse-tracking switches are removed so the viewer keeps scrollback and
 its own scrolling. Read-only: client frames are ignored; prompts go through `POST /api/agents/:id/send`.
-This is WaveCode's only WebSocket; everything else is SSE.
+This is WaveCode's only WebSocket; everything else is SSE. The PWA shows it on the agent page (Live terminal tab)
+and as the whole viewport at `/agent/:id/terminal` (fit: screen or width, with a one-line composer that posts to `/send`).
 
 ### `GET /api/agents/:id/scrollback`
 Get a scrollback window and total buffer size.

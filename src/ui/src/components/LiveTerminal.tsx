@@ -19,6 +19,14 @@ interface Props {
   agentId: string;
   /** Called when the server refuses the stream (disabled, forbidden): the page falls back to text. */
   onUnavailable?: (reason: string) => void;
+  /**
+   * 'width' (default): the pane's columns fit the container width and the element is as
+   * tall as the pane (the page scrolls). 'screen': columns and rows both fit the container,
+   * for the full-screen page where the container is the viewport.
+   */
+  fit?: 'width' | 'screen';
+  /** Full-screen page: no own header, the host fills its flex parent. */
+  bare?: boolean;
 }
 
 interface InitMsg { t: 'init'; session: string; cols: number; rows: number; history_size: number }
@@ -28,8 +36,9 @@ const MIN_FONT = 5;
 const MAX_FONT = 13;
 const SCROLLBACK = 20000;
 const CHAR_WIDTH_RATIO = 0.62; // a monospace glyph is about this many em wide
+const LINE_HEIGHT = 1.1;
 
-export default function LiveTerminal({ agentId, onUnavailable }: Props) {
+export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', bare = false }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -45,17 +54,24 @@ export default function LiveTerminal({ agentId, onUnavailable }: Props) {
     const host = hostRef.current;
     if (!term || !host) return;
     const width = host.clientWidth;
+    const height = fit === 'screen' ? host.clientHeight : 0;
     if (!width) return;
-    let size = Math.max(MIN_FONT, Math.min(MAX_FONT, Math.floor(width / (term.cols * CHAR_WIDTH_RATIO))));
+    let size = Math.floor(width / (term.cols * CHAR_WIDTH_RATIO));
+    // Glyph height is about 1.2em, times xterm's lineHeight option.
+    if (height) size = Math.min(size, Math.floor(height / (term.rows * 1.2 * LINE_HEIGHT)));
+    size = Math.max(MIN_FONT, Math.min(MAX_FONT, size));
     term.options.fontSize = size;
-    // Measure what xterm actually drew; the ratio above is only a first guess.
+    // Measure what xterm actually drew; the ratios above are only a first guess.
     for (let i = 0; i < 4; i++) {
       const screen = host.querySelector<HTMLElement>('.xterm-screen');
-      if (!screen || screen.offsetWidth <= width || size <= MIN_FONT) break;
+      if (!screen || size <= MIN_FONT) break;
+      const tooWide = screen.offsetWidth > width;
+      const tooTall = height > 0 && screen.offsetHeight > height;
+      if (!tooWide && !tooTall) break;
       size -= 1;
       term.options.fontSize = size;
     }
-  }, []);
+  }, [fit]);
 
   const jumpToLive = useCallback(() => {
     termRef.current?.scrollToBottom();
@@ -86,7 +102,7 @@ export default function LiveTerminal({ agentId, onUnavailable }: Props) {
         allowProposedApi: true,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
         fontSize: 12,
-        lineHeight: 1.1,
+        lineHeight: LINE_HEIGHT,
         theme: {
           background: '#070b14',
           foreground: '#cbd5e1',
@@ -190,8 +206,11 @@ export default function LiveTerminal({ agentId, onUnavailable }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
 
+  useEffect(() => { fitFont(); }, [fit, fitFont]);
+
   return (
-    <div className="relative" data-testid="live-terminal">
+    <div className={bare ? 'relative flex-1 min-h-0 flex flex-col' : 'relative'} data-testid="live-terminal">
+      {!bare && (
       <div className="px-3 py-1.5 border-b border-slate-800/30 flex items-center justify-between">
         <span className="text-[9px] text-slate-600 tracking-[0.2em] uppercase">Live terminal</span>
         <span className="text-[9px] text-slate-700 font-mono flex items-center gap-1.5">
@@ -199,10 +218,11 @@ export default function LiveTerminal({ agentId, onUnavailable }: Props) {
           {status}{geometry ? ` · ${geometry.cols}×${geometry.rows}` : ''}
         </span>
       </div>
+      )}
       {error && (
         <div className="px-3 py-1 text-[10px] text-amber-300/80 border-b border-amber-500/10">{error}</div>
       )}
-      <div ref={hostRef} className="w-full overflow-hidden bg-[#070b14] p-1 min-h-[300px]" onWheelCapture={undefined} />
+      <div ref={hostRef} className={bare ? 'w-full flex-1 min-h-0 overflow-hidden bg-[#070b14] p-1' : 'w-full overflow-hidden bg-[#070b14] p-1 min-h-[300px]'} />
       {behind && (
         <button
           type="button"
