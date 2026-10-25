@@ -830,6 +830,12 @@ export interface IngestOutcome {
 export interface IngestOptions {
   /** Backfill: only PASS verdicts create cards (spec §6). */
   passOnly?: boolean;
+  /**
+   * Backfill: record the freeze but do not start the pipeline for it. A restart
+   * re-reads every note of the day; firing a gate for each flooded the test
+   * dispatcher on 25 Oct 2026.
+   */
+  silent?: boolean;
 }
 
 /**
@@ -844,7 +850,7 @@ export async function ingestFreezeFile(filePath: string, opts: IngestOptions = {
     return { ok: false, error: `cannot read ${filePath}: ${(e as Error).message}` };
   }
   const result = await ingestFreezeText(text, filePath, opts);
-  if (result.ok) await fireFreeze(result.data.sha);
+  if (result.ok && !opts.silent) await fireFreeze(result.data.sha);
   return result;
 }
 
@@ -1463,7 +1469,7 @@ export async function backfillFreezes(dirs = freezeInboxDirs(), now = new Date()
       .filter((x): x is { file: string; mtime: number } => !!x && x.mtime >= since)
       .sort((a, b) => a.mtime - b.mtime);
     for (const { file } of files) {
-      await ingestIfChanged(file, { passOnly: true });
+      await ingestIfChanged(file, { passOnly: true, silent: true });
       n++;
     }
   }

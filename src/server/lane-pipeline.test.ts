@@ -29,9 +29,12 @@ import { commitsBehind } from './lane-main.js';
 import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
-  considerAutoStage, drainStagingQueue, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
+  considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
   reassignWaitingReviews, resetPipelineForTest, setPipelineExecForTest, type ExecOptions,
 } from './lane-pipeline.js';
+import { emit } from './event-bus.js';
+import { backfillFreezes, setFreezeGate } from './release-freezes.js';
+import { setTestRunExecForTest } from './test-runs.js';
 import { firstPassFor, recordFirstPassFile } from './first-pass.js';
 import { listPendingReviews } from './review-queue.js';
 import { ensureReleaseFreezeTable, getFreeze, ingestFreezeFile, listReviewFreezes, setFetchDisabledForTest } from './release-freezes.js';
@@ -588,6 +591,90 @@ describe('hands-free lane pipeline', () => {
     expect(gateOpts?.env?.WAVECODE_SHA).toBe(sha);
     expect(fs.existsSync(gateOpts?.cwd ?? '/nonexistent')).toBe(false);
     expect(git(repo, 'worktree', 'list')).not.toContain('.wavecode-gates');
+  });
+
+  it('the startup backfill records freezes without starting gates; a live note still gets one', async () => {
+    const shaA = branch('wc-ales', 'a1.txt', 'a');
+    const shaB = branch('wc-toni', 'b1.txt', 'b');
+    agent('ales', path.join(tmp, 'ales'));
+    agent('toni', path.join(tmp, 'toni'));
+    pipe.auto_gate = true;
+    openNote('ales', 'wc-ales', shaA);
+    openNote('toni', 'wc-toni', shaB);
+    expect(await backfillFreezes([freezeDir])).toBe(2);
+    expect(getFreeze(shaA)?.status).toBe('open');
+    expect(getFreeze(shaB)?.status).toBe('open');
+    expect(calls.filter((argv) => argv[0] === 'gate-run')).toHaveLength(0);
+    expect(getFreeze(shaA)?.gate).toBeNull();
+
+    const shaC = branch('wc-ales', 'a2.txt', 'a2');
+    await ingestFreezeFile(openNote('ales', 'wc-ales', shaC));
+    await vi.waitFor(() => expect(getFreeze(shaC)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    expect(calls.filter((argv) => argv[0] === 'gate-run')).toHaveLength(1);
+  });
+
+  it('runs at most gate_max_inflight gates at once; the rest wait in WaveCode and start when a slot frees', async () => {
+    const resolvers: Array<(r: { code: number; stdout: string }) => void> = [];
+    setPipelineExecForTest((argv) => {
+      calls.push(argv);
+      if (argv[0] === 'gate-run') return new Promise<{ code: number; stdout: string }>((resolve) => { resolvers.push(resolve); });
+      return { code: 0, stdout: 'ok' };
+    });
+    pipe.auto_gate = true;
+    pipe.gate_max_inflight = 1;
+    const lanes = ['wc-a', 'wc-b', 'wc-c'];
+    const shas = lanes.map((lane, i) => { agent(`dev${'abc'[i]}`, path.join(tmp, lane)); return branch(lane, `${lane}.txt`, String(i)); });
+    for (const [i, sha] of shas.entries()) await ingestFreezeFile(openNote(`dev${'abc'[i]}`, lanes[i], sha));
+    const gates = () => calls.filter((a) => a[0] === 'gate-run');
+    await vi.waitFor(() => expect(gates()).toHaveLength(1), { timeout: 10_000 });
+    expect(shas.map((s) => getFreeze(s)?.gate)).toEqual(['QUEUED', 'QUEUED', 'QUEUED']);
+    expect(gateLoadForTest()).toEqual({ inflight: { wave: [shas[0]] }, pending: [shas[1], shas[2]] });
+    expect(latestPipelineNote('wave', 'wc-b')).toMatch(/waits for a slot \(1 running, 1 waiting\)/);
+
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    await vi.waitFor(() => expect(getFreeze(shas[0])?.gate).toBe('GREEN'), { timeout: 10_000 });
+    await vi.waitFor(() => expect(gates()).toHaveLength(2), { timeout: 10_000 });
+    expect(gateLoadForTest().pending).toEqual([shas[2]]);
+    resolvers.shift()!({ code: 1, stdout: 'RED' });
+    await vi.waitFor(() => expect(getFreeze(shas[1])?.gate).toBe('RED'), { timeout: 10_000 });
+    await vi.waitFor(() => expect(gates()).toHaveLength(3), { timeout: 10_000 });
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    await vi.waitFor(() => expect(getFreeze(shas[2])?.gate).toBe('GREEN'), { timeout: 10_000 });
+    expect(gateLoadForTest()).toEqual({ inflight: { wave: [] }, pending: [] });
+  });
+
+  it('after a restart, a QUEUED freeze is settled from the test history, or resubmitted once when the dispatcher never saw it', async () => {
+    const sha = branch('wc-ales', 'a.txt', 'lane');
+    const lost = branch('wc-toni', 'b.txt', 'lane');
+    agent('ales', path.join(tmp, 'ales'));
+    agent('toni', path.join(tmp, 'toni'));
+    // The freezes landed while the gate was off, like a daemon whose submitters were killed.
+    await ingestFreezeFile(openNote('ales', 'wc-ales', sha));
+    await ingestFreezeFile(openNote('toni', 'wc-toni', lost));
+    for (const s of [sha, lost]) {
+      setFreezeGate(s, 'QUEUED');
+      emit('pipeline.gate', 'run', `${s}:full`, { sha: s, project: 'wave', gate: 'QUEUED' }, null);
+    }
+    pipe.auto_gate = true;
+    projects.wave.tests = { history_command: ['hist', '--sha', '{sha}'], full_suites: ['api'] };
+    setTestRunExecForTest((argv) => JSON.stringify({
+      v: 1,
+      runs: argv.includes(sha)
+        ? [{ id: 'r-1', sha, who: 'ales', kind: 'dev', suite: 'api', state: 'pass', queued_at: '2026-10-25T16:00:00Z', ended_at: '2026-10-25T17:00:00Z' }]
+        : [],
+    }));
+    try {
+      await pipelineTick();
+      expect(getFreeze(sha)?.gate).toBe('GREEN');
+      expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/full gate GREEN/);
+      await vi.waitFor(() => expect(getFreeze(lost)?.gate).toBe('GREEN'), { timeout: 10_000 });
+      expect(calls.filter((a) => a[0] === 'gate-run')).toHaveLength(1);
+      await pipelineTick();
+      expect(calls.filter((a) => a[0] === 'gate-run')).toHaveLength(1);
+    } finally {
+      setTestRunExecForTest(null);
+      delete projects.wave.tests;
+    }
   });
 
   it('gateOutcome: exit code decides for a tool that waits on the suite; 7 is the dispatcher duplicate', () => {

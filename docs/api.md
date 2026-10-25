@@ -1209,7 +1209,7 @@ tier's reviews (`ask` = two PASS verdicts from non-authors on different credenti
 profiles, from the new `freeze_verdicts` ledger), the remote lane still at the SHA, a pull
 request, and migrations numbered after main's. Serial per project; `--no-ff` merge in
 `<repos>/.wavecode-merges/`, optional `version_command` folded into the merge commit, the
-gate re-run on the merge SHA (reused when the tree is the same), plain push, bounce on
+full suite run once on the merge SHA (`merge_queue.gate_command`, never skipped), plain push, bounce on
 conflict or RED, re-merge when main moved. Kill switch = config `enabled` plus the runtime
 flag (Reviews page or `POST /api/merge-queue/:project/switch`). Events `merge_queue.queued`,
 `merge_queue.merged`, `merge_queue.bounced`, `merge_queue.requeued`, `merge_queue.switch`;
@@ -1220,3 +1220,22 @@ one line per merge or bounce in `maestro_log`.
 - `POST /api/merge-queue/:sha/priority` `{ priority }` — 0 to 9, developers and admins.
 - `GET /api/reviews/board` — cards carry `queue: { state, reason, tier, position, merge_sha, pr } | null`;
   the board carries `merge_queue: { projects, can_switch }`.
+
+## Gate flood fix (25 Oct 2026, evening)
+
+The startup backfill of the day's freeze notes no longer starts the pipeline for them
+(`IngestOptions.silent`); on 25 Oct a restart re-read some 250 notes and submitted an API
+gate for each. `pipeline.gate_max_inflight` (default 3) caps the full gates one daemon runs
+per project; further freezes show QUEUED and wait in WaveCode (`gate` note "waits for a
+slot") until a slot frees. After a restart, freezes left at QUEUED or RUNNING are settled
+from the test history when `tests` is configured, resubmitted once when the dispatcher
+never saw them and the freeze is under six hours old, and otherwise noted.
+
+## Testing rule change (25 Oct 2026, evening)
+
+Per the testing study: on push the agent runs lint, types and the related tests locally;
+at freeze one narrower run per branch (quick suite plus the API tests for the changed
+parts); the merge queue runs the full suite once on the merged code; a nightly full run on
+main. In WaveCode: `auto_gate` stays off, and the merge queue always runs
+`merge_queue.gate_command` (default `pipeline.gate_command`) on the merge result instead of
+reusing the lane's gate when the trees matched.

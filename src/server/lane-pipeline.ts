@@ -25,6 +25,7 @@ import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
+import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
 import { assignmentFacts, loadFor, minCapacityPct, projectReassignMs, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign } from './reviewer-assign.js';
 import { firstPassFor, firstPassHooks, overdueFirstPasses, requestFirstPass, type FirstPassResult } from './first-pass.js';
@@ -60,6 +61,8 @@ export interface PipelineSwitches {
   gate_with_quick: boolean;
   gate_timeout_min: number;
   quick_check_timeout_min: number;
+  /** Full gates in flight at once per project. The rest wait here, not on the dispatcher. */
+  gate_max_inflight: number;
   /** Lane size warning threshold in changed files. 0 disables. */
   max_lane_files: number;
   /** Open-ladder allowlist (lowercased). Empty = anyone not denied. */
@@ -70,9 +73,10 @@ export interface PipelineSwitches {
 
 type ExecResult = { code: number; stdout: string };
 export interface ExecOptions { cwd?: string; env?: Record<string, string>; timeoutMs?: number }
-let execForTest: ((argv: string[], opts: ExecOptions) => ExecResult) | null = null;
+type ExecForTest = (argv: string[], opts: ExecOptions) => ExecResult | Promise<ExecResult>;
+let execForTest: ExecForTest | null = null;
 
-export function setPipelineExecForTest(fn: ((argv: string[], opts: ExecOptions) => ExecResult) | null): void {
+export function setPipelineExecForTest(fn: ExecForTest | null): void {
   execForTest = fn;
 }
 
@@ -83,7 +87,7 @@ export function pipelineOf(project: string | null): PipelineSwitches {
     quick_check_command: null, push_command: null, gate_command: null, review_routes: {}, review_deny: [],
     lane_deny: [], agent_deny: [], reviewer_prefer: {}, reviewer_pool_by_author_glob: {},
     review_reassign_minutes: 15, freeze_dir: null,
-    gate_with_quick: false, gate_timeout_min: 120, quick_check_timeout_min: 20, max_lane_files: 40,
+    gate_with_quick: false, gate_timeout_min: 120, quick_check_timeout_min: 20, gate_max_inflight: 3, max_lane_files: 40,
     reviewer_allow: [], service_profiles: [],
   };
   if (!raw) return off;
@@ -109,6 +113,7 @@ export function pipelineOf(project: string | null): PipelineSwitches {
     gate_with_quick: raw.gate_with_quick === true,
     gate_timeout_min: minutesOr(raw.gate_timeout_min, 120),
     quick_check_timeout_min: minutesOr(raw.quick_check_timeout_min, 20),
+    gate_max_inflight: Math.max(1, minutesOr(raw.gate_max_inflight, 3)),
     max_lane_files: minutesOr(raw.max_lane_files, 40),
     reviewer_allow: (raw.reviewer_allow ?? []).map((s) => s.toLowerCase()),
     service_profiles: (raw.service_profiles ?? []).map((s) => s.toLowerCase()),
@@ -178,7 +183,7 @@ export function laneRefError(project: string, lane: string): string | null {
 
 async function runArgv(argv: string[], opts: ExecOptions = {}): Promise<ExecResult> {
   if (argv.length === 0) return { code: 1, stdout: '' };
-  if (execForTest) return execForTest(argv, opts);
+  if (execForTest) return await execForTest(argv, opts);
   try {
     const stdout = await execFileAsync(argv[0], argv.slice(1), {
       timeout: opts.timeoutMs ?? 20000,
@@ -632,16 +637,79 @@ export function gateOutcome(result: ExecResult): 'QUEUED' | 'RUNNING' | 'GREEN' 
  * which for a tool that waits on the remote suite is as long as the suite.
  * Callers do not await this.
  */
+/** Gates this daemon is running right now, per project, and the SHAs waiting for a slot (FIFO). */
+const gateInflight = new Map<string, Set<string>>();
+const gatePending: string[] = [];
+/** SHAs whose gate was lost at a restart and already handled once. */
+const gateRecovered = new Set<string>();
+const GATE_RECOVER_MAX_AGE_MS = 6 * 60 * 60_000;
+const GATE_RECONCILE_PER_TICK = 10;
+
+function inflightFor(project: string): Set<string> {
+  let set = gateInflight.get(project);
+  if (!set) { set = new Set(); gateInflight.set(project, set); }
+  return set;
+}
+
+export function gateLoadForTest(): { inflight: Record<string, string[]>; pending: string[] } {
+  return { inflight: Object.fromEntries([...gateInflight].map(([p, s]) => [p, [...s]])), pending: [...gatePending] };
+}
+
+/**
+ * One full gate per freeze SHA, at most `gate_max_inflight` running per project.
+ * The freeze shows QUEUED at once; a SHA over the cap waits in this daemon until a
+ * slot frees, so a burst of freezes never floods the dispatcher.
+ */
 async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
   if (!freeze.project) return;
   if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
   const pipe = pipelineOf(freeze.project);
   if (!pipe.auto_gate || !pipe.gate_command?.length) return;
   if (acted(`${freeze.sha}:full`, GATED)) return;
-  const spec = mainSpec(freeze.project);
   const sha8 = freeze.sha.slice(0, 8);
   setFreezeGate(freeze.sha, 'QUEUED');
   emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: 'QUEUED' }, null);
+  if (inflightFor(freeze.project).size >= pipe.gate_max_inflight) {
+    if (!gatePending.includes(freeze.sha)) gatePending.push(freeze.sha);
+    note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate on ${sha8} waits for a slot (${inflightFor(freeze.project).size} running, ${gatePending.length} waiting)`);
+    return;
+  }
+  await runGate(freeze);
+}
+
+/** Start waiting gates while slots are free. Freezes that closed meanwhile are dropped. */
+function drainGatePending(): void {
+  for (let i = 0; i < gatePending.length;) {
+    const sha = gatePending[i];
+    const freeze = getFreeze(sha);
+    if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { gatePending.splice(i, 1); continue; }
+    const pipe = pipelineOf(freeze.project);
+    if (!pipe.auto_gate || !pipe.gate_command?.length) { gatePending.splice(i, 1); continue; }
+    if (inflightFor(freeze.project).size >= pipe.gate_max_inflight) { i++; continue; }
+    gatePending.splice(i, 1);
+    void runGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Pending gate failed'));
+  }
+}
+
+async function runGate(freeze: ReleaseFreeze): Promise<void> {
+  if (!freeze.project) return;
+  const pipe = pipelineOf(freeze.project);
+  if (!pipe.gate_command?.length) return;
+  const spec = mainSpec(freeze.project);
+  const sha8 = freeze.sha.slice(0, 8);
+  const inflight = inflightFor(freeze.project);
+  if (inflight.has(freeze.sha)) return;
+  inflight.add(freeze.sha);
+  try {
+    await runGateBody(freeze, pipe, spec, sha8);
+  } finally {
+    inflight.delete(freeze.sha);
+    drainGatePending();
+  }
+}
+
+async function runGateBody(freeze: ReleaseFreeze, pipe: PipelineSwitches, spec: ReturnType<typeof mainSpec>, sha8: string): Promise<void> {
+  if (!freeze.project || !pipe.gate_command) return;
   note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate submitted on ${sha8}`);
   const checkout = await makeCheckout(freeze.project, freeze.lane, freeze.sha);
   const author = freeze.author_name ?? 'wavecode';
@@ -654,9 +722,15 @@ async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
     timeoutMs: Math.max(1, pipe.gate_timeout_min) * 60_000,
   });
   await dropCheckout(freeze.project, checkout);
-  const word = gateOutcome(result);
+  await settleGate(freeze, gateOutcome(result), result.code);
+}
+
+/** Record the gate word and act on it: RED tells the author, GREEN re-pings the reviewer. */
+async function settleGate(freeze: ReleaseFreeze, word: 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED', exitCode: number | null): Promise<void> {
+  if (!freeze.project) return;
+  const sha8 = freeze.sha.slice(0, 8);
   setFreezeGate(freeze.sha, word);
-  emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: word, exit_code: result.code }, null);
+  emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: word, ...(exitCode === null ? {} : { exit_code: exitCode }) }, null);
   note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate ${word} on ${sha8}`);
   if (word === 'RED') {
     tell(freeze.author_agent_id, `[from WaveCode] full gate RED on ${sha8} (${freeze.lane ?? 'lane'}). Read the failing step with countix-remote-test log, fix, push, and refreeze.`);
@@ -665,6 +739,43 @@ async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
     pingReviewersForGreenSha(freeze.sha);
     const fresh = getFreeze(freeze.sha);
     if (fresh && fresh.verdict !== 'pass' && pipelineOf(fresh.project).auto_review) await assignReviewer(fresh, 'green');
+  }
+}
+
+/**
+ * A restart kills the blocking gate submitters. Freezes left at QUEUED or RUNNING
+ * with nothing running here are settled from the dispatcher's history when `tests`
+ * is configured; a run the dispatcher never saw is resubmitted once for a fresh
+ * freeze, and otherwise noted. Bounded per tick.
+ */
+async function reconcileLostGates(now: number): Promise<void> {
+  let looked = 0;
+  for (const freeze of listFreezes()) {
+    if (looked >= GATE_RECONCILE_PER_TICK) break;
+    if (!freeze.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) continue;
+    const stored = (freeze.gate ?? '').toUpperCase();
+    if (stored !== 'QUEUED' && stored !== 'RUNNING') continue;
+    if (inflightFor(freeze.project).has(freeze.sha) || gatePending.includes(freeze.sha) || gateRecovered.has(freeze.sha)) continue;
+    const pipe = pipelineOf(freeze.project);
+    if (!pipe.auto_gate || !pipe.gate_command?.length) continue;
+    looked++;
+    let live: 'green' | 'red' | 'pending' | 'missing' = 'missing';
+    if (testsConfigured(freeze.project)) {
+      try {
+        live = shaChecks(await readLaneTests(freeze.project, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project)).full;
+      } catch { live = 'missing'; }
+    }
+    if (live === 'pending') continue; // still on the dispatcher; the cards read the history
+    gateRecovered.add(freeze.sha);
+    if (live === 'green' || live === 'red') { await settleGate(freeze, live === 'green' ? 'GREEN' : 'RED', null); continue; }
+    const age = now - Date.parse(`${freeze.created_at.replace(' ', 'T')}Z`);
+    if (Number.isFinite(age) && age <= GATE_RECOVER_MAX_AGE_MS) {
+      note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: gate run on ${freeze.sha.slice(0, 8)} was lost at a restart — submitting it again`);
+      if (inflightFor(freeze.project).size >= pipe.gate_max_inflight) { gatePending.push(freeze.sha); continue; }
+      void runGate(freeze).catch((e) => logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Gate recovery failed'));
+    } else {
+      note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: gate run on ${freeze.sha.slice(0, 8)} was lost at a restart and the freeze is older than 6 h — refreeze to run it again`);
+    }
   }
 }
 
@@ -1021,6 +1132,8 @@ function announceFirstPass(result: FirstPassResult): void {
  * were refused for an unpushed SHA, and note first passes that never arrived.
  */
 export async function pipelineTick(now = Date.now()): Promise<void> {
+  drainGatePending();
+  try { await reconcileLostGates(now); } catch (e) { logger.debug({ error: (e as Error).message }, 'Gate reconcile skipped'); }
   for (const [sha, at] of [...refusedFreezes.entries()]) {
     if (now - at > REFUSED_TTL_MS) { refusedFreezes.delete(sha); continue; }
     if (now - at < REFUSED_RECHECK_MS) continue;
@@ -1041,6 +1154,9 @@ export async function pipelineTick(now = Date.now()): Promise<void> {
 
 export function resetPipelineForTest(): void {
   refusedFreezes.clear();
+  gateInflight.clear();
+  gatePending.length = 0;
+  gateRecovered.clear();
 }
 
 firstPassHooks.onResult = announceFirstPass;

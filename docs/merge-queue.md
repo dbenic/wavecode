@@ -14,8 +14,11 @@ does not, as `Merge queue · waiting: …`.
    No `TIER:` line and no `default_tier` in config means the lane waits. A lane that
    touches an `ask_paths` glob or the migrations directory is `ask` whatever the note says
    (booking, VAT, payroll, payments, migrations, RLS and auth on Wavepulse).
-2. **Green gate on that exact SHA**: the quick check and the API gate, as the test history
-   and WaveCode's own gate run report them. No waivers, no skipped suites.
+2. **Green freeze-time run on that exact SHA**: the quick suite and the API tests for the
+   changed parts (the full API suite when migrations, the database, sign-in or the test
+   setup changed), as the test history reports them under `tests.quick_suites` and
+   `tests.full_suites`. No waivers, no skipped suites. WaveCode submits nothing at freeze
+   time (`auto_gate: false` since the testing study of 25 Oct 2026); the agent does.
 3. **Reviews by tier**: `ship` needs none; `show` needs none before the merge (the pipeline
    has already asked a reviewer; their verdict lands afterwards); `ask` needs two
    `VERDICT: PASS` files from reviewers who are not the author and whose seats run on
@@ -42,12 +45,12 @@ may raise a lane's priority. For the head of the queue WaveCode:
 3. runs `git merge --no-ff` of the lane SHA. A conflict aborts and **bounces** the lane
    with the files named;
 4. runs `version_command` there if configured and folds its changes into the merge commit;
-5. runs the project's `gate_command` on the merge result, as the author
-   (`COUNTIX_REMOTE_TEST_WHO`), with `WAVECODE_SHA=<merge sha>`, `WAVECODE_LANE`,
-   `WAVECODE_CHECKOUT` and `WAVECODE_MERGE_OF=<lane sha>`. When the merge result has the
-   same tree as the lane SHA (the lane already contained main) the lane's green gate is
-   reused and nothing is re-run. RED bounces; a dispatcher QUEUED or DUPLICATE answer
-   retries on the next pass, three times at most;
+5. runs the **full suite once on the merge result** (`merge_queue.gate_command`, default
+   `pipeline.gate_command`), as the author (`COUNTIX_REMOTE_TEST_WHO`), with
+   `WAVECODE_SHA=<merge sha>`, `WAVECODE_LANE`, `WAVECODE_CHECKOUT` and
+   `WAVECODE_MERGE_OF=<lane sha>`. It runs even when the lane already contained main:
+   this is the only full run between the nightly ones. RED bounces; a dispatcher QUEUED
+   or DUPLICATE answer retries on the next pass, three times at most;
 6. checks the kill switch once more and pushes plainly: `git push origin HEAD:refs/heads/main`.
    Never `--force`, never a squash, never a different ref. A rejected push (main moved
    during the gate) merges again on the next pass;
@@ -115,6 +118,7 @@ projects:
         ask_paths: ['**/booking/**', '**/vat/**', '**/payroll/**', '**/payments/**', '**/billing/**', '**/rls/**', '**/auth/**', 'migrations/**']
         require_pr: true
         maestro_log: /home/wave/inbox/wavecode-merge-queue.log
+        gate_command: [countix-remote-test, --suite, full]   # the one full run, on the merged code
         # version_command: [node, scripts/bump-version.mjs]   # once the project says how a version is bumped
         # pr_list_command: [gh, pr, list, --json, 'number,headRefName,headRefOid,state']  # once gh is logged in for wave
 ```

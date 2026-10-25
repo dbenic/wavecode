@@ -564,10 +564,11 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
     }
 
     const mergeSha = await git(dir, ['rev-parse', 'HEAD']);
-    const sameTree = (await tryGit(dir, ['rev-parse', `${row.sha}^{tree}`])) === (await tryGit(dir, ['rev-parse', 'HEAD^{tree}']));
-    let gateNote = `gate reused: ${mergeSha.slice(0, 8)} has the same tree as ${sha8}`;
-    if (!sameTree) {
-      const gateCmd = getConfig().projects?.[row.project]?.pipeline?.gate_command ?? null;
+    // The full suite runs once, here, on the merged code — even when the lane already
+    // contained main. The freeze-time run only covered the quick suite and the changed parts.
+    let gateNote: string;
+    {
+      const gateCmd = cfg.gate_command ?? getConfig().projects?.[row.project]?.pipeline?.gate_command ?? null;
       if (!gateCmd?.length) { bounce(freeze, started, 'no gate_command configured; the merge result cannot be tested'); return; }
       const minutes = cfg.gate_timeout_min ?? getConfig().projects?.[row.project]?.pipeline?.gate_timeout_min ?? 120;
       const env: Record<string, string> = {

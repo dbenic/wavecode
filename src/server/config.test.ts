@@ -323,6 +323,8 @@ projects:
     };
     await refuse('projects:\n  demo:\n    pipeline:\n      gate_timeout_min: -1\n', /gate_timeout_min must be a whole number/);
     await refuse('projects:\n  demo:\n    pipeline:\n      gate_with_quick: yes please\n', /gate_with_quick must be a boolean/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      gate_max_inflight: 0\n', /gate_max_inflight must be a whole number from 1 to 50/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        gate_command: full\n', /merge_queue\.gate_command/);
     await refuse('projects:\n  demo:\n    pipeline:\n      reviewer_allow: ["not a name"]\n', /reviewer_allow must be a list of agent names/);
     await refuse('projects:\n  demo:\n    pipeline:\n      gate_command: [sh, -c, "echo {lane}"]\n', /must not pass \{lane\} through a shell/);
     await refuse('review:\n  min_capacity_pct: 101\n', /min_capacity_pct must be a percentage/);

@@ -271,9 +271,10 @@ describe('merge queue — on a scratch repository', () => {
     expect(git(bare, 'rev-list', '--parents', '-1', 'main').split(' ')).toHaveLength(3); // a real merge commit
     expect(git(bare, 'log', '-1', '--format=%s', 'main')).toBe(`Merge wc-ales (${shaA.slice(0, 8)}) into main`);
     expect(git(bare, 'merge-base', '--is-ancestor', shaA, 'main')).toBe('');
-    // same tree as the lane (lane already contained main): the gate was reused, not re-run
-    expect(gateSeen).toHaveLength(0);
-    expect(getQueueRow(shaA)).toMatchObject({ state: 'merged', merge_sha: mainAfterA, reason: expect.stringMatching(/gate reused/) });
+    // the lane already contained main, yet the full suite still ran once on the merge result (the only full run)
+    expect(gateSeen).toHaveLength(1);
+    expect(gateSeen[0].env).toMatchObject({ WAVECODE_SHA: mainAfterA, WAVECODE_MERGE_OF: shaA, COUNTIX_REMOTE_TEST_WHO: 'ales' });
+    expect(getQueueRow(shaA)).toMatchObject({ state: 'merged', merge_sha: mainAfterA, reason: `gate GREEN on ${mainAfterA.slice(0, 8)}` });
     expect(messages(ales.id).some((m) => m.includes(`merged wc-ales ${shaA.slice(0, 8)} into main as ${mainAfterA.slice(0, 8)}`))).toBe(true);
 
     await freeze('toni', 'wc-toni', shaB, 'show');
@@ -283,11 +284,11 @@ describe('merge queue — on a scratch repository', () => {
     expect(mainAfterB).not.toBe(mainAfterA);
     expect(git(bare, 'merge-base', '--is-ancestor', shaB, 'main')).toBe('');
     expect(git(bare, 'merge-base', '--is-ancestor', mainAfterA, 'main')).toBe('');
-    // B did not contain A's merge: a new tree, so the gate ran on the merge result, as the author
-    expect(gateSeen).toHaveLength(1);
-    expect(gateSeen[0].env).toMatchObject({ WAVECODE_SHA: mainAfterB, WAVECODE_LANE: 'wc-toni', WAVECODE_MERGE_OF: shaB, COUNTIX_REMOTE_TEST_WHO: 'toni' });
-    expect(gateSeen[0].cwd).toContain(path.join('.wavecode-merges', 'wave-'));
-    expect(fs.existsSync(gateSeen[0].cwd!)).toBe(false); // the checkout is removed afterwards
+    // the gate ran on B's merge result too, as the author
+    expect(gateSeen).toHaveLength(2);
+    expect(gateSeen[1].env).toMatchObject({ WAVECODE_SHA: mainAfterB, WAVECODE_LANE: 'wc-toni', WAVECODE_MERGE_OF: shaB, COUNTIX_REMOTE_TEST_WHO: 'toni' });
+    expect(gateSeen[1].cwd).toContain(path.join('.wavecode-merges', 'wave-'));
+    expect(fs.existsSync(gateSeen[1].cwd!)).toBe(false); // the checkout is removed afterwards
     expect(getQueueRow(shaB)).toMatchObject({ state: 'merged', merge_sha: mainAfterB, tier: 'show' });
     expect(messages(toni.id).some((m) => m.includes('merged wc-toni'))).toBe(true);
 

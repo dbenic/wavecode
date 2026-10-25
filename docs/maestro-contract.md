@@ -136,7 +136,7 @@ paths:
 projects:
   wavepulse:
     pipeline:
-      auto_gate: true
+      auto_gate: false              # since 25 Oct 2026: no full run per freeze; the agent's freeze-time run is narrower, the full suite runs once from the merge queue
       auto_review: true
       gate_with_quick: true
       gate_command: [countix-remote-test, --suite, api]
@@ -163,7 +163,14 @@ projects:
         ask_paths: ['**/booking/**', '**/vat/**', '**/payroll/**', '**/payments/**', '**/billing/**', '**/rls/**', '**/auth/**', 'migrations/**']
         require_pr: true
         maestro_log: /home/wave/inbox/wavecode-merge-queue.log
+        gate_command: [countix-remote-test, --suite, full]   # the one full run, on the merged code
 ```
+
+Testing rule from the study of 25 Oct 2026: on push the agent runs lint, types and the
+related tests locally; at freeze one run per branch (quick suite plus the API tests for
+the changed parts; the full API suite only when migrations, the database, sign-in or the
+test setup change); the merge queue runs the full suite once on the merged code; a full
+run on main nightly. WaveCode's own automatic gates stay off (`auto_gate: false`).
 
 `auto_freeze` stays off: agents write their own freeze notes. `codex6` is not in the
 pools until its lane clearance is confirmed. `auto_stage` stays off; `auto_merge_main`

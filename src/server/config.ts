@@ -186,6 +186,8 @@ export interface ProjectConfig {
     gate_timeout_min?: number;
     /** How long the quick check may run. Default 20. */
     quick_check_timeout_min?: number;
+    /** Full gates running at once per project; the rest wait in WaveCode. Default 3. */
+    gate_max_inflight?: number;
     /** A lane that changes more files than this gets a size warning in the review ping. 0 disables. Default 40. */
     max_lane_files?: number;
     /**
@@ -240,6 +242,12 @@ export interface MergeQueueConfig {
   require_pr?: boolean;
   /** Append one line per merge or bounce here (the coordinating bot reads it). */
   maestro_log?: string;
+  /**
+   * The full suite, run once on the merged code before the push (the testing study
+   * of 25 Oct 2026: this is the only full run). Argv, no shell; `{sha}` is the merge
+   * SHA. Default `pipeline.gate_command`.
+   */
+  gate_command?: string[];
   /** Minutes the gate on the merge result may run. Default `pipeline.gate_timeout_min`. */
   gate_timeout_min?: number;
 }
@@ -614,6 +622,9 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
       throw new Error(`projects.${name}.pipeline.${key} must be a whole number from 0 to ${max}`);
     }
   }
+  if (pipeline.gate_max_inflight !== undefined && (typeof pipeline.gate_max_inflight !== 'number' || !Number.isInteger(pipeline.gate_max_inflight) || pipeline.gate_max_inflight < 1 || pipeline.gate_max_inflight > 50)) {
+    throw new Error(`projects.${name}.pipeline.gate_max_inflight must be a whole number from 1 to 50`);
+  }
   if (pipeline.reviewer_allow !== undefined && (!Array.isArray(pipeline.reviewer_allow) || pipeline.reviewer_allow.some((s) => typeof s !== 'string' || !AGENT_HANDLE.test(s)))) {
     throw new Error(`projects.${name}.pipeline.reviewer_allow must be a list of agent names or aliases`);
   }
@@ -667,6 +678,7 @@ function validateMergeQueue(name: string, mq: MergeQueueConfig | undefined): voi
     throw new Error(`${at}.default_tier must be ship, show or ask`);
   }
   validateArgvList(`${at}.version_command`, mq.version_command);
+  validateArgvList(`${at}.gate_command`, mq.gate_command);
   validateArgvList(`${at}.pr_list_command`, mq.pr_list_command);
   if (mq.maestro_log !== undefined && (typeof mq.maestro_log !== 'string' || !mq.maestro_log.trim() || mq.maestro_log.includes('..') || !/\.(log|txt|md)$/.test(mq.maestro_log))) {
     throw new Error(`${at}.maestro_log must be a .log, .txt or .md file path`);
