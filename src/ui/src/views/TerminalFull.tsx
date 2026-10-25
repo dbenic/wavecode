@@ -26,9 +26,9 @@ const RAW_KEYS: Array<{ label: string; key: string }> = [
 export default function TerminalFull() {
   const { id } = useParams<{ id: string }>();
   const [agent, setAgent] = useState<Agent | null>(null);
-  const [fit, setFit] = useState<'screen' | 'width'>('screen');
-  /** null = fit automatically; a number = that many px, the pane scrolls as needed. */
-  const [fontSize, setFontSize] = useState<number | null>(null);
+  const [fit, setFit] = useState<'screen' | 'width'>('width');
+  /** null = fit automatically; a number = that many px, the pane scrolls as needed. Default: a terminal's 13px. */
+  const [fontSize, setFontSize] = useState<number | null>(13);
   const stepFont = (delta: number) => setFontSize((cur) => Math.max(6, Math.min(32, (cur ?? 12) + delta)));
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -74,7 +74,7 @@ export default function TerminalFull() {
   if (!id) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-[#070b14] text-slate-300" data-testid="terminal-full">
+    <div className="fixed inset-0 z-50 flex flex-col bg-black text-slate-300" data-testid="terminal-full">
       <div className="flex items-center gap-3 px-3 py-1.5 border-b border-slate-800/60 bg-slate-950/90 text-[10px] tracking-wider">
         <Link to={`/agent/${id}`} className="text-slate-500 hover:text-slate-200">← AGENT</Link>
         <span className="font-mono text-slate-200">{agent?.name ?? id}</span>
@@ -87,14 +87,14 @@ export default function TerminalFull() {
           <span className="font-mono text-slate-500 normal-case">{fontSize ? `${fontSize}px` : 'auto'}</span>
           <button type="button" onClick={() => stepFont(1)} className="px-2 py-0.5 rounded text-slate-400 hover:text-slate-100 font-mono" title="larger text">A+</button>
           {fontSize && (
-            <button type="button" onClick={() => setFontSize(null)} className="px-2 py-0.5 rounded text-slate-500 hover:text-slate-200" title="fit the text automatically again">auto</button>
+            <button type="button" onClick={() => setFontSize(null)} className="px-2 py-0.5 rounded text-slate-500 hover:text-slate-200" title="fit the text to the window instead">auto</button>
           )}
           <span className="ml-3 text-slate-600">fit</span>
           {(['screen', 'width'] as const).map((v) => (
             <button
               key={v}
               type="button"
-              onClick={() => setFit(v)}
+              onClick={() => { setFit(v); if (v === 'screen') setFontSize(null); }}
               className={`px-2 py-0.5 rounded ${fit === v ? 'bg-cyan-500/15 text-cyan-200' : 'text-slate-600 hover:text-slate-300'}`}
             >
               {v}

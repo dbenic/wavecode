@@ -153,11 +153,12 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
         allowProposedApi: true,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
         fontSize: 12,
-        lineHeight: LINE_HEIGHT,
+        lineHeight: bare ? 1.2 : LINE_HEIGHT,
         // Faint CLI text (SGR 2, dark greys) is lifted to a readable contrast against the background.
-        minimumContrastRatio: 4.5,
+        minimumContrastRatio: bare ? 3 : 4.5,
         theme: {
-          background: '#070b14',
+          // Full screen looks like a real terminal: black with the standard palette.
+          background: bare ? '#000000' : '#070b14',
           foreground: '#f1f5f9',
           cursor: '#22d3ee',
           selectionBackground: 'rgba(34, 211, 238, 0.25)',
@@ -224,6 +225,9 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
               setStatus('live');
               setError(null);
               term.scrollToBottom();
+              // Full screen at a fixed size: start at the pane's bottom rows, where the prompt is.
+              const host = hostRef.current;
+              if (host && bare) requestAnimationFrame(() => { host.scrollTop = host.scrollHeight; });
             }).catch((e) => {
               setError((e as Error).message);
               setStatus('unavailable');
@@ -295,7 +299,7 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
         <div className="px-3 py-1 text-[10px] text-amber-300/80 border-b border-amber-500/10">{error}</div>
       )}
       {/* A phone narrower than the pane at the smallest font scrolls sideways instead of clipping. */}
-      <div ref={hostRef} className={bare ? 'w-full flex-1 min-h-0 overflow-auto bg-[#070b14] p-1' : 'w-full overflow-x-auto overflow-y-hidden bg-[#070b14] p-1 min-h-[300px]'} />
+      <div ref={hostRef} className={bare ? 'w-full flex-1 min-h-0 overflow-auto bg-black p-1' : 'w-full overflow-x-auto overflow-y-hidden bg-[#070b14] p-1 min-h-[300px]'} />
       {behind && (
         <button
           type="button"
