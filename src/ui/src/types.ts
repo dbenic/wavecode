@@ -330,6 +330,25 @@ export interface LaneCard {
   version: string | null;
   /** Push to staging. Absent on a card that has not been measured. */
   ops_push?: { enabled: boolean; reason: string | null } | null;
+  /** Merge queue state for this SHA; absent or null when the project has no queue. */
+  queue?: LaneQueueState | null;
+}
+
+export interface LaneQueueState {
+  state: 'waiting' | 'queued' | 'merging' | 'merged' | 'bounced' | 'superseded';
+  reason: string | null;
+  tier: 'ship' | 'show' | 'ask' | null;
+  position: number | null;
+  merge_sha: string | null;
+  pr: string | null;
+}
+
+export interface MergeQueueSwitch {
+  project: string;
+  config_enabled: boolean;
+  enabled: boolean;
+  enabled_by: string | null;
+  queued: number;
 }
 
 export interface ReleaseView {
@@ -347,6 +366,7 @@ export interface ReviewBoard {
   cards?: LaneCard[];
   viewer?: { name: string | null };
   release?: ReleaseView;
+  merge_queue?: { projects: MergeQueueSwitch[]; can_switch: boolean };
 }
 
 /** A row from the test-status JSON, already parsed by the server. */

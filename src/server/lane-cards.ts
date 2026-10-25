@@ -58,6 +58,18 @@ export interface LaneCard {
   version: string | null;
   /** Push to staging. Null when this card has no measured SHA. */
   ops_push: { enabled: boolean; reason: string | null } | null;
+  /** Merge queue state for this SHA. Null when the project has no queue or the SHA was never evaluated. */
+  queue: LaneQueueFact | null;
+}
+
+export interface LaneQueueFact {
+  state: 'waiting' | 'queued' | 'merging' | 'merged' | 'bounced' | 'superseded';
+  reason: string | null;
+  tier: 'ship' | 'show' | 'ask' | null;
+  /** 1 = next to merge. Null unless queued. */
+  position: number | null;
+  merge_sha: string | null;
+  pr: string | null;
 }
 
 export interface ReleaseLane {
@@ -122,6 +134,8 @@ export interface LaneFreezeFact {
    * Undefined on a fact that has not been measured.
    */
   ops_stage_block?: string | null;
+  /** Merge queue row for this SHA, when the project runs one. */
+  queue?: LaneQueueFact | null;
 }
 
 export interface WorkingLaneFact {
@@ -542,6 +556,7 @@ function finish(fact: LaneFreezeFact, presented: Presented, older: LaneOlder[], 
       enabled: fact.ops_stage_block === null,
       reason: fact.ops_stage_block,
     },
+    queue: fact.queue ?? null,
   };
 }
 
@@ -567,6 +582,7 @@ function workingCard(fact: WorkingLaneFact, viewer: LaneViewer | null, owners: A
     link: null,
     version: null,
     ops_push: null,
+    queue: null,
   };
 }
 

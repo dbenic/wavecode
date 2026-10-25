@@ -23,9 +23,13 @@ files and events listed below, and overrides a reviewer only through the
 | Asks a spare seat for a first pass and hands the result to reviewer and author | Reads first passes as a signal, not a verdict | Fix what the first pass found while the reviewer reads |
 | Re-pings on GREEN, reassigns after `review_reassign_minutes` on a busy seat | | |
 
-WaveCode never pushes, never merges into main, never stages, never gives a prod GO
-and never turns a first pass into a verdict. Staging stays with SystemOps; the prod GO
-is Denis's exact-SHA message in SystemOps' chat.
+WaveCode never pushes a lane, never stages, never gives a prod GO and never turns a first
+pass into a verdict. Since 25 Oct 2026 it does merge eligible lanes into **Wavepulse main**
+through the merge queue (`docs/merge-queue.md`): green gate on the exact SHA, the tier's
+reviews, a pull request, the lane tip unchanged, migrations numbered after main. One lane
+at a time, `--no-ff`, gate re-run on the merge result, plain push, bounce on conflict or
+RED. Staging stays with SystemOps; the prod GO is Denis's exact-SHA message in SystemOps'
+chat.
 
 ## Files in `/home/wave/inbox`
 
@@ -86,6 +90,18 @@ All events are rows in the `events` table and are streamed on `GET /api/events` 
 | `pipeline.first_pass` | `<sha>` | `{ sha, result: pass|needs-fixes, issues, file, seat }` |
 | `pipeline.first_pass_timeout` | `<sha>` | `{ sha, seat, file, waited_ms }` |
 | `review.gate_pinged` | `<sha>` | GREEN landed on a SHA whose verdict was NEEDS FIXES |
+| `merge_queue.queued` | `<sha>` | `{ sha, project, lane, tier, pr }` — eligible, waiting for its turn |
+| `merge_queue.merged` | `<sha>` | `{ sha_in, sha_out, main_before, lane, tier, pr, gate, gate_runs, verdict_files, enabled_by, author, at }` |
+| `merge_queue.bounced` | `<sha>` | `{ sha, lane, tier, pr, reason, at }` — author told; a new SHA starts over |
+| `merge_queue.requeued` | `<sha>` | `{ sha, lane, reason, attempts }` — main moved or the gate was busy; tried again |
+| `merge_queue.switch` | `<project>` | `{ project, enabled, by }` — the kill switch |
+
+The queue also appends one line per merge or bounce to
+`/home/wave/inbox/wavecode-merge-queue.log` (`<CET time> merged <lane> <sha8> -> main <sha8> (tier, PR, gate runs, verdicts)` /
+`<CET time> bounced <lane> <sha8>: <reason>`). Tail that file instead of polling the cards.
+
+The freeze note needs one more line for the queue: `TIER: ship | show | ask`. Booking, VAT,
+payroll, payments, billing, RLS, auth and migration paths are `ask` whatever the note says.
 
 Over ssh, read-only:
 
@@ -136,6 +152,19 @@ projects:
       review_deny: [codex1, chatgpt-countix, fable-analyst, fable-analyst2, ultra-scout]
 ```
 
+```yaml
+    tests:
+      history_command: [countix-remote-test, history, --json, --sha, '{sha}']
+      status_command: [countix-remote-test, status, --json, --lane, '{lane}']
+      full_suites: [api, full-tuned, full]
+    pipeline:
+      merge_queue:
+        enabled: true
+        ask_paths: ['**/booking/**', '**/vat/**', '**/payroll/**', '**/payments/**', '**/billing/**', '**/rls/**', '**/auth/**', 'migrations/**']
+        require_pr: true
+        maestro_log: /home/wave/inbox/wavecode-merge-queue.log
+```
+
 `auto_freeze` stays off: agents write their own freeze notes. `codex6` is not in the
-pools until its lane clearance is confirmed. `auto_stage` and `auto_merge_main` are
-staging and merge decisions and stay as they are.
+pools until its lane clearance is confirmed. `auto_stage` stays off; `auto_merge_main`
+is on so the other lanes are told when the queue advances main.

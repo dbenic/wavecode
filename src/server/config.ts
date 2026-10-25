@@ -200,6 +200,12 @@ export interface ProjectConfig {
      * such a profile may review each other.
      */
     service_profiles?: string[];
+    /**
+     * WaveCode merges eligible lanes into main itself (docs/merge-queue.md).
+     * Off unless `enabled` is true; the runtime kill switch is the kv flag
+     * `merge_queue.<project>` and the Reviews page toggle.
+     */
+    merge_queue?: MergeQueueConfig;
   };
   /**
    * Operational checks named by a freeze note's `prereqs:` block. Absent
@@ -207,6 +213,35 @@ export interface ProjectConfig {
    * Commands run as argv on this box (the deploy box). `code_deploy` is not a check.
    */
   prereq_checks?: Record<string, PrereqCheckConfig>;
+}
+
+export type MergeTier = 'ship' | 'show' | 'ask';
+
+export interface MergeQueueConfig {
+  enabled?: boolean;
+  /**
+   * Path globs (`migrations/**`, `**\/payroll/**`) that force tier `ask`.
+   * `projects.<p>.migrations_dir` is always one of them.
+   */
+  ask_paths?: string[];
+  /** Tier when the freeze note has no `TIER:` line. Unset: the note must name one. */
+  default_tier?: MergeTier;
+  /**
+   * Run in the merge checkout before the merge commit is sealed (a version
+   * bump). Its file changes are folded into the merge commit. Argv, no shell.
+   */
+  version_command?: string[];
+  /**
+   * Prints the open pull requests as JSON (`gh pr list --json number,headRefName,headRefOid,state`).
+   * Without it the remote's `refs/pull/*\/head` is read, which cannot tell open from closed.
+   */
+  pr_list_command?: string[];
+  /** A lane needs a pull request before it is merged. Default true. */
+  require_pr?: boolean;
+  /** Append one line per merge or bounce here (the coordinating bot reads it). */
+  maestro_log?: string;
+  /** Minutes the gate on the merge result may run. Default `pipeline.gate_timeout_min`. */
+  gate_timeout_min?: number;
 }
 
 export interface PeerConfig {
@@ -614,6 +649,30 @@ function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): vo
     if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
       throw new Error(`projects.${name}.pipeline.review_reassign_minutes must be a number of minutes from 0 to 1440`);
     }
+  }
+  validateMergeQueue(name, pipeline.merge_queue);
+}
+
+function validateMergeQueue(name: string, mq: MergeQueueConfig | undefined): void {
+  if (mq === undefined) return;
+  const at = `projects.${name}.pipeline.merge_queue`;
+  if (typeof mq !== 'object' || mq === null || Array.isArray(mq)) throw new Error(`${at} must be a map`);
+  for (const flag of ['enabled', 'require_pr'] as const) {
+    if (mq[flag] !== undefined && typeof mq[flag] !== 'boolean') throw new Error(`${at}.${flag} must be a boolean`);
+  }
+  if (mq.ask_paths !== undefined && (!Array.isArray(mq.ask_paths) || mq.ask_paths.some((p) => typeof p !== 'string' || !p.trim() || p.length > 200 || p.includes('..') || p.startsWith('/')))) {
+    throw new Error(`${at}.ask_paths must be a list of relative path globs`);
+  }
+  if (mq.default_tier !== undefined && !['ship', 'show', 'ask'].includes(mq.default_tier as string)) {
+    throw new Error(`${at}.default_tier must be ship, show or ask`);
+  }
+  validateArgvList(`${at}.version_command`, mq.version_command);
+  validateArgvList(`${at}.pr_list_command`, mq.pr_list_command);
+  if (mq.maestro_log !== undefined && (typeof mq.maestro_log !== 'string' || !mq.maestro_log.trim() || mq.maestro_log.includes('..') || !/\.(log|txt|md)$/.test(mq.maestro_log))) {
+    throw new Error(`${at}.maestro_log must be a .log, .txt or .md file path`);
+  }
+  if (mq.gate_timeout_min !== undefined && (typeof mq.gate_timeout_min !== 'number' || !Number.isInteger(mq.gate_timeout_min) || mq.gate_timeout_min < 1 || mq.gate_timeout_min > 1440)) {
+    throw new Error(`${at}.gate_timeout_min must be a whole number of minutes from 1 to 1440`);
   }
 }
 

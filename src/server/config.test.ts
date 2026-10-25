@@ -329,4 +329,42 @@ projects:
     await refuse('review:\n  first_pass:\n    enabled: true\n', /first_pass.seats must name at least one seat/);
     await refuse('review:\n  first_pass:\n    seats: [codex2]\n    timeout_min: 0\n', /first_pass.timeout_min/);
   });
+
+  it('loads the merge queue block and refuses bad values', async () => {
+    fs.writeFileSync(configPath, `
+projects:
+  demo:
+    migrations_dir: migrations
+    pipeline:
+      gate_command: [countix-remote-test, --suite, api]
+      merge_queue:
+        enabled: true
+        ask_paths: ["**/payroll/**", "src/server/vat/*", migrations]
+        default_tier: ask
+        version_command: [node, scripts/bump-version.mjs]
+        pr_list_command: [gh, pr, list, --json, "number,headRefName,headRefOid,state"]
+        require_pr: true
+        maestro_log: /home/wave/inbox/wavecode-merge-queue.log
+        gate_timeout_min: 90
+`, 'utf8');
+    const { loadConfig } = await import('./config.js');
+    const mq = loadConfig(configPath).projects?.demo.pipeline?.merge_queue;
+    expect(mq).toEqual({
+      enabled: true, ask_paths: ['**/payroll/**', 'src/server/vat/*', 'migrations'], default_tier: 'ask',
+      version_command: ['node', 'scripts/bump-version.mjs'], pr_list_command: ['gh', 'pr', 'list', '--json', 'number,headRefName,headRefOid,state'],
+      require_pr: true, maestro_log: '/home/wave/inbox/wavecode-merge-queue.log', gate_timeout_min: 90,
+    });
+    const refuse = async (yaml: string, pattern: RegExp) => {
+      fs.writeFileSync(configPath, yaml, 'utf8');
+      vi.resetModules();
+      const fresh = await import('./config.js');
+      expect(() => fresh.loadConfig(configPath)).toThrow(pattern);
+    };
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        enabled: "yes"\n', /merge_queue.enabled must be a boolean/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        default_tier: maybe\n', /default_tier must be ship, show or ask/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        ask_paths: ["/etc/**"]\n', /ask_paths must be a list of relative path globs/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        maestro_log: /home/wave/inbox/queue.json\n', /maestro_log must be a \.log, \.txt or \.md file path/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        gate_timeout_min: 0\n', /gate_timeout_min must be a whole number of minutes from 1 to 1440/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue: [enabled]\n', /merge_queue must be a map/);
+  });
 });

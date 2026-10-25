@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { LaneCard, ReleaseView, ReviewBoard, ReviewerLoadView } from '../types';
+import type { LaneCard, LaneQueueState, MergeQueueSwitch, ReleaseView, ReviewBoard, ReviewerLoadView } from '../types';
 import { isReviewEventType } from '../sse-events';
 import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 import RoomProposals from '../components/RoomProposals';
@@ -13,7 +13,58 @@ const HOW_IT_WORKS = [
   'You press Stage, or it stages itself. Then check it on staging.',
   'Press Ready for prod. Denis ships that release.',
   'Behind main, merge main and freeze again. Your agent is told.',
+  'Where the merge queue is on, a green lane merges into main by itself: ship on the gate, show with one review, ask with two.',
 ];
+
+function queueLabel(queue: LaneQueueState): string {
+  const tier = queue.tier ? ` · ${queue.tier}` : '';
+  switch (queue.state) {
+    case 'queued': return `Merge queue · #${queue.position ?? '?'}${tier}${queue.pr ? ` · PR ${queue.pr}` : ''}`;
+    case 'merging': return `Merge queue · merging now${tier}`;
+    case 'merged': return `Merged into main${queue.merge_sha ? ` as ${shortSha(queue.merge_sha)}` : ''}${tier}`;
+    case 'bounced': return `Merge queue · bounced${tier}: ${queue.reason ?? 'see the note'}`;
+    case 'superseded': return `Merge queue · left (${queue.reason ?? 'freeze closed'})`;
+    default: return `Merge queue · waiting${tier}: ${queue.reason ?? 'checks pending'}`;
+  }
+}
+
+function MergeQueueSwitches({ switches, canSwitch, onDone }: { switches: MergeQueueSwitch[]; canSwitch: boolean; onDone: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (switches.length === 0) return null;
+  const flip = (row: MergeQueueSwitch) => {
+    if (busy) return;
+    setBusy(row.project);
+    setError(null);
+    apiPost(`/merge-queue/${row.project}/switch`, { enabled: !row.enabled })
+      .then(() => onDone())
+      .catch((e: Error) => setError(e.message || 'That did not go through'))
+      .finally(() => setBusy(null));
+  };
+  return (
+    <div className="max-w-3xl mx-auto px-4 pb-2 flex flex-wrap items-center gap-x-3 gap-y-1" data-testid="merge-queue-switches">
+      {switches.map((row) => (
+        <span key={row.project} className="flex items-center gap-2 text-[10px] font-mono" data-testid={`merge-queue-${row.project}`}>
+          <span className={row.enabled ? 'text-emerald-300' : 'text-amber-300'}>
+            merge queue {row.project} {row.config_enabled ? (row.enabled ? 'ON' : 'OFF') : 'not configured'} · {row.queued} queued
+          </span>
+          {canSwitch && row.config_enabled && (
+            <button
+              type="button"
+              data-testid={`merge-queue-toggle-${row.project}`}
+              disabled={busy === row.project}
+              onClick={() => flip(row)}
+              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold disabled:opacity-50 ${row.enabled ? 'border-amber-500/50 text-amber-200' : 'border-emerald-500/50 text-emerald-200'}`}
+            >
+              {row.enabled ? 'Stop merging' : 'Start merging'}
+            </button>
+          )}
+        </span>
+      ))}
+      {error && <span className="text-[10px] text-red-300">{error}</span>}
+    </div>
+  );
+}
 
 function reconciledLabel(iso: string | null): string {
   if (!iso) return 'not yet';
@@ -120,6 +171,15 @@ function LaneCardView({ card, onDone }: { card: LaneCard; onDone: () => void }) 
       )}
       <p className="text-[11px] text-slate-400" data-testid="lane-owner">Owner · {card.owner_label}</p>
       <Pipeline card={card} />
+      {card.queue && (
+        <p
+          data-testid="merge-queue"
+          data-state={card.queue.state}
+          className={`text-[11px] ${card.queue.state === 'bounced' ? 'text-red-300' : card.queue.state === 'merged' ? 'text-emerald-300' : card.queue.state === 'queued' || card.queue.state === 'merging' ? 'text-sky-200' : 'text-slate-400'}`}
+        >
+          {queueLabel(card.queue)}
+        </p>
+      )}
       {card.button?.kind === 'clear' && (
         <input
           data-testid="clear-reason"
@@ -236,6 +296,7 @@ export default function ReviewQueue() {
   const [reconciledAt, setReconciledAt] = useState<string | null>(null);
   const [reconcileStale, setReconcileStale] = useState(false);
   const [reviewerLoads, setReviewerLoads] = useState<ReviewerLoadView[]>([]);
+  const [mergeQueue, setMergeQueue] = useState<{ projects: MergeQueueSwitch[]; can_switch: boolean }>({ projects: [], can_switch: false });
   const [view, setView] = useState<'lanes' | 'release' | 'history'>('lanes');
   const [scope, setScope] = useState<'mine' | 'all'>('mine');
   const scopeInit = useRef(false);
@@ -256,6 +317,7 @@ export default function ReviewQueue() {
       setReconciledAt(board?.last_reconciled_at ?? null);
       setReconcileStale(board?.stale === true);
       setReviewerLoads(board?.reviewers ?? []);
+      setMergeQueue(board?.merge_queue ?? { projects: [], can_switch: false });
       setLoaded(true);
     }).catch(() => setLoaded(true));
   }, []);
@@ -263,7 +325,7 @@ export default function ReviewQueue() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleSSE = useCallback((event: SSEEvent) => {
-    if (isReviewEventType(event.type) || event.type === 'deploy.reconciled' || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.') || event.type.startsWith('pipeline.')) {
+    if (isReviewEventType(event.type) || event.type === 'deploy.reconciled' || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.') || event.type.startsWith('pipeline.') || event.type.startsWith('merge_queue.')) {
       fetchData();
     }
     if (event.type.startsWith('room.proposal_')) setProposalsVersion((v) => v + 1);
@@ -325,6 +387,7 @@ export default function ReviewQueue() {
             {reconcileStale && <span data-testid="reconcile-stale"> · stale — more than 5 minutes</span>}
           </p>
         </div>
+        <MergeQueueSwitches switches={mergeQueue.projects} canSwitch={mergeQueue.can_switch} onDone={fetchData} />
         {reviewerLoads.length > 0 && (
           <div className="max-w-3xl mx-auto px-4 pb-2 flex flex-wrap gap-x-3 gap-y-1" data-testid="reviewer-load">
             {reviewerLoads.map((seat) => (

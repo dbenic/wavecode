@@ -66,6 +66,59 @@ function board(over: Partial<ReviewBoard>): ReviewBoard {
   };
 }
 
+describe('ReviewQueue merge queue', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const sse = await import('../hooks/useSSE');
+    vi.mocked(sse.useSSE).mockImplementation(() => undefined);
+  });
+
+  it('shows each card\'s queue line and lets an admin flip the kill switch', async () => {
+    const useApi = await import('../hooks/useApi');
+    let enabled = true;
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      if (path !== '/reviews/board') throw new Error(path);
+      return board({
+        viewer: { name: 'Antonio' },
+        merge_queue: { can_switch: true, projects: [{ project: 'wavepulse', config_enabled: true, enabled, enabled_by: 'denis', queued: 2 }] },
+        cards: [
+          card({ key: 'wc-a', lane: 'wc-a', title: 'A', status: 'Reviewed', action: 'Waiting for its turn', queue: { state: 'queued', reason: null, tier: 'ask', position: 1, merge_sha: null, pr: '#103' } }),
+          card({ key: 'wc-b', lane: 'wc-b', title: 'B', status: 'In review', action: 'codex3 reviewing', queue: { state: 'waiting', reason: 'waiting gate: quick green, api pending', tier: 'show', position: null, merge_sha: null, pr: null } }),
+          card({ key: 'wc-c', lane: 'wc-c', title: 'C', status: 'Needs fixes', action: 'Fix and refreeze', queue: { state: 'bounced', reason: 'merge conflict with main in a.txt', tier: 'ship', position: null, merge_sha: null, pr: null } }),
+          card({ key: 'wc-d', lane: 'wc-d', title: 'D', status: 'Merged', action: 'Nothing to do', queue: null }),
+        ],
+      }) as never;
+    });
+    vi.mocked(useApi.apiPost).mockImplementation(async (path: string, body?: unknown) => {
+      expect(path).toBe('/merge-queue/wavepulse/switch');
+      enabled = (body as { enabled: boolean }).enabled;
+      return {} as never;
+    });
+    render(<MemoryRouter><ReviewQueue /></MemoryRouter>);
+    expect(await screen.findByText('A')).toBeInTheDocument();
+    const lines = screen.getAllByTestId('merge-queue');
+    expect(lines.map((el) => el.textContent)).toEqual([
+      'Merge queue · #1 · ask · PR #103',
+      'Merge queue · waiting · show: waiting gate: quick green, api pending',
+      'Merge queue · bounced · ship: merge conflict with main in a.txt',
+    ]);
+    expect(screen.getByTestId('merge-queue-wavepulse').textContent).toContain('merge queue wavepulse ON · 2 queued');
+    fireEvent.click(screen.getByTestId('merge-queue-toggle-wavepulse'));
+    await waitFor(() => expect(screen.getByTestId('merge-queue-wavepulse').textContent).toContain('OFF'));
+    expect(screen.getByTestId('merge-queue-toggle-wavepulse').textContent).toBe('Start merging');
+  });
+
+  it('hides the toggle from a developer and says when the queue is not configured', async () => {
+    const useApi = await import('../hooks/useApi');
+    vi.mocked(useApi.apiGet).mockImplementation(async () => board({
+      merge_queue: { can_switch: false, projects: [{ project: 'wavepulse', config_enabled: false, enabled: false, enabled_by: null, queued: 0 }] },
+    }) as never);
+    render(<MemoryRouter><ReviewQueue /></MemoryRouter>);
+    expect(await screen.findByTestId('merge-queue-wavepulse')).toHaveTextContent('not configured');
+    expect(screen.queryByTestId('merge-queue-toggle-wavepulse')).toBeNull();
+  });
+});
+
 describe('ReviewQueue', () => {
   let sseHandler: ((event: SSEEvent) => void) | null = null;
 
@@ -113,7 +166,7 @@ describe('ReviewQueue', () => {
     expect(screen.getByText('EBA viewer')).toBeInTheDocument();
     expect(screen.queryByText('Recognition timeout')).not.toBeInTheDocument();
     expect(screen.getByTestId('action-ready')).toHaveTextContent('Ready for prod');
-    expect(screen.getByTestId('how-it-works').querySelectorAll('li')).toHaveLength(5);
+    expect(screen.getByTestId('how-it-works').querySelectorAll('li')).toHaveLength(6);
     fireEvent.click(screen.getByTestId('scope-toggle'));
     expect(screen.getByText('Recognition timeout')).toBeInTheDocument();
   });

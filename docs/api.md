@@ -1199,3 +1199,24 @@ event contract).
   `.md`/`.txt` files with a `To: @seat` line or a `<author>-to-<recipient>-…` name are
   announced; `-to-` names go to the recipient, never the author; logs, receipts, freeze and
   verdict files are left to the freeze watcher; `wave-firstpass-*` files are recorded.
+
+## Merge queue for main (25 Oct 2026)
+
+Approved for Wavepulse main only; see `docs/merge-queue.md` for the rules. WaveCode
+merges an eligible freeze into main itself: exact SHA and `TIER:` in the note (ask forced
+by `ask_paths` and the migrations directory), quick and API gate green on that SHA, the
+tier's reviews (`ask` = two PASS verdicts from non-authors on different credential
+profiles, from the new `freeze_verdicts` ledger), the remote lane still at the SHA, a pull
+request, and migrations numbered after main's. Serial per project; `--no-ff` merge in
+`<repos>/.wavecode-merges/`, optional `version_command` folded into the merge commit, the
+gate re-run on the merge SHA (reused when the tree is the same), plain push, bounce on
+conflict or RED, re-merge when main moved. Kill switch = config `enabled` plus the runtime
+flag (Reviews page or `POST /api/merge-queue/:project/switch`). Events `merge_queue.queued`,
+`merge_queue.merged`, `merge_queue.bounced`, `merge_queue.requeued`, `merge_queue.switch`;
+one line per merge or bounce in `maestro_log`.
+
+- `GET /api/merge-queue[?project=]` — `{ switches: [{ project, config_enabled, enabled, enabled_by, queued }], rows: [...] }`.
+- `POST /api/merge-queue/:project/switch` `{ enabled }` — admin.
+- `POST /api/merge-queue/:sha/priority` `{ priority }` — 0 to 9, developers and admins.
+- `GET /api/reviews/board` — cards carry `queue: { state, reason, tier, position, merge_sha, pr } | null`;
+  the board carries `merge_queue: { projects, can_switch }`.

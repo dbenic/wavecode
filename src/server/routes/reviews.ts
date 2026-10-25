@@ -15,6 +15,8 @@ import * as deployState from '../deploy-state.js';
 import { shaStageBlock } from '../sha-stage-block.js';
 import { opsStageBlockFromChecks } from '../ops-stage.js';
 import logger from '../logger.js';
+import * as mergeQueue from '../merge-queue.js';
+import { getConfig } from '../config.js';
 
 async function opsStageBlockFor(
   freeze: { sha: string; project: string | null; lane: string | null; gate: string | null; freeze_path?: string | null; verdict: string | null } | null,
@@ -123,6 +125,38 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const result = await devLanes.laneTestLog(project, id);
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
+  });
+
+  // Merge queue (docs/merge-queue.md): read for everyone, the kill switch for admins, priority for developers.
+  app.get('/api/merge-queue', (c) => {
+    const project = c.req.query('project') ?? null;
+    return c.json({
+      switches: mergeQueue.configuredProjects().map((name) => mergeQueue.queueSwitch(name)),
+      rows: mergeQueue.listQueue(project),
+    });
+  });
+
+  app.post('/api/merge-queue/:project/switch', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin may flip the merge queue' }, 403);
+    const project = c.req.param('project');
+    const body = await c.req.json<{ enabled?: boolean }>().catch(() => ({} as { enabled?: boolean }));
+    if (typeof body.enabled !== 'boolean') return c.json({ error: 'enabled must be true or false' }, 400);
+    const known = Object.keys(getConfig().projects ?? {}).includes(project);
+    if (!known) return c.json({ error: `Unknown project ${project}` }, 404);
+    const result = mergeQueue.setQueueSwitch(project, body.enabled, user.name);
+    logger.info({ project, enabled: body.enabled, by: user.name }, 'Merge queue switch');
+    return c.json(result);
+  });
+
+  app.post('/api/merge-queue/:sha/priority', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ priority?: number }>().catch(() => ({} as { priority?: number }));
+    if (typeof body.priority !== 'number' || !Number.isFinite(body.priority)) return c.json({ error: 'priority must be a number from 0 to 9' }, 400);
+    const row = mergeQueue.setQueuePriority(c.req.param('sha'), body.priority);
+    if (!row) return c.json({ error: 'Not in the merge queue' }, 404);
+    return c.json(row);
   });
 
   app.get('/api/reviews/board', async (c) => {

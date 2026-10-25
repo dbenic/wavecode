@@ -25,6 +25,7 @@ import { getDb } from './db.js';
 import { emit } from './event-bus.js';
 import { gitAncestor, gitRun, gitText } from './git-memo.js';
 import logger from './logger.js';
+import { listQueue, queueSwitch, type MergeQueueRow, type QueueSwitch } from './merge-queue.js';
 import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef, withRefMemoAsync } from './lane-main.js';
 import { recordJob } from './perf-monitor.js';
 import { notify } from './notifications.js';
@@ -55,7 +56,7 @@ import { readProdHealth } from './staging-forward.js';
 import { reviewStatusForVerdict, reviewerLoads, sameOwnerPoolReviewer, type ReviewerLoadView } from './reviewer-assign.js';
 import { developerFor, developerRoster } from './developers.js';
 import {
-  buildLaneCards, buildReleaseView, conflictFilesFromNote,
+  buildLaneCards, buildReleaseView, conflictFilesFromNote, type LaneQueueFact,
   type LaneCard, type LaneFreezeFact, type ReleaseView,
 } from './lane-cards.js';
 import { readLaneTests, shaChecks, suiteNames, type TestRun } from './test-runs.js';
@@ -211,6 +212,7 @@ export interface ReviewBoard {
   cards: LaneCard[];
   viewer: { name: string | null };
   release: ReleaseView;
+  merge_queue?: MergeQueueView;
 }
 
 const KV_AT = 'deploy_reconcile_at';
@@ -779,6 +781,12 @@ async function runOnce(reason: string): Promise<void> {
       logger.warn({ reason, error: (e as Error).message }, 'Review reassignment skipped');
     }
     try {
+      const queue = await import('./merge-queue.js');
+      await queue.mergeQueueTick();
+    } catch (e) {
+      logger.warn({ reason, error: (e as Error).message }, 'Merge queue tick skipped');
+    }
+    try {
       const overview = await import('./overview.js');
       const t0 = Date.now();
       await overview.reconcileOverview();
@@ -1227,11 +1235,13 @@ export async function reviewBoard(user: { name: string; role: string }, lanes: D
     const owners = developerRoster();
     const facts: LaneFreezeFact[] = [];
     const opens = openStagingLocks();
+    const queueBySha = queueRowsBySha();
     for (const row of prepared) {
       const storedLane = row.row?.lane ?? row.freeze.lane;
       const laneName = storedLane && !isInvalidLane(storedLane) ? storedLane : null;
       if (!laneName) continue;
       const fact = factFor({ ...row.freeze, lane: laneName }, row.lane, row.deploy, row.row);
+      fact.queue = queueFact(queueBySha.get(fact.sha), queueBySha);
       const open = fact.project ? opens.get(fact.project) : undefined;
       if (open && (open.sha === fact.sha || fact.action === 'stage')) {
         fact.open_request_id = open.id;
@@ -1246,6 +1256,8 @@ export async function reviewBoard(user: { name: string; role: string }, lanes: D
   } catch (e) {
     logger.debug({ error: (e as Error).message }, 'Lane cards skipped');
   }
+  let mergeQueue: MergeQueueView = { projects: [], can_switch: false };
+  try { mergeQueue = mergeQueueView(user); } catch { /* no queue table yet */ }
   return {
     last_reconciled_at: lastReconciledAt(),
     stale: reconcileIsStale(),
@@ -1254,5 +1266,35 @@ export async function reviewBoard(user: { name: string; role: string }, lanes: D
     cards,
     viewer: { name: viewerName },
     release,
+    merge_queue: mergeQueue,
   };
+}
+
+export interface MergeQueueView {
+  projects: QueueSwitch[];
+  /** Admins may flip the kill switch. */
+  can_switch: boolean;
+}
+
+function mergeQueueView(user: { role: string }): MergeQueueView {
+  const projects = Object.entries(getConfig().projects ?? {})
+    .filter(([, p]) => p.pipeline?.merge_queue !== undefined)
+    .map(([name]) => queueSwitch(name));
+  return { projects, can_switch: user.role === 'admin' };
+}
+
+function queueRowsBySha(): Map<string, MergeQueueRow> {
+  try { return new Map(listQueue().map((row) => [row.sha, row])); } catch { return new Map(); }
+}
+
+/** The card's one-line merge queue state; position counts queued rows ahead of this one. */
+function queueFact(row: MergeQueueRow | undefined, all: Map<string, MergeQueueRow>): LaneQueueFact | null {
+  if (!row) return null;
+  let position: number | null = null;
+  if (row.state === 'queued') {
+    const ahead = [...all.values()].filter((r) => r.project === row.project && r.state === 'queued'
+      && (r.priority > row.priority || (r.priority === row.priority && (r.eligible_at ?? '') < (row.eligible_at ?? ''))));
+    position = ahead.length + 1;
+  }
+  return { state: row.state, reason: row.reason, tier: row.tier, position, merge_sha: row.merge_sha, pr: row.pr };
 }

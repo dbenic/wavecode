@@ -127,7 +127,43 @@ export function ensureReleaseFreezeTable(): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_release_freezes_run ON release_freezes(run_id);
+    CREATE TABLE IF NOT EXISTS freeze_verdicts (
+      sha TEXT NOT NULL,
+      reviewer_agent_id TEXT,
+      reviewer_name TEXT NOT NULL,
+      profile TEXT,
+      verdict TEXT NOT NULL,
+      path TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (sha, reviewer_name)
+    );
   `);
+}
+
+/** One row per (SHA, reviewer): every verdict file that was ingested, not only the latest. The merge queue counts these. */
+export interface FreezeVerdict {
+  sha: string;
+  reviewer_agent_id: string | null;
+  reviewer_name: string;
+  /** The reviewer's credential profile at ingest time; null = home-dir login. */
+  profile: string | null;
+  verdict: ReviewVerdict;
+  path: string | null;
+  created_at: string;
+}
+
+export function recordVerdict(row: { sha: string; reviewer: Agent | null; reviewerName: string; verdict: ReviewVerdict; path: string | null }): void {
+  withTable(() => {
+    getDb().prepare(`INSERT INTO freeze_verdicts (sha, reviewer_agent_id, reviewer_name, profile, verdict, path)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(sha, reviewer_name) DO UPDATE SET reviewer_agent_id = excluded.reviewer_agent_id, profile = excluded.profile,
+        verdict = excluded.verdict, path = excluded.path, created_at = datetime('now')`)
+      .run(row.sha, row.reviewer?.id ?? null, row.reviewerName.toLowerCase(), row.reviewer?.profile ?? null, row.verdict, row.path);
+  });
+}
+
+export function listVerdicts(sha: string): FreezeVerdict[] {
+  return withTable(() => getDb().prepare('SELECT * FROM freeze_verdicts WHERE sha = ? ORDER BY created_at').all(sha) as FreezeVerdict[]);
 }
 
 /** The queue consults freezes on every card; a database opened without bootstrap (tests, CLI) gets the table on first use. */
@@ -135,7 +171,7 @@ function withTable<T>(fn: () => T): T {
   try {
     return fn();
   } catch (e) {
-    if (!/no such table: release_freezes/.test((e as Error).message)) throw e;
+    if (!/no such table: (release_freezes|freeze_verdicts)/.test((e as Error).message)) throw e;
     ensureReleaseFreezeTable();
     return fn();
   }
@@ -912,6 +948,7 @@ export async function ingestFreezeText(text: string, filePath: string, opts: Ing
   if (!reviewer && reviewerName && reviewerName.toLowerCase() === authorName?.toLowerCase()) {
     return { ok: false, error: `${path.basename(filePath)}: self-review refused — ${reviewerName} is the author of ${sha.slice(0, 8)}` };
   }
+  if (parsed.kind === 'verdict' && reviewerName) recordVerdict({ sha, reviewer, reviewerName, verdict, path: filePath });
   if (opts.passOnly && verdict !== 'pass' && !existing?.run_id) {
     // Backfill keeps the queue to what can be promoted; the freeze is still recorded so a later PASS completes it.
     if (existing) {
