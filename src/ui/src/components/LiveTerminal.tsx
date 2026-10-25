@@ -232,7 +232,8 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
       {error && (
         <div className="px-3 py-1 text-[10px] text-amber-300/80 border-b border-amber-500/10">{error}</div>
       )}
-      <div ref={hostRef} className={bare ? 'w-full flex-1 min-h-0 overflow-hidden bg-[#070b14] p-1' : 'w-full overflow-hidden bg-[#070b14] p-1 min-h-[300px]'} />
+      {/* A phone narrower than the pane at the smallest font scrolls sideways instead of clipping. */}
+      <div ref={hostRef} className={bare ? 'w-full flex-1 min-h-0 overflow-auto bg-[#070b14] p-1' : 'w-full overflow-x-auto overflow-y-hidden bg-[#070b14] p-1 min-h-[300px]'} />
       {behind && (
         <button
           type="button"
