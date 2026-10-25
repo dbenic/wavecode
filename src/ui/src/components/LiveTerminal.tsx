@@ -48,6 +48,9 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
   const [error, setError] = useState<string | null>(null);
   const unmountedRef = useRef(false);
   const retryRef = useRef(0);
+  /** Bytes that arrive while xterm.js is still loading (the seed comes right after init). */
+  const pendingRef = useRef<Uint8Array[]>([]);
+  const readyRef = useRef(false);
 
   const fitFont = useCallback(() => {
     const term = termRef.current;
@@ -155,7 +158,12 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
             gotInit = true;
             retryRef.current = 0;
             setGeometry({ cols: msg.cols, rows: msg.rows });
+            pendingRef.current = [];
+            readyRef.current = false;
             void ensureTerminal(msg.cols, msg.rows).then((term) => {
+              for (const chunk of pendingRef.current) term.write(chunk);
+              pendingRef.current = [];
+              readyRef.current = true;
               fitFont();
               setStatus('live');
               setError(null);
@@ -170,8 +178,10 @@ export default function LiveTerminal({ agentId, onUnavailable, fit = 'width', ba
           }
           return;
         }
+        const bytes = new Uint8Array(ev.data as ArrayBuffer);
         const term = termRef.current;
-        if (term) term.write(new Uint8Array(ev.data as ArrayBuffer));
+        if (term && readyRef.current) term.write(bytes);
+        else pendingRef.current.push(bytes);
       };
 
       ws.onclose = (ev: CloseEvent) => {
