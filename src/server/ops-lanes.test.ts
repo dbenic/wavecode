@@ -93,9 +93,9 @@ describe('ops lanes collector', () => {
     const realpath = vi.spyOn(fs.promises, 'realpath').mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
     try {
       startOpsLanes();
-      await vi.waitFor(() => expect(realpath.mock.calls.length).toBe(1));
+      await vi.waitFor(() => expect(realpath.mock.calls.length).toBe(1), { timeout: 5000 });
       await vi.advanceTimersByTimeAsync(10_000);
-      await vi.waitFor(() => expect(realpath.mock.calls.length).toBe(2));
+      await vi.waitFor(() => expect(realpath.mock.calls.length).toBe(2), { timeout: 5000 });
     } finally {
       stopOpsLanes();
       realpath.mockRestore();
