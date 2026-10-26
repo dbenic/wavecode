@@ -250,6 +250,32 @@ arrives, so a second freeze by the same author waits (note: "waits for @author's
 - `GET /api/reviews/board` — every card carries `queue` (`state`, `reason`, `tier`,
   `position`, `merge_sha`, `pr`) and the board carries `merge_queue.projects`.
 
+## Main is the only road to prod (26 Oct 2026)
+
+Prod deploys only a SHA that (1) is on origin/main, (2) contains the SHA production runs now
+(forward-only: no rollback, no branch cut from prod), and (3) has quick + api GREEN on that exact
+SHA. One check answers for everyone: `wavecode deployable <sha>` (exit 0 YES, 2 NO, 1 error),
+`GET /api/deployable/:sha`, and the Stage/Promote buttons when `releases.main_only: true`.
+What prod runs is recorded with `wavecode prod-sha <sha>` (`POST /api/deployable/prod-sha`,
+admin) after each deploy, falling back to the newest deployed production release WaveCode knows.
+
+- **Every new main tip gets the api suite once** (author `main` on the gateway), so a main SHA
+  has its own verdict and a RED main is visible. A lane whose full gate is RED while main is RED
+  is told "probably not your lane" (`[MAIN_RED]`) instead of "fix".
+- **Prod drift**: production on a SHA that is not on main shows a red banner on the Reviews page
+  (`PROD_DRIFT` in `GET /api/merge-queue` stalls). WaveCode opens one sync lane per prod SHA,
+  `wc-wavecode-prod-sync-<day>` (main with prod merged in, pushed, frozen under `wavecode`),
+  unless an open lane already contains prod's SHA; a conflicting merge is handed to Maestro
+  (`[PROD_SYNC_CONFLICT]`). The lane merges through the queue like any other.
+- **Review reuse by patch-id (rule 3)**: when a lane's own change against its merge-base with
+  main has the same `git patch-id --stable` as an earlier freeze on the lane with an independent
+  PASS, that PASS and the donor's api GREEN carry over; the new SHA needs quick GREEN, nothing
+  more. Any new line is a new patch-id and needs its own review. Event
+  `merge_queue.review_reused` (once per SHA) names the donor and the reviewers.
+- **Fast lane**: an admin sets `POST /api/merge-queue/:sha/priority`; the lane takes the next
+  gate slot and the head of the queue, still gated (quick + api + one PASS).
+- The SystemOps side is described in `docs/ops/main-only-deploy-patch-note.md`.
+
 ## Configuration
 
 ```yaml
