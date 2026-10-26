@@ -793,6 +793,17 @@ export function runRefusal(result: ExecResult): string | null {
   const said = lines.filter((l) => !/remote exit \d+ on host=/.test(l)).slice(-1)[0] ?? lines.slice(-1)[0] ?? '';
   return (said || `exit ${result.code ?? 'none'} with no RESULT line`).slice(0, 160);
 }
+/**
+ * The gateway keeps one queued run per agent name and cancels the older one when a second arrives
+ * ("CANCELLED while queued: superseded by …", seen 26 Oct 2026 even with distinct `who` suffixes).
+ * WaveCode therefore runs at most one of its own submissions per author at a time, quick before full.
+ */
+const authorInflight = new Map<string, number>();
+function authorOf(freeze: ReleaseFreeze): string { return (freeze.author_name ?? 'wavecode').toLowerCase(); }
+function authorBusy(freeze: ReleaseFreeze): boolean { return (authorInflight.get(authorOf(freeze)) ?? 0) > 0; }
+function authorStart(freeze: ReleaseFreeze): void { const a = authorOf(freeze); authorInflight.set(a, (authorInflight.get(a) ?? 0) + 1); }
+function authorDone(freeze: ReleaseFreeze): void { const a = authorOf(freeze); const n = (authorInflight.get(a) ?? 1) - 1; if (n <= 0) authorInflight.delete(a); else authorInflight.set(a, n); }
+export function authorLoadForTest(): Record<string, number> { return Object.fromEntries(authorInflight); }
 const REFUSED_MAX_TRIES = 3;
 let refusedRetryMs = 90_000;
 export function setRefusedRetryMsForTest(ms: number | null): void { refusedRetryMs = ms ?? 90_000; }
@@ -831,9 +842,9 @@ async function queueQuickCheck(freeze: ReleaseFreeze): Promise<void> {
     if (words.quick !== 'missing') return;
   } catch (e) { logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'quick check: checker read failed; running it'); }
   emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: 'QUEUED' }, null);
-  if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight) {
+  if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight || authorBusy(freeze)) {
     if (!quickPending.includes(freeze.sha)) quickPending.push(freeze.sha);
-    note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check on ${sha8} waits for a slot (${quickInflightFor(freeze.project).size} running, ${quickPending.length} waiting)`);
+    note(freeze.project, freeze.lane, freeze.sha, 'quick', authorBusy(freeze) ? `auto: quick check on ${sha8} waits for @${freeze.author_name ?? 'wavecode'}'s other run (the gateway keeps one queued run per agent)` : `auto: quick check on ${sha8} waits for a slot (${quickInflightFor(freeze.project).size} running, ${quickPending.length} waiting)`);
     return;
   }
   await runQuick(freeze);
@@ -847,7 +858,7 @@ function drainQuickPending(): void {
     if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { quickPending.splice(i, 1); continue; }
     const pipe = pipelineOf(freeze.project);
     if (!pipe.auto_gate || !pipe.gate_with_quick || !pipe.quick_check_command?.length) { quickPending.splice(i, 1); continue; }
-    if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight || refusedWait(sha, 'quick')) { i++; continue; }
+    if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight || refusedWait(sha, 'quick') || authorBusy(freeze)) { i++; continue; }
     quickPending.splice(i, 1);
     void runQuick(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Pending quick check failed'));
   }
@@ -860,6 +871,7 @@ async function runQuick(freeze: ReleaseFreeze): Promise<void> {
   const inflight = quickInflightFor(freeze.project);
   if (inflight.has(freeze.sha)) return;
   inflight.add(freeze.sha);
+  authorStart(freeze);
   try {
     const spec = mainSpec(freeze.project);
     const sha8 = freeze.sha.slice(0, 8);
@@ -891,7 +903,9 @@ async function runQuick(freeze: ReleaseFreeze): Promise<void> {
     if (word === 'RED') tell(freeze.author_agent_id, `[from WaveCode] quick check RED on ${sha8} (${freeze.lane ?? 'your lane'}). Fix, push and freeze a new SHA.`);
   } finally {
     inflight.delete(freeze.sha);
+    authorDone(freeze);
     drainQuickPending();
+    drainGatePending();
   }
 }
 
@@ -909,9 +923,9 @@ async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
   const sha8 = freeze.sha.slice(0, 8);
   setFreezeGate(freeze.sha, 'QUEUED');
   emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: 'QUEUED' }, null);
-  if (inflightFor(freeze.project).size >= pipe.gate_max_inflight) {
+  if (inflightFor(freeze.project).size >= pipe.gate_max_inflight || authorBusy(freeze)) {
     if (!gatePending.includes(freeze.sha)) gatePending.push(freeze.sha);
-    note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate on ${sha8} waits for a slot (${inflightFor(freeze.project).size} running, ${gatePending.length} waiting)`);
+    note(freeze.project, freeze.lane, freeze.sha, 'gate', authorBusy(freeze) ? `auto: full gate on ${sha8} waits for @${freeze.author_name ?? 'wavecode'}'s other run (the gateway keeps one queued run per agent)` : `auto: full gate on ${sha8} waits for a slot (${inflightFor(freeze.project).size} running, ${gatePending.length} waiting)`);
     return;
   }
   await runGate(freeze);
@@ -926,7 +940,7 @@ function drainGatePending(): void {
     if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { gatePending.splice(i, 1); continue; }
     const pipe = pipelineOf(freeze.project);
     if (!pipe.auto_gate || !pipe.gate_command?.length) { gatePending.splice(i, 1); continue; }
-    if (inflightFor(freeze.project).size >= pipe.gate_max_inflight || refusedWait(sha, 'full')) { i++; continue; }
+    if (inflightFor(freeze.project).size >= pipe.gate_max_inflight || refusedWait(sha, 'full') || authorBusy(freeze)) { i++; continue; }
     gatePending.splice(i, 1);
     void runGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Pending gate failed'));
   }
@@ -941,11 +955,14 @@ async function runGate(freeze: ReleaseFreeze): Promise<void> {
   const inflight = inflightFor(freeze.project);
   if (inflight.has(freeze.sha)) return;
   inflight.add(freeze.sha);
+  authorStart(freeze);
   try {
     await runGateBody(freeze, pipe, spec, sha8);
   } finally {
     inflight.delete(freeze.sha);
+    authorDone(freeze);
     drainGatePending();
+    drainQuickPending();
   }
 }
 
@@ -1025,7 +1042,7 @@ async function reconcileLostGates(now: number): Promise<void> {
     const age = now - Date.parse(`${freeze.created_at.replace(' ', 'T')}Z`);
     if (Number.isFinite(age) && age <= GATE_RECOVER_MAX_AGE_MS) {
       note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: gate run on ${freeze.sha.slice(0, 8)} was lost at a restart — submitting it again`);
-      if (inflightFor(freeze.project).size >= pipe.gate_max_inflight) { gatePending.push(freeze.sha); continue; }
+      if (inflightFor(freeze.project).size >= pipe.gate_max_inflight || authorBusy(freeze)) { gatePending.push(freeze.sha); continue; }
       void runGate(freeze).catch((e) => logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Gate recovery failed'));
     } else {
       note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: gate run on ${freeze.sha.slice(0, 8)} was lost at a restart and the freeze is older than 6 h — refreeze to run it again`);
@@ -1340,8 +1357,9 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
     refusedFreezes.delete(sha);
   }
   // The gate runs for as long as the remote suite takes; the review starts now.
-  void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
+  // Quick first (minutes), then the full gate: WaveCode submits one run per author at a time.
   void queueQuickCheck(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-quick skipped'));
+  void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
   try { await requestFirstPassFor(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'First pass skipped'); }
   try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
   try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
@@ -1417,6 +1435,7 @@ export function resetPipelineForTest(): void {
   quickPending.length = 0;
   refusedRuns.clear();
   refusedRetryMs = 90_000;
+  authorInflight.clear();
 }
 
 firstPassHooks.onResult = announceFirstPass;

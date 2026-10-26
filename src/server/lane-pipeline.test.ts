@@ -30,7 +30,7 @@ import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
-  quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+  authorLoadForTest, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
 import { setTestRunExecForTest } from './test-runs.js';
@@ -767,6 +767,35 @@ describe('hands-free lane pipeline', () => {
     const quickWords = () => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.quick' AND entity_id = ? ORDER BY id").all(`${sha}:quick`) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick: string }).quick);
     await vi.waitFor(() => expect(quickWords()).toEqual(['QUEUED', 'QUEUED', 'GREEN']), { timeout: 10_000 });
     expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
+  });
+
+  it('WaveCode submits one run per author at a time (the gateway cancels a second queued run per agent); other authors run alongside', async () => {
+    const resolvers: Array<(r: { code: number; stdout: string }) => void> = [];
+    setPipelineExecForTest((argv) => {
+      calls.push(argv);
+      if (argv[0] === 'gate-run') return new Promise<{ code: number; stdout: string }>((resolve) => { resolvers.push(resolve); });
+      return { code: 0, stdout: 'ok' };
+    });
+    pipe.auto_gate = true;
+    pipe.gate_max_inflight = 3;
+    agent('ales', path.join(tmp, 'wc-ales-1'));
+    agent('toni', path.join(tmp, 'wc-toni-1'));
+    const a1 = branch('wc-ales-1', 'a1.txt', '1');
+    const a2 = branch('wc-ales-2', 'a2.txt', '2');
+    const t1 = branch('wc-toni-1', 't1.txt', '3');
+    await ingestFreezeFile(openNote('ales', 'wc-ales-1', a1));
+    await ingestFreezeFile(openNote('ales', 'wc-ales-2', a2));
+    await ingestFreezeFile(openNote('toni', 'wc-toni-1', t1));
+    const gates = () => calls.filter((a) => a[0] === 'gate-run').map((a) => a[2]);
+    await vi.waitFor(() => expect(gates()).toEqual([a1, t1]), { timeout: 10_000 }); // ales's second waits, toni's runs alongside
+    expect(gateLoadForTest().pending).toEqual([a2]);
+    expect(authorLoadForTest()).toEqual({ ales: 1, toni: 1 });
+    expect(latestPipelineNote('wave', 'wc-ales-2')).toMatch(/waits for @ales's other run/);
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' }); // a1 done
+    await vi.waitFor(() => expect(gates()).toEqual([a1, t1, a2]), { timeout: 10_000 });
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    await vi.waitFor(() => expect(authorLoadForTest()).toEqual({}), { timeout: 10_000 });
   });
 
   it('after a restart, a QUEUED freeze is settled from the test history, or resubmitted once when the dispatcher never saw it', async () => {
