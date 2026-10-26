@@ -603,6 +603,57 @@ profileCmd
     process.exit(result.status ?? 0);
   });
 
+// --- deployable: "main is the only road to prod" (deploy guard, Stage/Promote) ---
+program
+  .command('deployable <sha>')
+  .description('May this exact SHA go to production? YES only if it is on origin/main, contains what prod runs, and quick + api are GREEN on it. Exit 0 yes, 2 no, 1 error')
+  .option('--project <name>', 'Project (default: the only configured one)')
+  .option('--json', 'Print the full report as JSON')
+  .option('--url <url>', 'WaveCode daemon URL (default: $WAVECODE_URL or config server)')
+  .option('--token <token>', 'Bearer token (default: $WAVECODE_TOKEN or config auth.fallback_token)')
+  .action(async (sha: string, opts: { project?: string; json?: boolean; url?: string; token?: string }) => {
+    try { loadInstalledConfig(); } catch { /* env may carry url + token */ }
+    const { resolveDaemonConnection } = await import('./daemon-connection.js');
+    const { formatDeployable } = await import('../server/deployable.js');
+    const conn = resolveDaemonConnection();
+    const url = new URL(`/api/deployable/${encodeURIComponent(sha.trim())}`, opts.url ?? conn.url);
+    if (opts.project) url.searchParams.set('project', opts.project);
+    const token = opts.token ?? conn.token;
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    } catch (e) {
+      console.error(`deployable: daemon unreachable at ${url.origin}: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    const body = await res.json().catch(() => null) as { error?: string; exit_code?: number } | null;
+    if (!res.ok || !body || typeof body.exit_code !== 'number') {
+      console.error(`deployable: ${body?.error ?? `HTTP ${res.status}`}`);
+      process.exit(1);
+    }
+    if (opts.json) writeLine(process.stdout, JSON.stringify(body, null, 2));
+    else writeLine(process.stdout, formatDeployable(body as Parameters<typeof formatDeployable>[0]));
+    process.exit(body.exit_code);
+  });
+
+program
+  .command('prod-sha <sha>')
+  .description('Record what production runs now (admin; SystemOps after each deploy). The deployable check requires a candidate to contain it')
+  .option('--project <name>', 'Project (default: the only configured one)')
+  .option('--url <url>', 'WaveCode daemon URL (default: $WAVECODE_URL or config server)')
+  .option('--token <token>', 'Bearer token (default: $WAVECODE_TOKEN or config auth.fallback_token)')
+  .action(async (sha: string, opts: { project?: string; url?: string; token?: string }) => {
+    try { loadInstalledConfig(); } catch { /* env may carry url + token */ }
+    const { resolveDaemonConnection } = await import('./daemon-connection.js');
+    const conn = resolveDaemonConnection();
+    const url = new URL('/api/deployable/prod-sha', opts.url ?? conn.url);
+    const token = opts.token ?? conn.token;
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ sha: sha.trim(), ...(opts.project ? { project: opts.project } : {}) }) }).catch((e: Error) => { console.error(`prod-sha: daemon unreachable: ${e.message}`); process.exit(1); });
+    const body = await res.json().catch(() => null) as { error?: string; sha?: string; project?: string } | null;
+    if (!res.ok || !body?.sha) { console.error(`prod-sha: ${body?.error ?? `HTTP ${res.status}`}`); process.exit(1); }
+    writeLine(process.stdout, `recorded: production of ${body.project} runs ${body.sha}`);
+  });
+
 // --- gate-status: the one checker (deploy scripts, agents) ---
 program
   .command('gate-status <sha>')

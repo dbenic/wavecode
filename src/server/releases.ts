@@ -694,6 +694,11 @@ export async function requestRelease(opts: RequestReleaseOpts): Promise<Result<R
   }
   const behind = await releaseBehindMain(opts.project, opts.sha);
   if (behind) return { ok: false, error: behind };
+  if (opts.target === 'production' && getConfig().releases?.main_only === true) {
+    const { checkDeployable } = await import('./deployable.js');
+    const d = await checkDeployable(opts.project, opts.sha);
+    if (!d.deployable) return { ok: false, error: `not deployable (main is the only road to prod): ${d.reasons.join('; ')}` };
+  }
   let stepsJson: string | null = null;
   let rollbackReason: string | null = null;
   if (opts.target === 'production') {

@@ -473,6 +473,12 @@ export interface WaveConfig {
   releases?: {
     deploy_agent?: string | null;
     production_approvers?: string[];
+    /**
+     * "Main is the only road to prod" (Denis, 26 Oct 2026): a production release request is
+     * refused unless `wavecode deployable` says YES (on origin/main, contains what prod runs,
+     * quick + api GREEN on the exact SHA). Default off so older boxes keep their flow.
+     */
+    main_only?: boolean;
     staging_command?: string[];
     staging_watch_command?: string[];
     /**
@@ -871,6 +877,7 @@ export function validateConfig(cfg: WaveConfig): void {
   if (cfg.releases?.deploy_agent != null && (typeof cfg.releases.deploy_agent !== 'string' || !/^@?[\w.-]{1,64}$/.test(cfg.releases.deploy_agent))) {
     throw new Error('releases.deploy_agent must be an agent alias, name or id');
   }
+  if (cfg.releases?.main_only !== undefined && typeof cfg.releases.main_only !== 'boolean') throw new Error('releases.main_only must be a boolean');
   if (cfg.releases?.production_approvers !== undefined) {
     const list = cfg.releases.production_approvers;
     if (!Array.isArray(list) || list.some((n) => typeof n !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(n))) {
