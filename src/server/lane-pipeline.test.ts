@@ -491,6 +491,50 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
+  it('syncs only a clean lane at its origin tip: pushes the merge first, then freezes; otherwise tells the owner once', async () => {
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    const author = agent('ales', repo);
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', sha, '/reviews/prev.md')));
+    moveMain('main.txt', 'later');
+    git(repo, 'checkout', '-q', 'wc-ales');
+    pipe.auto_merge_main = true;
+    // Uncommitted change: no merge, one plain message, not repeated on the next tick.
+    fs.writeFileSync(path.join(repo, 'lane.txt'), 'edited');
+    (await onMainAdvanced('wave'));
+    (await onMainAdvanced('wave'));
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha);
+    const dirty = () => messages(author.id).filter((m) => /uncommitted changes/.test(m));
+    await vi.waitFor(() => expect(dirty()).toHaveLength(1)); // delivery is asynchronous
+    expect(dirty()[0]).toMatch(/\[LANE_DIRTY\]/);
+    git(repo, 'checkout', '-q', '--', 'lane.txt');
+    // Local commit not on origin: no merge, the owner pushes first.
+    fs.writeFileSync(path.join(repo, 'more.txt'), 'more');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'local only');
+    const ahead = git(repo, 'rev-parse', 'HEAD');
+    (await onMainAdvanced('wave'));
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(ahead);
+    await vi.waitFor(() => expect(messages(author.id).filter((m) => /not at its origin tip/.test(m))).toHaveLength(1));
+    expect(dirty()).toHaveLength(1);
+    expect(calls.some((argv) => argv[0] === 'git' && argv[1] === 'push')).toBe(false);
+    // At the tip and clean: merge, plain push of the lane (never force), then the freeze.
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-ales', ahead);
+    (await onMainAdvanced('wave'));
+    const head = git(repo, 'rev-parse', 'HEAD');
+    expect(head).not.toBe(ahead);
+    const pushes = calls.filter((argv) => argv[0] === 'push-lane'); // the configured push command (sync, then the freeze's own); plain git push without one
+    expect(pushes.length).toBeGreaterThanOrEqual(1);
+    expect(pushes.every((argv) => argv[1] === 'wc-ales')).toBe(true);
+    expect(calls.some((argv) => argv[0] === 'git' && argv[1] === 'push')).toBe(false);
+    expect(getFreeze(head)).toBeTruthy(); // the freeze came after the push
+    // Main moves again within 30 minutes: the lane is not synced again.
+    moveMain('main.txt', 'even later');
+    git(repo, 'checkout', '-q', 'wc-ales');
+    (await onMainAdvanced('wave'));
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(head);
+    expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/was synced 0 min ago/);
+  });
+
   it('does not auto-merge or ping a review_deny agent', async () => {
     const sha = branch('wc-codex1', 'codex.txt', 'lane');
     const seat = agent('chatgpt-countix', repo);

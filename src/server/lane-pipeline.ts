@@ -1286,6 +1286,85 @@ function behindConflict(lane: string): string {
 }
 
 /** Main moved: clean-merge every open lane that is now behind, then refreeze. `review_deny` seats are left alone. */
+/** A lane is synced at most this often, unless its queue row bounced on a merge conflict. */
+const SYNC_MIN_MS = 30 * 60_000;
+const SYNC = 'sync';
+
+function lastNoteAt(project: string, lane: string, action: string): number | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT created_at FROM events WHERE type = ? AND entity_id = ? AND json_extract(payload_json, '$.action') = ? ORDER BY id DESC LIMIT 1`,
+    ).get(PIPELINE_ACTION, `${project}:${lane}`, action) as { created_at: string } | undefined;
+    if (!row) return null;
+    const at = Date.parse(row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`);
+    return Number.isFinite(at) ? at : null;
+  } catch {
+    return null;
+  }
+}
+
+function queueRowOf(sha: string): { state: string; reason: string | null } | null {
+  try {
+    return (getDb().prepare('SELECT state, reason FROM merge_queue WHERE sha = ?').get(sha) as { state: string; reason: string | null } | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Newest freeze on the lane, any status. */
+function newestFreezeOf(project: string, lane: string): ReleaseFreeze | null {
+  for (const freeze of listFreezes()) if (freeze.project === project && freeze.lane === lane) return freeze;
+  return null;
+}
+
+async function workspaceClean(workspace: string): Promise<boolean> {
+  try {
+    return (await git(workspace, ['status', '--porcelain', '--untracked-files=no'])) === '';
+  } catch {
+    return false;
+  }
+}
+
+/** The lane's tip on the remote, after a fetch when the remote answers. */
+async function remoteLaneTip(project: string, lane: string): Promise<string | null> {
+  const repo = projectRepo(project);
+  if (!repo || !SAFE_LANE.test(lane)) return null;
+  const spec = mainSpec(project);
+  try { await git(repo, ['fetch', '--quiet', spec.remote, lane]); } catch { /* offline or no remote: the stored ref is used */ }
+  try {
+    const sha = await git(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${spec.remote}/${lane}^{commit}`]);
+    return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why a lane is not synced now, or null. Said once per (lane, tip): the owner gets one message,
+ * not one per tick.
+ */
+async function syncSkipReason(project: string, lane: string, workspace: string, before: string, author: Agent): Promise<string | null> {
+  const newest = newestFreezeOf(project, lane);
+  const row = newest ? queueRowOf(newest.sha) : null;
+  if (row && (row.state === 'queued' || row.state === 'merging')) return `${lane} is ${row.state === 'merging' ? 'merging now' : 'next to merge'}; not synced`;
+  const conflictBounce = row?.state === 'bounced' && /conflict/i.test(row.reason ?? '');
+  const last = lastNoteAt(project, lane, SYNC);
+  if (!conflictBounce && last != null && Date.now() - last < SYNC_MIN_MS) return `${lane} was synced ${Math.round((Date.now() - last) / 60_000)} min ago; the next sync waits (every ${SYNC_MIN_MS / 60_000} min unless the lane bounces on a conflict)`;
+  if (!(await workspaceClean(workspace))) return `${lane} has uncommitted changes in @${author.name}'s checkout; @${author.name} commits or stashes, merges main and pushes [LANE_DIRTY]`;
+  const tip = await remoteLaneTip(project, lane);
+  if (tip && tip.toLowerCase() !== before.toLowerCase()) return `${lane} is not at its origin tip (checkout ${before.slice(0, 8)}, origin ${tip.slice(0, 8)}); @${author.name} pushes or pulls, then WaveCode syncs [LANE_NOT_AT_TIP]`;
+  return null;
+}
+
+/** Push the sync merge to the lane, plain (never force). The configured push command wins. */
+async function pushSync(project: string, lane: string, workspace: string, pipe: PipelineSwitches): Promise<ExecResult> {
+  const spec = mainSpec(project);
+  const argv = pipe.push_command?.length
+    ? fill(pipe.push_command, { workspace, lane, sha: '', remote: spec.remote, project, checkout: workspace })
+    : ['git', 'push', spec.remote, `HEAD:refs/heads/${lane}`];
+  return runArgv(argv, { cwd: workspace, timeoutMs: 60_000 });
+}
+
 export async function onMainAdvanced(project: string, mainSha?: string): Promise<void> {
   const pipe = pipelineOf(project);
   if (!pipe.auto_merge_main) return;
@@ -1314,6 +1393,18 @@ export async function onMainAdvanced(project: string, mainSha?: string): Promise
     if (!before) continue;
     const behind = await commitsBehind(project, before);
     if (behind == null || behind <= 0) continue;
+    // Only a clean checkout at the lane's origin tip is synced: the merge is pushed first and
+    // frozen second, so the frozen SHA is always the origin tip (spec item 2, 26 Oct 2026).
+    const skip = await syncSkipReason(project, lane, author.workspace, before, author);
+    if (skip) {
+      const key = `${lane}@${before.slice(0, 8)}`;
+      if (!acted(key, 'pipeline.sync-skip')) {
+        emit('pipeline.sync-skip', 'lane', key, { project, lane, sha: before, reason: skip }, null);
+        note(project, lane, before, 'sync-skip', `auto: main moved; ${skip}`);
+        if (/\[LANE_(DIRTY|NOT_AT_TIP)\]/.test(skip)) tell(author.id, `[from WaveCode] main moved and ${skip}`);
+      }
+      continue;
+    }
     const merged = await mergeMainClean(author.workspace, mainRef);
     if (!merged.ok) {
       if (merged.skipped) continue;
@@ -1321,14 +1412,22 @@ export async function onMainAdvanced(project: string, mainSha?: string): Promise
       const tip = await mainTip(repo, project);
       const shaNow = mainSha ?? tip?.sha ?? '';
       if (shaNow) await alertBehind({ lane, project, authorAgentId: author.id, authorName: author.name });
-      note(project, lane, before, 'merge', `auto: merge conflict in ${files} — @${author.name}`);
+      note(project, lane, before, 'merge', `auto: merge conflict in ${files}: @${author.name} merges main, resolves ${files}, pushes and freezes [MERGE_CONFLICT]`);
       continue;
     }
     const sha = await headOf(author.workspace);
+    if (!sha || sha === before) continue;
+    const pushed = await pushSync(project, lane, author.workspace, pipe);
+    if (pushed.code !== 0) {
+      try { await git(author.workspace, ['reset', '--hard', before]); } catch { /* left for the owner */ }
+      note(project, lane, before, SYNC, `auto: main merged into ${lane} but the push was refused (origin moved?); checkout reset to ${before.slice(0, 8)}, tried again on the next main advance`);
+      continue;
+    }
+    note(project, lane, sha, SYNC, `auto: merged main into ${lane} and pushed ${sha.slice(0, 8)}; freezing it now`);
     const tip = await mainTip(repo, project);
     const mergedTip = mainSha ?? tip?.sha ?? '';
     if (mergedTip) await alertMerged({ lane, project, mainSha: mergedTip, authorAgentId: author.id, authorName: author.name });
-    if (!sha || sha === before || acted(sha, FROZEN)) continue;
+    if (acted(sha, FROZEN)) continue;
     await publishFreeze({ workspace: author.workspace, project, lane, sha, author, pipe });
   }
 }
