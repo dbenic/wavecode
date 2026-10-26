@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { getUser, hasSeatToken } from '../db.js';
+import { isAdmin } from '../users.js';
 import * as outputWatcher from '../output-watcher.js';
 import {
   createSeat,
@@ -28,8 +29,24 @@ export function registerSeatRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   app.post('/api/users/me/seat', async (c) => {
-    const body = await c.req.json<{ runtime?: unknown }>().catch(() => ({} as { runtime?: unknown }));
-    const result = await createSeat(getActingUser(c), { runtime: body?.runtime });
+    const body = await c.req.json<{ runtime?: unknown; profile?: unknown }>().catch(() => ({} as { runtime?: unknown; profile?: unknown }));
+    const result = await createSeat(getActingUser(c), { runtime: body?.runtime, profile: body?.profile });
+    if (!result.ok) return c.json({ error: result.error }, seatErrorStatus(result.code));
+    outputWatcher.startWatching(result.data.agent.id);
+    return c.json({
+      agent: result.data.agent,
+      mcp: result.data.mcp.ok ? { registered: true } : { registered: false, error: result.data.mcp.error, token: result.data.token },
+    }, 201);
+  });
+
+  // An admin creates a user's seat, optionally on another credential profile (a separate subscription).
+  app.post('/api/users/:id/seat', async (c) => {
+    const actor = getActingUser(c);
+    if (!isAdmin(actor) || actor.via_seat) return c.json({ error: 'Only an admin may create a seat for another user' }, 403);
+    const target = getUser(c.req.param('id'));
+    if (!target.ok) return c.json({ error: target.error }, 404);
+    const body = await c.req.json<{ runtime?: unknown; profile?: unknown }>().catch(() => ({} as { runtime?: unknown; profile?: unknown }));
+    const result = await createSeat(target.data, { runtime: body?.runtime, profile: body?.profile, actor });
     if (!result.ok) return c.json({ error: result.error }, seatErrorStatus(result.code));
     outputWatcher.startWatching(result.data.agent.id);
     return c.json({

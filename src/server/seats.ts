@@ -115,7 +115,15 @@ export interface CreatedSeat {
  * register MCP in the seat's own config, spawn on the user's profile, take
  * the never-expiring seat lease, brief it (async, once the runtime is up).
  */
-export async function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtime?: unknown } = {}): Promise<SeatResult<CreatedSeat>> {
+/**
+ * `profile`: the credential profile the seat runs on; default the user's own. Another profile
+ * (a seat on a separate subscription, e.g. `assist`) is an admin's choice: `actor` is the admin
+ * creating the seat for `user`, and the profile rule is checked against the actor.
+ */
+export async function createSeat(
+  user: Pick<User, 'id' | 'role'>,
+  opts: { runtime?: unknown; profile?: unknown; actor?: Pick<User, 'role' | 'profile'> } = {},
+): Promise<SeatResult<CreatedSeat>> {
   const guarded = guardUser(user);
   if (!guarded.ok) return guarded;
   const me = guarded.data;
@@ -129,7 +137,8 @@ export async function createSeat(user: Pick<User, 'id' | 'role'>, opts: { runtim
     : opts.runtime;
   if (typeof runtime !== 'string' || !runtimes[runtime]) return { ok: false, code: 'invalid', error: `Unknown runtime '${String(runtime)}'` };
 
-  const profile = resolveSpawnProfile(me, undefined);
+  const wanted = opts.profile === undefined || opts.profile === '' ? undefined : opts.profile;
+  const profile = wanted === undefined ? resolveSpawnProfile(me, undefined) : resolveSpawnProfile(opts.actor ?? me, wanted);
   if (!profile.ok) return { ok: false, code: profile.code === 'forbidden' ? 'forbidden' : 'invalid', error: profile.error };
   const login = requireProfileLogin(profile.data, runtime);
   if (!login.ok) return { ok: false, code: 'invalid', error: login.error };

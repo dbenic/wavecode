@@ -90,12 +90,12 @@ describe('one orchestrator seat per user (spec §5d)', () => {
       'auth:', '  method: token', `  fallback_token: ${FALLBACK}`,
       'autonomy:', '  auto_dispatch: false',
       'orchestrator_agent: pm',
-      `profiles_root: ${root}`, 'profiles:', '  ana: {}', '  denis: {}',
+      `profiles_root: ${root}`, 'profiles:', '  ana: {}', '  denis: {}', '  assist: {}',
       'artifacts:', `  storage: ${path.join(tmpDir, 'artifacts')}`, '',
     ].join('\n'));
     (await import('./config.js')).loadConfig(path.join(tmpDir, 'config.yaml'));
     // Profiles are logged in (credential files present) unless a test removes them.
-    for (const profile of ['ana', 'denis']) touchLogins(root, profile);
+    for (const profile of ['ana', 'denis', 'assist']) touchLogins(root, profile);
     db = await import('./db.js');
     db.resetDbForTest();
     db.initDb(path.join(tmpDir, 'test.db'));
@@ -329,6 +329,23 @@ describe('one orchestrator seat per user (spec §5d)', () => {
       await dispatcher.dispatchNext({ manual: true });
       expect((db.getTask(task.data.id) as { data: { status: string } }).data.status).toBe('pending');
     });
+  });
+
+  it('an admin creates a user\'s seat on another profile (a separate subscription); a developer may not pick one', async () => {
+    const forbidden = await call('POST', '/api/users/me/seat', ana.token, { profile: 'assist' });
+    expect(forbidden.status).toBe(403);
+    const notAdmin = await call('POST', `/api/users/${denis.id}/seat`, ana.token, { profile: 'assist' });
+    expect(notAdmin.status).toBe(403);
+    const res = await call('POST', `/api/users/${denis.id}/seat`, FALLBACK, { profile: 'assist' });
+    expect(res.status).toBe(201);
+    expect(res.json.agent.name).toBe('pm-denis');
+    expect(res.json.agent.profile).toBe('assist');
+    expect(res.json.agent.role).toBe('orchestrator');
+    expect(res.json.mcp.registered).toBe(true);
+    const mine = await call('GET', '/api/users/me/seat', denis.token);
+    expect(mine.json.agent?.id).toBe(res.json.agent.id);
+    const again = await call('POST', `/api/users/${denis.id}/seat`, FALLBACK, { profile: 'assist' });
+    expect(again.status).toBe(409);
   });
 
   it('a missing seat is reported (no silent fallback) and can be recreated', async () => {
