@@ -102,6 +102,7 @@ export const MERGE_QUEUE_EVENT = {
   pass: 'merge_queue.pass',
   resolved: 'merge_queue.resolved',
   reset: 'merge_queue.reset',
+  reused: 'merge_queue.review_reused',
 } as const;
 
 export interface QueueStall {
@@ -440,6 +441,64 @@ export function independentPasses(
   return { ok: false, passes, why };
 }
 
+/**
+ * `git patch-id --stable` of the lane's own change against its merge-base with main: the same
+ * for two SHAs when the lane only merged main between them. Empty when the lane changes nothing.
+ */
+async function patchIdOf(repo: string, mainRef: string, sha: string): Promise<string | null> {
+  const cached = kvGet(`patchid:${sha.toLowerCase()}`);
+  if (cached !== null) return cached;
+  const base = await tryGit(repo, ['merge-base', mainRef, sha]);
+  if (!base) return null;
+  const diff = await tryGit(repo, ['diff', '--no-color', '--no-ext-diff', base, sha], 60_000);
+  if (diff === null) return null;
+  let id = '';
+  if (diff.trim()) {
+    try {
+      const out = await execFileAsync('git', ['-C', repo, 'patch-id', '--stable'], { input: diff, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+      id = out.trim().split(/\s+/)[0] ?? '';
+    } catch { return null; }
+  }
+  kvSet(`patchid:${sha.toLowerCase()}`, id);
+  return id;
+}
+
+interface CarriedReview { donor: string; patchId: string; passes: FreezeVerdict[]; full: string }
+
+/**
+ * An earlier freeze on the same lane, by the same author, with the same patch-id and an
+ * independent PASS: its review (and its api GREEN) carries over to this SHA. Newest first.
+ */
+async function reviewCarriedOver(repo: string, mainRef: string, freeze: ReleaseFreeze): Promise<CarriedReview | null> {
+  if (!freeze.project || !freeze.lane) return null;
+  const mine = await patchIdOf(repo, mainRef, freeze.sha);
+  if (!mine) return null;
+  const author = authorFor(freeze);
+  const who = { id: freeze.author_agent_id ?? author?.id ?? null, name: freeze.author_name ?? author?.name ?? null, alias: author?.alias ?? null, profile: author?.profile ?? null };
+  const service = getConfig().projects?.[freeze.project]?.pipeline?.service_profiles ?? [];
+  const mineAt = Date.parse(`${freeze.created_at.replace(' ', 'T')}Z`);
+  for (const other of listFreezes()) {
+    if (other.sha.toLowerCase() === freeze.sha.toLowerCase() || other.project !== freeze.project || other.lane !== freeze.lane) continue;
+    if (other.author_name && freeze.author_name && other.author_name.toLowerCase() !== freeze.author_name.toLowerCase()) continue;
+    const at = Date.parse(`${other.created_at.replace(' ', 'T')}Z`);
+    if (Number.isFinite(at) && Number.isFinite(mineAt) && at > mineAt) continue;
+    if (other.verdict === 'needs-fixes' || other.verdict === 'reject') continue;
+    const passed = independentPasses(verdictsFor(other), who, service);
+    if (!passed.ok) continue;
+    if ((await patchIdOf(repo, mainRef, other.sha)) !== mine) continue;
+    const gates = await gateWords(other).catch(() => ({ quick: 'missing', full: 'missing' }));
+    return { donor: other.sha, patchId: mine, passes: passed.passes, full: gates.full };
+  }
+  return null;
+}
+
+function reusedNoted(sha: string): boolean {
+  try {
+    const row = getDb().prepare('SELECT id FROM events WHERE type = ? AND entity_id = ? LIMIT 1').get(MERGE_QUEUE_EVENT.reused, sha) as { id: number } | undefined;
+    return !!row;
+  } catch { return false; }
+}
+
 /** The freeze's own verdict line counts when the ledger has no row for it (notes ingested before the ledger existed). */
 function verdictsFor(freeze: ReleaseFreeze): FreezeVerdict[] {
   const rows = listVerdicts(freeze.sha);
@@ -763,8 +822,15 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
   const github = await githubPass(project, cfg);
   if (!github.ok) return no(base, 'GH_AUTH_MISSING', github.error ?? 'gh is not logged in');
 
+  // Review reuse by patch-id (rule 3, 26 Oct 2026): a lane that only merged main since a SHA with an
+  // independent PASS carries that PASS and its api GREEN over; the new SHA needs quick GREEN, nothing more.
+  const carried = await reviewCarriedOver(repo, mainRef, freeze);
   const gates = await gateWords(freeze);
-  if (gates.quick !== 'green' || gates.full !== 'green') return no(base, 'GATE_NOT_GREEN', `quick ${gates.quick}, api ${gates.full} on ${freeze.sha.slice(0, 8)}`);
+  const full = gates.full === 'green' ? 'green' : carried?.full === 'green' ? 'green' : gates.full;
+  if (gates.quick !== 'green' || full !== 'green') {
+    const apiWord = carried && carried.full !== 'green' && gates.full !== 'green' ? `${gates.full} (and ${carried.full} on ${carried.donor.slice(0, 8)}, the SHA it would carry from)` : full;
+    return no(base, 'GATE_NOT_GREEN', `quick ${gates.quick}, api ${apiWord} on ${freeze.sha.slice(0, 8)}`);
+  }
 
   if (freeze.verdict === 'needs-fixes' || freeze.verdict === 'reject') {
     return no(base, 'NEEDS_FIXES', `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA`);
@@ -775,8 +841,15 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
     { id: freeze.author_agent_id ?? author?.id ?? null, name: freeze.author_name ?? author?.name ?? null, alias: author?.alias ?? null, profile: author?.profile ?? null },
     getConfig().projects?.[project]?.pipeline?.service_profiles ?? [],
   );
-  if (!passed.ok) return no(base, 'NO_PASS_ON_SHA', passed.why ?? 'no PASS on this SHA');
-  const verdictFiles = passed.passes.map((p) => p.path).filter((p): p is string => !!p);
+  if (!passed.ok && carried) {
+    if (!reusedNoted(freeze.sha)) {
+      emit(MERGE_QUEUE_EVENT.reused, 'run', freeze.sha, { sha: freeze.sha, project, lane: freeze.lane, donor: carried.donor, patch_id: carried.patchId, reviewers: carried.passes.map((p) => p.reviewer_name), api: carried.full === 'green' && gates.full !== 'green' ? 'carried' : 'own' }, null);
+      maestroLine(project, `review reused: ${freeze.sha.slice(0, 8)} on ${freeze.lane} has the same patch-id as ${carried.donor.slice(0, 8)} (only main merged since); PASS by ${carried.passes.map((p) => `@${p.reviewer_name}`).join(', ')} carries over`);
+    }
+  } else if (!passed.ok) {
+    return no(base, 'NO_PASS_ON_SHA', passed.why ?? 'no PASS on this SHA');
+  }
+  const verdictFiles = (passed.ok ? passed.passes : carried!.passes).map((p) => p.path).filter((p): p is string => !!p);
 
   const pr = await findPr(repo, spec.remote, freeze.sha, freeze.lane, cfg, github);
   if (!pr && cfg.require_pr === true) return no(base, 'NO_PR', `no open pull request for ${freeze.lane} at ${freeze.sha.slice(0, 8)}`);

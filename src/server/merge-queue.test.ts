@@ -303,6 +303,42 @@ describe('merge queue — on a scratch repository', () => {
     expect((await evaluate(getFreeze(sha)!))).toMatchObject({ state: 'queued', pr: '#12' });
   });
 
+  it('review reuse by patch-id: a lane that only merged main keeps its PASS and api GREEN; any new line needs a new review', async () => {
+    const author = agent('ales');
+    agent('codex3', 'pool');
+    agent('toni');
+    const sha1 = lane('wc-ales', { 'src/x.ts': 'x1' });
+    await reviewed('ales', 'wc-ales', sha1, 'ask'); // ask tier without the label: reviewed, held, so it does not merge first
+    expect(await evaluate(getFreeze(sha1)!)).toMatchObject({ code: 'ASK_TIER_NO_OK' });
+    // main moves (another lane merges); wc-ales merges main: same patch-id, new SHA.
+    const other = lane('wc-toni', { 'src/y.ts': 'y' });
+    await reviewed('toni', 'wc-toni', other, 'ship');
+    await tick();
+    expect(getQueueRow(other)).toMatchObject({ state: 'merged' });
+    git(repo, 'checkout', '-q', 'wc-ales');
+    git(repo, 'fetch', '-q', 'origin');
+    git(repo, 'merge', '-q', '--no-edit', 'origin/main');
+    const sha2 = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'push', '-q', 'origin', 'wc-ales');
+    await freeze('ales', 'wc-ales', sha2, 'ask'); // quick GREEN from the note; no api run, no verdict on sha2
+    mq.ask_tier = 'auto';
+    const reused = await evaluate(getFreeze(sha2)!);
+    expect(reused).toMatchObject({ state: 'queued', code: null, reason: null });
+    expect(reused.verdictFiles).toHaveLength(1);
+    const events = db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'merge_queue.review_reused' AND entity_id = ?").all(sha2) as Array<{ payload_json: string }>;
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0].payload_json)).toMatchObject({ donor: sha1, reviewers: ['codex3'], api: 'carried' });
+    await evaluate(getFreeze(sha2)!);
+    expect(db.getDb().prepare("SELECT count(*) AS n FROM events WHERE type = 'merge_queue.review_reused' AND entity_id = ?").get(sha2)).toEqual({ n: 1 });
+    // A new line on the lane: a new patch-id, so the old PASS does not carry; the api gate is its own again.
+    const sha3 = lane('wc-ales', { 'src/x.ts': 'x2' }, 'wc-ales');
+    await freeze('ales', 'wc-ales', sha3, 'ask');
+    expect(await evaluate(getFreeze(sha3)!)).toMatchObject({ code: 'GATE_NOT_GREEN', reason: `GATE_NOT_GREEN: quick green, api missing on ${sha3.slice(0, 8)}` });
+    gateGreen(sha3);
+    expect(await evaluate(getFreeze(sha3)!)).toMatchObject({ code: 'NO_PASS_ON_SHA' });
+    expect(messages(author.id).length).toBeGreaterThanOrEqual(0);
+  });
+
   it('without the GitHub credential every lane is GH_AUTH_MISSING and the stall file goes out at once', async () => {
     agent('ales');
     const sha = lane('wc-ales', { 'g.txt': 'g' });
