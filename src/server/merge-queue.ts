@@ -1238,7 +1238,8 @@ async function refreshProjectPass(project: string): Promise<MergeQueueRow | null
   const { open, parked } = freezesToEvaluate(project);
   const openShas = new Set(open.map((f) => f.sha));
   for (const row of listQueue(project)) {
-    if ((row.state !== 'waiting' && row.state !== 'queued') || openShas.has(row.sha)) continue;
+    // A bounced row whose freeze closed (lane retired, merged elsewhere, superseded) is over too: requeue needs a live freeze.
+    if ((row.state !== 'waiting' && row.state !== 'queued' && row.state !== 'bounced') || openShas.has(row.sha)) continue;
     const why = parked.get(row.sha);
     if (why) {
       if (row.state === 'queued' || row.reason !== why) upsert({ sha: row.sha, project, lane: row.lane, state: 'waiting', reason: why, eligible_at: null });

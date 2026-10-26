@@ -284,7 +284,8 @@ or all `-`) has nothing left to sync. Its tip is often a merge of main, so ances
 closed it, and it drew a "behind main" ping every 30 minutes. Now every place that would ping
 (`pingLaneAboutMain`, the behind-main reconcilers) first asks git cherry and, when the answer is
 empty, retires the lane instead: freezes `merged`, event `lane.retired` (`<lane>@<sha8>`), no
-message to the owner. The answer is remembered per lane, tip and main for 10 minutes. Admins can
+message to the owner. The next queue pass supersedes the lane's waiting, queued and bounced rows
+(`freeze merged`): a bounce on a retired lane is over, not something to requeue. The answer is remembered per lane, tip and main for 10 minutes. Admins can
 do the same by hand with `POST /api/lanes/:lane/retire`. WaveCode never deletes the branch.
 
 ## Configuration
