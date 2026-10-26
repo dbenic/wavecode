@@ -100,6 +100,7 @@ export const MERGE_QUEUE_EVENT = {
   stall: 'merge_queue.stall',
   pass: 'merge_queue.pass',
   resolved: 'merge_queue.resolved',
+  reset: 'merge_queue.reset',
 } as const;
 
 export interface QueueStall {
@@ -267,6 +268,52 @@ export function resolveQueueShas(project: string, shas: string[], reason: string
   return out;
 }
 
+export interface ResetOutcome {
+  project: string;
+  reason: string;
+  by: string;
+  /** Every row that was waiting or bounced, now superseded; `freeze` says what happened to its freeze. */
+  reset: Array<{ sha: string; lane: string | null; was: 'waiting' | 'bounced'; freeze: 'closed' | 'left' | 'none' }>;
+  /** Rows the reset does not touch, by state (queued, merging, merged, superseded). */
+  untouched: Record<string, number>;
+}
+
+/**
+ * The queue reset, the supported way to start the list over: every row of the project that is
+ * waiting or bounced turns superseded with the given reason, and its freeze, when still open
+ * (open / behind-main / rejected), is closed as `stale` with the same reason so the lane can
+ * refreeze. Rows that are queued, merging, merged or already superseded are not touched, no
+ * branch is touched, and the history stays. One event for the whole reset, not one per row.
+ */
+export function resetQueue(project: string, reason: string, by: string): ResetOutcome {
+  const out: ResetOutcome = { project, reason, by, reset: [], untouched: {} };
+  const rows = withTable(() => getDb().prepare("SELECT * FROM merge_queue WHERE project = ? AND state IN ('waiting', 'bounced') ORDER BY created_at").all(project)) as MergeQueueRow[];
+  const closeFreeze = getDb().prepare("UPDATE release_freezes SET status = 'stale', superseded_by = ?, updated_at = datetime('now') WHERE sha = ?");
+  const now = new Date().toISOString();
+  getDb().transaction(() => {
+    for (const row of rows) {
+      const freeze = getFreeze(row.sha);
+      let freezeOutcome: 'closed' | 'left' | 'none' = 'none';
+      if (freeze && ['open', 'behind-main', 'rejected'].includes(freeze.status)) {
+        closeFreeze.run(`queue reset by ${by}: ${reason}`.slice(0, 200), row.sha);
+        freezeOutcome = 'closed';
+      } else if (freeze) {
+        freezeOutcome = 'left';
+      }
+      upsert({ sha: row.sha, project, lane: row.lane, state: 'superseded', reason: reason.slice(0, 200), eligible_at: null, finished_at: now });
+      out.reset.push({ sha: row.sha, lane: row.lane, was: row.state as 'waiting' | 'bounced', freeze: freezeOutcome });
+    }
+  })();
+  for (const r of withTable(() => getDb().prepare("SELECT state, COUNT(*) AS n FROM merge_queue WHERE project = ? AND state <> 'superseded' GROUP BY state").all(project)) as Array<{ state: string; n: number }>) {
+    out.untouched[r.state] = r.n;
+  }
+  const closed = out.reset.filter((r) => r.freeze === 'closed').length;
+  emit(MERGE_QUEUE_EVENT.reset, 'project', project, { project, reason, by, count: out.reset.length, freezes_closed: closed, shas: out.reset.map((r) => r.sha) }, null);
+  logger.info({ project, by, reason, count: out.reset.length, freezes_closed: closed, untouched: out.untouched }, 'Merge queue: reset');
+  if (out.reset.length) maestroLine(project, `queue reset by ${by}: ${out.reset.length} lane${out.reset.length === 1 ? '' : 's'} superseded, ${closed} freeze${closed === 1 ? '' : 's'} closed — ${reason}`);
+  return out;
+}
+
 /** The stall the last pass found for the project, or null when it is moving. */
 export function queueStall(project: string): QueueStall | null {
   const raw = kvGet(`merge_queue.${project}.stall`);
@@ -404,7 +451,9 @@ export async function alreadyOnMain(repo: string, sha: string, mainRef: string):
   const cherry = await tryGit(repo, ['cherry', mainRef, sha]);
   if (cherry === null) return null;
   const lines = cherry.split('\n').map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return null; // no commits of its own: nothing to merge, nothing to call equivalent either
+  // `git cherry` skips merge commits: an empty answer means the lane's own commits are all in
+  // main and its tip is only a merge of main (the usual shape of a lane merged some other way).
+  if (lines.length === 0) return `${sha.slice(0, 8)} has no commits of its own beyond ${mainRef.replace(/^refs\/remotes\//, '')} (only merges)`;
   if (lines.every((l) => l.startsWith('-'))) return `all ${lines.length} commit${lines.length === 1 ? '' : 's'} of the lane already have equivalents in ${mainRef.replace(/^refs\/remotes\//, '')} (the merge would be empty)`;
   // Different commits, same content: a clean merge whose tree equals main's changes nothing.
   const merged = await runArgv(['git', '-C', repo, 'merge-tree', '--write-tree', '--no-messages', mainRef, sha], { timeoutMs: 30000 });

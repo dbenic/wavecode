@@ -166,6 +166,18 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(mergeQueue.resolveQueueShas(project, shas, reason, status, user.name));
   });
 
+  app.post('/api/merge-queue/:project/reset', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin may reset the queue' }, 403);
+    const project = c.req.param('project');
+    const known = Object.keys(getConfig().projects ?? {}).includes(project);
+    if (!known) return c.json({ error: `Unknown project ${project}` }, 404);
+    const body = await c.req.json<{ reason?: unknown }>().catch(() => ({} as { reason?: unknown }));
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 3 || reason.length > 200) return c.json({ error: 'reason must be 3 to 200 characters' }, 400);
+    return c.json(mergeQueue.resetQueue(project, reason, user.name));
+  });
+
   app.post('/api/merge-queue/:sha/priority', async (c) => {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);

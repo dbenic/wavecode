@@ -113,6 +113,22 @@ Each listed freeze (7- to 40-character SHA) is closed with the reason kept as it
 reached main some other way. Freezes that are not open, not this project's, mid-merge or
 unknown are skipped with the reason. Never edit the database by hand for this.
 
+### Starting over
+
+When the list is mostly stale (a day of conflicts, lanes nobody refroze), an admin resets it:
+
+```
+POST /api/merge-queue/<project>/reset
+{ "reason": "queue reset 26 Oct — merge main, gate, refreeze" }
+```
+
+Every row that is waiting or bounced turns superseded with that reason, and its freeze, when
+still open (open, behind-main or rejected), is closed as `stale` with the same reason so the
+lane can refreeze. Rows that are queued, merging, merged or already superseded are not
+touched, no branch is touched, the history stays. The answer lists each row (`was`, what
+happened to its `freeze`) and the counts left per state; one `merge_queue.reset` event
+carries the SHAs. Authors then merge main, get the gates green and freeze the new SHA.
+
 ## How it merges
 
 The queue has its own clock: every 90 s it re-reads its lanes and tries the head, on top of

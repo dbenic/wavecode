@@ -413,6 +413,10 @@ function underCap(now: number, max: number): boolean {
 export async function wake(trigger: string, opts: { force?: boolean; now?: number } = {}): Promise<OverlordReport | null> {
   const cfg = overlordConfig();
   const now = opts.now ?? Date.now();
+  if (!cfg.enabled && !opts.force) {
+    logger.info({ trigger }, 'Overlord wake skipped: overlord.enabled is false');
+    return null;
+  }
   if (!opts.force && !underCap(now, cfg.maxWakesPerHour)) {
     logger.info({ trigger, max: cfg.maxWakesPerHour }, 'Overlord wake skipped: hourly cap');
     return null;

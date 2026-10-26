@@ -22,7 +22,7 @@ import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
   askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
-  gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
+  gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resetQueue, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
 } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -538,6 +538,26 @@ describe('merge queue — on a scratch repository', () => {
     expect(getQueueRow(sha)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: all 1 commit of the lane already have equivalents/) });
   });
 
+  it('a lane whose tip is only a merge of main, its own commits already there, leaves the queue', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
+    git(repo, 'push', '-q', 'origin', 'wc-ales:main'); // the work reached main
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'merge', '-q', '--ff-only', 'wc-ales');
+    fs.writeFileSync(path.join(repo, 'later.txt'), 'main moved on');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'main moves on');
+    git(repo, 'push', '-q', 'origin', 'main');
+    git(repo, 'checkout', '-q', 'wc-ales');
+    git(repo, 'merge', '-q', '--no-ff', '--no-edit', 'main'); // the lane merges main: its tip is now a merge commit
+    git(repo, 'push', '-q', 'origin', 'wc-ales');
+    const tip = git(repo, 'rev-parse', 'HEAD');
+    expect(tip).not.toBe(sha);
+    await reviewed('ales', 'wc-ales', tip, 'ship');
+    await tick();
+    expect(getQueueRow(tip)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: [0-9a-f]{8} has no commits of its own beyond origin\/main/) });
+  });
+
   it('a lane whose changes main already carries through different commits (a no-op merge) leaves the queue', async () => {
     agent('ales');
     const sha = lane('wc-ales', { 'a.txt': 'same change' });
@@ -572,6 +592,29 @@ describe('merge queue — on a scratch repository', () => {
     await tick(); // the live lane merges; the resolved one stays out
     expect(getQueueRow(shaA)?.state).toBe('superseded');
     expect(getQueueRow(shaB)?.state).toBe('merged');
+  });
+
+  it('resetQueue supersedes every waiting and bounced row with the reason, closes their open freezes and leaves the rest', async () => {
+    agent('ales');
+    agent('toni');
+    const shaA = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', shaA, 'ship');
+    const shaB = lane('wc-toni', { 'b-lane.txt': 'B' });
+    await freeze('toni', 'wc-toni', shaB, 'ship'); // frozen, gate not run: it waits
+    await tick(); // the reviewed lane merges, the other row waits
+    expect(getQueueRow(shaA)?.state).toBe('merged');
+    expect(getQueueRow(shaB)).toMatchObject({ state: 'waiting', reason: expect.stringMatching(/^GATE_NOT_GREEN/) });
+    const out = resetQueue('wave', 'queue reset 26 Oct — merge main, gate, refreeze', 'owner');
+    expect(out.reset).toEqual([{ sha: shaB, lane: 'wc-toni', was: 'waiting', freeze: 'closed' }]);
+    expect(out.untouched).toEqual({ merged: 1 });
+    expect(getQueueRow(shaB)).toMatchObject({ state: 'superseded', reason: 'queue reset 26 Oct — merge main, gate, refreeze' });
+    expect(getFreeze(shaB)).toMatchObject({ status: 'stale', superseded_by: 'queue reset by owner: queue reset 26 Oct — merge main, gate, refreeze' });
+    expect(getQueueRow(shaA)?.state).toBe('merged');
+    const waiting = shaB;
+    expect(db.getDb().prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'merge_queue.reset'").get()).toEqual({ n: 1 });
+    await tick(); // the reset row stays out; a second reset finds nothing
+    expect(getQueueRow(waiting)?.state).toBe('superseded');
+    expect(resetQueue('wave', 'again', 'owner').reset).toEqual([]);
   });
 
   it('a second tick while one runs joins it instead of starting another pass', async () => {

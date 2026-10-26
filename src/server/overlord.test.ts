@@ -162,6 +162,15 @@ describe('overview board + overlord', () => {
     expect(vi.mocked(notify)).toHaveBeenCalledTimes(1);
   });
 
+  it('a disabled overlord does not call the model on events or asks; only an explicit force wakes it', async () => {
+    cfg.overlord = { ...cfg.overlord, enabled: false };
+    vi.mocked(completeText).mockResolvedValue({ ok: true, data: JSON.stringify({ agents: [], recommendations: [], digest: null }) });
+    expect(await ol.wake('review.ai_completed')).toBeNull();
+    expect(completeText).not.toHaveBeenCalled();
+    expect(await ol.wake('manual:owner', { force: true })).not.toBeNull();
+    expect(completeText).toHaveBeenCalledTimes(1);
+  });
+
   it('wakes are capped per hour and debounced from board-changing events; a bad answer is logged, not stored', async () => {
     agent('claude2');
     vi.mocked(completeText).mockResolvedValue({ ok: true, data: 'not json at all' });

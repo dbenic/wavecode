@@ -485,7 +485,9 @@ export interface WaveConfig {
   /**
    * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
    * calls `model` on the configured LLM key (llm.anthropic_api_key), posts reports with
-   * one-click recommendations. Off unless enabled. It never acts on its own.
+   * one-click recommendations. Off unless `enabled: true` (the default is off): nothing in a
+   * lane, a review or the merge queue waits on it, so switching it off changes no flow.
+   * It never acts on its own.
    */
   overlord?: {
     enabled?: boolean;

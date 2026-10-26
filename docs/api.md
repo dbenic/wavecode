@@ -548,12 +548,18 @@ ones last and alone) and a digest — stored, emitted as
 `overlord.report`, posted as a thread item whose recommendations are buttons, and sent as a
 notification when the digest changed. It never promotes, stages or types into an agent by itself.
 
+It is off unless `overlord.enabled: true`, and nothing waits on it: a lane, a review or a merge
+queue step goes on exactly the same without it (the seat agents do the reviews; the overlord
+only writes reports). With `enabled: false` events and the heartbeat do not wake it; a manual
+`POST /api/overview/wake` with `force: true` still does. Since 26 Oct 2026 it is off on
+countix-dev (its model calls were hitting the key's usage limit).
+
 ```yaml
 llm:
   anthropic_api_key: sk-ant-…        # or ANTHROPIC_API_KEY in the service environment
   anthropic_workspace_id: wrkspc_…   # only for a key that is not scoped to a workspace (the API then demands the header)
 overlord:
-  enabled: true
+  enabled: false                     # default; true only when the key has headroom
   model: claude-sonnet-5-5
   heartbeat_min: 30
   max_wakes_per_hour: 12
@@ -1218,6 +1224,7 @@ one line per merge or bounce in `maestro_log`.
 - `GET /api/merge-queue[?project=]` — `{ switches: [{ project, config_enabled, enabled, enabled_by, queued }], rows: [...] }`.
 - `POST /api/merge-queue/:project/switch` `{ enabled }` — admin.
 - `POST /api/merge-queue/:sha/priority` `{ priority }` — 0 to 9, developers and admins.
+- `POST /api/merge-queue/:project/reset` `{ reason }` — admin; every waiting or bounced row of the project turns superseded with the reason and its open freeze is closed as `stale`; queued, merging, merged and superseded rows are untouched, no branch is touched. Returns `{ reset: [{ sha, lane, was, freeze }], untouched: { state: n } }`. Event `merge_queue.reset` (one per reset, with the SHAs).
 - `POST /api/merge-queue/:project/resolve` `{ shas, reason, status? }` — admin; closes the listed freezes (`stale` by default, or `merged`) with the reason and supersedes their rows; returns `{ resolved, skipped }`. Event `merge_queue.resolved`. Every pass also emits `merge_queue.pass` and the switch view carries `last_pass_at`.
 - `GET /api/reviews/board` — cards carry `queue: { state, reason, tier, position, merge_sha, pr } | null`;
   the board carries `merge_queue: { projects, can_switch }`.
