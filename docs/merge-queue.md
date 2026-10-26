@@ -242,6 +242,9 @@ sqlite3 -readonly /home/wave/wavecode/wavecode.db "select created_at, type, enti
 
 A lane's priority also orders WaveCode's own gate dispatch: a SHA with a higher merge-queue
 priority takes the next free gate (and quick-check) slot ahead of older waiting ones.
+WaveCode submits at most one of its own runs per author at a time, quick check before full
+gate: the gateway keeps one queued run per agent name and cancels the older one when a second
+arrives, so a second freeze by the same author waits (note: "waits for @author's other run").
 - `GET /api/reviews/board` — every card carries `queue` (`state`, `reason`, `tier`,
   `position`, `merge_sha`, `pr`) and the board carries `merge_queue.projects`.
 
