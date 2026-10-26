@@ -59,5 +59,14 @@ describe('merge queue priority is an admin label', () => {
     expect((await post(FALLBACK, { reason: 'x' })).status).toBe(400);
     expect((await post(FALLBACK, { reason: 'tool exit 5 after GREEN' })).status).toBe(409);
     expect(rq).toHaveBeenCalledWith(SHA, 'tool exit 5 after GREEN', 'owner');
+
+    // reset names its states or is refused: no default widening
+    const reset = vi.spyOn(mergeQueue, 'resetQueue').mockReturnValue({ reset: [], untouched: {} } as never);
+    vi.spyOn(await import('../config.js'), 'getConfig').mockReturnValue({ projects: { wave: {} } } as never);
+    const resetPost = (body: unknown) => app.request('/api/merge-queue/wave/reset', { method: 'POST', headers: { Authorization: `Bearer ${FALLBACK}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    expect((await resetPost({ reason: 'queue reset: merge main, gate, refreeze' })).status).toBe(400);
+    expect(reset).not.toHaveBeenCalled();
+    expect((await resetPost({ reason: 'queue reset: merge main, gate, refreeze', states: ['bounced'] })).status).toBe(200);
+    expect(reset).toHaveBeenCalledWith('wave', 'queue reset: merge main, gate, refreeze', 'owner', ['bounced']);
   });
 });

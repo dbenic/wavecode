@@ -25,7 +25,7 @@ import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
-import { recordGateResult } from './gate-status.js';
+import { gateWordsFor, recordGateResult } from './gate-status.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
@@ -749,6 +749,109 @@ export function gateLoadForTest(): { inflight: Record<string, string[]>; pending
   return { inflight: Object.fromEntries([...gateInflight].map(([p, s]) => [p, [...s]])), pending: [...gatePending] };
 }
 
+export function quickLoadForTest(): { inflight: Record<string, string[]>; pending: string[] } {
+  return { inflight: Object.fromEntries([...quickInflight].map(([p, s]) => [p, [...s]])), pending: [...quickPending] };
+}
+
+/** The merge-queue priority an admin set on this SHA (0 when none): a priority lane takes the next free slot first. */
+function queuePriorityOf(sha: string): number {
+  try {
+    const row = getDb().prepare('SELECT priority FROM merge_queue WHERE sha = ?').get(sha) as { priority?: number } | undefined;
+    return row?.priority ?? 0;
+  } catch { return 0; }
+}
+
+/** Highest queue priority first, then the order the SHAs arrived (Denis, 26 Oct 2026: "put this lane in front of the gate runners"). */
+function sortByQueuePriority(pending: string[]): void {
+  const keyed = pending.map((sha, i) => ({ sha, i, p: queuePriorityOf(sha) }));
+  keyed.sort((a, b) => b.p - a.p || a.i - b.i);
+  pending.splice(0, pending.length, ...keyed.map((k) => k.sha));
+}
+
+// --- the quick check WaveCode runs when nobody did ---------------------------------------
+// With gate_with_quick the full gate is WaveCode's and the quick check is the author's; on 26 Oct 2026
+// seven api-green lanes sat at "quick missing" because no author had run tier1 on the exact SHA.
+// WaveCode now runs the quick_check_command on the frozen SHA when the checker finds no quick result,
+// under the same per-project cap as the full gate and in the same priority order.
+const QUICK = 'pipeline.quick';
+const quickInflight = new Map<string, Set<string>>();
+const quickPending: string[] = [];
+
+function quickInflightFor(project: string): Set<string> {
+  let set = quickInflight.get(project);
+  if (!set) { set = new Set(); quickInflight.set(project, set); }
+  return set;
+}
+
+async function queueQuickCheck(freeze: ReleaseFreeze): Promise<void> {
+  if (!freeze.project) return;
+  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
+  const pipe = pipelineOf(freeze.project);
+  if (!pipe.auto_gate || !pipe.gate_with_quick || !pipe.quick_check_command?.length) return;
+  if (acted(`${freeze.sha}:quick`, QUICK)) return;
+  const sha8 = freeze.sha.slice(0, 8);
+  // The author's own quick on the exact SHA counts; only a missing one is WaveCode's to run.
+  try {
+    const words = await gateWordsFor(freeze);
+    if (words.quick !== 'missing') return;
+  } catch (e) { logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'quick check: checker read failed; running it'); }
+  emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: 'QUEUED' }, null);
+  if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight) {
+    if (!quickPending.includes(freeze.sha)) quickPending.push(freeze.sha);
+    note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check on ${sha8} waits for a slot (${quickInflightFor(freeze.project).size} running, ${quickPending.length} waiting)`);
+    return;
+  }
+  await runQuick(freeze);
+}
+
+function drainQuickPending(): void {
+  sortByQueuePriority(quickPending);
+  for (let i = 0; i < quickPending.length;) {
+    const sha = quickPending[i];
+    const freeze = getFreeze(sha);
+    if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { quickPending.splice(i, 1); continue; }
+    const pipe = pipelineOf(freeze.project);
+    if (!pipe.auto_gate || !pipe.gate_with_quick || !pipe.quick_check_command?.length) { quickPending.splice(i, 1); continue; }
+    if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight) { i++; continue; }
+    quickPending.splice(i, 1);
+    void runQuick(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Pending quick check failed'));
+  }
+}
+
+async function runQuick(freeze: ReleaseFreeze): Promise<void> {
+  if (!freeze.project) return;
+  const pipe = pipelineOf(freeze.project);
+  if (!pipe.quick_check_command?.length) return;
+  const inflight = quickInflightFor(freeze.project);
+  if (inflight.has(freeze.sha)) return;
+  inflight.add(freeze.sha);
+  try {
+    const spec = mainSpec(freeze.project);
+    const sha8 = freeze.sha.slice(0, 8);
+    note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check submitted on ${sha8} (no quick result on this SHA)`);
+    const checkout = await makeCheckout(freeze.project, freeze.lane, freeze.sha);
+    const author = freeze.author_name ?? 'wavecode';
+    const argv = fill(pipe.quick_check_command, {
+      sha: freeze.sha, lane: freeze.lane ?? '', workspace: checkout ?? '', checkout: checkout ?? '', remote: spec.remote, project: freeze.project,
+    });
+    const started = new Date();
+    const result = await runArgv(argv, {
+      ...(checkout ? { cwd: checkout } : {}),
+      env: runEnv({ sha: freeze.sha, lane: freeze.lane ?? '', author, ...(checkout ? { checkout } : {}) }),
+      timeoutMs: Math.max(1, pipe.quick_check_timeout_min) * 60_000,
+    });
+    await dropCheckout(freeze.project, checkout);
+    const word = gateOutcome(result);
+    await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: result.stdout, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: word === 'RED' && !/=== RESULT (GREEN|RED)\b/.test(result.stdout) ? `exit ${result.code ?? 'none'} without a RESULT line` : null });
+    emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: word, exit_code: result.code }, null);
+    note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check ${word} on ${sha8}`);
+    if (word === 'RED') tell(freeze.author_agent_id, `[from WaveCode] quick check RED on ${sha8} (${freeze.lane ?? 'your lane'}). Fix, push and freeze a new SHA.`);
+  } finally {
+    inflight.delete(freeze.sha);
+    drainQuickPending();
+  }
+}
+
 /**
  * One full gate per freeze SHA, at most `gate_max_inflight` running per project.
  * The freeze shows QUEUED at once; a SHA over the cap waits in this daemon until a
@@ -773,6 +876,7 @@ async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
 
 /** Start waiting gates while slots are free. Freezes that closed meanwhile are dropped. */
 function drainGatePending(): void {
+  sortByQueuePriority(gatePending);
   for (let i = 0; i < gatePending.length;) {
     const sha = gatePending[i];
     const freeze = getFreeze(sha);
@@ -1185,6 +1289,7 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
   }
   // The gate runs for as long as the remote suite takes; the review starts now.
   void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
+  void queueQuickCheck(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-quick skipped'));
   try { await requestFirstPassFor(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'First pass skipped'); }
   try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
   try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
@@ -1231,6 +1336,7 @@ function announceFirstPass(result: FirstPassResult): void {
  */
 export async function pipelineTick(now = Date.now()): Promise<void> {
   drainGatePending();
+  drainQuickPending();
   try { await reconcileLostGates(now); } catch (e) { logger.debug({ error: (e as Error).message }, 'Gate reconcile skipped'); }
   for (const [sha, at] of [...refusedFreezes.entries()]) {
     if (now - at > REFUSED_TTL_MS) { refusedFreezes.delete(sha); continue; }
@@ -1255,6 +1361,8 @@ export function resetPipelineForTest(): void {
   gateInflight.clear();
   gatePending.length = 0;
   gateRecovered.clear();
+  quickInflight.clear();
+  quickPending.length = 0;
 }
 
 firstPassHooks.onResult = announceFirstPass;

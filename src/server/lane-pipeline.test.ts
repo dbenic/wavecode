@@ -30,7 +30,7 @@ import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
-  reassignWaitingReviews, resetPipelineForTest, setPipelineExecForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+  quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, setPipelineExecForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
 import { setTestRunExecForTest } from './test-runs.js';
@@ -673,6 +673,65 @@ describe('hands-free lane pipeline', () => {
     resolvers.shift()!({ code: 0, stdout: 'GREEN' });
     await vi.waitFor(() => expect(getFreeze(shas[2])?.gate).toBe('GREEN'), { timeout: 10_000 });
     expect(gateLoadForTest()).toEqual({ inflight: { wave: [] }, pending: [] });
+  });
+
+  it('a lane with a merge-queue priority takes the next free gate slot ahead of older waiting gates', async () => {
+    const resolvers: Array<(r: { code: number; stdout: string }) => void> = [];
+    setPipelineExecForTest((argv) => {
+      calls.push(argv);
+      if (argv[0] === 'gate-run') return new Promise<{ code: number; stdout: string }>((resolve) => { resolvers.push(resolve); });
+      return { code: 0, stdout: 'ok' };
+    });
+    pipe.auto_gate = true;
+    pipe.gate_max_inflight = 1;
+    const lanes = ['wc-a', 'wc-b', 'wc-c'];
+    const shas = lanes.map((lane, i) => { agent(`dev${'abc'[i]}`, path.join(tmp, lane)); return branch(lane, `${lane}.txt`, String(i)); });
+    for (const [i, sha] of shas.entries()) await ingestFreezeFile(openNote(`dev${'abc'[i]}`, lanes[i], sha));
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'gate-run')).toHaveLength(1), { timeout: 10_000 });
+    expect(gateLoadForTest().pending).toEqual([shas[1], shas[2]]);
+    // Denis labels the third lane priority 9 while its gate waits.
+    const mq = await import('./merge-queue.js');
+    mq.listQueue('wave');
+    db.getDb().prepare("INSERT INTO merge_queue (sha, project, lane, state, priority) VALUES (?, 'wave', 'wc-c', 'waiting', 9)").run(shas[2]);
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'gate-run')).toHaveLength(2), { timeout: 10_000 });
+    expect(gateLoadForTest().inflight.wave).toEqual([shas[2]]);
+    expect(gateLoadForTest().pending).toEqual([shas[1]]);
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'gate-run')).toHaveLength(3), { timeout: 10_000 });
+    expect(gateLoadForTest().pending).toEqual([]);
+    resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    await vi.waitFor(() => expect(gateLoadForTest().inflight.wave).toEqual([]), { timeout: 10_000 });
+  });
+
+  it('with gate_with_quick, WaveCode runs the quick check on a frozen SHA that has none, records it, and tells the author when it is RED', async () => {
+    setPipelineExecForTest((argv) => {
+      calls.push(argv);
+      if (argv[0] === 'quick-check') return { code: argv.includes('wc-red') ? 1 : 0, stdout: argv.includes('wc-red') ? '=== RESULT RED sha=x suite=tier1 who=w exit=1 host=h ===' : '=== RESULT GREEN sha=x suite=tier1 who=w exit=0 host=h ===' };
+      if (argv[0] === 'gate-run') return { code: 0, stdout: 'GREEN' };
+      return { code: 0, stdout: 'ok' };
+    });
+    pipe.auto_gate = true;
+    pipe.gate_with_quick = true;
+    const green = branch('wc-green', 'g.txt', 'g');
+    const red = branch('wc-red', 'r.txt', 'r');
+    const author = agent('toni', path.join(tmp, 'wc-red'));
+    agent('ales', path.join(tmp, 'wc-green'));
+    await ingestFreezeFile(openNote('ales', 'wc-green', green));
+    await ingestFreezeFile(openNote('toni', 'wc-red', red));
+    const quicks = () => calls.filter((a) => a[0] === 'quick-check');
+    await vi.waitFor(() => expect(quicks()).toHaveLength(2), { timeout: 10_000 });
+    expect(quicks().map((a) => a[1])).toEqual([green, red]);
+    const quickWords = (sha: string) => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.quick' AND entity_id = ? ORDER BY id").all(`${sha}:quick`) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick: string }).quick);
+    await vi.waitFor(() => expect(quickWords(green)).toEqual(['QUEUED', 'GREEN']), { timeout: 10_000 });
+    await vi.waitFor(() => expect(quickWords(red)).toEqual(['QUEUED', 'RED']), { timeout: 10_000 });
+    const gs = await import('./gate-status.js');
+    expect(gs.recordsFor(green).map((r) => [r.suite, r.state])).toContainEqual(['quick', 'GREEN']);
+    await vi.waitFor(() => expect(messages(author.id).some((m) => /quick check RED on/.test(m))).toBe(true), { timeout: 10_000 });
+    // A second ingest of the same note runs nothing again.
+    await ingestFreezeFile(openNote('ales', 'wc-green', green));
+    expect(quicks()).toHaveLength(2);
+    expect(quickLoadForTest()).toEqual({ inflight: { wave: [] }, pending: [] });
   });
 
   it('after a restart, a QUEUED freeze is settled from the test history, or resubmitted once when the dispatcher never saw it', async () => {

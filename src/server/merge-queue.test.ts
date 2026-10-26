@@ -647,7 +647,7 @@ describe('merge queue — on a scratch repository', () => {
     await tick(); // the reviewed lane merges, the other row waits
     expect(getQueueRow(shaA)?.state).toBe('merged');
     expect(getQueueRow(shaB)).toMatchObject({ state: 'waiting', reason: expect.stringMatching(/^GATE_NOT_GREEN/) });
-    const out = resetQueue('wave', 'queue reset 26 Oct — merge main, gate, refreeze', 'owner');
+    const out = resetQueue('wave', 'queue reset 26 Oct — merge main, gate, refreeze', 'owner', ['waiting', 'bounced']);
     expect(out.reset).toEqual([{ sha: shaB, lane: 'wc-toni', was: 'waiting', freeze: 'closed' }]);
     expect(out.untouched).toEqual({ merged: 1 });
     expect(getQueueRow(shaB)).toMatchObject({ state: 'superseded', reason: 'queue reset 26 Oct — merge main, gate, refreeze' });
@@ -657,7 +657,7 @@ describe('merge queue — on a scratch repository', () => {
     expect(db.getDb().prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'merge_queue.reset'").get()).toEqual({ n: 1 });
     await tick(); // the reset row stays out; a second reset finds nothing
     expect(getQueueRow(waiting)?.state).toBe('superseded');
-    expect(resetQueue('wave', 'again', 'owner').reset).toEqual([]);
+    expect(resetQueue('wave', 'again', 'owner', ['waiting', 'bounced']).reset).toEqual([]);
   });
 
   it('a reset narrowed to bounced rows leaves the waiting ones alone', async () => {

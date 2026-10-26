@@ -306,7 +306,7 @@ export interface ResetOutcome {
  * queued, merging, merged or already superseded are not touched, no branch is touched, and the
  * history stays. One event for the whole reset, not one per row.
  */
-export function resetQueue(project: string, reason: string, by: string, states: Array<'waiting' | 'bounced'> = ['waiting', 'bounced']): ResetOutcome {
+export function resetQueue(project: string, reason: string, by: string, states: Array<'waiting' | 'bounced'>): ResetOutcome {
   const out: ResetOutcome = { project, reason, by, reset: [], untouched: {} };
   const wanted = states.filter((s) => s === 'waiting' || s === 'bounced');
   if (wanted.length === 0) return out;

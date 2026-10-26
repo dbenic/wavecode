@@ -178,8 +178,9 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const body = await c.req.json<{ reason?: unknown; states?: unknown }>().catch(() => ({} as { reason?: unknown; states?: unknown }));
     const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
     if (reason.length < 3 || reason.length > 200) return c.json({ error: 'reason must be 3 to 200 characters' }, 400);
-    const states = body.states === undefined ? ['waiting', 'bounced'] : body.states;
-    if (!Array.isArray(states) || states.length === 0 || !states.every((s) => s === 'waiting' || s === 'bounced')) return c.json({ error: "states must be a list of 'waiting' and/or 'bounced'" }, 400);
+    // No default: a reset names what it touches (SystemOps, 26 Oct 2026), so a call can never widen by omission.
+    const states = body.states;
+    if (!Array.isArray(states) || states.length === 0 || !states.every((s) => s === 'waiting' || s === 'bounced')) return c.json({ error: "states is required: a list of 'waiting' and/or 'bounced'" }, 400);
     return c.json(mergeQueue.resetQueue(project, reason, user.name, states as Array<'waiting' | 'bounced'>));
   });
 

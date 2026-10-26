@@ -238,6 +238,10 @@ sqlite3 -readonly /home/wave/wavecode/wavecode.db "select created_at, type, enti
 - `POST /api/merge-queue/:project/switch` `{ enabled }` — admin only.
 - `POST /api/merge-queue/:sha/priority` `{ priority: 0-9 }` — admins only (since 26 Oct 2026; it was open to developers, which includes agent seats).
 - `POST /api/merge-queue/:sha/requeue` `{ reason }` — admins only; a bounced row with a live freeze returns to waiting (404 unknown, 409 not bounced or freeze closed).
+- `POST /api/merge-queue/:project/reset` `{ reason, states }` — admins only; `states` is required (`waiting` and/or `bounced`), there is no default (26 Oct 2026).
+
+A lane's priority also orders WaveCode's own gate dispatch: a SHA with a higher merge-queue
+priority takes the next free gate (and quick-check) slot ahead of older waiting ones.
 - `GET /api/reviews/board` — every card carries `queue` (`state`, `reason`, `tier`,
   `position`, `merge_sha`, `pr`) and the board carries `merge_queue.projects`.
 
