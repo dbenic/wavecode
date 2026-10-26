@@ -100,7 +100,8 @@ The same ask over HTTP: `POST /api/reviews/lanes/request-review { project, lane 
 ## Cleaning the list
 
 Rows leave the queue on their own: a newer freeze on the same lane retires the older one
-(open or behind-main) as `stale`; work that is already in main shows `ALREADY_ON_MAIN` and
+(open or behind-main) as `stale`, unless the older one is the lane's current tip (then it is
+the live one whatever its age); a freeze closed by an admin (resolve, reset) stays closed; work that is already in main shows `ALREADY_ON_MAIN` and
 the row is superseded. For everything else there is one supported bulk route, for admins:
 
 ```

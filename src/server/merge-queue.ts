@@ -311,7 +311,7 @@ export function resetQueue(project: string, reason: string, by: string, states: 
     out.untouched[r.state] = r.n;
   }
   const closed = out.reset.filter((r) => r.freeze === 'closed').length;
-  emit(MERGE_QUEUE_EVENT.reset, 'project', project, { project, reason, by, count: out.reset.length, freezes_closed: closed, shas: out.reset.map((r) => r.sha) }, null);
+  emit(MERGE_QUEUE_EVENT.reset, 'project', project, { project, reason, by, states: wanted, count: out.reset.length, freezes_closed: closed, shas: out.reset.map((r) => r.sha) }, null);
   logger.info({ project, by, reason, count: out.reset.length, freezes_closed: closed, untouched: out.untouched }, 'Merge queue: reset');
   if (out.reset.length) maestroLine(project, `queue reset by ${by}: ${out.reset.length} lane${out.reset.length === 1 ? '' : 's'} superseded, ${closed} freeze${closed === 1 ? '' : 's'} closed — ${reason}`);
   return out;

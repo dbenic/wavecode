@@ -1236,7 +1236,7 @@ export async function isOnMain(project: string | null, sha: string, now = Date.n
  * status 'merged', the queue card approved, a review.superseded event with superseded_by 'main'.
  */
 export async function reconcileMerged(now = Date.now()): Promise<number> {
-  let n = reconcileSuperseded();
+  let n = await reconcileSuperseded();
   const open = getDb().prepare("SELECT * FROM release_freezes WHERE status IN ('open', 'stale')").all() as ReleaseFreeze[];
   for (const f of open) {
     if (await isOnMain(f.project, f.sha, now) !== true) continue;
@@ -1256,7 +1256,7 @@ export async function reconcileMerged(now = Date.now()): Promise<number> {
  * older ones are stale. Ingest applies this as files arrive; this pass covers rows created
  * before the rule existed and freezes whose lane or desk was only learned later.
  */
-export function reconcileSuperseded(): number {
+export async function reconcileSuperseded(): Promise<number> {
   // behind-main freezes are live candidates too (the queue merges them forward); an older one is retired by a newer freeze on its lane like an open one.
   const open = (getDb().prepare("SELECT * FROM release_freezes WHERE status IN ('open', 'behind-main') ORDER BY created_at ASC, rowid ASC").all() as ReleaseFreeze[]);
   const newest = new Map<string, ReleaseFreeze>();
@@ -1271,6 +1271,10 @@ export function reconcileSuperseded(): number {
     const byDesk = f.desk != null && !f.lane ? newest.get(`desk:${f.project ?? ''}:${f.desk}`) : undefined;
     const winner = byLane && byLane.sha !== f.sha ? byLane : byDesk && byDesk.sha !== f.sha ? byDesk : null;
     if (!winner) continue;
+    // The freeze that is the lane's current tip is the live one whatever its created_at (a
+    // note written later for an older SHA does not retire it). Retiring it here only to have
+    // the lane walk reopen it (syncAttributedLane) was the 26 Oct 2026 storm: ~2000 flips in ten minutes.
+    if (f.lane && (await laneHead(f)) === f.sha) continue;
     patch(f.sha, { status: 'stale', superseded_by: winner.sha });
     if (f.run_id) emit('review.superseded', 'run', f.run_id, { sha: f.sha, superseded_by: winner.sha, lane: f.lane, desk: f.desk, by: byLane && byLane.sha !== f.sha ? 'lane' : 'desk' }, null);
     logger.info({ sha: f.sha, superseded_by: winner.sha }, 'Release freeze superseded on reconcile');
@@ -1323,6 +1327,11 @@ export function staleStageMessage(freeze: { sha: string; lane: string | null }, 
  * Write the attributed lane onto the row. A stale mark that blamed a different
  * lane is cleared when this lane's tip is still the freeze SHA.
  */
+/** `superseded_by` written by resolveQueueShas / resetQueue (merge-queue.ts): a person decided, not a lane walk. */
+export function decidedByAdmin(supersededBy: string | null | undefined): boolean {
+  return /^(resolved by|queue reset by) /.test(supersededBy ?? '');
+}
+
 export async function syncAttributedLane(freeze: ReleaseFreeze, noteText?: string | null): Promise<ReleaseFreeze> {
   const lane = await attributedLane(freeze, noteText);
   let next = freeze;
@@ -1330,7 +1339,9 @@ export async function syncAttributedLane(freeze: ReleaseFreeze, noteText?: strin
     patch(freeze.sha, { lane });
     next = { ...next, lane };
   }
-  if (next.status === 'stale') {
+  // A stale mark decided by an admin (bulk resolve, queue reset) is final: the lane walk clears only
+  // a mark that blamed a different lane or a newer freeze, when this lane's tip is still the freeze SHA.
+  if (next.status === 'stale' && !decidedByAdmin(next.superseded_by)) {
     const head = await laneHead(next);
     if (head && head === next.sha) {
       patch(next.sha, { status: 'open', superseded_by: null });

@@ -496,14 +496,41 @@ describe('release-freezes.ts', () => {
       // simulate rows that predate the rule: reopen the old one
       db.getDb().prepare("UPDATE release_freezes SET status = 'open', superseded_by = NULL WHERE sha = ?").run(SHA_B);
       expect(rf.getFreeze(SHA_B)!.status).toBe('open');
-      expect(rf.reconcileSuperseded()).toBe(1);
+      expect(await rf.reconcileSuperseded()).toBe(1);
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
       expect(rf.getFreeze(SHA_A)!.status).toBe('open');
-      expect(rf.reconcileSuperseded()).toBe(0);
+      expect(await rf.reconcileSuperseded()).toBe(0);
       // a behind-main older freeze on the same desk is retired the same way (it is a live candidate until then)
       db.getDb().prepare("UPDATE release_freezes SET status = 'behind-main', superseded_by = NULL WHERE sha = ?").run(SHA_B);
-      expect(rf.reconcileSuperseded()).toBe(1);
+      expect(await rf.reconcileSuperseded()).toBe(1);
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
+    });
+
+    it('the freeze at the lane tip stays live whatever its age, and an admin resolution is not reopened by the lane walk', async () => {
+      const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+      const ws = path.join(tmp, 'ws-toni');
+      fs.mkdirSync(ws);
+      const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+      const git = (...args: string[]) => execFileSync('git', ['-C', ws, ...args], { encoding: 'utf-8', env }).trim();
+      git('init', '-q', '-b', 'wc-toni');
+      fs.writeFileSync(path.join(ws, 'a.txt'), 'a'); git('add', '.'); git('commit', '-q', '-m', 'tip');
+      const tip = git('rev-parse', 'HEAD');
+      const toni = db.insertAgent({ name: 'toni', runtime: 'codex', tmux_session: 'wc-toni', workspace: ws, mode: 'spawned', status: 'idle' });
+      if (!toni.ok) throw new Error('seed');
+      const older = 'a1b2c3d4' + 'ef'.repeat(16); // an older SHA of the lane, frozen again later
+      expect((await rf.ingestFreezeText(`# Freeze\nProject: wavepulse · Author: toni\nLane: wc-toni\n- Exact SHA: \`${tip}\`\n`, `toni-freeze-${tip.slice(0, 8)}.md`)).ok).toBe(true);
+      expect((await rf.ingestFreezeText(`# Freeze\nProject: wavepulse · Author: toni\nLane: wc-toni\n- Exact SHA: \`${older}\`\n`, `toni-freeze-${older.slice(0, 8)}.md`)).ok).toBe(true);
+      // ingest retired the tip's freeze behind the newer note; the lane walk puts it back (the tip is still that SHA)
+      expect(rf.getFreeze(tip)).toMatchObject({ status: 'stale', superseded_by: older });
+      expect((await rf.syncAttributedLane(rf.getFreeze(tip)!)).status).toBe('open');
+      // and reconcile does not retire it again: the tip wins whatever its created_at
+      expect(await rf.reconcileSuperseded()).toBe(0);
+      expect(rf.getFreeze(tip)!.status).toBe('open');
+      // an admin's resolution is final even though the lane still sits on that SHA
+      db.getDb().prepare("UPDATE release_freezes SET status = 'stale', superseded_by = ? WHERE sha = ?").run('resolved by owner: queue reset 26 Oct', tip);
+      expect((await rf.syncAttributedLane(rf.getFreeze(tip)!)).status).toBe('stale');
+      expect(rf.decidedByAdmin('queue reset by owner: merge main')).toBe(true);
+      expect(rf.decidedByAdmin(older)).toBe(false);
     });
 
     it('a SHA inside an unreleased candidate branch is "in candidate"; a released candidate (on main) no longer counts', async () => {
