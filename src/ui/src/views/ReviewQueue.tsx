@@ -69,6 +69,8 @@ function MergeQueueFlow({ version }: { version: number }) {
   const active = sorted.filter((r) => r.state === 'merging' || r.state === 'queued' || r.state === 'waiting');
   const done = sorted.filter((r) => r.state === 'bounced' || r.state === 'merged').slice(0, 8);
   const shown = showAll ? active : active.slice(0, 12);
+  const lastPass = rows.reduce<string | null>((acc, r) => (r.updated_at && (!acc || r.updated_at > acc) ? r.updated_at : acc), null);
+  const merging = rows.find((r) => r.state === 'merging') ?? null;
   const counts = (['merging', 'queued', 'waiting', 'bounced', 'merged'] as const).map((s) => [s, rows.filter((r) => r.state === s).length] as const).filter(([, n]) => n > 0);
   let position = 0;
   const line = (row: MergeQueueRowView) => {
@@ -95,6 +97,11 @@ function MergeQueueFlow({ version }: { version: number }) {
         <h2 className="text-[10px] font-bold tracking-[0.18em] text-slate-500 uppercase">Merge queue</h2>
         <span className="text-[10px] font-mono text-slate-500">{counts.map(([s, n]) => `${n} ${s}`).join(' · ')}{open ? ' ▾' : ' ▸'}</span>
       </button>
+      {lastPass && (
+        <p className="mt-1 text-[10px] text-slate-500" data-testid="merge-queue-pass">
+          last queue pass {sinceLabel(lastPass)} ago · lanes are re-checked and the head merged once per pass{merging ? ` · merging ${merging.lane} ${merging.sha.slice(0, 8)} since ${sinceLabel(merging.started_at)} ago` : ''}
+        </p>
+      )}
       {stalls.map((s) => (
         <p key={s.project} className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200" data-testid="merge-queue-stall">
           Stalled · {s.code}: {s.text}{s.at ? ` · since ${sinceLabel(s.at)}` : ''}{s.file ? ` · ${s.file.split('/').pop()}` : ''}
@@ -102,7 +109,7 @@ function MergeQueueFlow({ version }: { version: number }) {
       ))}
       {open && (
         <>
-          <p className="mt-2 text-[10px] text-slate-500">freeze → gate green on the SHA → one independent PASS → OK (ask tier: Denis's label; no hold label) → queued → merging (full suite once) → merged. A lane behind main is merged with main first.</p>
+          <p className="mt-2 text-[10px] text-slate-500">freeze → gate green on the SHA → one independent PASS → OK (ask tier: Denis's label; no hold label) → queued → merging (merge gate once) → merged. A lane behind main is merged with main first.</p>
           {shown.length > 0 && <ul className="mt-2 space-y-1" data-testid="merge-queue-active">{shown.map(line)}</ul>}
           {active.length > shown.length && (
             <button type="button" className="mt-1 text-[10px] text-sky-300" onClick={() => setShowAll(true)} data-testid="merge-queue-more">show all {active.length}</button>
