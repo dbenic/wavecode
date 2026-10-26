@@ -137,8 +137,8 @@ the turn it gets at the end of each deploy reconcile pass (which can take minute
 moves; each pass step now has a ceiling, 5–10 min, after which the pass moves on and the next
 pass skips the step while it is still busy). Every pass writes a heartbeat, shown on the
 Reviews page as "last queue pass N min ago" (`switches[].last_pass_at`), and a merge clears
-the stall banner at once. One lane at a time per project, in the order lanes became eligible; an admin or developer
-may raise a lane's priority. For the head of the queue WaveCode:
+the stall banner at once. One lane at a time per project, in the order lanes became eligible; only an admin
+may raise a lane's priority (an agent seat is a developer and must not jump the others). For the head of the queue WaveCode:
 
 1. fetches main and the lane and checks the tip once more;
 2. makes a detached checkout of main in `<repos>/.wavecode-merges/<repo>-<sha9>`;
@@ -231,7 +231,7 @@ sqlite3 -readonly /home/wave/wavecode/wavecode.db "select created_at, type, enti
 
 - `GET /api/merge-queue[?project=]` — switches per configured project and the rows.
 - `POST /api/merge-queue/:project/switch` `{ enabled }` — admin only.
-- `POST /api/merge-queue/:sha/priority` `{ priority: 0-9 }` — developers and admins.
+- `POST /api/merge-queue/:sha/priority` `{ priority: 0-9 }` — admins only (since 26 Oct 2026; it was open to developers, which includes agent seats).
 - `GET /api/reviews/board` — every card carries `queue` (`state`, `reason`, `tier`,
   `position`, `merge_sha`, `pr`) and the board carries `merge_queue.projects`.
 

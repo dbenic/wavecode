@@ -130,7 +130,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result.data);
   });
 
-  // Merge queue (docs/merge-queue.md): read for everyone, the kill switch for admins, priority for developers.
+  // Merge queue (docs/merge-queue.md): read for everyone; the kill switch, bulk resolve, reset and priority for admins.
   app.get('/api/merge-queue', (c) => {
     const project = c.req.query('project') ?? null;
     return c.json({
@@ -183,9 +183,11 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(mergeQueue.resetQueue(project, reason, user.name, states as Array<'waiting' | 'bounced'>));
   });
 
+  // Priority is Denis's label: an agent seat is a developer too, and a seat that could raise its
+  // own lane would jump every other seat's (throughput brief, 26 Oct 2026).
   app.post('/api/merge-queue/:sha/priority', async (c) => {
     const user = getActingUser(c);
-    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin may set a lane\'s priority' }, 403);
     const body = await c.req.json<{ priority?: number }>().catch(() => ({} as { priority?: number }));
     if (typeof body.priority !== 'number' || !Number.isFinite(body.priority)) return c.json({ error: 'priority must be a number from 0 to 9' }, 400);
     const row = mergeQueue.setQueuePriority(c.req.param('sha'), body.priority);
