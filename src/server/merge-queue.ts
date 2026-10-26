@@ -1105,7 +1105,12 @@ async function refreshProjectPass(project: string): Promise<MergeQueueRow | null
 export async function mergeQueueTick(opts: { wait?: boolean } = {}): Promise<void> {
   recoverOnce();
   for (const project of configuredProjects()) {
-    if (inflight.has(project)) { if (opts.wait) await inflight.get(project); continue; }
+    if (inflight.has(project)) {
+      // Busy merging: the queue is alive, the lanes are not re-read until the merge is done.
+      kvSet(`merge_queue.${project}.last_pass_at`, new Date().toISOString());
+      if (opts.wait) await inflight.get(project);
+      continue;
+    }
     const passT0 = Date.now();
     let head: MergeQueueRow | null = null;
     try { head = await refreshProject(project); } catch (e) {
