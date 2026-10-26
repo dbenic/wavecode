@@ -11,7 +11,7 @@ const projects: Record<string, { repo?: string; workspace_match?: string; lane_g
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, reconcileBehindFreezes, setLaneAlertNowForTest, withRefMemoAsync } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, LANE_RETIRED, laneHasNothingMainLacks, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, reconcileBehindFreezes, resetLaneRetireMemoForTest, setLaneAlertNowForTest, withRefMemoAsync } from './lane-main.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -277,5 +277,118 @@ describe('lane main ancestry', () => {
     now += 30 * 60 * 1000;
     (await reconcileBehindFreezes());
     expect(pings()).toHaveLength(2);
+  });
+});
+
+describe('lane retire: nothing main lacks', () => {
+  let tmp: string;
+  let repo: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-lane-retire-'));
+    repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    db.initDb(path.join(tmp, 't.db'));
+    ensureReleaseFreezeTable();
+    resetLaneRetireMemoForTest();
+    projects.wave = { repo, workspace_match: '**/*', lane_glob: 'wc-*' };
+    git(repo, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'base');
+    git(repo, 'checkout', '-q', '-b', 'wc-ales');
+    fs.writeFileSync(path.join(repo, 'lane.txt'), 'lane');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'lane work');
+    db.insertAgent({ name: 'ales', runtime: 'codex', tmux_session: 'wc-ales', workspace: repo, mode: 'spawned', status: 'idle' });
+  });
+
+  afterEach(() => {
+    setLaneAlertNowForTest(null);
+    resetLaneRetireMemoForTest();
+    db.resetDbForTest();
+    fs.rmSync(tmp, { recursive: true, force: true });
+    delete projects.wave;
+  });
+
+  /** main merges the lane (PR merge), then moves on; the lane merges main back so its tip is not an ancestor of main. */
+  function mergeLaneIntoMainThenSyncLane(): { mainSha: string; laneTip: string } {
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, '-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', 'Merge PR #115 wc-ales', 'wc-ales');
+    fs.writeFileSync(path.join(repo, 'm.txt'), 'main moved on');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main moved on');
+    const mainSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
+    git(repo, 'checkout', '-q', 'wc-ales');
+    git(repo, '-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', 'merge main', 'origin/main');
+    const laneTip = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-ales', laneTip);
+    return { mainSha, laneTip };
+  }
+
+  it('answers from git cherry: empty once the lane is merged, not before', async () => {
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'main'));
+    expect((await laneHasNothingMainLacks(repo, 'origin/main', git(repo, 'rev-parse', 'wc-ales')))).toBe(false);
+    const { laneTip } = mergeLaneIntoMainThenSyncLane();
+    // The lane tip is a merge of main, so it is not an ancestor of main: ancestry alone would never close it.
+    expect(() => git(repo, 'merge-base', '--is-ancestor', laneTip, 'origin/main')).toThrow();
+    expect((await laneHasNothingMainLacks(repo, 'origin/main', laneTip))).toBe(true);
+  });
+
+  it('retires a merged lane instead of pinging it: freezes closed as merged, one lane.retired event, no main_ping', async () => {
+    const laneBefore = git(repo, 'rev-parse', 'wc-ales');
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, project, lane, verdict, status) VALUES (?, 'wave', 'wc-ales', 'pass', 'behind-main')`).run(laneBefore);
+    const { mainSha, laneTip } = mergeLaneIntoMainThenSyncLane();
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, project, lane, verdict, status) VALUES (?, 'wave', 'wc-ales', 'pass', 'open')`).run(laneTip);
+    expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'moved' }))).toBe(false);
+    const pings = db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING);
+    expect(pings).toHaveLength(0);
+    const retired = db.getDb().prepare('SELECT entity_id, payload_json FROM events WHERE type = ?').all(LANE_RETIRED) as { entity_id: string; payload_json: string }[];
+    expect(retired).toHaveLength(1);
+    expect(retired[0].entity_id).toBe(`wc-ales@${laneTip.slice(0, 8)}`);
+    expect(JSON.parse(retired[0].payload_json).freezes_closed).toBe(2);
+    const statuses = db.getDb().prepare("SELECT status, superseded_by FROM release_freezes WHERE lane = 'wc-ales'").all() as { status: string; superseded_by: string | null }[];
+    expect(statuses.every((s) => s.status === 'merged' && s.superseded_by === 'main')).toBe(true);
+    // The branch is still there.
+    expect(git(repo, 'rev-parse', 'refs/remotes/origin/wc-ales')).toBe(laneTip);
+    // A second pass is quiet: no second event, still no ping.
+    expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha, kind: 'freeze' }))).toBe(false);
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(LANE_RETIRED)).toHaveLength(1);
+    expect(db.listAgentMessages({ limit: 10 }).some((m) => m.message.includes('behind main'))).toBe(false);
+  });
+
+  it('keeps pinging a lane that still has a commit main lacks', async () => {
+    const { mainSha } = mergeLaneIntoMainThenSyncLane();
+    fs.writeFileSync(path.join(repo, 'extra.txt'), 'more');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'more lane work');
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-ales', git(repo, 'rev-parse', 'HEAD'));
+    // main moves again so the lane is behind.
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'n.txt'), 'again');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main again');
+    const main2 = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', main2);
+    expect(main2).not.toBe(mainSha);
+    expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: main2, kind: 'moved' }))).toBe(true);
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(LANE_RETIRED)).toHaveLength(0);
+  });
+
+  it('reconcileBehindFreezes retires rather than marks behind-main', async () => {
+    const { laneTip } = mergeLaneIntoMainThenSyncLane();
+    // main moves once more so the lane tip no longer contains main.
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'n.txt'), 'again');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main again');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, project, lane, verdict, status) VALUES (?, 'wave', 'wc-ales', 'pass', 'open')`).run(laneTip);
+    await reconcileBehindFreezes();
+    const row = db.getDb().prepare('SELECT status FROM release_freezes WHERE sha = ?').get(laneTip) as { status: string };
+    expect(row.status).toBe('merged');
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(0);
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(LANE_RETIRED)).toHaveLength(1);
   });
 });

@@ -450,6 +450,70 @@ export function resetMainPingMemoForTest(): void {
   caughtUp.clear();
 }
 
+export const LANE_RETIRED = 'lane.retired';
+
+/**
+ * `git cherry <main> <tip>` empty, or every line `-`: the lane has no commit that main lacks
+ * (its tip is a merge of main, or its commits landed through another merge). Null when git
+ * cannot answer.
+ */
+export async function laneHasNothingMainLacks(repo: string, mainRef: string, tip: string): Promise<boolean | null> {
+  const out = await git(repo, ['cherry', mainRef, tip]);
+  if (out === null) return null;
+  const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines.length === 0 || lines.every((l) => l.startsWith('-'));
+}
+
+/**
+ * Retire a lane whose work is all on main: its open, behind-main and stale freezes become
+ * `merged` (superseded by main), one `lane.retired` event per lane and tip, and no more
+ * behind-main pings. The branch is left alone. Returns the number of freezes closed.
+ */
+export function retireLane(project: string | null, lane: string, tip: string, why: string): number {
+  let n = 0;
+  try {
+    const r = getDb().prepare(
+      "UPDATE release_freezes SET status = 'merged', superseded_by = 'main', updated_at = datetime('now') WHERE lane = ? AND (project = ? OR ? IS NULL) AND status IN ('open', 'behind-main', 'stale')",
+    ).run(lane, project, project);
+    n = r.changes;
+  } catch { /* no freeze table */ }
+  const key = `${lane}@${tip.slice(0, 8)}`;
+  let seen = false;
+  try { seen = !!getDb().prepare('SELECT id FROM events WHERE type = ? AND entity_id = ? LIMIT 1').get(LANE_RETIRED, key); } catch { /* none */ }
+  if (!seen) {
+    emit(LANE_RETIRED, 'lane', key, { lane, project, tip, why, freezes_closed: n }, null);
+    logger.info({ lane, project, tip, why, freezes_closed: n }, 'Lane retired: nothing main lacks');
+  }
+  return n;
+}
+
+/**
+ * Retire instead of pinging when the lane has no commit main lacks. The cherry answer is
+ * remembered per lane, tip and main for 10 minutes so a reconcile pass does not re-run git for
+ * every lane every time.
+ */
+const retiredMemo = new Map<string, { at: number; retired: boolean }>();
+export async function retireIfNothingMainLacks(project: string | null, lane: string): Promise<boolean> {
+  const repo = projectRepo(project);
+  if (!repo) return false;
+  const tip = await laneTipSha(project, lane);
+  if (!tip) return false;
+  const mainRef = await resolveMainRef(repo, project);
+  if (!mainRef) return false;
+  const mainSha = await git(repo, ['rev-parse', `${mainRef}^{commit}`]);
+  const key = `${lane}@${tip}@${mainSha ?? mainRef}`;
+  const memo = retiredMemo.get(key);
+  if (memo && nowMs() - memo.at < 10 * 60_000) return memo.retired;
+  const nothing = await laneHasNothingMainLacks(repo, mainRef, tip);
+  if (nothing === null) return false;
+  retiredMemo.set(key, { at: nowMs(), retired: nothing });
+  if (!nothing) return false;
+  retireLane(project, lane, tip, `git cherry ${mainRef} ${lane} is empty: every commit of the lane is on main`);
+  return true;
+}
+
+export function resetLaneRetireMemoForTest(): void { retiredMemo.clear(); }
+
 export async function pingLaneAboutMain(opts: {
   lane: string;
   project: string | null;
@@ -463,6 +527,8 @@ export async function pingLaneAboutMain(opts: {
   if (laneAutomationDenied(opts.project, opts.authorName ? { name: opts.authorName } : null, opts.lane)) return false;
   // A paused lane skips the notice only. Freeze status and Stage eligibility are decided by the caller.
   if (syncNoticesPaused(opts.lane)) return false;
+  // A lane with no commit main lacks is retired, not pinged (rule of 26 Oct 2026).
+  if (opts.kind !== 'merged' && await retireIfNothingMainLacks(opts.project, opts.lane)) return false;
   const key = pingKey(opts.lane, opts.mainSha);
   const latest = latestPing(opts.lane, opts.mainSha);
   if (latest) {
@@ -586,6 +652,7 @@ async function notifyBehindLanes(project: string, repo: string, mainSha: string,
     if (!ref || !/^[0-9a-f]{40}$/i.test(ref)) continue;
     const behind = await isAncestor(repo, main, ref);
     if (behind !== false) continue;
+    if (await retireIfNothingMainLacks(project, lane)) continue;
     await pingLaneAboutMain({ lane, project, mainSha, subject, kind: 'moved' });
     try {
       getDb().prepare(
@@ -682,6 +749,7 @@ export async function reconcileBehindFreezes(): Promise<void> {
     const mainRef = repo ? await resolveMainRef(repo, f.project) : null;
     const tip = f.lane ? await laneTipSha(f.project, f.lane) : null;
     if (repo && mainRef && tip && tip !== f.sha && await isMergeOnlyDelta(repo, f.sha, tip, mainRef)) continue;
+    if (f.lane && await retireIfNothingMainLacks(f.project, f.lane)) continue;
     const n = await commitsBehind(f.project, f.sha);
     if (n == null || n <= 0) continue;
     if (f.status === 'open') {

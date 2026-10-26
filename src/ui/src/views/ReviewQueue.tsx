@@ -51,6 +51,7 @@ const QUEUE_ORDER: Record<MergeQueueRowView['state'], number> = { merging: 0, qu
 function MergeQueueFlow({ version }: { version: number }) {
   const [rows, setRows] = useState<MergeQueueRowView[]>([]);
   const [stalls, setStalls] = useState<MergeQueueStallView[]>([]);
+  const [askTier, setAskTier] = useState<'auto' | 'label'>('auto');
   const [passAt, setPassAt] = useState<string | null>(null);
   const [open, setOpen] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -60,6 +61,7 @@ function MergeQueueFlow({ version }: { version: number }) {
       if (!live) return;
       setRows(Array.isArray(view?.rows) ? view.rows : []);
       setStalls(Array.isArray(view?.stalls) ? view.stalls : []);
+      setAskTier(view?.ask_tier === 'label' ? 'label' : 'auto');
       setPassAt((Array.isArray(view?.switches) ? view.switches : []).reduce<string | null>((acc, s) => (s.last_pass_at && (!acc || s.last_pass_at > acc) ? s.last_pass_at : acc), null));
     }).catch(() => { /* the board still works without the queue view */ });
     return () => { live = false; };
@@ -111,7 +113,7 @@ function MergeQueueFlow({ version }: { version: number }) {
       ))}
       {open && (
         <>
-          <p className="mt-2 text-[10px] text-slate-500">freeze → gate green on the SHA → one independent PASS → OK (ask tier: Denis's label; no hold label) → queued → merging (merge gate once) → merged. A lane behind main is merged with main first.</p>
+          <p className="mt-2 text-[10px] text-slate-500">freeze → gate green on the SHA → one independent PASS → OK ({askTier === 'label' ? "ask tier: Denis's label; " : ''}no hold label) → queued → merging (merge gate once) → merged. A lane behind main is merged with main first; a lane with nothing main lacks is retired.</p>
           {shown.length > 0 && <ul className="mt-2 space-y-1" data-testid="merge-queue-active">{shown.map(line)}</ul>}
           {active.length > shown.length && (
             <button type="button" className="mt-1 text-[10px] text-sky-300" onClick={() => setShowAll(true)} data-testid="merge-queue-more">show all {active.length}</button>

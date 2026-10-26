@@ -372,6 +372,8 @@ export interface MergeQueueStallView {
 export interface MergeQueueView {
   switches: MergeQueueSwitch[];
   stalls?: MergeQueueStallView[];
+  /** Ask-tier policy: 'auto' merges ask-tier lanes without a label; 'label' waits for Denis's label. */
+  ask_tier?: 'auto' | 'label';
   rows: MergeQueueRowView[];
 }
 

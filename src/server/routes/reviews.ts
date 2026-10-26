@@ -141,7 +141,10 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
         ...drifts.map((d) => ({ project: d!.project, code: 'PROD_DRIFT', text: d!.text, at: null, file: null })),
         ...mergeQueue.configuredProjects().map((name) => mergeQueue.queueStall(name)).filter((s) => s !== null),
       ],
-      rows: mergeQueue.listQueue(project),
+      // Ask-tier policy of the configured projects: 'auto' (no label from Denis) or 'label'.
+      ask_tier: mergeQueue.configuredProjects().every((name) => getConfig().projects?.[name]?.pipeline?.merge_queue?.ask_tier === 'auto') ? 'auto' : 'label',
+      // Seats denied for automation in config are not work for anyone: they stay out of the list.
+      rows: mergeQueue.listQueue(project).filter((r) => !(r.state === 'waiting' && (r.reason ?? '').startsWith('LANE_DENIED:'))),
     });
   });
 

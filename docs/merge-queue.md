@@ -236,7 +236,8 @@ sqlite3 -readonly /home/wave/wavecode/wavecode.db "select created_at, type, enti
 
 ## Endpoints
 
-- `GET /api/merge-queue[?project=]` — switches per configured project and the rows.
+- `GET /api/merge-queue[?project=]` — switches per configured project, `ask_tier` (`auto` | `label`) and the rows. Seats denied for automation (`LANE_DENIED`) are not listed: they are not work for anyone.
+- `POST /api/lanes/:lane/retire` `{ project? }` — admin only. Retires a lane whose work is all on main: refuses (409) while `git cherry origin/main <lane>` still lists a commit; otherwise its open, behind-main and stale freezes close as `merged` (superseded by main), one `lane.retired` event per lane and tip, and the lane is never pinged about main again. The branch stays.
 - `POST /api/merge-queue/:project/switch` `{ enabled }` — admin only.
 - `POST /api/merge-queue/:sha/priority` `{ priority: 0-9 }` — admins only (since 26 Oct 2026; it was open to developers, which includes agent seats).
 - `POST /api/merge-queue/:sha/requeue` `{ reason }` — admins only; a bounced row with a live freeze returns to waiting (404 unknown, 409 not bounced or freeze closed).
@@ -275,6 +276,16 @@ admin) after each deploy, falling back to the newest deployed production release
 - **Fast lane**: an admin sets `POST /api/merge-queue/:sha/priority`; the lane takes the next
   gate slot and the head of the queue, still gated (quick + api + one PASS).
 - The SystemOps side is described in `docs/ops/main-only-deploy-patch-note.md`.
+
+## A lane with nothing main lacks is retired, not pinged (26 Oct 2026)
+
+A lane whose commits all landed on main (its PR merged; `git cherry origin/main <lane>` is empty
+or all `-`) has nothing left to sync. Its tip is often a merge of main, so ancestry alone never
+closed it, and it drew a "behind main" ping every 30 minutes. Now every place that would ping
+(`pingLaneAboutMain`, the behind-main reconcilers) first asks git cherry and, when the answer is
+empty, retires the lane instead: freezes `merged`, event `lane.retired` (`<lane>@<sha8>`), no
+message to the owner. The answer is remembered per lane, tip and main for 10 minutes. Admins can
+do the same by hand with `POST /api/lanes/:lane/retire`. WaveCode never deletes the branch.
 
 ## Configuration
 

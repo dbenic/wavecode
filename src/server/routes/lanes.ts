@@ -9,6 +9,9 @@ import {
   type SyncNoticeApply,
 } from '../lane-sync-notices.js';
 import { isAdmin } from '../users.js';
+import { getConfig } from '../config.js';
+import { laneHasNothingMainLacks, projectRepo, resolveMainRef, retireLane } from '../lane-main.js';
+import { execFileAsync } from '../proc.js';
 
 type Body = Record<string, unknown>;
 
@@ -34,6 +37,33 @@ function wantsDeferred(value: unknown): boolean {
 
 /** Admin pause and resume of behind-main notices. One lane, a `lanes` list, or a deferred-agent filter. */
 export function registerLaneRoutes(app: Hono<NodeAppEnv>): void {
+  // Retire a lane whose work is all on main (git cherry empty): freezes closed as merged, no more pings. Admin. The branch stays.
+  app.post('/api/lanes/:id/retire', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin may retire a lane' }, 403);
+    const lane = canonicalLaneName(c.req.param('id'));
+    if (!lane) return c.json({ error: 'invalid lane name' }, 400);
+    const body = (await readBody(c)) ?? {};
+    const projects = Object.keys(getConfig().projects ?? {});
+    const project = typeof body.project === 'string' ? body.project : c.req.query('project') ?? (projects.length === 1 ? projects[0] : null);
+    if (!project || !projects.includes(project)) return c.json({ error: `project is required (one of ${projects.join(', ') || 'none configured'})` }, 400);
+    const repo = projectRepo(project);
+    if (!repo) return c.json({ error: `project ${project} has no repo` }, 400);
+    const mainRef = await resolveMainRef(repo, project);
+    if (!mainRef) return c.json({ error: 'main not found' }, 400);
+    const spec = `refs/remotes/${mainRef.includes('/') ? mainRef : `origin/${mainRef}`}`.replace(/^refs\/remotes\/refs\/remotes\//, 'refs/remotes/');
+    const remote = spec.split('/')[2] ?? 'origin';
+    try { await execFileAsync('git', ['-C', repo, 'fetch', '--quiet', remote, lane], { timeout: 30_000 }); } catch { /* use what is known */ }
+    let tip: string | null = null;
+    try { tip = (await execFileAsync('git', ['-C', repo, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${lane}^{commit}`], { timeout: 10_000 })).trim(); } catch { tip = null; }
+    if (!tip) return c.json({ error: `${lane} is not on ${remote}` }, 404);
+    const nothing = await laneHasNothingMainLacks(repo, mainRef, tip);
+    if (nothing === null) return c.json({ error: 'git cherry failed' }, 500);
+    if (!nothing) return c.json({ error: `${lane} still has commits main lacks (git cherry ${mainRef} ${lane} is not empty); it merges through the queue, not retired` }, 409);
+    const closed = retireLane(project, lane, tip, `retired by ${user.name}: git cherry ${mainRef} ${lane} is empty`);
+    return c.json({ lane, project, tip, freezes_closed: closed, retired: true });
+  });
+
   app.post('/api/lanes/sync-notices/pause', (c) => bulk(c, 'pause'));
   app.post('/api/lanes/sync-notices/resume', (c) => bulk(c, 'resume'));
   app.post('/api/lanes/:id/sync-notices/pause', (c) => one(c, 'pause'));
