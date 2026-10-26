@@ -181,7 +181,7 @@ projects:
           hold_labels: [migration-hold, do-not-merge]
         stall_minutes: 30
         maestro_log: /home/wave/inbox/wavecode-merge-queue.log
-        gate_command: [countix-remote-test, --suite, gate]   # the one full run, on the merged code; the remote gateway only lets the full suite through its gate verb
+        gate_command: [countix-remote-test, --suite, tier1]  # the quick check on the merged code (Maestro, 26 Oct 2026); the full suite stays with the release gate before prod
         # version_command: [node, scripts/bump-version.mjs]   # once the project says how a version is bumped
 ```
 

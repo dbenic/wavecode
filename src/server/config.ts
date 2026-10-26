@@ -273,7 +273,7 @@ export interface MergeQueueGithubConfig {
   /** `owner/name`. */
   repo: string;
   /**
-   * File holding the fine-grained token (contents, pull_requests, checks on the repo),
+   * File holding the fine-grained token (contents and pull_requests on the repo; no checks),
    * stored by SystemOps, readable by the service user only. Read at tick time and handed
    * to `gh` as `GH_TOKEN`; never logged. Unset: the service user's own `gh auth login`.
    */

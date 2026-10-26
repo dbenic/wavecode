@@ -476,7 +476,7 @@ async function githubPass(project: string, cfg: MergeQueueConfig): Promise<Githu
     let env: Record<string, string> | undefined;
     if (gh.token_file) {
       const token = readTokenFile(gh.token_file);
-      if (!token) return { ok: false, error: `GitHub token file ${gh.token_file} is missing or empty; SystemOps stores the credential there (contents, pull_requests, checks on ${gh.repo})`, prs: null };
+      if (!token) return { ok: false, error: `GitHub token file ${gh.token_file} is missing or empty; SystemOps stores the credential there (contents and pull_requests on ${gh.repo}; the queue posts no check runs)`, prs: null };
       env = { GH_TOKEN: token };
     }
     const now = Date.now();
