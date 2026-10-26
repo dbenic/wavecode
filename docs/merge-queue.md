@@ -101,8 +101,9 @@ may raise a lane's priority. For the head of the queue WaveCode:
 3. runs `git merge --no-ff` of the lane SHA. A conflict aborts and **bounces** the lane
    with the files named;
 4. runs `version_command` there if configured and folds its changes into the merge commit;
-5. runs the **full suite once on the merge result** (`merge_queue.gate_command`, default
-   `pipeline.gate_command`), as the author (`COUNTIX_REMOTE_TEST_WHO`), with
+5. runs the **merge gate once on the merge result** (`merge_queue.gate_command`, default
+   `pipeline.gate_command`; on countix-dev the tier1 quick check, the full suite stays with
+   the release gate before prod), as the author (`COUNTIX_REMOTE_TEST_WHO`), with
    `WAVECODE_SHA=<merge sha>`, `WAVECODE_LANE`, `WAVECODE_CHECKOUT` and
    `WAVECODE_MERGE_OF=<lane sha>`. It runs even when the lane already contained main:
    this is the only full run between the nightly ones. RED bounces; a dispatcher QUEUED

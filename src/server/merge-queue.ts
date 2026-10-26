@@ -760,7 +760,7 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
     }
 
     const mergeSha = await git(dir, ['rev-parse', 'HEAD']);
-    // The full suite runs once, here, on the merged code — even when the lane already
+    // The merge gate runs once, here, on the merged code — even when the lane already
     // contained main. The freeze-time run only covered the quick suite and the changed parts.
     let gateNote: string;
     {
