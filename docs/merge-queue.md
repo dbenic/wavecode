@@ -5,35 +5,90 @@ Approved by Denis Benič on 25 Oct 2026 for **Wavepulse main only**. It replaces
 only the queue merges, and only on countix-dev. Staging and production are untouched: the
 staging push stays with SystemOps and the production GO stays Denis's exact-SHA message.
 
-## What merges
+## What merges — evidence, not names
 
-A freeze is eligible when all of these hold. The Reviews card shows the first one that
-does not, as `Merge queue · waiting: …`.
+Stabilised on 26 Oct 2026 (Maestro's brief, Denis's "lets do this"). There is **no
+allowlist**: any branch with a freeze note may queue unless it is on the deny list
+(`main`, `master`, `release/*`, `prod-*`, the project's main branch; `deny_lanes` in
+config). A freeze is eligible when all of these hold. The Reviews page shows the first
+one that does not, as one machine-readable code and what is missing.
 
-1. **Freeze note** in the inbox naming the exact 40-character SHA and `TIER: ship|show|ask`.
-   No `TIER:` line and no `default_tier` in config means the lane waits. A lane that
-   touches an `ask_paths` glob or the migrations directory is `ask` whatever the note says
-   (booking, VAT, payroll, payments, migrations, RLS and auth on Wavepulse).
-2. **Green freeze-time run on that exact SHA**: the quick suite and the API tests for the
-   changed parts (the full API suite when migrations, the database, sign-in or the test
-   setup changed), as the test history reports them under `tests.quick_suites` and
-   `tests.full_suites`. No waivers, no skipped suites. WaveCode submits nothing at freeze
-   time (`auto_gate: false` since the testing study of 25 Oct 2026); the agent does.
-3. **Reviews by tier**: `ship` needs none; `show` needs none before the merge (the pipeline
-   has already asked a reviewer; their verdict lands afterwards); `ask` needs two
-   `VERDICT: PASS` files from reviewers who are not the author and whose seats run on
-   **different credential profiles**. Any verdict that says `NEEDS FIXES` or `REJECT` holds
-   the lane until a new SHA is frozen.
-4. **The remote lane still points at the frozen SHA.** A commit after the review moves the
-   tip; the card says so and the author freezes the new SHA.
-5. **A pull request exists** for the lane (`require_pr`, default on). With
-   `pr_list_command` the open PRs are read from its JSON; without it the remote's
-   `refs/pull/*/head` is matched, which cannot tell an open PR from a closed one.
-6. **New migrations are numbered after main's latest** and do not collide with each other.
-   A collision bounces the lane straight away.
+1. **Freeze note** in the inbox naming the exact 40-character SHA. `TIER: ship|show|ask`
+   is read when present; without it the lane is `show` (or `default_tier`). A lane that
+   touches an `ask_paths` glob or the migrations directory is `ask` whatever the note says.
+2. **Green freeze-time gate on that exact SHA** (`GATE_NOT_GREEN` until then): the quick
+   suite and the API tests for the changed parts, as the test history reports them under
+   `tests.quick_suites` and `tests.full_suites`. No waivers, no skipped suites.
+3. **One independent PASS on that exact SHA** (`NO_PASS_ON_SHA` until then): a
+   `VERDICT: PASS` from a reviewer who is not the author and whose seat runs on a
+   **different credential profile** than the builder's (the home-dir login counts as a
+   profile). Every tier needs it; `ask` adds Denis's OK. A verdict that says
+   `NEEDS FIXES` or `REJECT` holds the lane (`NEEDS_FIXES`) until a new SHA is frozen.
+4. **Ask tier: Denis's OK label** on the lane's open pull request (`github.ok_label`,
+   default `ask-tier-approved`), else `ASK_TIER_NO_OK`. Ship and show auto-merge: Denis
+   is not a manual merge step and builders never merge.
+5. **No hold label** on the pull request (`github.hold_labels`, default `migration-hold`
+   and `do-not-merge`), else `MIGRATION_HOLD`. This is how a migration that must wait for
+   a release (0394 before R7) is parked without touching the lane.
+6. **The remote lane still points at the frozen SHA** (`LANE_MOVED` / `LANE_GONE`). A commit
+   after the review moves the tip; the author freezes the new SHA.
+7. **A pull request exists** only when `require_pr: true` (`NO_PR`). Default off.
+8. **New migrations are numbered after main's latest** and do not collide with each other,
+   else the lane bounces at once (`MIGRATION_COLLISION`).
 
-The lane does not have to contain the current main: the queue merges main for it and
-gates the result.
+The lane does **not** have to contain the current main: the queue merges main into it in
+the merge checkout and gates the result, so a lane behind main is never refused for that.
+Every waiting lane is re-evaluated against the current main on each pass; when a merge
+advances main, the other lanes are told (`auto_merge_main`).
+
+### GitHub
+
+The queue reaches GitHub through `gh` with a **server-side credential** that depends on no
+person's session: a fine-grained token (contents, pull_requests, checks on the repo) in
+`github.token_file`, stored by SystemOps, readable by the service user only, never in chat
+or in the repo. WaveCode reads it at tick time and hands it to `gh` as `GH_TOKEN`; it is
+never logged, never in an event, never in a row. `gh auth status` is checked at the start
+of every pass (cached five minutes when it passes). While it fails, **every** lane reads
+`GH_AUTH_MISSING: <why>`, nothing merges, and the stall file goes out at once.
+
+### Refusal codes
+
+| code | missing evidence |
+|---|---|
+| `GATE_NOT_GREEN` | quick or api not green on the exact SHA |
+| `NO_PASS_ON_SHA` | no PASS from a non-author on another profile than the builder |
+| `NEEDS_FIXES` | a reviewer said NEEDS FIXES or REJECT on this SHA |
+| `ASK_TIER_NO_OK` | ask tier without Denis's label on the pull request |
+| `MIGRATION_HOLD` | the pull request carries a hold label |
+| `LANE_MOVED` / `LANE_GONE` | the remote tip is another SHA / the lane is not on the remote |
+| `LANE_DENIED` | the branch is on the deny list or denied for automation |
+| `NO_PR` | `require_pr` is on and no open pull request matches |
+| `MIGRATION_COLLISION` | a new migration is numbered at or below main's latest (bounced) |
+| `GH_AUTH_MISSING` | the GitHub credential is missing or `gh auth status` fails |
+| `QUEUE_OFF` | eligible, but the kill switch is off |
+| `NOT_CONFIGURED` / `NO_REPO` / `CHECK_FAILED` | config or repo problems; the text says which |
+| `STALLED_MERGE` | (stall file only) an eligible lane waited past `stall_minutes` with no merge |
+
+### Stall alarm
+
+When the queue cannot run (`GH_AUTH_MISSING`, `QUEUE_OFF` with eligible lanes) or an
+eligible lane has waited longer than `stall_minutes` (default 30) with no merge started
+or finished in that window, WaveCode writes `wavecode-queue-stall-<yyyymmdd-hhmm>.md` in
+`stall_dir` (default: the `maestro_log` directory) with the reason, the switch state and a
+table of lanes, SHAs, states and ages, appends a `stall` line to `maestro_log`, and emits
+`merge_queue.stall`. One file per window; the Reviews page shows the stall first. A merge
+clears it.
+
+### Asking for a review yourself
+
+After development the author asks, nobody waits for a pick: drop
+`<you>-<lane>-review-request-<sha8>.md` in the freeze inbox with `Lane:` and the exact
+SHA (optionally `Reviewer: @seat`). WaveCode pings the least-loaded eligible seat on a
+different profile (or the named seat, through the ladder's checks), notes it on the lane,
+and tells the author's pane what happened. It works with `auto_review` on or off, and a
+second request on the same SHA moves the review when the first seat has not answered.
+The same ask over HTTP: `POST /api/reviews/lanes/request-review { project, lane }` with no
+`reviewer`. The freeze note must exist first: it is what the reviewer reads.
 
 ## How it merges
 
@@ -116,15 +171,22 @@ projects:
       merge_queue:
         enabled: true
         ask_paths: ['**/booking/**', '**/vat/**', '**/payroll/**', '**/payments/**', '**/billing/**', '**/rls/**', '**/auth/**', 'migrations/**']
-        require_pr: true
+        deny_lanes: [main, master, 'release/*', 'prod-*']   # the default; there is no allowlist
+        require_pr: false
+        github:
+          repo: dbenic/Wavepulse
+          token_file: /home/wave/.config/wavecode/github-token   # stored by SystemOps, mode 0400, owner wave
+          ok_label: ask-tier-approved
+          hold_labels: [migration-hold, do-not-merge]
+        stall_minutes: 30
         maestro_log: /home/wave/inbox/wavecode-merge-queue.log
         gate_command: [countix-remote-test, --suite, full]   # the one full run, on the merged code
         # version_command: [node, scripts/bump-version.mjs]   # once the project says how a version is bumped
-        # pr_list_command: [gh, pr, list, --json, 'number,headRefName,headRefOid,state']  # once gh is logged in for wave
 ```
 
 ## What it never does
 
-Force-push, squash or rewrite a reviewed SHA, merge with a red or missing gate, merge an
-`ask` lane on one review, push to staging or production, write a secret to a log, or
-merge while either switch is off.
+Force-push, squash or rewrite a reviewed SHA, merge with a red or missing gate, merge
+without an independent PASS, merge an `ask` lane without Denis's label, merge past a hold
+label, push to staging or production, write a secret (the GitHub token included) to a log,
+or merge while either switch is off.

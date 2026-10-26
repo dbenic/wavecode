@@ -37,7 +37,7 @@ import {
   type Result,
 } from './db.js';
 import { countVerdictIssues, type ReviewVerdict } from './code-review.js';
-import { fireFreeze } from './pipeline-hooks.js';
+import { fireFreeze, fireReviewRequest } from './pipeline-hooks.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { archiveDocumentFile } from './fixtures.js';
@@ -98,7 +98,13 @@ export interface ParsedFreezeFile {
 const SETTLE_MS = 1200;
 const FEEDBACK_MAX = 20_000;
 const SUMMARY_MAX = 1_500;
-const FILE_NAME_RE = /(freeze|verdict)/i;
+const FILE_NAME_RE = /(freeze|verdict|review-request)/i;
+const REVIEW_REQUEST_RE = /review-request/i;
+
+/** `<you>-<lane>-review-request-<sha8>.md`: the agent asks for a review itself (docs/maestro-contract.md). */
+export function isReviewRequestFileName(name: string): boolean {
+  return REVIEW_REQUEST_RE.test(name) && TEXT_EXT_RE.test(name) && !name.startsWith('.');
+}
 const TEXT_EXT_RE = /\.(md|markdown|txt)$/i;
 
 // --- schema ---------------------------------------------------------------------
@@ -925,8 +931,9 @@ export async function ingestFreezeText(text: string, filePath: string, opts: Ing
   const sameVerdict = existing && verdict && existing.verdict === verdict
     && (existing.reviewer_agent_id ? existing.reviewer_agent_id === (reviewer?.id ?? existing.reviewer_agent_id) : existing.reviewer_name === reviewerName);
 
-  // Decided freezes are final: a re-delivered file must not revive them.
-  if (existing && existing.status !== 'open' && existing.status !== 'stale') {
+  // Decided freezes are final: a re-delivered file must not revive them. A lane behind main is
+  // not decided: the merge queue merges main in for it, so its review still lands here.
+  if (existing && existing.status !== 'open' && existing.status !== 'stale' && existing.status !== 'behind-main') {
     patch(sha, enrich);
     return { ok: true, data: { sha, effect: 'noop', run_id: existing.run_id } };
   }
@@ -1440,6 +1447,11 @@ async function ingestIfChanged(file: string, opts: IngestOptions = {}): Promise<
   }
   if (seen.get(file) === mtime) return;
   seen.set(file, mtime);
+  if (isReviewRequestFileName(path.basename(file))) {
+    // A request is an action, not a record: the backfill after a restart does not replay it.
+    if (!opts.silent) await fireReviewRequest(file);
+    return;
+  }
   try {
     const r = await ingestFreezeFile(file, opts);
     if (!r.ok) logger.info({ file, reason: r.error }, 'Freeze file skipped');

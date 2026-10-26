@@ -343,6 +343,38 @@ export interface LaneQueueState {
   pr: string | null;
 }
 
+/** A row of `GET /api/merge-queue`: one frozen SHA and where it is in the flow. */
+export interface MergeQueueRowView {
+  sha: string;
+  project: string;
+  lane: string;
+  tier: 'ship' | 'show' | 'ask' | null;
+  state: 'waiting' | 'queued' | 'merging' | 'merged' | 'bounced' | 'superseded';
+  /** `CODE: what is missing` while waiting or bounced. */
+  reason: string | null;
+  priority: number;
+  eligible_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  merge_sha: string | null;
+  pr: string | null;
+  updated_at: string;
+}
+
+export interface MergeQueueStallView {
+  project: string;
+  code: string;
+  text: string;
+  at: string;
+  file: string | null;
+}
+
+export interface MergeQueueView {
+  switches: MergeQueueSwitch[];
+  stalls?: MergeQueueStallView[];
+  rows: MergeQueueRowView[];
+}
+
 export interface MergeQueueSwitch {
   project: string;
   config_enabled: boolean;

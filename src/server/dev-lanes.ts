@@ -12,7 +12,7 @@ import { listReleases, resolveStagingTip, stageGateBlock } from './releases.js';
 import { prereqStatusNote } from './prereqs.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { deliverSystemLine } from './wire-lines.js';
-import { latestPipelineNote } from './lane-pipeline.js';
+import { latestPipelineNote, requestReviewFor } from './lane-pipeline.js';
 import logger from './logger.js';
 import { recordJob } from './perf-monitor.js';
 import {
@@ -364,11 +364,20 @@ export function resetLaneBoardForTest(): void {
   laneRefresh = null;
 }
 
-export async function requestLaneReview(opts: { project: string; lane: string; reviewer: string }): Promise<Result<{ reviewer: string; delta: boolean }>> {
+export async function requestLaneReview(opts: { project: string; lane: string; reviewer?: string | null; by?: string | null }): Promise<Result<{ reviewer: string; delta: boolean }>> {
   const project = opts.project?.trim();
   const lane = opts.lane?.trim();
   const reviewer = opts.reviewer?.trim();
-  if (!project || !lane || !reviewer) return { ok: false, error: 'project, lane, and reviewer are required' };
+  if (!project || !lane) return { ok: false, error: 'project and lane are required' };
+  if (!reviewer) {
+    // No seat named: the author (or maestro) asks and the picker chooses, as for an inbox review request.
+    const rows = getDb().prepare(
+      "SELECT sha FROM release_freezes WHERE project = ? AND lane = ? AND status IN ('open', 'behind-main') ORDER BY created_at DESC LIMIT 1",
+    ).all(project, lane) as Array<{ sha: string }>;
+    if (!rows[0]) return { ok: false, error: 'needs an author freeze first' };
+    const asked = await requestReviewFor(rows[0].sha, { reviewer: null, by: opts.by ?? 'api' });
+    return asked.ok ? { ok: true, data: { reviewer: asked.data.reviewer, delta: false } } : asked;
+  }
   if (laneAutomationDenied(project, null, lane)) return { ok: false, error: `refusing ${lane}: denied` };
   let freeze: ReleaseFreeze | null = null;
   try {

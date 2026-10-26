@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost } from '../hooks/useApi';
 import { useSSE, type SSEEvent } from '../hooks/useSSE';
-import type { LaneCard, LaneQueueState, MergeQueueSwitch, ReleaseView, ReviewBoard, ReviewerLoadView } from '../types';
+import type { LaneCard, LaneQueueState, MergeQueueRowView, MergeQueueStallView, MergeQueueSwitch, MergeQueueView, ReleaseView, ReviewBoard, ReviewerLoadView } from '../types';
 import { isReviewEventType } from '../sse-events';
 import { fileViewHref, internalLinkClickHandler } from '../utils/paths';
 import RoomProposals from '../components/RoomProposals';
@@ -13,8 +13,111 @@ const HOW_IT_WORKS = [
   'You press Stage, or it stages itself. Then check it on staging.',
   'Press Ready for prod. Denis ships that release.',
   'Behind main, merge main and freeze again. Your agent is told.',
-  'Where the merge queue is on, a green lane merges into main by itself: ship on the gate, show with one review, ask with two.',
+  'Ask for the review yourself when the work is done: drop <you>-<lane>-review-request-<sha8>.md in the inbox.',
+  'Where the merge queue is on, a green lane with one independent PASS merges into main by itself; an ask lane also needs Denis\'s OK label on its pull request.',
 ];
+
+/** The step a queue row is at, from its state and the refusal code in front of its reason. */
+const FLOW_STEPS = ['setup', 'gate', 'review', 'OK', 'queued', 'merging', 'merged'] as const;
+function flowStep(row: Pick<MergeQueueRowView, 'state' | 'reason'>): { index: number; label: string } {
+  const code = row.reason?.match(/^([A-Z_]+):/)?.[1] ?? null;
+  if (row.state === 'merged') return { index: 6, label: 'merged' };
+  if (row.state === 'merging') return { index: 5, label: 'merging' };
+  if (row.state === 'queued') return { index: 4, label: 'queued' };
+  if (row.state === 'bounced') return { index: 5, label: 'bounced' };
+  if (row.state === 'superseded') return { index: 0, label: 'left' };
+  switch (code) {
+    case 'GATE_NOT_GREEN': return { index: 1, label: 'gate' };
+    case 'NEEDS_FIXES': case 'NO_PASS_ON_SHA': return { index: 2, label: 'review' };
+    case 'ASK_TIER_NO_OK': case 'NO_PR': case 'MIGRATION_HOLD': return { index: 3, label: 'OK' };
+    default: return { index: 0, label: 'setup' };
+  }
+}
+
+function sinceLabel(iso: string | null): string {
+  if (!iso) return '';
+  const t = Date.parse(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
+  if (!Number.isFinite(t)) return '';
+  const min = Math.max(0, Math.round((Date.now() - t) / 60_000));
+  return min < 60 ? `${min} min` : `${Math.round(min / 60)} h`;
+}
+
+const QUEUE_ORDER: Record<MergeQueueRowView['state'], number> = { merging: 0, queued: 1, waiting: 2, bounced: 3, merged: 4, superseded: 5 };
+
+/**
+ * The whole flow on one panel: who is merging, who is queued and in what order, who
+ * waits and on which evidence, who bounced, who merged. A stall is the first line.
+ */
+function MergeQueueFlow({ version }: { version: number }) {
+  const [rows, setRows] = useState<MergeQueueRowView[]>([]);
+  const [stalls, setStalls] = useState<MergeQueueStallView[]>([]);
+  const [open, setOpen] = useState(true);
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    let live = true;
+    apiGet<MergeQueueView>('/merge-queue').then((view) => {
+      if (!live) return;
+      setRows(Array.isArray(view?.rows) ? view.rows : []);
+      setStalls(Array.isArray(view?.stalls) ? view.stalls : []);
+    }).catch(() => { /* the board still works without the queue view */ });
+    return () => { live = false; };
+  }, [version]);
+  if (rows.length === 0 && stalls.length === 0) return null;
+  const sorted = [...rows]
+    .filter((r) => r.state !== 'superseded')
+    .sort((a, b) => QUEUE_ORDER[a.state] - QUEUE_ORDER[b.state] || (b.priority - a.priority) || (a.eligible_at ?? '').localeCompare(b.eligible_at ?? '') || (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
+  const active = sorted.filter((r) => r.state === 'merging' || r.state === 'queued' || r.state === 'waiting');
+  const done = sorted.filter((r) => r.state === 'bounced' || r.state === 'merged').slice(0, 8);
+  const shown = showAll ? active : active.slice(0, 12);
+  const counts = (['merging', 'queued', 'waiting', 'bounced', 'merged'] as const).map((s) => [s, rows.filter((r) => r.state === s).length] as const).filter(([, n]) => n > 0);
+  let position = 0;
+  const line = (row: MergeQueueRowView) => {
+    const step = flowStep(row);
+    const pos = row.state === 'queued' ? `#${++position} ` : '';
+    const colour = row.state === 'bounced' ? 'text-red-300' : row.state === 'merged' ? 'text-emerald-300' : row.state === 'queued' || row.state === 'merging' ? 'text-sky-200' : 'text-slate-300';
+    const since = row.state === 'merging' ? row.started_at : row.state === 'queued' ? row.eligible_at : row.state === 'waiting' ? row.updated_at : row.finished_at;
+    return (
+      <li key={row.sha} data-testid="merge-queue-row" data-state={row.state} data-step={step.label} className="rounded-lg border border-slate-800 bg-slate-950/40 px-2 py-1.5">
+        <div className="flex flex-wrap items-baseline gap-x-2 text-[11px]">
+          <span className={`font-semibold ${colour}`}>{pos}{row.lane}</span>
+          <span className="font-mono text-slate-500">{shortSha(row.sha)}{row.merge_sha ? ` → ${shortSha(row.merge_sha)}` : ''}</span>
+          {row.tier && <span className="text-slate-500">{row.tier}</span>}
+          {row.pr && <span className="text-slate-500">PR {row.pr}</span>}
+          <span className="ml-auto text-[10px] text-slate-500" title={FLOW_STEPS.join(' → ')}>step {step.index + 1}/7 · {step.label}{since ? ` · ${sinceLabel(since)}` : ''}</span>
+        </div>
+        {row.reason && <p className={`mt-0.5 text-[11px] ${row.state === 'bounced' ? 'text-red-300/90' : 'text-slate-400'}`} data-testid="merge-queue-reason">{row.reason}</p>}
+      </li>
+    );
+  };
+  return (
+    <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-3" data-testid="merge-queue-flow">
+      <button type="button" className="flex w-full items-baseline justify-between gap-2 text-left" onClick={() => setOpen((v) => !v)} data-testid="merge-queue-flow-toggle">
+        <h2 className="text-[10px] font-bold tracking-[0.18em] text-slate-500 uppercase">Merge queue</h2>
+        <span className="text-[10px] font-mono text-slate-500">{counts.map(([s, n]) => `${n} ${s}`).join(' · ')}{open ? ' ▾' : ' ▸'}</span>
+      </button>
+      {stalls.map((s) => (
+        <p key={s.project} className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200" data-testid="merge-queue-stall">
+          Stalled · {s.code}: {s.text}{s.at ? ` · since ${sinceLabel(s.at)}` : ''}{s.file ? ` · ${s.file.split('/').pop()}` : ''}
+        </p>
+      ))}
+      {open && (
+        <>
+          <p className="mt-2 text-[10px] text-slate-500">freeze → gate green on the SHA → one independent PASS → OK (ask tier: Denis's label; no hold label) → queued → merging (full suite once) → merged. A lane behind main is merged with main first.</p>
+          {shown.length > 0 && <ul className="mt-2 space-y-1" data-testid="merge-queue-active">{shown.map(line)}</ul>}
+          {active.length > shown.length && (
+            <button type="button" className="mt-1 text-[10px] text-sky-300" onClick={() => setShowAll(true)} data-testid="merge-queue-more">show all {active.length}</button>
+          )}
+          {done.length > 0 && (
+            <>
+              <h3 className="mt-3 text-[10px] font-semibold tracking-[0.14em] text-slate-600 uppercase">Recently</h3>
+              <ul className="mt-1 space-y-1" data-testid="merge-queue-done">{done.map(line)}</ul>
+            </>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
 
 function queueLabel(queue: LaneQueueState): string {
   const tier = queue.tier ? ` · ${queue.tier}` : '';
@@ -297,6 +400,7 @@ export default function ReviewQueue() {
   const [reconcileStale, setReconcileStale] = useState(false);
   const [reviewerLoads, setReviewerLoads] = useState<ReviewerLoadView[]>([]);
   const [mergeQueue, setMergeQueue] = useState<{ projects: MergeQueueSwitch[]; can_switch: boolean }>({ projects: [], can_switch: false });
+  const [queueVersion, setQueueVersion] = useState(0);
   const [view, setView] = useState<'lanes' | 'release' | 'history'>('lanes');
   const [scope, setScope] = useState<'mine' | 'all'>('mine');
   const scopeInit = useRef(false);
@@ -328,6 +432,7 @@ export default function ReviewQueue() {
     if (isReviewEventType(event.type) || event.type === 'deploy.reconciled' || event.type === 'run.finished' || event.type.startsWith('release.') || event.type.startsWith('lane.') || event.type.startsWith('tests.') || event.type.startsWith('pipeline.') || event.type.startsWith('merge_queue.')) {
       fetchData();
     }
+    if (event.type.startsWith('merge_queue.') || event.type === 'deploy.reconciled') setQueueVersion((v) => v + 1);
     if (event.type.startsWith('room.proposal_')) setProposalsVersion((v) => v + 1);
   }, [fetchData]);
 
@@ -405,6 +510,7 @@ export default function ReviewQueue() {
 
       <main className="max-w-3xl mx-auto px-4 py-4 space-y-4">
         <RoomProposals version={proposalsVersion} />
+        {view === 'lanes' && <MergeQueueFlow version={queueVersion} />}
         {view === 'lanes' && (
           <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-3" data-testid="how-it-works">
             <h2 className="text-[10px] font-bold tracking-[0.18em] text-slate-500 uppercase">How it works</h2>

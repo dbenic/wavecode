@@ -348,6 +348,14 @@ projects:
         require_pr: true
         maestro_log: /home/wave/inbox/wavecode-merge-queue.log
         gate_timeout_min: 90
+        deny_lanes: [main, "release/*", "prod-*", "hotfix/*"]
+        github:
+          repo: dbenic/Wavepulse
+          token_file: /home/wave/.config/wavecode/github-token
+          ok_label: ask-tier-approved
+          hold_labels: [migration-hold]
+        stall_minutes: 30
+        stall_dir: /home/wave/inbox
 `, 'utf8');
     const { loadConfig } = await import('./config.js');
     const mq = loadConfig(configPath).projects?.demo.pipeline?.merge_queue;
@@ -355,6 +363,9 @@ projects:
       enabled: true, ask_paths: ['**/payroll/**', 'src/server/vat/*', 'migrations'], default_tier: 'ask',
       version_command: ['node', 'scripts/bump-version.mjs'], pr_list_command: ['gh', 'pr', 'list', '--json', 'number,headRefName,headRefOid,state'],
       require_pr: true, maestro_log: '/home/wave/inbox/wavecode-merge-queue.log', gate_timeout_min: 90,
+      deny_lanes: ['main', 'release/*', 'prod-*', 'hotfix/*'],
+      github: { repo: 'dbenic/Wavepulse', token_file: '/home/wave/.config/wavecode/github-token', ok_label: 'ask-tier-approved', hold_labels: ['migration-hold'] },
+      stall_minutes: 30, stall_dir: '/home/wave/inbox',
     });
     const refuse = async (yaml: string, pattern: RegExp) => {
       fs.writeFileSync(configPath, yaml, 'utf8');
@@ -368,5 +379,9 @@ projects:
     await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        maestro_log: /home/wave/inbox/queue.json\n', /maestro_log must be a \.log, \.txt or \.md file path/);
     await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        gate_timeout_min: 0\n', /gate_timeout_min must be a whole number of minutes from 1 to 1440/);
     await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue: [enabled]\n', /merge_queue must be a map/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        deny_lanes: main\n', /deny_lanes must be a list of branch globs/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        github:\n          repo: wavepulse\n', /github\.repo must be owner\/name/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        github:\n          repo: dbenic/Wavepulse\n          token_file: ../token\n', /github\.token_file must be a file path/);
+    await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        stall_minutes: 1\n', /stall_minutes must be a whole number of minutes from 5 to 1440/);
   });
 });

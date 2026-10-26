@@ -2,10 +2,10 @@
 
 import '../../test-setup';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import ReviewQueue from './ReviewQueue';
-import type { LaneCard, ReviewBoard } from '../types';
+import type { LaneCard, MergeQueueRowView, ReviewBoard } from '../types';
 import type { SSEEvent } from '../hooks/useSSE';
 
 vi.mock('../hooks/useApi', () => ({
@@ -108,6 +108,44 @@ describe('ReviewQueue merge queue', () => {
     expect(screen.getByTestId('merge-queue-toggle-wavepulse').textContent).toBe('Start merging');
   });
 
+  it('shows the whole flow: the stall first, then who is merging, queued, waiting and why', async () => {
+    const useApi = await import('../hooks/useApi');
+    const row = (over: Partial<MergeQueueRowView>): MergeQueueRowView => ({
+      sha: 'a'.repeat(40), project: 'wavepulse', lane: 'wc-x', tier: 'show', state: 'waiting', reason: null, priority: 0,
+      eligible_at: null, started_at: null, finished_at: null, merge_sha: null, pr: null, updated_at: '2026-10-26 10:00:00', ...over,
+    });
+    vi.mocked(useApi.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/reviews/board') return board({ merge_queue: { can_switch: false, projects: [{ project: 'wavepulse', config_enabled: true, enabled: true, enabled_by: 'denis', queued: 1 }] } }) as never;
+      if (path === '/merge-queue') {
+        return {
+          switches: [],
+          stalls: [{ project: 'wavepulse', code: 'GH_AUTH_MISSING', text: 'GitHub token file /home/wave/.config/wavecode/github-token is missing or empty', at: new Date().toISOString(), file: '/home/wave/inbox/wavecode-queue-stall-20261026-1000.md' }],
+          rows: [
+            row({ sha: 'b'.repeat(40), lane: 'wc-b', state: 'queued', tier: 'ship', eligible_at: '2026-10-26T09:50:00.000Z' }),
+            row({ sha: 'c'.repeat(40), lane: 'claude6/overview-fixes', state: 'waiting', tier: 'ask', pr: '#210', reason: 'ASK_TIER_NO_OK: ask because of migrations/0394_x.sql; pull request #210 has no ask-tier-approved label from Denis' }),
+            row({ sha: 'd'.repeat(40), lane: 'wc-d', state: 'waiting', reason: 'NO_PASS_ON_SHA: needs one PASS verdict on this exact SHA from a reviewer who is not the author' }),
+            row({ sha: 'e'.repeat(40), lane: 'wc-e', state: 'merging', tier: 'show', started_at: new Date().toISOString() }),
+            row({ sha: 'f'.repeat(40), lane: 'wc-f', state: 'merged', merge_sha: '9'.repeat(40), finished_at: '2026-10-26T08:00:00.000Z', reason: 'gate GREEN on 99999999' }),
+            row({ sha: '1'.repeat(40), lane: 'wc-old', state: 'superseded', reason: 'freeze stale' }),
+          ],
+        } as never;
+      }
+      throw new Error(path);
+    });
+    render(<MemoryRouter><ReviewQueue /></MemoryRouter>);
+    expect(await screen.findByTestId('merge-queue-stall')).toHaveTextContent('Stalled · GH_AUTH_MISSING: GitHub token file');
+    expect(screen.getByTestId('merge-queue-stall')).toHaveTextContent('wavecode-queue-stall-20261026-1000.md');
+    const active = within(screen.getByTestId('merge-queue-active')).getAllByTestId('merge-queue-row');
+    expect(active.map((el) => [el.dataset.state, el.dataset.step])).toEqual([['merging', 'merging'], ['queued', 'queued'], ['waiting', 'OK'], ['waiting', 'review']]);
+    expect(active[1]).toHaveTextContent('#1 wc-b');
+    expect(active[2]).toHaveTextContent('step 4/7 · OK');
+    expect(active[2]).toHaveTextContent('ASK_TIER_NO_OK: ask because of migrations/0394_x.sql');
+    const done = within(screen.getByTestId('merge-queue-done')).getAllByTestId('merge-queue-row');
+    expect(done.map((el) => el.dataset.state)).toEqual(['merged']);
+    expect(done[0]).toHaveTextContent('ffffffff → 99999999');
+    expect(screen.getByTestId('merge-queue-flow-toggle')).toHaveTextContent('1 merging · 1 queued · 2 waiting · 1 merged');
+  });
+
   it('hides the toggle from a developer and says when the queue is not configured', async () => {
     const useApi = await import('../hooks/useApi');
     vi.mocked(useApi.apiGet).mockImplementation(async () => board({
@@ -166,7 +204,7 @@ describe('ReviewQueue', () => {
     expect(screen.getByText('EBA viewer')).toBeInTheDocument();
     expect(screen.queryByText('Recognition timeout')).not.toBeInTheDocument();
     expect(screen.getByTestId('action-ready')).toHaveTextContent('Ready for prod');
-    expect(screen.getByTestId('how-it-works').querySelectorAll('li')).toHaveLength(6);
+    expect(screen.getByTestId('how-it-works').querySelectorAll('li')).toHaveLength(7);
     fireEvent.click(screen.getByTestId('scope-toggle'));
     expect(screen.getByText('Recognition timeout')).toBeInTheDocument();
   });

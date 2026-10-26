@@ -1,16 +1,28 @@
 /**
  * Merge queue for a project's main branch (docs/merge-queue.md). Approved by
- * Denis on 25 Oct 2026 for Wavepulse main only: WaveCode merges eligible lanes
- * itself, serially, in a checkout it owns. Agents still never push to main.
+ * Denis on 25 Oct 2026 for Wavepulse main only, stabilised by the brief of
+ * 26 Oct 2026: WaveCode merges eligible lanes itself, serially, in a checkout
+ * it owns. Agents still never push to main.
  *
- * A freeze is eligible when its note names the exact SHA and a tier, the quick
- * check and the API gate are green on that exact SHA, the tier's reviews are
- * in, the remote lane still points at that SHA, a pull request exists, and any
- * new migration is numbered after main's latest. The queue then merges the lane
- * onto the current main with `--no-ff`, runs the gate on the result, pushes
- * plainly, and tells the author and the coordinating bot. Red or conflicting
- * work bounces to the author. Nothing here force-pushes, squashes, stages, or
- * touches production. The kill switch is the config flag plus a runtime flag.
+ * Any lane not on the deny list is eligible when its freeze note names the
+ * exact SHA, the freeze-time gate is green on that exact SHA, one reviewer who
+ * is not the author and sits on a different credential profile than the
+ * builder said PASS on that SHA, the remote lane still points at that SHA, and
+ * any new migration is numbered after main's latest. An ask-tier lane also
+ * needs Denis's OK label on its pull request; a hold label parks any lane. A
+ * lane behind main is not refused: the queue merges main in and gates the
+ * result. Every refusal carries one machine-readable code (`NO_PASS_ON_SHA`,
+ * `GATE_NOT_GREEN`, ...) and what is missing.
+ *
+ * The queue then merges the lane onto the current main with `--no-ff`, runs
+ * the full suite once on the result, pushes plainly, and tells the author and
+ * the coordinating bot. Red or conflicting work bounces to the author. GitHub
+ * is reached through `gh` with a server-side credential that is never logged;
+ * when `gh auth status` fails the whole queue refuses with `GH_AUTH_MISSING`.
+ * An eligible lane that waits longer than `stall_minutes` without progress
+ * raises a stall file for the coordinating bot. Nothing here force-pushes,
+ * squashes, stages, or touches production. The kill switch is the config flag
+ * plus a runtime flag.
  */
 
 import fs from 'node:fs';
@@ -18,12 +30,12 @@ import path from 'node:path';
 import { getConfig, type MergeQueueConfig, type MergeTier } from './config.js';
 import { getAgent, getDb, listAgents, type Agent } from './db.js';
 import { emit } from './event-bus.js';
-import { gateOutcome, laneRefError, type ExecOptions } from './lane-pipeline.js';
-import { changedFiles, mainSpec, projectRepo, resolveMainRef } from './lane-main.js';
+import { gateOutcome, type ExecOptions } from './lane-pipeline.js';
+import { changedFiles, laneAutomationDenied, mainSpec, projectRepo, resolveMainRef } from './lane-main.js';
 import logger from './logger.js';
 import { fireMainAdvanced } from './pipeline-hooks.js';
 import { execFileAsync } from './proc.js';
-import { getFreeze, listFreezes, listVerdicts, viewShaChecks, type FreezeVerdict, type ReleaseFreeze } from './release-freezes.js';
+import { freezeInboxDirs, getFreeze, listFreezes, listVerdicts, viewShaChecks, type FreezeVerdict, type ReleaseFreeze } from './release-freezes.js';
 import { freezeAgeMs, readLaneTests, readLaneTestsSparingly, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
@@ -60,8 +72,16 @@ export interface QueueSwitch {
   queued: number;
 }
 
+/** One machine-readable reason per refusal; the row's `reason` starts with it. */
+export type EligibilityCode =
+  | 'NOT_CONFIGURED' | 'LANE_DENIED' | 'NO_REPO' | 'LANE_GONE' | 'LANE_MOVED' | 'GH_AUTH_MISSING'
+  | 'GATE_NOT_GREEN' | 'NEEDS_FIXES' | 'NO_PASS_ON_SHA' | 'NO_PR' | 'MIGRATION_HOLD' | 'ASK_TIER_NO_OK'
+  | 'MIGRATION_COLLISION' | 'QUEUE_OFF' | 'CHECK_FAILED' | 'STALLED_MERGE';
+
 export interface Eligibility {
   state: 'waiting' | 'queued' | 'bounced';
+  code: EligibilityCode | null;
+  /** `CODE: what is missing`, or null when queued. */
   reason: string | null;
   tier: MergeTier | null;
   pr: string | null;
@@ -74,7 +94,16 @@ export const MERGE_QUEUE_EVENT = {
   queued: 'merge_queue.queued',
   switch: 'merge_queue.switch',
   requeued: 'merge_queue.requeued',
+  stall: 'merge_queue.stall',
 } as const;
+
+export interface QueueStall {
+  project: string;
+  code: EligibilityCode;
+  text: string;
+  at: string;
+  file: string | null;
+}
 
 type ExecResult = { code: number; stdout: string };
 /** Test hook: return a result to fake the command, or null to run it for real. */
@@ -196,6 +225,13 @@ export function queueSwitch(project: string): QueueSwitch {
   return { project, config_enabled, enabled: config_enabled && queueEnabled(project), enabled_by: kvGet(`merge_queue.${project}.by`), queued };
 }
 
+/** The stall the last pass found for the project, or null when it is moving. */
+export function queueStall(project: string): QueueStall | null {
+  const raw = kvGet(`merge_queue.${project}.stall`);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as QueueStall; } catch { return null; }
+}
+
 /** The kill switch. Who flipped it is kept for the audit row of every later merge. */
 export function setQueueSwitch(project: string, enabled: boolean, who: string | null): QueueSwitch {
   kvSet(`merge_queue.${project}`, enabled ? 'on' : 'off');
@@ -238,7 +274,27 @@ export function askPathHit(files: string[], asks: string[], migrationsDir: strin
 export function tierFor(note: string | null, files: string[], cfg: MergeQueueConfig, migrationsDir: string | null | undefined): { tier: MergeTier | null; forced: string | null } {
   const forced = askPathHit(files, cfg.ask_paths ?? [], migrationsDir);
   if (forced) return { tier: 'ask', forced };
-  return { tier: tierFromNote(note) ?? cfg.default_tier ?? null, forced: null };
+  // No TIER line is no reason to wait: the lane is `show` unless config says otherwise.
+  return { tier: tierFromNote(note) ?? cfg.default_tier ?? 'show', forced: null };
+}
+
+// --- lanes ---------------------------------------------------------------------
+
+export const DEFAULT_DENY_LANES = ['main', 'master', 'release/*', 'prod-*'];
+
+/**
+ * There is no allowlist: any branch may queue unless it is on the deny list
+ * (the project's main branch, `merge_queue.deny_lanes`, default main, master,
+ * release/*, prod-*) or denied for automation in config.
+ */
+export function laneDeniedWhy(project: string, lane: string, cfg: MergeQueueConfig): string | null {
+  if (!laneRefErrorFree(lane)) return `${lane} is not a safe branch name`;
+  const mainBranch = getConfig().projects?.[project]?.main_branch?.trim() || 'main';
+  const globs = [mainBranch, 'HEAD', ...(cfg.deny_lanes ?? DEFAULT_DENY_LANES)];
+  const hit = globs.find((g) => g.trim() && globRe(g).test(lane));
+  if (hit) return `${lane} is on the deny list (${hit})`;
+  if (laneAutomationDenied(project, null, lane)) return `${lane} is denied for automation in config`;
+  return null;
 }
 
 // --- reviews -----------------------------------------------------------------
@@ -248,23 +304,37 @@ function sameName(a: string | null | undefined, b: string | null | undefined): b
 }
 
 /**
- * Tier `ask`: two PASS verdicts from reviewers who are not the author, on
- * different credential profiles. The author's own seats never count.
+ * One independent PASS on the exact SHA: a reviewer who is not the author, on a
+ * different credential profile than the builder (null = the home-dir login).
+ * Every tier needs it; the ask tier adds Denis's OK label on the pull request.
  */
-export function askVerdicts(verdicts: FreezeVerdict[], author: { id: string | null; name: string | null }): { ok: boolean; passes: FreezeVerdict[]; why: string | null } {
-  const passes: FreezeVerdict[] = [];
-  const profiles = new Set<string>();
-  for (const v of verdicts) {
-    if (v.verdict !== 'pass') continue;
-    if (sameName(v.reviewer_name, author.name) || (author.id && v.reviewer_agent_id === author.id)) continue;
-    const profileKey = v.profile ?? 'home';
-    if (profiles.has(profileKey)) continue;
-    passes.push(v);
-    profiles.add(profileKey);
-  }
-  if (passes.length >= 2) return { ok: true, passes, why: null };
-  const names = passes.map((p) => `@${p.reviewer_name}`).join(', ');
-  return { ok: false, passes, why: `ask tier needs 2 PASS verdicts on different profiles, has ${passes.length}${names ? ` (${names})` : ''}` };
+export function independentPasses(
+  verdicts: FreezeVerdict[],
+  author: { id: string | null; name: string | null; profile: string | null },
+): { ok: boolean; passes: FreezeVerdict[]; why: string | null } {
+  const builderProfile = author.profile ?? 'home';
+  const own = (v: FreezeVerdict) => sameName(v.reviewer_name, author.name) || (!!author.id && v.reviewer_agent_id === author.id);
+  const allPasses = verdicts.filter((v) => v.verdict === 'pass' && !own(v));
+  const passes = allPasses.filter((v) => (v.profile ?? 'home') !== builderProfile);
+  if (passes.length > 0) return { ok: true, passes, why: null };
+  const sameProfile = allPasses.map((v) => `@${v.reviewer_name}`).join(', ');
+  const why = sameProfile
+    ? `needs one PASS from a reviewer on a different profile than the builder (${sameProfile} share profile ${builderProfile})`
+    : 'needs one PASS verdict on this exact SHA from a reviewer who is not the author';
+  return { ok: false, passes, why };
+}
+
+/** The freeze's own verdict line counts when the ledger has no row for it (notes ingested before the ledger existed). */
+function verdictsFor(freeze: ReleaseFreeze): FreezeVerdict[] {
+  const rows = listVerdicts(freeze.sha);
+  if (rows.length > 0 || freeze.verdict !== 'pass' || !freeze.reviewer_name) return rows;
+  const reviewer = (freeze.reviewer_agent_id ? getAgent(freeze.reviewer_agent_id) : null);
+  const name = freeze.reviewer_name.toLowerCase();
+  const agent = reviewer?.ok ? reviewer.data : listAgents().find((a) => a.name.toLowerCase() === name || (a.alias ?? '').toLowerCase() === name) ?? null;
+  return [{
+    sha: freeze.sha, reviewer_agent_id: agent?.id ?? null, reviewer_name: freeze.reviewer_name, profile: agent?.profile ?? null,
+    verdict: 'pass', path: freeze.verdict_path ?? null, created_at: freeze.created_at,
+  }];
 }
 
 // --- git ---------------------------------------------------------------------
@@ -345,24 +415,89 @@ function laneRefErrorFree(lane: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/.test(lane);
 }
 
-// --- pull requests -------------------------------------------------------------
+// --- pull requests and GitHub ------------------------------------------------------
 
-interface PrItem { number?: number | string; head?: string; headRefOid?: string; sha?: string; branch?: string; headRefName?: string; state?: string }
+interface PrItem {
+  number?: number | string; head?: string; headRefOid?: string; sha?: string; branch?: string; headRefName?: string; state?: string;
+  labels?: Array<string | { name?: string }>;
+}
 
-export function prFromList(json: string, sha: string, lane: string): string | null {
-  let items: PrItem[];
+export interface PrMatch { number: string; labels: string[] }
+
+function parsePrs(json: string): PrItem[] {
   try {
     const parsed = JSON.parse(json) as unknown;
-    items = Array.isArray(parsed) ? parsed as PrItem[] : [];
-  } catch { return null; }
+    return Array.isArray(parsed) ? parsed as PrItem[] : [];
+  } catch { return []; }
+}
+
+function matchPr(items: PrItem[], sha: string, lane: string): PrMatch | null {
   const open = items.filter((it) => !it.state || /^open$/i.test(String(it.state)));
   const bySha = open.find((it) => [it.head, it.headRefOid, it.sha].some((s) => typeof s === 'string' && s.toLowerCase() === sha.toLowerCase()));
   const byLane = open.find((it) => [it.branch, it.headRefName].some((b) => typeof b === 'string' && b === lane));
   const hit = bySha ?? byLane;
-  return hit?.number !== undefined ? `#${hit.number}` : null;
+  if (hit?.number === undefined) return null;
+  const labels = (hit.labels ?? []).map((l) => (typeof l === 'string' ? l : l?.name ?? '')).filter(Boolean);
+  return { number: `#${hit.number}`, labels };
 }
 
-async function findPr(repo: string, remote: string, sha: string, lane: string, cfg: MergeQueueConfig): Promise<string | null> {
+export function prFromList(json: string, sha: string, lane: string): PrMatch | null {
+  return matchPr(parsePrs(json), sha, lane);
+}
+
+interface GithubPass { ok: boolean; error: string | null; prs: PrItem[] | null }
+
+/** Inside one refresh pass GitHub is asked once per project. */
+let ghScope: Map<string, Promise<GithubPass>> | null = null;
+const ghAuthOkUntil = new Map<string, number>();
+const GH_AUTH_TTL_MS = 5 * 60_000;
+
+function readTokenFile(file: string): string | null {
+  try {
+    const token = fs.readFileSync(file, 'utf8').trim();
+    return token || null;
+  } catch { return null; }
+}
+
+/**
+ * `gh auth status` with the server-side credential, then the open pull requests
+ * with their labels. The token leaves this function only as `GH_TOKEN` in the
+ * child's environment: never in a log line, an event or a row.
+ */
+async function githubPass(project: string, cfg: MergeQueueConfig): Promise<GithubPass> {
+  const gh = cfg.github;
+  if (!gh) return { ok: true, error: null, prs: null };
+  const run = async (): Promise<GithubPass> => {
+    let env: Record<string, string> | undefined;
+    if (gh.token_file) {
+      const token = readTokenFile(gh.token_file);
+      if (!token) return { ok: false, error: `GitHub token file ${gh.token_file} is missing or empty; SystemOps stores the credential there (contents, pull_requests, checks on ${gh.repo})`, prs: null };
+      env = { GH_TOKEN: token };
+    }
+    const now = Date.now();
+    if ((ghAuthOkUntil.get(project) ?? 0) < now) {
+      const status = await runArgv(['gh', 'auth', 'status', '--hostname', 'github.com'], { env, timeoutMs: 30000 });
+      if (status.code !== 0) {
+        ghAuthOkUntil.delete(project);
+        return { ok: false, error: `gh auth status failed (exit ${status.code}); ${gh.token_file ? `check the token in ${gh.token_file}` : 'log gh in as the service user'}`, prs: null };
+      }
+      ghAuthOkUntil.set(project, now + GH_AUTH_TTL_MS);
+    }
+    const list = await runArgv(['gh', 'pr', 'list', '--repo', gh.repo, '--state', 'open', '--json', 'number,headRefName,headRefOid,labels', '--limit', '200'], { env, timeoutMs: 60000 });
+    if (list.code !== 0) {
+      ghAuthOkUntil.delete(project);
+      return { ok: false, error: `gh pr list for ${gh.repo} failed (exit ${list.code})`, prs: null };
+    }
+    return { ok: true, error: null, prs: parsePrs(list.stdout) };
+  };
+  if (!ghScope) return run();
+  let pending = ghScope.get(project);
+  if (!pending) { pending = run(); ghScope.set(project, pending); }
+  return pending;
+}
+
+async function findPr(repo: string, remote: string, sha: string, lane: string, cfg: MergeQueueConfig, github: GithubPass): Promise<PrMatch | null> {
+  if (github.prs) return matchPr(github.prs, sha, lane);
   if (cfg.pr_list_command?.length) {
     const result = await runArgv(fill(cfg.pr_list_command, { lane, sha, remote }), { cwd: repo, timeoutMs: 30000 });
     if (result.code !== 0) return null;
@@ -372,10 +507,13 @@ async function findPr(repo: string, remote: string, sha: string, lane: string, c
   if (!refs) return null;
   for (const line of refs.split('\n')) {
     const m = line.match(/^([0-9a-f]{40})\s+refs\/pull\/(\d+)\/head$/i);
-    if (m && m[1].toLowerCase() === sha.toLowerCase()) return `#${m[2]}`;
+    if (m && m[1].toLowerCase() === sha.toLowerCase()) return { number: `#${m[2]}`, labels: [] };
   }
   return null;
 }
+
+export const DEFAULT_OK_LABEL = 'ask-tier-approved';
+export const DEFAULT_HOLD_LABELS = ['migration-hold', 'do-not-merge'];
 
 // --- migrations ----------------------------------------------------------------
 
@@ -427,54 +565,63 @@ async function gateWords(freeze: ReleaseFreeze): Promise<{ quick: string; full: 
 
 /** Why a freeze is not merged yet, or `queued` when everything is in. Pure of side effects besides git fetches. */
 export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
-  const none: Eligibility = { state: 'waiting', reason: null, tier: null, pr: null, verdictFiles: [] };
+  const none: Eligibility = { state: 'waiting', code: null, reason: null, tier: null, pr: null, verdictFiles: [] };
+  const no = (base: Eligibility, code: EligibilityCode, text: string): Eligibility => ({ ...base, state: 'waiting', code, reason: `${code}: ${text}` });
   const project = freeze.project;
   const cfg = mqConfig(project);
-  if (!project || !cfg || !freeze.lane) return { ...none, reason: 'not a merge-queue project' };
-  const laneErr = laneRefError(project, freeze.lane);
-  if (laneErr) return { ...none, reason: laneErr };
+  if (!project || !cfg || !freeze.lane) return no(none, 'NOT_CONFIGURED', 'not a merge-queue project');
+  const denied = laneDeniedWhy(project, freeze.lane, cfg);
+  if (denied) return no(none, 'LANE_DENIED', denied);
   const repo = projectRepo(project);
-  if (!repo) return { ...none, reason: 'project has no repo' };
+  if (!repo) return no(none, 'NO_REPO', 'project has no repo');
   const spec = mainSpec(project);
   const mainRef = await resolveMainRef(repo, project);
-  if (!mainRef) return { ...none, reason: `${spec.ref} not found` };
+  if (!mainRef) return no(none, 'NO_REPO', `${spec.ref} not found`);
 
   // Any commit after the review invalidates it: the remote lane must still be this SHA.
   const tip = await remoteTip(repo, spec.remote, freeze.lane, freeze.sha);
-  if (!tip) return { ...none, reason: `${freeze.lane} is not on ${spec.remote}` };
-  if (tip.toLowerCase() !== freeze.sha.toLowerCase()) return { ...none, reason: `lane moved to ${tip.slice(0, 8)} after the freeze; freeze that SHA` };
+  if (!tip) return no(none, 'LANE_GONE', `${freeze.lane} is not on ${spec.remote}`);
+  if (tip.toLowerCase() !== freeze.sha.toLowerCase()) return no(none, 'LANE_MOVED', `lane moved to ${tip.slice(0, 8)} after the freeze; freeze that SHA`);
 
   const migrationsDir = getConfig().projects?.[project]?.migrations_dir ?? null;
   const files = await changedFiles(repo, freeze.sha, mainRef).catch(() => [] as string[]);
   const note = readNote(freeze.freeze_path);
   const { tier, forced } = tierFor(note, files, cfg, migrationsDir);
-  if (!tier) return { ...none, reason: 'freeze note has no TIER line (ship, show or ask)' };
   const base: Eligibility = { ...none, tier };
 
+  // GitHub first: without the credential nothing merges, and the card says so on every lane.
+  const github = await githubPass(project, cfg);
+  if (!github.ok) return no(base, 'GH_AUTH_MISSING', github.error ?? 'gh is not logged in');
+
   const gates = await gateWords(freeze);
-  if (gates.quick !== 'green' || gates.full !== 'green') return { ...base, reason: `waiting gate: quick ${gates.quick}, api ${gates.full}` };
+  if (gates.quick !== 'green' || gates.full !== 'green') return no(base, 'GATE_NOT_GREEN', `quick ${gates.quick}, api ${gates.full} on ${freeze.sha.slice(0, 8)}`);
 
   if (freeze.verdict === 'needs-fixes' || freeze.verdict === 'reject') {
-    return { ...base, reason: `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA` };
+    return no(base, 'NEEDS_FIXES', `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA`);
   }
-  const verdicts = listVerdicts(freeze.sha);
-  let verdictFiles = verdicts.filter((v) => v.verdict === 'pass').map((v) => v.path).filter((p): p is string => !!p);
-  if (tier === 'ask') {
-    const asked = askVerdicts(verdicts, { id: freeze.author_agent_id, name: freeze.author_name });
-    if (!asked.ok) return { ...base, reason: `${asked.why}${forced ? ` — ask because of ${forced}` : ''}` };
-    verdictFiles = asked.passes.map((p) => p.path).filter((p): p is string => !!p);
-  }
+  const author = authorFor(freeze);
+  const passed = independentPasses(verdictsFor(freeze), { id: freeze.author_agent_id ?? author?.id ?? null, name: freeze.author_name ?? author?.name ?? null, profile: author?.profile ?? null });
+  if (!passed.ok) return no(base, 'NO_PASS_ON_SHA', passed.why ?? 'no PASS on this SHA');
+  const verdictFiles = passed.passes.map((p) => p.path).filter((p): p is string => !!p);
 
-  let pr: string | null = null;
-  if (cfg.require_pr !== false) {
-    pr = await findPr(repo, spec.remote, freeze.sha, freeze.lane, cfg);
-    if (!pr) return { ...base, reason: `no pull request for ${freeze.lane} at ${freeze.sha.slice(0, 8)}` };
+  const pr = await findPr(repo, spec.remote, freeze.sha, freeze.lane, cfg, github);
+  if (!pr && cfg.require_pr === true) return no(base, 'NO_PR', `no open pull request for ${freeze.lane} at ${freeze.sha.slice(0, 8)}`);
+  const withPr: Eligibility = { ...base, pr: pr?.number ?? null, verdictFiles };
+  const holdLabels = (cfg.github?.hold_labels ?? DEFAULT_HOLD_LABELS).map((l) => l.toLowerCase());
+  const hold = pr?.labels.find((l) => holdLabels.includes(l.toLowerCase()));
+  if (hold) return no(withPr, 'MIGRATION_HOLD', `pull request ${pr!.number} carries the label ${hold}; remove it when the hold is over`);
+  if (tier === 'ask') {
+    const okLabel = cfg.github?.ok_label ?? DEFAULT_OK_LABEL;
+    const why = forced ? `ask because of ${forced}` : 'ask by the freeze note';
+    if (!cfg.github) return no(withPr, 'ASK_TIER_NO_OK', `${why}; no github block in config to read the ${okLabel} label from`);
+    if (!pr) return no(withPr, 'ASK_TIER_NO_OK', `${why}; needs an open pull request with Denis's ${okLabel} label`);
+    if (!pr.labels.some((l) => l.toLowerCase() === okLabel.toLowerCase())) return no(withPr, 'ASK_TIER_NO_OK', `${why}; pull request ${pr.number} has no ${okLabel} label from Denis`);
   }
 
   const migration = await migrationProblem(repo, mainRef, freeze.sha, migrationsDir);
-  if (migration) return { ...base, state: 'bounced', reason: migration, pr, verdictFiles };
+  if (migration) return { ...withPr, state: 'bounced', code: 'MIGRATION_COLLISION', reason: `MIGRATION_COLLISION: ${migration}` };
 
-  return { ...base, state: 'queued', pr, verdictFiles };
+  return { ...withPr, state: 'queued' };
 }
 
 // --- notes and audit -----------------------------------------------------------
@@ -552,7 +699,7 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
   if (fetched === null) { requeue(freeze, started, `fetch from ${spec.remote} failed`); return; }
   const tip = await tryGit(repo, ['rev-parse', '--verify', '--quiet', `refs/remotes/${spec.remote}/${row.lane}^{commit}`]);
   if (!tip || tip.toLowerCase() !== row.sha.toLowerCase()) {
-    upsert({ sha: row.sha, project: row.project, lane: row.lane, state: 'waiting', reason: `lane moved to ${(tip ?? '').slice(0, 8) || 'nothing'} after the freeze; freeze that SHA`, started_at: null });
+    upsert({ sha: row.sha, project: row.project, lane: row.lane, state: 'waiting', reason: `LANE_MOVED: lane moved to ${(tip ?? '').slice(0, 8) || 'nothing'} after the freeze; freeze that SHA`, started_at: null });
     return;
   }
   const mainBefore = await tryGit(repo, ['rev-parse', `refs/remotes/${spec.remote}/${spec.branch}^{commit}`]);
@@ -653,6 +800,100 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
   }
 }
 
+// --- the stall alarm ------------------------------------------------------------
+
+const DEFAULT_STALL_MINUTES = 30;
+
+function stallDir(cfg: MergeQueueConfig): string | null {
+  if (cfg.stall_dir) return cfg.stall_dir;
+  if (cfg.maestro_log) return path.dirname(cfg.maestro_log);
+  return freezeInboxDirs()[0] ?? null;
+}
+
+function fileStamp(now: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${now.getUTCFullYear()}${p(now.getUTCMonth() + 1)}${p(now.getUTCDate())}-${p(now.getUTCHours())}${p(now.getUTCMinutes())}`;
+}
+
+function ageMinutes(iso: string | null, now: number): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
+  return Number.isFinite(t) ? Math.round((now - t) / 60_000) : null;
+}
+
+/**
+ * The queue is stalled when it cannot run (no GitHub credential, switched off with
+ * eligible lanes) or an eligible lane has waited longer than `stall_minutes` with
+ * no merge started or finished in that time. One file per `stall_minutes` goes to
+ * the coordinating bot's inbox with the reason, the lanes and their SHAs.
+ */
+export function checkStall(project: string, ghError: string | null, now = Date.now()): QueueStall | null {
+  const cfg = mqConfig(project);
+  if (!cfg) return null;
+  const limitMs = (cfg.stall_minutes ?? DEFAULT_STALL_MINUTES) * 60_000;
+  const rows = listQueue(project);
+  const queued = rows.filter((r) => r.state === 'queued');
+  const merging = rows.find((r) => r.state === 'merging') ?? null;
+  const recent = (iso: string | null) => { const t = iso ? Date.parse(iso) : NaN; return Number.isFinite(t) && now - t < limitMs; };
+  const progress = rows.some((r) => (r.state === 'merged' || r.state === 'bounced') && recent(r.finished_at)) || (merging !== null && recent(merging.started_at));
+
+  let code: EligibilityCode | null = null;
+  let text: string | null = null;
+  const waitingRows = rows.filter((r) => r.state === 'waiting');
+  if (ghError && (queued.length > 0 || waitingRows.length > 0)) {
+    code = 'GH_AUTH_MISSING'; text = ghError;
+  } else if (queued.length > 0 && !queueEnabled(project)) {
+    code = 'QUEUE_OFF'; text = `${queued.length} eligible lane${queued.length === 1 ? '' : 's'} and the switch is off (by ${kvGet(`merge_queue.${project}.by`) ?? 'unknown'})`;
+  } else if (merging && !recent(merging.started_at)) {
+    code = 'STALLED_MERGE'; text = `${merging.lane} ${merging.sha.slice(0, 8)} has been merging for ${ageMinutes(merging.started_at, now) ?? '?'} min`;
+  } else if (!progress) {
+    const oldest = queued.filter((r) => !recent(r.eligible_at)).sort((a, b) => (a.eligible_at ?? '').localeCompare(b.eligible_at ?? ''))[0];
+    if (oldest) { code = 'STALLED_MERGE'; text = `${oldest.lane} ${oldest.sha.slice(0, 8)} has been eligible for ${ageMinutes(oldest.eligible_at, now) ?? '?'} min and nothing merged`; }
+  }
+
+  if (!code || !text) {
+    if (kvGet(`merge_queue.${project}.stall`)) kvSet(`merge_queue.${project}.stall`, '');
+    return null;
+  }
+  const previous = queueStall(project);
+  const lastWritten = kvGet(`merge_queue.${project}.stall_written`);
+  const throttled = lastWritten !== null && recent(lastWritten);
+  const stall: QueueStall = { project, code, text, at: new Date(now).toISOString(), file: throttled ? previous?.file ?? null : null };
+  if (!throttled) {
+    const dir = stallDir(cfg);
+    if (dir) {
+      const file = path.join(dir, `wavecode-queue-stall-${fileStamp(new Date(now))}.md`);
+      const lines = [
+        `# WaveCode merge queue stall · ${project}`,
+        '',
+        `At: ${cetStamp(new Date(now))}`,
+        `Reason: ${code}: ${text}`,
+        `Queue switch: ${queueEnabled(project) ? 'on' : 'off'}${kvGet(`merge_queue.${project}.by`) ? ` (last by ${kvGet(`merge_queue.${project}.by`)})` : ''}`,
+        '',
+        '| lane | SHA | state | since (min) | why |',
+        '|---|---|---|---|---|',
+        ...[...(merging ? [merging] : []), ...queued, ...waitingRows].slice(0, 40).map((r) => `| ${r.lane} | ${r.sha} | ${r.state} | ${ageMinutes(r.state === 'merging' ? r.started_at : r.eligible_at ?? r.updated_at, now) ?? '?'} | ${(r.reason ?? '').replace(/\|/g, '/')} |`),
+        '',
+        'What to do: fix the reason above (store the GitHub credential, flip the switch, or check the gate on the test server); the queue picks up by itself on the next pass.',
+        '',
+      ];
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(file, lines.join('\n'));
+        stall.file = file;
+      } catch (e) {
+        logger.warn({ project, file, error: (e as Error).message }, 'Merge queue: stall file not written');
+      }
+    }
+    kvSet(`merge_queue.${project}.stall_written`, stall.at);
+    emit(MERGE_QUEUE_EVENT.stall, 'project', project, { project, code, text, file: stall.file, at: cetStamp(new Date(now)) }, null);
+    maestroLine(project, `stall ${code}: ${text}${stall.file ? ` (${path.basename(stall.file)})` : ''}`);
+    logger.warn({ project, code, text, file: stall.file }, 'Merge queue: stalled');
+  }
+  kvSet(`merge_queue.${project}.stall`, JSON.stringify(stall));
+  return stall;
+}
+
 // --- the tick ------------------------------------------------------------------
 
 function recoverOnce(): void {
@@ -683,10 +924,12 @@ function freezesToEvaluate(project: string, now = Date.now()): { open: ReleaseFr
 
 async function refreshProject(project: string): Promise<MergeQueueRow | null> {
   headsScope = new Map();
+  ghScope = new Map();
   try {
     return await refreshProjectPass(project);
   } finally {
     headsScope = null;
+    ghScope = null;
   }
 }
 
@@ -708,7 +951,7 @@ async function refreshProjectPass(project: string): Promise<MergeQueueRow | null
     if (existing && (existing.state === 'merged' || existing.state === 'bounced' || existing.state === 'merging')) continue;
     let result: Eligibility;
     try { result = await evaluate(freeze); } catch (e) {
-      result = { state: 'waiting', reason: `check failed: ${(e as Error).message}`.slice(0, 200), tier: null, pr: null, verdictFiles: [] };
+      result = { state: 'waiting', code: 'CHECK_FAILED', reason: `CHECK_FAILED: ${(e as Error).message}`.slice(0, 200), tier: null, pr: null, verdictFiles: [] };
     }
     const lane = freeze.lane!;
     if (result.state === 'bounced') {
@@ -717,7 +960,7 @@ async function refreshProjectPass(project: string): Promise<MergeQueueRow | null
       continue;
     }
     const wasQueued = existing?.state === 'queued';
-    if (result.state === 'queued' && !queueEnabled(project)) result.reason = 'merge queue is off';
+    if (result.state === 'queued' && !queueEnabled(project)) result.reason = 'QUEUE_OFF: merge queue is off';
     upsert({
       sha: freeze.sha, project, lane, tier: result.tier, state: result.state, reason: result.reason, pr: result.pr,
       verdict_files: result.verdictFiles.join('\n'),
@@ -745,10 +988,18 @@ export async function mergeQueueTick(opts: { wait?: boolean } = {}): Promise<voi
     try { head = await refreshProject(project); } catch (e) {
       logger.warn({ project, error: (e as Error).message }, 'Merge queue: refresh failed');
     }
+    const cfg = mqConfig(project);
+    let ghError: string | null = null;
+    if (cfg?.github) {
+      try { ghError = (await githubPass(project, cfg)).error; } catch (e) { ghError = (e as Error).message; }
+    }
+    try { checkStall(project, ghError); } catch (e) {
+      logger.warn({ project, error: (e as Error).message }, 'Merge queue: stall check failed');
+    }
     if (!queueEnabled(project)) {
       // The switch is off: the cards still show who is eligible, nothing is merged.
       for (const row of listQueue(project)) {
-        if (row.state === 'queued') upsert({ sha: row.sha, project, lane: row.lane, reason: 'merge queue is off' });
+        if (row.state === 'queued') upsert({ sha: row.sha, project, lane: row.lane, reason: 'QUEUE_OFF: merge queue is off' });
       }
       continue;
     }
@@ -766,4 +1017,6 @@ export function resetMergeQueueForTest(): void {
   recovered = false;
   execForTest = null;
   headsScope = null;
+  ghScope = null;
+  ghAuthOkUntil.clear();
 }

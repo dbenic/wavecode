@@ -10,6 +10,8 @@ export const pipelineHooks = {
   onMain: null as ((project: string, sha: string) => void) | null,
   onDeployed: null as ((releaseId: string) => void) | null,
   onVerified: null as ((project: string | null) => void) | null,
+  /** An agent's own `<you>-<lane>-review-request-<sha8>.md` landed in the inbox. */
+  onReviewRequest: null as ((file: string) => void | Promise<void>) | null,
 };
 
 async function fire(fn: (() => void | Promise<void>) | null): Promise<void> {
@@ -31,6 +33,10 @@ export function fireMainAdvanced(project: string, sha: string): Promise<void> {
 
 export function fireStagingDeployed(releaseId: string): Promise<void> {
   return fire(pipelineHooks.onDeployed ? () => pipelineHooks.onDeployed!(releaseId) : null);
+}
+
+export function fireReviewRequest(file: string): Promise<void> {
+  return fire(pipelineHooks.onReviewRequest ? () => pipelineHooks.onReviewRequest!(file) : null);
 }
 
 export function fireStagingVerified(project: string | null): Promise<void> {

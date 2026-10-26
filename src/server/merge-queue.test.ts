@@ -21,8 +21,8 @@ import * as db from './db.js';
 import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
-  askPathHit, askVerdicts, evaluate, getQueueRow, listQueue, mergeQueueTick, migrationCollision, prFromList, queueSwitch,
-  resetMergeQueueForTest, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
+  askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
+  queueStall, queueSwitch, resetMergeQueueForTest, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
 } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -52,21 +52,37 @@ describe('merge queue — pure rules', () => {
 
     expect(tierFor('TIER: ship', ['src/ui/App.tsx'], cfg, 'migrations')).toEqual({ tier: 'ship', forced: null });
     expect(tierFor('TIER: ship', ['migrations/0370_x.sql'], cfg, 'migrations')).toEqual({ tier: 'ask', forced: 'migrations/0370_x.sql' });
-    expect(tierFor('no tier here', [], cfg, null)).toEqual({ tier: null, forced: null });
+    expect(tierFor('no tier here', [], cfg, null)).toEqual({ tier: 'show', forced: null }); // no TIER line: show, not a wait
     expect(tierFor('no tier here', [], { ...cfg, default_tier: 'show' }, null)).toEqual({ tier: 'show', forced: null });
   });
 
-  it('ask needs two PASS verdicts from non-authors on different profiles', () => {
+  it('one PASS counts when the reviewer is not the author and sits on another profile than the builder', () => {
     const v = (reviewer_name: string, profile: string | null, verdict: 'pass' | 'needs-fixes' = 'pass') => ({
       sha: 'x', reviewer_agent_id: null, reviewer_name, profile, verdict, path: `/inbox/${reviewer_name}.md`, created_at: 'now',
     });
-    const author = { id: null, name: 'claude2' };
-    expect(askVerdicts([v('codex3', 'pool')], author).ok).toBe(false);
-    expect(askVerdicts([v('codex4', 'denis20x'), v('codex5', 'denis20x')], author).why).toMatch(/different profiles, has 1/);
-    expect(askVerdicts([v('codex3', 'pool'), v('codex5', 'denis20x')], author).ok).toBe(true);
-    expect(askVerdicts([v('claude2', 'pool'), v('codex5', 'denis20x')], author).ok).toBe(false);
-    expect(askVerdicts([v('codex3', 'pool', 'needs-fixes'), v('codex5', 'denis20x')], author).ok).toBe(false);
-    expect(askVerdicts([v('codex3', null), v('codex5', 'denis20x')], author).ok).toBe(true);
+    const author = { id: null, name: 'claude2', profile: 'denis20x' };
+    expect(independentPasses([v('codex3', 'pool')], author)).toMatchObject({ ok: true, passes: [expect.objectContaining({ reviewer_name: 'codex3' })] });
+    expect(independentPasses([v('codex4', 'denis20x')], author).why).toMatch(/@codex4 share profile denis20x/);
+    expect(independentPasses([v('codex4', 'denis20x'), v('codex5', 'pool')], author).passes.map((p) => p.reviewer_name)).toEqual(['codex5']);
+    expect(independentPasses([v('claude2', 'pool')], author).why).toMatch(/not the author/);
+    expect(independentPasses([v('codex3', 'pool', 'needs-fixes')], author).ok).toBe(false);
+    expect(independentPasses([], author).why).toMatch(/needs one PASS verdict on this exact SHA/);
+    // the home-dir login is a profile too: two home seats are the same profile
+    expect(independentPasses([v('codex3', null)], { id: null, name: 'ales', profile: null }).ok).toBe(false);
+    expect(independentPasses([v('codex3', 'pool')], { id: null, name: 'ales', profile: null }).ok).toBe(true);
+  });
+
+  it('denies main, release and prod branches and nothing else: there is no allowlist', () => {
+    const cfg = {};
+    expect(laneDeniedWhy('wave', 'main', cfg)).toMatch(/on the deny list \(main\)/);
+    expect(laneDeniedWhy('wave', 'master', cfg)).toMatch(/deny list/);
+    expect(laneDeniedWhy('wave', 'release/1.2', cfg)).toMatch(/release\/\*/);
+    expect(laneDeniedWhy('wave', 'prod-hotfix', cfg)).toMatch(/prod-\*/);
+    expect(laneDeniedWhy('wave', 'bad name', cfg)).toMatch(/not a safe branch name/);
+    expect(laneDeniedWhy('wave', 'claude6/overview-fixes', cfg)).toBeNull();
+    expect(laneDeniedWhy('wave', 'wc-codex-antonio-overview-ui-staging', cfg)).toBeNull();
+    expect(laneDeniedWhy('wave', 'codex3/hr-payroll-r4', cfg)).toBeNull();
+    expect(laneDeniedWhy('wave', 'wc-x', { deny_lanes: ['wc-*'] })).toMatch(/wc-\*/);
   });
 
   it('new migrations must be numbered after main and not collide', () => {
@@ -84,10 +100,13 @@ describe('merge queue — pure rules', () => {
       { number: 103, headRefName: 'wc-claude2-hr', headRefOid: sha, state: 'OPEN' },
       { number: 104, headRefName: 'wc-other', headRefOid: 'c'.repeat(40) },
     ]);
-    expect(prFromList(json, sha, 'wc-claude2-hr')).toBe('#103');
-    expect(prFromList(json, 'd'.repeat(40), 'wc-other')).toBe('#104');
+    expect(prFromList(json, sha, 'wc-claude2-hr')).toEqual({ number: '#103', labels: [] });
+    expect(prFromList(json, 'd'.repeat(40), 'wc-other')?.number).toBe('#104');
     expect(prFromList(json, 'b'.repeat(40), 'wc-old')).toBeNull();
     expect(prFromList('not json', sha, 'x')).toBeNull();
+    // gh prints labels as objects; a plain string list is accepted too
+    const labelled = JSON.stringify([{ number: 9, headRefName: 'wc-l', headRefOid: sha, labels: [{ name: 'ask-tier-approved' }, 'migration-hold'] }]);
+    expect(prFromList(labelled, sha, 'wc-l')?.labels).toEqual(['ask-tier-approved', 'migration-hold']);
   });
 });
 
@@ -100,6 +119,9 @@ describe('merge queue — on a scratch repository', () => {
   let mq: Record<string, unknown>;
   const gateSeen: Array<{ argv: string[]; env: Record<string, string> | undefined; cwd: string | undefined }> = [];
   let gateHook: ((env: Record<string, string> | undefined) => { code: number; stdout: string } | void) | null = null;
+  let ghAuth = true;
+  let prs: Array<{ number: number; headRefName: string; headRefOid: string; labels: Array<{ name: string }> }> = [];
+  const ghSeen: string[][] = [];
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-mq-'));
@@ -112,7 +134,17 @@ describe('merge queue — on a scratch repository', () => {
     resetMergeQueueForTest();
     gateSeen.length = 0;
     gateHook = null;
+    ghAuth = true;
+    prs = [];
+    ghSeen.length = 0;
     setMergeQueueExecForTest((argv, opts) => {
+      if (argv[0] === 'gh') {
+        ghSeen.push(argv);
+        if (!ghAuth) return { code: 1, stdout: '' };
+        if (argv[1] === 'auth') return { code: 0, stdout: 'Logged in to github.com' };
+        if (argv[1] === 'pr') return { code: 0, stdout: JSON.stringify(prs) };
+        return { code: 2, stdout: '' };
+      }
       if (argv[0] !== 'gate-run') return null;
       gateSeen.push({ argv, env: opts.env, cwd: opts.cwd });
       return gateHook?.(opts.env) ?? { code: 0, stdout: 'GREEN' };
@@ -194,11 +226,19 @@ describe('merge queue — on a scratch repository', () => {
     if (!result.ok) throw new Error(result.error);
   }
 
+  /** Freeze, green gate and one independent PASS (codex3 on profile pool): the evidence every tier needs. */
+  async function reviewed(author: string, laneName: string, sha: string, tier: string | null = 'ship'): Promise<void> {
+    await freeze(author, laneName, sha, tier);
+    gateGreen(sha);
+    if (!db.listAgents().some((a) => a.name === 'codex3')) agent('codex3', 'pool');
+    await verdict('codex3', author, sha);
+  }
+
   async function tick(): Promise<void> {
     await mergeQueueTick({ wait: true });
   }
 
-  it('waits for TIER, the gate, the reviews and a pull request; then queues', async () => {
+  it('refuses with one code and the missing evidence at each step, then queues; ask needs the OK label', async () => {
     const author = agent('ales');
     agent('codex3', 'pool');
     agent('codex5', 'denis20x');
@@ -206,34 +246,103 @@ describe('merge queue — on a scratch repository', () => {
     await freeze('ales', 'wc-ales', sha, null);
     // A payroll path forces ask: no TIER line is needed to know the tier.
     let state = await evaluate(getFreeze(sha)!);
-    expect(state).toMatchObject({ state: 'waiting', tier: 'ask', reason: expect.stringMatching(/waiting gate: quick green, api missing/) });
-
-    await freeze('ales', 'wc-ales', sha, 'ship');
-    state = await evaluate(getFreeze(sha)!);
-    expect(state).toMatchObject({ state: 'waiting', tier: 'ask' });
+    expect(state).toMatchObject({ state: 'waiting', tier: 'ask', code: 'GATE_NOT_GREEN', reason: `GATE_NOT_GREEN: quick green, api missing on ${sha.slice(0, 8)}` });
 
     gateGreen(sha);
     state = await evaluate(getFreeze(sha)!);
-    expect(state.reason).toMatch(/ask tier needs 2 PASS verdicts on different profiles, has 0 — ask because of src\/payroll\/run.ts/);
+    expect(state).toMatchObject({ code: 'NO_PASS_ON_SHA', reason: 'NO_PASS_ON_SHA: needs one PASS verdict on this exact SHA from a reviewer who is not the author' });
 
     await verdict('codex3', 'ales', sha);
     state = await evaluate(getFreeze(sha)!);
-    expect(state.reason).toMatch(/has 1 \(@codex3\)/);
+    expect(state).toMatchObject({ code: 'ASK_TIER_NO_OK', reason: expect.stringMatching(/^ASK_TIER_NO_OK: ask because of src\/payroll\/run.ts; no github block in config/) });
+    expect(listVerdicts(sha).map((v) => [v.reviewer_name, v.profile, v.verdict])).toEqual([['codex3', 'pool', 'pass']]);
 
-    await verdict('codex5', 'ales', sha);
-    expect(listVerdicts(sha).map((v) => [v.reviewer_name, v.profile, v.verdict])).toEqual([['codex3', 'pool', 'pass'], ['codex5', 'denis20x', 'pass']]);
-    mq.require_pr = true;
+    mq.github = { repo: 'dbenic/wave' };
     state = await evaluate(getFreeze(sha)!);
-    expect(state).toMatchObject({ state: 'waiting', reason: expect.stringMatching(/no pull request for wc-ales/) });
-
-    git(bare, 'update-ref', 'refs/pull/7/head', sha);
+    expect(state.reason).toMatch(/^ASK_TIER_NO_OK: .*needs an open pull request with Denis's ask-tier-approved label/);
+    prs = [{ number: 7, headRefName: 'wc-ales', headRefOid: sha, labels: [] }];
     state = await evaluate(getFreeze(sha)!);
-    expect(state).toMatchObject({ state: 'queued', tier: 'ask', pr: '#7', reason: null });
-    expect(state.verdictFiles).toHaveLength(2);
+    expect(state).toMatchObject({ pr: '#7', reason: 'ASK_TIER_NO_OK: ask because of src/payroll/run.ts; pull request #7 has no ask-tier-approved label from Denis' });
+    prs[0].labels = [{ name: 'migration-hold' }, { name: 'ask-tier-approved' }];
+    state = await evaluate(getFreeze(sha)!);
+    expect(state).toMatchObject({ code: 'MIGRATION_HOLD', reason: 'MIGRATION_HOLD: pull request #7 carries the label migration-hold; remove it when the hold is over' });
+    prs[0].labels = [{ name: 'Ask-Tier-Approved' }];
+    state = await evaluate(getFreeze(sha)!);
+    expect(state).toMatchObject({ state: 'queued', code: null, tier: 'ask', pr: '#7', reason: null });
+    expect(state.verdictFiles).toHaveLength(1);
 
     await tick();
     expect(getQueueRow(sha)).toMatchObject({ state: 'merged', pr: '#7', tier: 'ask' });
     expect(messages(author.id).some((m) => /is in the merge queue \(tier ask\)/.test(m))).toBe(true);
+    // gh was asked once for auth and once for the list per pass; the token never appears in argv
+    expect(ghSeen.every((argv) => !argv.some((a) => /token/i.test(a)))).toBe(true);
+  });
+
+  it('require_pr is off by default; on, a missing pull request is NO_PR; a lane that already has a PASS needs no second review', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'p.txt': 'p' });
+    await reviewed('ales', 'wc-ales', sha, 'show');
+    expect((await evaluate(getFreeze(sha)!))).toMatchObject({ state: 'queued', tier: 'show', pr: null });
+    mq.require_pr = true;
+    expect((await evaluate(getFreeze(sha)!))).toMatchObject({ code: 'NO_PR', reason: `NO_PR: no open pull request for wc-ales at ${sha.slice(0, 8)}` });
+    git(bare, 'update-ref', 'refs/pull/12/head', sha);
+    expect((await evaluate(getFreeze(sha)!))).toMatchObject({ state: 'queued', pr: '#12' });
+  });
+
+  it('without the GitHub credential every lane is GH_AUTH_MISSING and the stall file goes out at once', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'g.txt': 'g' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    mq.github = { repo: 'dbenic/wave', token_file: path.join(tmp, 'no-such-token') };
+    const main = originMain();
+    await tick();
+    expect(originMain()).toBe(main);
+    expect(getQueueRow(sha)).toMatchObject({ state: 'waiting', reason: expect.stringMatching(/^GH_AUTH_MISSING: GitHub token file .*no-such-token is missing or empty; SystemOps stores the credential there/) });
+    expect(ghSeen).toHaveLength(0); // no token, no gh call
+    const stall = queueStall('wave');
+    expect(stall).toMatchObject({ project: 'wave', code: 'GH_AUTH_MISSING', file: expect.stringMatching(/\/maestro\/wavecode-queue-stall-\d{8}-\d{4}\.md$/) });
+    const body = fs.readFileSync(stall!.file!, 'utf8');
+    expect(body).toContain('# WaveCode merge queue stall · wave');
+    expect(body).toContain('Reason: GH_AUTH_MISSING:');
+    expect(body).toContain(`| wc-ales | ${sha} | waiting |`);
+    expect(fs.readFileSync(mq.maestro_log as string, 'utf8')).toMatch(/stall GH_AUTH_MISSING/);
+
+    // a token file that gh rejects is the same refusal, with gh's exit code and no token in the reason
+    fs.writeFileSync(path.join(tmp, 'token'), 'ghp_secret_value\n');
+    mq.github = { repo: 'dbenic/wave', token_file: path.join(tmp, 'token') };
+    ghAuth = false;
+    await tick();
+    expect(getQueueRow(sha)?.reason).toMatch(/^GH_AUTH_MISSING: gh auth status failed \(exit 1\); check the token in /);
+    expect(getQueueRow(sha)?.reason).not.toContain('secret');
+    expect(fs.readdirSync(path.join(tmp, 'maestro')).filter((f) => f.startsWith('wavecode-queue-stall-'))).toHaveLength(1); // throttled
+
+    // the credential returns: the lane merges and the stall clears
+    ghAuth = true;
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('merged');
+    expect(queueStall('wave')).toBeNull();
+  });
+
+  it('an eligible lane that waits with no progress raises the stall file once per window; a merge clears it', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 's.txt': 's' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    gateHook = () => ({ code: 7, stdout: 'QUEUED' });
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'queued', attempts: 1 });
+    expect(checkStall('wave', null)).toBeNull();
+    const later = Date.now() + 31 * 60_000;
+    const stall = checkStall('wave', null, later);
+    expect(stall).toMatchObject({ code: 'STALLED_MERGE', text: expect.stringMatching(/^wc-ales [0-9a-f]{8} has been eligible for 31 min and nothing merged/) });
+    expect(fs.existsSync(stall!.file!)).toBe(true);
+    expect(checkStall('wave', null, later + 60_000)?.file).toBe(stall!.file); // same window: no second file
+    const events = db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'merge_queue.stall'").all() as Array<{ payload_json: string }>;
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0].payload_json)).toMatchObject({ project: 'wave', code: 'STALLED_MERGE' });
+    gateHook = null;
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('merged');
+    expect(queueStall('wave')).toBeNull();
   });
 
   it('a verdict that says NEEDS FIXES holds the merge, and a moved lane tip is waited on', async () => {
@@ -241,27 +350,25 @@ describe('merge queue — on a scratch repository', () => {
     agent('codex3', 'pool');
     const sha = lane('wc-ales', { 'b.txt': 'b' });
     await freeze('ales', 'wc-ales', sha, null);
-    expect((await evaluate(getFreeze(sha)!)).reason).toMatch(/no TIER line \(ship, show or ask\)/);
-    mq.default_tier = 'show';
-    expect((await evaluate(getFreeze(sha)!))).toMatchObject({ tier: 'show', reason: expect.stringMatching(/waiting gate/) });
+    // no TIER line is no reason to wait: show unless config says otherwise
+    expect((await evaluate(getFreeze(sha)!))).toMatchObject({ tier: 'show', code: 'GATE_NOT_GREEN' });
+    mq.default_tier = 'ask';
+    expect((await evaluate(getFreeze(sha)!)).tier).toBe('ask');
     delete mq.default_tier;
-    await freeze('ales', 'wc-ales', sha, 'ship');
-    gateGreen(sha);
+    await reviewed('ales', 'wc-ales', sha, 'ship');
     await verdict('codex3', 'ales', sha, 'NEEDS FIXES');
-    expect((await evaluate(getFreeze(sha)!)).reason).toMatch(/@codex3 said NEEDS FIXES/);
+    expect((await evaluate(getFreeze(sha)!))).toMatchObject({ code: 'NEEDS_FIXES', reason: 'NEEDS_FIXES: reviewer @codex3 said NEEDS FIXES; fix, push and freeze a new SHA' });
 
     const sha2 = lane('wc-ales', { 'c.txt': 'c' }, 'wc-ales');
-    await freeze('ales', 'wc-ales', sha2, 'ship');
-    gateGreen(sha2);
+    await reviewed('ales', 'wc-ales', sha2, 'ship');
     lane('wc-ales', { 'd.txt': 'd' }, 'wc-ales');
-    expect((await evaluate(getFreeze(sha2)!)).reason).toMatch(/lane moved to [0-9a-f]{8} after the freeze/);
+    expect((await evaluate(getFreeze(sha2)!))).toMatchObject({ code: 'LANE_MOVED', reason: expect.stringMatching(/^LANE_MOVED: lane moved to [0-9a-f]{8} after the freeze/) });
   });
 
   it('parks a freeze older than two weeks instead of evaluating it every pass', async () => {
     agent('ales');
     const sha = lane('wc-ales', { 'old.txt': 'old' });
-    await freeze('ales', 'wc-ales', sha, 'ship');
-    gateGreen(sha);
+    await reviewed('ales', 'wc-ales', sha, 'ship');
     setQueueSwitch('wave', false, 'denis');
     await tick();
     expect(getQueueRow(sha)?.state).toBe('queued');
@@ -278,8 +385,7 @@ describe('merge queue — on a scratch repository', () => {
     const base = originMain();
     const shaA = lane('wc-ales', { 'a-lane.txt': 'A' });
     const shaB = lane('wc-toni', { 'b-lane.txt': 'B' });
-    await freeze('ales', 'wc-ales', shaA, 'ship');
-    gateGreen(shaA);
+    await reviewed('ales', 'wc-ales', shaA, 'ship');
     await tick(); // A is queued and merged; B has no freeze yet
     const mainAfterA = originMain();
     expect(mainAfterA).not.toBe(base);
@@ -292,8 +398,7 @@ describe('merge queue — on a scratch repository', () => {
     expect(getQueueRow(shaA)).toMatchObject({ state: 'merged', merge_sha: mainAfterA, reason: `gate GREEN on ${mainAfterA.slice(0, 8)}` });
     expect(messages(ales.id).some((m) => m.includes(`merged wc-ales ${shaA.slice(0, 8)} into main as ${mainAfterA.slice(0, 8)}`))).toBe(true);
 
-    await freeze('toni', 'wc-toni', shaB, 'show');
-    gateGreen(shaB);
+    await reviewed('toni', 'wc-toni', shaB, 'show');
     await tick();
     const mainAfterB = originMain();
     expect(mainAfterB).not.toBe(mainAfterA);
@@ -309,8 +414,8 @@ describe('merge queue — on a scratch repository', () => {
 
     const log = fs.readFileSync(mq.maestro_log as string, 'utf8').trim().split('\n');
     expect(log).toHaveLength(2);
-    expect(log[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} CET merged wc-ales [0-9a-f]{8} -> main [0-9a-f]{8} \(tier ship\)$/);
-    expect(log[1]).toMatch(/merged wc-toni .* \(tier show\)/);
+    expect(log[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} CET merged wc-ales [0-9a-f]{8} -> main [0-9a-f]{8} \(tier ship, verdicts codex3-verdict-ales-[0-9a-f]{8}\.md\)$/);
+    expect(log[1]).toMatch(/merged wc-toni .* \(tier show, verdicts /);
     const events = db.getDb().prepare("SELECT type, payload_json FROM events WHERE type LIKE 'merge_queue.%' ORDER BY id").all() as Array<{ type: string; payload_json: string }>;
     expect(events.map((e) => e.type)).toEqual(['merge_queue.queued', 'merge_queue.merged', 'merge_queue.queued', 'merge_queue.merged']);
     expect(JSON.parse(events[1].payload_json)).toMatchObject({ sha_in: shaA, sha_out: mainAfterA, main_before: base, tier: 'ship', author: 'ales' });
@@ -324,8 +429,7 @@ describe('merge queue — on a scratch repository', () => {
     lane('wc-main-mover', { 'a.txt': 'main version' });
     git(repo, 'push', '-q', 'origin', 'wc-main-mover:main');
     const main = originMain();
-    await freeze('ales', 'wc-ales', sha, 'ship');
-    gateGreen(sha);
+    await reviewed('ales', 'wc-ales', sha, 'ship');
     await tick();
     expect(originMain()).toBe(main);
     expect(getQueueRow(sha)).toMatchObject({ state: 'bounced', reason: expect.stringMatching(/merge conflict with main in a\.txt/) });
@@ -344,15 +448,13 @@ describe('merge queue — on a scratch repository', () => {
     lane('wc-base-shift', { 'shift.txt': 's' });
     git(repo, 'push', '-q', 'origin', 'wc-base-shift:main');
     const sha = lane('wc-ales', { 'a-lane.txt': 'A' }); // local main is behind origin/main: the merge has a new tree, so the gate runs
-    await freeze('ales', 'wc-ales', sha, 'ship');
-    gateGreen(sha);
+    await reviewed('ales', 'wc-ales', sha, 'ship');
     gateHook = () => ({ code: 1, stdout: 'step api failed\nRED' });
     await tick();
     expect(getQueueRow(sha)).toMatchObject({ state: 'bounced', reason: expect.stringMatching(/gate RED on merge [0-9a-f]{8} — RED/) });
 
     const shaB = lane('wc-toni', { 'b-lane.txt': 'B' });
-    await freeze('toni', 'wc-toni', shaB, 'ship');
-    gateGreen(shaB);
+    await reviewed('toni', 'wc-toni', shaB, 'ship');
     let moved = false;
     gateHook = () => {
       if (!moved) {
@@ -374,15 +476,14 @@ describe('merge queue — on a scratch repository', () => {
   it('the kill switch stops merging without losing the queue; config off means no queue at all', async () => {
     const ales = agent('ales');
     const sha = lane('wc-ales', { 'k.txt': 'k' });
-    await freeze('ales', 'wc-ales', sha, 'ship');
-    gateGreen(sha);
+    await reviewed('ales', 'wc-ales', sha, 'ship');
     const main = originMain();
     setQueueSwitch('wave', false, 'denis');
     expect(queueSwitch('wave')).toMatchObject({ project: 'wave', config_enabled: true, enabled: false, enabled_by: 'denis' });
     await tick();
     expect(originMain()).toBe(main);
     // Eligibility is still shown while the switch is off; nothing merges.
-    expect(getQueueRow(sha)).toMatchObject({ state: 'queued', reason: 'merge queue is off' });
+    expect(getQueueRow(sha)).toMatchObject({ state: 'queued', reason: 'QUEUE_OFF: merge queue is off' });
     expect((await evaluate(getFreeze(sha)!)).state).toBe('queued');
 
     setQueueSwitch('wave', true, 'denis');
@@ -395,8 +496,7 @@ describe('merge queue — on a scratch repository', () => {
 
     mq.enabled = false;
     const sha2 = lane('wc-ales', { 'k2.txt': 'k2' }, 'wc-ales');
-    await freeze('ales', 'wc-ales', sha2, 'ship');
-    gateGreen(sha2);
+    await reviewed('ales', 'wc-ales', sha2, 'ship');
     const mainNow = originMain();
     await tick();
     expect(originMain()).toBe(mainNow);
@@ -407,22 +507,17 @@ describe('merge queue — on a scratch repository', () => {
   it('a migration numbered at or below main bounces; a later number goes through; the version command is folded into the merge commit', async () => {
     agent('ales');
     agent('toni');
+    mq.github = { repo: 'dbenic/wave', ok_label: 'denis-ok' };
     const bad = lane('wc-ales', { 'migrations/0001_dup.sql': 'x' });
-    await freeze('ales', 'wc-ales', bad, 'ask');
-    gateGreen(bad);
-    agent('codex3', 'pool');
-    agent('codex5', 'denis20x');
-    await verdict('codex3', 'ales', bad);
-    await verdict('codex5', 'ales', bad);
+    await reviewed('ales', 'wc-ales', bad, 'ask'); // migrations force ask whatever the note says
+    prs = [{ number: 1, headRefName: 'wc-ales', headRefOid: bad, labels: [{ name: 'denis-ok' }] }];
     await tick();
-    expect(getQueueRow(bad)).toMatchObject({ state: 'bounced', tier: 'ask', reason: expect.stringMatching(/0001_dup\.sql is not numbered after main's latest \(0001\)/) });
+    expect(getQueueRow(bad)).toMatchObject({ state: 'bounced', tier: 'ask', reason: expect.stringMatching(/^MIGRATION_COLLISION: migration 0001_dup\.sql is not numbered after main's latest \(0001\)/) });
 
     mq.version_command = ['sh', '-c', 'echo "bumped {sha}" > VERSION'];
     const good = lane('wc-toni', { 'migrations/0002_ok.sql': 'y' });
-    await freeze('toni', 'wc-toni', good, 'ask');
-    gateGreen(good);
-    await verdict('codex3', 'toni', good);
-    await verdict('codex5', 'toni', good);
+    await reviewed('toni', 'wc-toni', good, 'ship');
+    prs = [{ number: 2, headRefName: 'wc-toni', headRefOid: good, labels: [{ name: 'denis-ok' }] }];
     await tick();
     const row = getQueueRow(good) as MergeQueueRow;
     expect(row.state).toBe('merged');
@@ -441,10 +536,8 @@ describe('merge queue — on a scratch repository', () => {
     const shaB = lane('wc-toni', { 'b1.txt': 'b' });
     const main = originMain();
     setQueueSwitch('wave', false, 'denis');
-    await freeze('ales', 'wc-ales', shaA, 'ship');
-    await freeze('toni', 'wc-toni', shaB, 'ship');
-    gateGreen(shaA);
-    gateGreen(shaB);
+    await reviewed('ales', 'wc-ales', shaA, 'ship');
+    await reviewed('toni', 'wc-toni', shaB, 'ship');
     setQueueSwitch('wave', true, 'denis');
     // A refresh with the gate blocked keeps both queued and nothing merges yet.
     gateHook = () => ({ code: 7, stdout: 'DUPLICATE' });

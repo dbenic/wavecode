@@ -25,6 +25,7 @@ import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
+import { pickReviewer } from './reviewer-ladder.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
 import { assignmentFacts, loadFor, loadMemo, minCapacityPct, projectReassignMs, reviewEvents, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign, type ReviewerLoad } from './reviewer-assign.js';
@@ -552,6 +553,89 @@ async function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 
     ? `auto: GREEN landed — re-pinged @${reviewer.alias ?? reviewer.name}${own}`
     : `auto: review requested — pinged @${reviewer.alias ?? reviewer.name}${own}`;
   note(freeze.project, freeze.lane, freeze.sha, 'review', shown);
+}
+
+/**
+ * An agent asks for a review itself, after development: through the inbox file
+ * `<you>-<lane>-review-request-<sha8>.md` or `POST /api/reviews/lanes/request-review`.
+ * The freeze note for that SHA must exist (it is what the reviewer reads). A named
+ * seat is honoured through the ladder's checks; otherwise the picker chooses the
+ * least-loaded eligible seat on a different profile. The ask works whether or
+ * not `auto_review` is on, and again on a SHA that was already assigned: a
+ * second ask moves the review when the first seat has not answered.
+ */
+export async function requestReviewFor(
+  sha: string,
+  opts: { reviewer?: string | null; by: string },
+): Promise<Result<{ reviewer: string; sha: string; lane: string | null }>> {
+  const freeze = getFreeze(sha);
+  if (!freeze) return { ok: false, error: `no freeze note for ${sha.slice(0, 8)}; write the freeze note first, it is what the reviewer reads` };
+  if (!freeze.project) return { ok: false, error: 'the freeze names no project' };
+  if (freeze.status !== 'open' && freeze.status !== 'behind-main') return { ok: false, error: `freeze ${sha.slice(0, 8)} is ${freeze.status}; freeze the current SHA` };
+  if (freeze.verdict === 'pass') return { ok: false, error: `${sha.slice(0, 8)} already has a PASS from @${freeze.reviewer_name ?? '?'}` };
+  if (!freeze.author_agent_id) return { ok: false, error: 'the freeze has no author agent' };
+  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return { ok: false, error: `refusing ${freeze.lane ?? sha.slice(0, 8)}: denied` };
+  const author = getAgent(freeze.author_agent_id);
+  if (!author.ok) return { ok: false, error: 'the author agent is gone' };
+  const pipe = pipelineOf(freeze.project);
+  const run = freeze.run_id ? getRun(freeze.run_id) : null;
+  const taskId = run?.ok ? run.data.task_id : 'none';
+  let reviewer: Agent | null;
+  if (opts.reviewer?.trim()) {
+    const picked = pickReviewer({ agent_id: author.data.id, task_id: taskId }, { explicit: opts.reviewer.trim() });
+    if (!picked.ok) return { ok: false, error: picked.reason };
+    if (laneAutomationDenied(freeze.project, picked.agent)) return { ok: false, error: `${picked.agent.alias ?? picked.agent.name} is denied` };
+    reviewer = picked.agent;
+  } else {
+    reviewer = chooseReviewer(author.data, pipe, taskId);
+    if (!reviewer) return { ok: false, error: 'no eligible reviewer with plan capacity right now; WaveCode asks again on the next pass' };
+  }
+  const sha8 = sha.slice(0, 8);
+  const delta = freeze.lane ? await deltaSentence(freeze.project, freeze.lane, sha) : null;
+  const extras = [firstPassSentence(sha), await laneSizeSentence(freeze, pipe)].filter((s): s is string => !!s);
+  const tail = extras.length ? ` ${extras.join(' ')}` : '';
+  const text = delta
+    ? `[from WaveCode] ${delta}. New SHA ${sha8} on ${freeze.lane}, review asked by @${author.data.alias ?? author.data.name}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).${tail}`
+    : `[from WaveCode] @${author.data.alias ?? author.data.name} asks for a review of freeze ${sha8} on ${freeze.lane ?? 'the lane'}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).${tail}`;
+  deliverSystemLine(reviewer, text, { kind: 'info', source: 'review' });
+  emit('pipeline.review', 'run', `${sha}:request`, {
+    sha, reviewer_id: reviewer.id, kind: 'request', by: opts.by, assigned_at_ms: Date.now(), reassigned: false,
+  }, null);
+  if (!freeze.verdict) setFreezeReviewer(sha, { id: reviewer.id, name: reviewer.name });
+  note(freeze.project, freeze.lane, sha, 'review', `review asked by @${opts.by} — pinged @${reviewer.alias ?? reviewer.name}`);
+  return { ok: true, data: { reviewer: reviewer.alias ?? reviewer.name, sha, lane: freeze.lane } };
+}
+
+const REQUEST_SHA_RE = /\b([0-9a-f]{40})\b/i;
+const REQUEST_LANE_RE = /^\s*(?:[-*>]\s*)?\**\s*(?:lane|branch)\s*\**\s*[:：]\s*\**\s*`?([A-Za-z0-9][A-Za-z0-9._/-]{0,63})`?/im;
+const REQUEST_REVIEWER_RE = /^\s*(?:[-*>]\s*)?\**\s*reviewer\s*\**\s*[:：]\s*\**\s*@?([A-Za-z][\w-]*)/im;
+
+/**
+ * The inbox form of the ask. Lines: `Lane:` (or the file name), the exact SHA (or
+ * the lane's newest open freeze when the SHA is missing), optional `Reviewer: @seat`.
+ * The author is told what happened in their pane; nothing else is written.
+ */
+export async function ingestReviewRequestFile(file: string): Promise<Result<{ reviewer: string; sha: string }>> {
+  let text: string;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: false, error: (e as Error).message }; }
+  const base = path.basename(file);
+  const by = base.match(/^([A-Za-z][\w-]*?)-(?:[\w-]*-)?review-request-/i)?.[1] ?? text.match(/\bauthor\b\**\s*[:：]?\**\s*@?([A-Za-z][\w-]*)/i)?.[1] ?? null;
+  const lane = text.match(REQUEST_LANE_RE)?.[1] ?? null;
+  const reviewer = text.match(REQUEST_REVIEWER_RE)?.[1] ?? null;
+  let sha = text.match(REQUEST_SHA_RE)?.[1]?.toLowerCase() ?? null;
+  if (!sha && lane) sha = listFreezes().find((f) => f.lane === lane && (f.status === 'open' || f.status === 'behind-main'))?.sha ?? null;
+  const author = by ? listAgents().find((a) => a.name.toLowerCase() === by.toLowerCase() || (a.alias ?? '').toLowerCase() === by.toLowerCase()) ?? null : null;
+  const result: Result<{ reviewer: string; sha: string; lane: string | null }> = sha
+    ? await requestReviewFor(sha, { reviewer, by: by ?? 'inbox' })
+    : { ok: false, error: `${base}: no exact SHA and no open freeze on ${lane ?? 'the lane'}; freeze first, then ask` };
+  if (result.ok) {
+    tell(author?.id ?? null, `[from WaveCode] review of ${result.data.sha.slice(0, 8)} asked from @${result.data.reviewer} (${base}). Their verdict lands in the inbox.`);
+    logger.info({ file, sha, reviewer: result.data.reviewer }, 'Review requested by the author');
+  } else {
+    tell(author?.id ?? null, `[from WaveCode] review request ${base} not sent: ${result.error}`);
+    logger.info({ file, error: result.error }, 'Review request skipped');
+  }
+  return result.ok ? { ok: true, data: { reviewer: result.data.reviewer, sha: result.data.sha } } : result;
 }
 
 /**
@@ -1182,6 +1266,7 @@ export async function onStagingDeployed(releaseId: string): Promise<void> {
 }
 
 pipelineHooks.onFreeze = onFreezeRecorded;
+pipelineHooks.onReviewRequest = (file) => ingestReviewRequestFile(file).then(() => undefined);
 pipelineHooks.onAuthorDone = (agentId) => {
   void onAuthorDone(agentId).catch((e) => logger.debug({ agentId, error: (e as Error).message }, 'Auto-freeze skipped'));
 };

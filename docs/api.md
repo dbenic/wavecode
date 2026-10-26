@@ -1272,3 +1272,37 @@ and a lane behind main every thirty.
 Views built without runs (`viewShaChecks` for cards, stage blocks and the board route) are
 served from a report up to ten minutes old; the pipeline's green decision and the
 production promote check still read fresh.
+
+## Merge queue stabilisation (26 Oct 2026)
+
+Maestro's brief, approved by Denis: eligibility by evidence, not by branch name.
+
+- No allowlist. `merge_queue.deny_lanes` (default `main`, `master`, `release/*`, `prod-*`,
+  plus the project's main branch) is the only name rule; `laneRefError`'s `lane_glob` no
+  longer applies to the queue.
+- Every tier needs one PASS on the exact SHA from a non-author on a **different credential
+  profile** than the builder (`independentPasses`). Ask tier adds the `github.ok_label`
+  (default `ask-tier-approved`) on the open pull request. A `github.hold_labels` label
+  parks the lane (`MIGRATION_HOLD`). No `TIER:` line means `show`.
+- `merge_queue.github { repo, token_file, ok_label, hold_labels }`: `gh auth status` before
+  every pass with the token from `token_file` as `GH_TOKEN` (never logged), then one
+  `gh pr list --json number,headRefName,headRefOid,labels` per pass. Failure: every lane
+  `GH_AUTH_MISSING`, nothing merges.
+- `Eligibility.code` and `merge_queue.reason` start with the code: `GATE_NOT_GREEN`,
+  `NO_PASS_ON_SHA`, `NEEDS_FIXES`, `ASK_TIER_NO_OK`, `MIGRATION_HOLD`, `LANE_MOVED`,
+  `LANE_GONE`, `LANE_DENIED`, `NO_PR`, `MIGRATION_COLLISION`, `GH_AUTH_MISSING`,
+  `QUEUE_OFF`, `NOT_CONFIGURED`, `NO_REPO`, `CHECK_FAILED`.
+- Stall alarm (`checkStall`, every merge-queue tick): `stall_minutes` (default 30) →
+  `<stall_dir>/wavecode-queue-stall-<yyyymmdd-hhmm>.md`, event `merge_queue.stall`
+  `{ project, code, text, file, at }`, kv `merge_queue.<project>.stall` (JSON, cleared on
+  progress) and `.stall_written` (throttle). `GET /api/merge-queue` now returns `stalls`.
+- Verdicts land on `behind-main` freezes too (they were a noop): the queue merges main for
+  such a lane, so its review must count.
+- Review on request: inbox file `<you>-<lane>-review-request-<sha8>.md` (`Lane:`, the SHA,
+  optional `Reviewer:`) → `pipelineHooks.onReviewRequest` → `requestReviewFor(sha, { reviewer, by })`
+  in `lane-pipeline.ts`; event `pipeline.review` entity `<sha>:request`. The backfill after a
+  restart does not replay requests. `POST /api/reviews/lanes/request-review` accepts a
+  missing `reviewer` and picks one.
+- Reviews page: a "Merge queue" panel (`MergeQueueFlow`) draws the flow from
+  `GET /api/merge-queue`: the stall first, then merging, queued (in order), waiting with
+  code and step, and the last bounces and merges.

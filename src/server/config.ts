@@ -250,6 +250,38 @@ export interface MergeQueueConfig {
   gate_command?: string[];
   /** Minutes the gate on the merge result may run. Default `pipeline.gate_timeout_min`. */
   gate_timeout_min?: number;
+  /**
+   * Lanes the queue never merges (globs). Default main, master, release/*, prod-*;
+   * the project's `main_branch` is always denied. There is no allowlist: any other
+   * branch with a freeze note may queue (brief of 26 Oct 2026).
+   */
+  deny_lanes?: string[];
+  /**
+   * GitHub through `gh` with a server-side credential: the open pull requests and
+   * their labels (the ask-tier OK, the migration hold). `gh auth status` is checked
+   * before every pass; while it fails the whole queue refuses with `GH_AUTH_MISSING`
+   * and raises the stall file.
+   */
+  github?: MergeQueueGithubConfig;
+  /** Minutes an eligible lane may wait with no merge progress before the stall file is written. Default 30. */
+  stall_minutes?: number;
+  /** Directory for `wavecode-queue-stall-<ts>.md`. Default: the `maestro_log` directory, else the first freeze inbox. */
+  stall_dir?: string;
+}
+
+export interface MergeQueueGithubConfig {
+  /** `owner/name`. */
+  repo: string;
+  /**
+   * File holding the fine-grained token (contents, pull_requests, checks on the repo),
+   * stored by SystemOps, readable by the service user only. Read at tick time and handed
+   * to `gh` as `GH_TOKEN`; never logged. Unset: the service user's own `gh auth login`.
+   */
+  token_file?: string;
+  /** Pull-request label that is Denis's OK for an ask-tier lane. Default `ok-to-merge`. */
+  ok_label?: string;
+  /** Pull-request labels that park a lane (`MIGRATION_HOLD`). Default `migration-hold`, `do-not-merge`. */
+  hold_labels?: string[];
 }
 
 export interface PeerConfig {
@@ -685,6 +717,20 @@ function validateMergeQueue(name: string, mq: MergeQueueConfig | undefined): voi
   }
   if (mq.gate_timeout_min !== undefined && (typeof mq.gate_timeout_min !== 'number' || !Number.isInteger(mq.gate_timeout_min) || mq.gate_timeout_min < 1 || mq.gate_timeout_min > 1440)) {
     throw new Error(`${at}.gate_timeout_min must be a whole number of minutes from 1 to 1440`);
+  }
+  const globList = (v: unknown) => Array.isArray(v) && v.every((g) => typeof g === 'string' && g.trim() && g.length <= 80 && !g.includes('..'));
+  if (mq.deny_lanes !== undefined && !globList(mq.deny_lanes)) throw new Error(`${at}.deny_lanes must be a list of branch globs`);
+  if (mq.stall_minutes !== undefined && (typeof mq.stall_minutes !== 'number' || !Number.isInteger(mq.stall_minutes) || mq.stall_minutes < 5 || mq.stall_minutes > 1440)) {
+    throw new Error(`${at}.stall_minutes must be a whole number of minutes from 5 to 1440`);
+  }
+  if (mq.stall_dir !== undefined && (typeof mq.stall_dir !== 'string' || !mq.stall_dir.trim() || mq.stall_dir.includes('..'))) throw new Error(`${at}.stall_dir must be a directory path`);
+  if (mq.github !== undefined) {
+    const gh = mq.github;
+    if (typeof gh !== 'object' || gh === null || Array.isArray(gh)) throw new Error(`${at}.github must be a map`);
+    if (typeof gh.repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(gh.repo)) throw new Error(`${at}.github.repo must be owner/name`);
+    if (gh.token_file !== undefined && (typeof gh.token_file !== 'string' || !gh.token_file.trim() || gh.token_file.includes('..'))) throw new Error(`${at}.github.token_file must be a file path`);
+    if (gh.ok_label !== undefined && (typeof gh.ok_label !== 'string' || !gh.ok_label.trim() || gh.ok_label.length > 60)) throw new Error(`${at}.github.ok_label must be a label name`);
+    if (gh.hold_labels !== undefined && !globList(gh.hold_labels)) throw new Error(`${at}.github.hold_labels must be a list of label names`);
   }
 }
 

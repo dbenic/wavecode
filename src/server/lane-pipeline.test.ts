@@ -30,8 +30,7 @@ import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
-  reassignWaitingReviews, resetPipelineForTest, setPipelineExecForTest, type ExecOptions,
-} from './lane-pipeline.js';
+  reassignWaitingReviews, resetPipelineForTest, setPipelineExecForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
 import { setTestRunExecForTest } from './test-runs.js';
@@ -268,6 +267,39 @@ describe('hands-free lane pipeline', () => {
     expect(messages(author.id).join('\n')).not.toMatch(/Please review/);
     expect(messages(db.listAgents().find((a) => a.name === 'codex1')!.id).join('\n')).not.toMatch(/Please review/);
     expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  it('an agent asks for a review itself: the inbox request pings a seat whether auto_review is on or not', async () => {
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    const author = agent('ales', path.join(tmp, 'ales'));
+    const reviewer = agent('codex3', path.join(tmp, 'codex3'));
+    pipe.auto_review = false;
+    fs.mkdirSync(freezeDir, { recursive: true });
+    const note = path.join(freezeDir, `ales-freeze-${sha.slice(0, 8)}.md`);
+    fs.writeFileSync(note, `# wc-ales freeze\nProject: wave · Author: ales\n- Lane: wc-ales\n- Freeze SHA: ${sha}\n`);
+    expect((await ingestFreezeFile(note)).ok).toBe(true);
+    expect(messages(reviewer.id)).toEqual([]);
+
+    const request = path.join(freezeDir, `ales-wc-ales-review-request-${sha.slice(0, 8)}.md`);
+    fs.writeFileSync(request, `Lane: wc-ales\nSHA: ${sha}\n`);
+    expect(await ingestReviewRequestFile(request)).toMatchObject({ ok: true, data: { reviewer: 'codex3', sha } });
+    expect(messages(reviewer.id).join('\n')).toMatch(/@ales asks for a review of freeze/);
+    expect(messages(author.id).join('\n')).toMatch(/review of [0-9a-f]{8} asked from @codex3/);
+    expect(getFreeze(sha)?.reviewer_name).toBe('codex3');
+    const events = db.getDb().prepare("SELECT entity_id, payload_json FROM events WHERE type = 'pipeline.review'").all() as Array<{ entity_id: string; payload_json: string }>;
+    expect(events).toHaveLength(1);
+    expect(events[0].entity_id).toBe(`${sha}:request`);
+    expect(JSON.parse(events[0].payload_json)).toMatchObject({ kind: 'request', by: 'ales', reviewer_id: reviewer.id });
+
+    // a named seat goes through the ladder's checks: the author is never the reviewer
+    fs.writeFileSync(request, `Lane: wc-ales\nSHA: ${sha}\nReviewer: @ales\n`);
+    expect((await ingestReviewRequestFile(request)).ok).toBe(false);
+    expect(messages(author.id).join('\n')).toMatch(/review request .* not sent/);
+
+    // no SHA and no open freeze on the lane: told, nothing sent
+    const other = path.join(freezeDir, 'ales-wc-none-review-request-x.md');
+    fs.writeFileSync(other, 'Lane: wc-none\n');
+    expect(await ingestReviewRequestFile(other)).toMatchObject({ ok: false, error: expect.stringMatching(/no exact SHA and no open freeze on wc-none/) });
   });
 
   it('does not assign a reviewer when the only candidate is the author', async () => {

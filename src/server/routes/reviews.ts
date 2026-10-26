@@ -112,7 +112,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
     const body = await c.req.json<{ project?: string; lane?: string; reviewer?: string }>().catch(() => ({} as { project?: string; lane?: string; reviewer?: string }));
     const result = await devLanes.requestLaneReview({
-      project: body.project ?? '', lane: body.lane ?? '', reviewer: body.reviewer ?? '',
+      project: body.project ?? '', lane: body.lane ?? '', reviewer: body.reviewer ?? null, by: user.name,
     });
     if (!result.ok) return c.json({ error: result.error }, 400);
     return c.json(result.data);
@@ -132,6 +132,7 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const project = c.req.query('project') ?? null;
     return c.json({
       switches: mergeQueue.configuredProjects().map((name) => mergeQueue.queueSwitch(name)),
+      stalls: mergeQueue.configuredProjects().map((name) => mergeQueue.queueStall(name)).filter((s) => s !== null),
       rows: mergeQueue.listQueue(project),
     });
   });
