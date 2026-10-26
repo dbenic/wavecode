@@ -366,7 +366,25 @@ interface ReviewEvent {
   reassigned: boolean;
 }
 
-function reviewEvents(): ReviewEvent[] {
+/**
+ * One pass's view of reviewer load: the review events are read once and each
+ * seat's load once. Choosing a reviewer sorts the candidates by load, so a pass
+ * over many freezes used to re-read and re-parse the events hundreds of times
+ * per freeze — on 26 Oct 2026 that froze the daemon for five minutes after
+ * every reconcile pass.
+ */
+export function loadMemo(events = reviewEvents()): (agent: Agent) => ReviewerLoad {
+  const memo = new Map<string, ReviewerLoad>();
+  return (agent) => {
+    const hit = memo.get(agent.id);
+    if (hit) return hit;
+    const load = loadFor(agent, events);
+    memo.set(agent.id, load);
+    return load;
+  };
+}
+
+export function reviewEvents(): ReviewEvent[] {
   try {
     const rows = getDb().prepare(
       `SELECT entity_id, payload_json, created_at FROM events WHERE type = 'pipeline.review' ORDER BY id ASC`,
@@ -393,8 +411,8 @@ function reviewEvents(): ReviewEvent[] {
   }
 }
 
-export function assignmentFacts(sha: string): { at: number; reviewerId: string; reassigns: number } | null {
-  const rows = reviewEvents().filter((row) => row.sha === sha);
+export function assignmentFacts(sha: string, events = reviewEvents()): { at: number; reviewerId: string; reassigns: number } | null {
+  const rows = events.filter((row) => row.sha === sha);
   if (rows.length === 0) return null;
   const last = rows[rows.length - 1];
   return { at: last.at, reviewerId: last.reviewerId, reassigns: rows.filter((row) => row.reassigned).length };

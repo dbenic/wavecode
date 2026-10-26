@@ -1250,3 +1250,15 @@ at most every six hours and not at all once its words are settled, every other o
 (behind main, merged, stale) from the cache only, unless its words were still pending. The merge queue evaluates only the
 newest open freeze per lane frozen within two weeks, and one `ls-remote --heads` per
 pass replaces a `git fetch` per lane.
+
+## Post-pass freeze and lanes-board reads (26 Oct 2026)
+
+After every reconcile pass the daemon stopped answering for four to five minutes: the
+review-reassignment loop re-read and re-parsed the `pipeline.review` events for every
+candidate seat of every waiting freeze, synchronously. It now reads the events once per
+pass, memoises each seat's load (`loadMemo`), and searches for a new reviewer only when
+the freeze has waited past the limit and its reviewer is busy. The lanes board reads a
+lane's test history live only for a fresh open freeze, every ten minutes for a lane
+behind main or long frozen, every three for a lane without a freeze, and no longer warms
+the behind-main count for closed freezes. `review_reassign`, `pipeline_tick` and
+`merge_queue` are timed in `/api/health/perf`.

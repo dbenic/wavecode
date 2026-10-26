@@ -24,10 +24,7 @@ import {
 } from './lane-main.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
 import { stagingForwardBlock } from './staging-forward.js';
-import {
-  fullRunPhrase, hasLogCommand, readLaneReport, readTestLog, selectChipRun, shaChecks, suiteNames,
-  testsConfigured, watchTestRuns, type TestHostError, type TestRun,
-} from './test-runs.js';
+import { LIVE_TEST_WINDOW_MS, type TestHostError, type TestRun, freezeAgeMs, fullRunPhrase, hasLogCommand, readLaneReport, readTestLog, selectChipRun, shaChecks, suiteNames, testsConfigured, watchTestRuns } from './test-runs.js';
 import type { Result } from './db.js';
 
 export interface DeltaReview {
@@ -173,7 +170,8 @@ export async function loadDevLanes(): Promise<DevLane[]> {
 async function loadDevLanesPass(): Promise<DevLane[]> {
   const freezes = (() => { try { return listFreezes(); } catch { return [] as ReleaseFreeze[]; } })();
   for (const freeze of freezes) {
-    if (!freeze.sha) continue;
+    // only a freeze that can still move behind main needs the count warmed; closed ones stay as they are
+    if (!freeze.sha || (freeze.status !== 'open' && freeze.status !== 'behind-main')) continue;
     try { await commitsBehindAsync(freeze.project, freeze.sha); } catch { /* repo missing */ }
   }
   try { await reconcileBehindFreezes(); } catch (e) { logger.debug({ error: (e as Error).message }, 'behind-main reconcile skipped'); }
@@ -231,7 +229,13 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
         ?? null;
       const freeze = current && current.sha === sha ? current : null;
       const behind = await commitsBehindAsync(project, sha) ?? 0;
-      const report = await readLaneReport(project, lane, sha);
+      // A lane with a fresh open freeze is read live; a lane behind main or long frozen every ten
+      // minutes; a lane without a freeze every three (the hot poller keeps a run in flight fresh).
+      const freezeAge = freeze ? freezeAgeMs(freeze.created_at) : Number.NaN;
+      const staleOkMs = freeze
+        ? (freeze.status === 'open' && (!Number.isFinite(freezeAge) || freezeAge <= LIVE_TEST_WINDOW_MS) ? 0 : 10 * 60_000)
+        : 3 * 60_000;
+      const report = await readLaneReport(project, lane, sha, { staleOkMs });
       allRuns.push(...report.runs);
       watched.push({ project, lane, sha });
       const viewed = checksFor(report.runs, freeze?.sha ?? sha, null, project);

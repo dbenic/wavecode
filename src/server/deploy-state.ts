@@ -795,14 +795,20 @@ async function runOnce(reason: string): Promise<void> {
     }
     try {
       const pipeline = await import('./lane-pipeline.js');
+      const t1 = Date.now();
       pipeline.reassignWaitingReviews();
+      recordJob('review_reassign', Date.now() - t1);
+      const t2 = Date.now();
       await pipeline.pipelineTick();
+      recordJob('pipeline_tick', Date.now() - t2);
     } catch (e) {
       logger.warn({ reason, error: (e as Error).message }, 'Review reassignment skipped');
     }
     try {
       const queue = await import('./merge-queue.js');
+      const t3 = Date.now();
       await queue.mergeQueueTick();
+      recordJob('merge_queue', Date.now() - t3);
     } catch (e) {
       logger.warn({ reason, error: (e as Error).message }, 'Merge queue tick skipped');
     }

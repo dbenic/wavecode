@@ -27,7 +27,7 @@ import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
-import { assignmentFacts, loadFor, minCapacityPct, projectReassignMs, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign } from './reviewer-assign.js';
+import { assignmentFacts, loadFor, loadMemo, minCapacityPct, projectReassignMs, reviewEvents, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign, type ReviewerLoad } from './reviewer-assign.js';
 import { firstPassFor, firstPassHooks, overdueFirstPasses, requestFirstPass, type FirstPassResult } from './first-pass.js';
 import { deliverSystemLine } from './wire-lines.js';
 
@@ -459,7 +459,7 @@ function reviewTagIds(): Set<string> {
  * ladder. A same-person seat is last, and only when the author-glob pool
  * names it.
  */
-export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: string | null): Agent | null {
+export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: string | null, load: (agent: Agent) => ReviewerLoad = loadFor): Agent | null {
   const review = getConfig().review;
   return selectReviewer({
     author,
@@ -472,7 +472,7 @@ export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: s
     defaultReviewer: review?.default_reviewer ?? null,
     autoPick: review?.auto_pick !== false,
     reviewTagIds: reviewTagIds(),
-    load: loadFor,
+    load,
     minCapacityPct: minCapacityPct(),
     allow: pipe.reviewer_allow,
     serviceProfiles: pipe.service_profiles,
@@ -563,6 +563,8 @@ async function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 
 export function reassignWaitingReviews(now = Date.now()): number {
   let freezes: ReleaseFreeze[] = [];
   try { freezes = listFreezes(); } catch { return 0; }
+  const events = reviewEvents();
+  const load = loadMemo(events);
   let moved = 0;
   for (const freeze of freezes) {
     if (!freeze.project || !freeze.reviewer_agent_id || freeze.verdict) continue;
@@ -570,18 +572,21 @@ export function reassignWaitingReviews(now = Date.now()): number {
     const pipe = pipelineOf(freeze.project);
     if (!pipe.auto_review) continue;
     if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) continue;
-    const facts = assignmentFacts(freeze.sha);
+    const facts = assignmentFacts(freeze.sha, events);
     if (!facts) continue;
+    const limitMs = projectReassignMs(freeze.project);
+    if (!(limitMs > 0) || now - facts.at < limitMs) continue; // not waited long enough: no candidate search
     const current = getAgent(freeze.reviewer_agent_id);
     const author = freeze.author_agent_id ? getAgent(freeze.author_agent_id) : null;
     if (!current.ok || !author?.ok) continue;
-    const next = chooseReviewer(author.data, pipe, null);
-    const nextLoad = next ? loadFor(next) : null;
+    if (!load(current.data).busy) continue; // the reviewer is free: it stays theirs
+    const next = chooseReviewer(author.data, pipe, null, load);
+    const nextLoad = next ? load(next) : null;
     if (!shouldReassign({
       hasVerdict: false,
       waitedMs: now - facts.at,
-      limitMs: projectReassignMs(freeze.project),
-      currentBusy: loadFor(current.data).busy,
+      limitMs,
+      currentBusy: true,
       reassignCount: facts.reassigns,
       nextId: next?.id ?? null,
       currentId: current.data.id,

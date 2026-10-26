@@ -367,3 +367,14 @@ describe('capacity, allowlist and service profiles', () => {
     expect(sameOwnerPoolReviewer(author, codex4, { 'claude*': ['codex4'] }, ['denis20x'])).toBe(false);
   });
 });
+
+describe('loadMemo', () => {
+  it('computes each seat once from the events it was given', async () => {
+    const { loadMemo } = await import('./reviewer-assign.js');
+    const load = loadMemo([]);
+    const agent = { id: 'a1', name: 'ales', runtime: 'claude-code', status: 'idle', profile: null } as unknown as Parameters<typeof load>[0];
+    const first = load(agent);
+    expect(load(agent)).toBe(first);
+    expect(first).toMatchObject({ busy: false, openReviews: 0, runningTasks: 0, lastAssignedAt: 0 });
+  });
+});
