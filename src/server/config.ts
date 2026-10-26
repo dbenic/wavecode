@@ -291,6 +291,28 @@ export interface MergeQueueGithubConfig {
   hold_labels?: string[];
 }
 
+/**
+ * Slack bridge (docs/slack-bridge.md): Slack messages become prompts to a seat and the seat's
+ * captured reply is posted back in the thread. A separate Slack app from any other bot.
+ * Tokens live in files placed by SystemOps (0600, service user), never here.
+ */
+export interface SlackConfig {
+  /** File with the app-level token (`xapp-…`, Socket Mode). */
+  app_token_file: string;
+  /** File with the bot token (`xoxb-…`, Web API). */
+  bot_token_file: string;
+  /** Agent name that answers DMs and bare @mentions (Denis's own seat). */
+  dm_seat?: string;
+  /** Channel routes by Slack channel ID. `mode: all` answers every message there; default only @mentions. */
+  routes?: Array<{ channel: string; seat: string; name?: string; mode?: 'mention' | 'all' }>;
+  /** Slack user ID → WaveCode user name. Anyone else is refused in one line. */
+  users?: Record<string, string>;
+  /** Channel ID that also receives WaveCode notifications (alerts), optional. */
+  notify_channel?: string;
+  /** How long to wait for the seat's captured reply, seconds (default 600, the reply-capture ceiling). */
+  reply_timeout_s?: number;
+}
+
 export interface PeerConfig {
   /** Base URL of the peer daemon, reachable over the tailnet (http://100.x.y.z:3777). */
   url: string;
@@ -406,6 +428,8 @@ export interface WaveConfig {
    * so it can reach only the answering agent (docs/peers.md).
    */
   peers: Record<string, PeerConfig>;
+  /** Slack bridge; absent = no bridge. */
+  slack?: SlackConfig;
   review: {
     auto_review: boolean;
     default_reviewer: string;
@@ -821,6 +845,35 @@ const SAFE_REL_PATH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 const DEVELOPER_NAME = /^[\p{L}][\p{L}0-9 .'_-]{0,40}$/u;
 const DEVELOPER_USER = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
+function validateSlack(s: SlackConfig | undefined): void {
+  if (s === undefined) return;
+  if (typeof s !== 'object' || s === null || Array.isArray(s)) throw new Error('slack must be a map');
+  const filePath = (v: unknown): v is string => typeof v === 'string' && !!v.trim() && !v.includes('..');
+  if (!filePath(s.app_token_file)) throw new Error('slack.app_token_file must be a file path');
+  if (!filePath(s.bot_token_file)) throw new Error('slack.bot_token_file must be a file path');
+  if (/^x(app|oxb|oxp)-/.test(s.app_token_file) || /^x(app|oxb|oxp)-/.test(s.bot_token_file)) throw new Error('slack.*_token_file must be a file path, never the token itself');
+  const seat = (v: unknown): v is string => typeof v === 'string' && /^[\w.-]{1,64}$/.test(v);
+  if (s.dm_seat !== undefined && !seat(s.dm_seat)) throw new Error('slack.dm_seat must be an agent name');
+  if (s.routes !== undefined) {
+    if (!Array.isArray(s.routes)) throw new Error('slack.routes must be a list');
+    for (const r of s.routes) {
+      if (typeof r !== 'object' || r === null || !/^[A-Z0-9]{6,20}$/.test(String(r.channel))) throw new Error('slack.routes[].channel must be a Slack channel ID (C…)');
+      if (!seat(r.seat)) throw new Error(`slack.routes[${r.channel}].seat must be an agent name`);
+      if (r.mode !== undefined && r.mode !== 'mention' && r.mode !== 'all') throw new Error(`slack.routes[${r.channel}].mode must be mention or all`);
+      if (r.name !== undefined && (typeof r.name !== 'string' || !/^[\w-]{1,40}$/.test(r.name))) throw new Error(`slack.routes[${r.channel}].name must be a short channel name`);
+    }
+  }
+  if (s.users !== undefined) {
+    if (typeof s.users !== 'object' || s.users === null || Array.isArray(s.users)) throw new Error('slack.users must be a map of Slack user ID → WaveCode user name');
+    for (const [id, name] of Object.entries(s.users)) {
+      if (!/^[UW][A-Z0-9]{5,20}$/.test(id) || typeof name !== 'string' || !name.trim()) throw new Error(`slack.users.${id} must map a Slack user ID (U…) to a WaveCode user name`);
+    }
+  }
+  if (s.notify_channel !== undefined && !/^[A-Z0-9]{6,20}$/.test(s.notify_channel)) throw new Error('slack.notify_channel must be a Slack channel ID');
+  if (s.reply_timeout_s !== undefined && (typeof s.reply_timeout_s !== 'number' || !(s.reply_timeout_s >= 30) || !(s.reply_timeout_s <= 3600))) throw new Error('slack.reply_timeout_s must be 30 to 3600 seconds');
+  if (!s.dm_seat && !(s.routes ?? []).length) throw new Error('slack needs dm_seat or at least one route');
+}
+
 function validateDevelopers(list: DeveloperConfig[] | undefined): void {
   if (list === undefined) return;
   if (!Array.isArray(list)) throw new Error('developers must be a list');
@@ -848,6 +901,7 @@ function validateDevelopers(list: DeveloperConfig[] | undefined): void {
 }
 
 export function validateConfig(cfg: WaveConfig): void {
+  validateSlack(cfg.slack);
   const profileErrors = validateProfilesConfig(cfg);
   if (profileErrors.length > 0) {
     throw new Error(`Invalid credential profile config:\n  ${profileErrors.join('\n  ')}`);

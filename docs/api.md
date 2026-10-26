@@ -1319,3 +1319,12 @@ Maestro's brief, approved by Denis: eligibility by evidence, not by branch name.
 - Reviews page: a "Merge queue" panel (`MergeQueueFlow`) draws the flow from
   `GET /api/merge-queue`: the stall first, then merging, queued (in order), waiting with
   code and step, and the last bounces and merges.
+
+## Slack bridge (26 Oct 2026)
+
+`slack:` in config.yaml starts a Socket Mode bridge (docs/slack-bridge.md): a DM or @mention
+becomes a prompt to a seat through the same path as `POST /api/agents/:id/send` (now
+`prompting.ts`: liveness, persona, send-keys, `agent.prompt_sent`, reply capture), and the
+captured reply is posted in the Slack thread. Events `slack.prompt`, `slack.reply`,
+`slack.refused`. No new HTTP routes. `POST /api/agents/:id/send` is unchanged on the wire; raw
+keys still record `agent.prompt_sent` and capture no reply.

@@ -385,3 +385,43 @@ projects:
     await refuse('projects:\n  demo:\n    pipeline:\n      merge_queue:\n        stall_minutes: 1\n', /stall_minutes must be a whole number of minutes from 5 to 1440/);
   });
 });
+
+describe('config.ts — slack bridge', () => {
+  let tmpDir: string;
+  let configPath: string;
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wavecode-test-'));
+    configPath = path.join(tmpDir, 'config.yaml');
+  });
+  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); vi.resetModules(); });
+
+  it('loads a slack section with token files, a DM seat, routes and users', async () => {
+    fs.writeFileSync(configPath, `
+slack:
+  app_token_file: /home/wave/.config/wavecode/slack-app.token
+  bot_token_file: /home/wave/.config/wavecode/slack-bot.token
+  dm_seat: pm-denis
+  routes:
+    - { channel: C0123SUPPORT, seat: support, name: support, mode: all }
+  users:
+    U0123DENIS: denis
+  notify_channel: C0123ALERTS
+  reply_timeout_s: 300
+`);
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig(configPath);
+    expect(cfg.slack?.dm_seat).toBe('pm-denis');
+    expect(cfg.slack?.routes?.[0]).toMatchObject({ channel: 'C0123SUPPORT', seat: 'support', mode: 'all' });
+    expect(cfg.slack?.users?.U0123DENIS).toBe('denis');
+  });
+
+  it('refuses a token in place of a file path, a bad user id, and a section with nowhere to route', async () => {
+    const { loadConfig } = await import('./config.js');
+    fs.writeFileSync(configPath, 'slack:\n  app_token_file: xapp-1-abc\n  bot_token_file: /x/bot\n  dm_seat: pm\n');
+    expect(() => loadConfig(configPath)).toThrow(/never the token itself/);
+    fs.writeFileSync(configPath, 'slack:\n  app_token_file: /x/app\n  bot_token_file: /x/bot\n  dm_seat: pm\n  users: { denis: denis }\n');
+    expect(() => loadConfig(configPath)).toThrow(/Slack user ID/);
+    fs.writeFileSync(configPath, 'slack:\n  app_token_file: /x/app\n  bot_token_file: /x/bot\n');
+    expect(() => loadConfig(configPath)).toThrow(/dm_seat or at least one route/);
+  });
+});

@@ -157,3 +157,16 @@ llm:
 #     base_url: http://localhost:11434/v1
 #     model: llama3.3
 #     api_key: null
+
+# Slack bridge (docs/slack-bridge.md): Slack messages become prompts to a seat, the captured reply
+# comes back in the thread. Tokens live in files placed by SystemOps (0600), never here.
+# slack:
+#   app_token_file: /home/wave/.config/wavecode/slack-app.token
+#   bot_token_file: /home/wave/.config/wavecode/slack-bot.token
+#   dm_seat: pm-denis
+#   routes:
+#     - { channel: C0XXXXXXX, seat: support, name: support, mode: all }
+#   users:
+#     U0XXXXXXX: denis
+#   notify_channel: C0ZZZZZZZ
+#   reply_timeout_s: 600

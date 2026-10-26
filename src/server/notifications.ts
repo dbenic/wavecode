@@ -1,4 +1,5 @@
 import webpush from 'web-push';
+import { readTokenFile, slackApi } from './slack-api.js';
 import { getDb, listPushSubscriptions, deletePushSubscription, listTasks, listRuns } from './db.js';
 import { getConfig } from './config.js';
 import logger from './logger.js';
@@ -152,6 +153,16 @@ export async function sendTelegramNotification(payload: NotificationPayload, cha
   }
 }
 
+/** Slack, when the bridge is configured with a `notify_channel` (docs/slack-bridge.md). */
+export async function sendSlackNotification(payload: NotificationPayload): Promise<void> {
+  const slack = getConfig().slack;
+  if (!slack?.notify_channel) return;
+  const token = readTokenFile(slack.bot_token_file);
+  if (!token) return;
+  const r = await slackApi(token).postMessage({ channel: slack.notify_channel, text: `*${payload.title}*\n${payload.body}` });
+  if (!r.ok) logger.debug({ error: r.error }, 'Slack notification failed');
+}
+
 /**
  * Unified notification dispatcher.
  * Sends to all configured channels.
@@ -162,6 +173,7 @@ export async function notify(payload: NotificationPayload): Promise<void> {
     sendPushNotification(payload),
     sendNtfyNotification(payload),
     sendTelegramNotification(payload, config.notifications.telegram_chat_id ?? undefined),
+    sendSlackNotification(payload),
   ]);
 }
 

@@ -27,10 +27,10 @@ import * as modelSwitch from '../model-switch.js';
 import { splitPayload } from '../pane-split.js';
 import * as terminalStream from '../terminal-stream.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
-import * as replyCapture from '../reply-capture.js';
+import { promptAgent } from '../prompting.js';
 import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
 import { defaultSeatFor } from '../seats.js';
-import { validateAlias, validatePersona, validateTag, withPersona } from '../agent-identity.js';
+import { validateAlias, validatePersona, validateTag } from '../agent-identity.js';
 import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
 import { agentAllowedFor, isRestrictedUser } from '../users.js';
 import { runtimeDefaultsFor, subscriptionFor } from '../subscription-info.js';
@@ -110,7 +110,6 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
     if (!access.ok) return c.json({ error: access.error }, 403);
 
-    let typed = body.text;
     const user = getActingUser(c);
     if (body.raw) {
       // Raw keys (C-c, Escape, Enter) fix a stuck shell — a person's own, unrestricted
@@ -120,37 +119,15 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       }
       const result = await sessionManager.sendRawKeys(agentResult.data.id, body.text);
       if (!result.ok) return c.json({ error: result.error }, 500);
-    } else {
-      // T0: a prompt typed into a bare shell executes as commands; an unknown
-      // state (no session, capture failed) is not a running runtime either.
-      const state = await runtimeLiveness.getRuntimeState(agentResult.data);
-      if (state !== 'alive') {
-        return c.json({ error: `${runtimeLiveness.RUNTIME_NOT_RUNNING} (${state}) — relaunch it (or send raw keys) first` }, 409);
-      }
-      // Spec §5c: `[you are @toni — frontend lead] …` when the agent has a persona
-      typed = withPersona(agentResult.data, body.text);
-      const result = await sessionManager.sendKeys(agentResult.data.id, typed);
-      if (!result.ok) return c.json({ error: result.error }, 500);
+      const sent = emit('agent.prompt_sent', 'agent', agentResult.data.id, { text: body.text.substring(0, 2000) });
+      return c.json({ ok: true, prompt_event_id: sent?.id ?? null });
     }
 
-    // The thread shows what the person wrote; the pane got the persona-prefixed text.
-    const sent = emit('agent.prompt_sent', 'agent', agentResult.data.id, {
-      text: body.text.substring(0, 2000),
-    });
-
-    // Spec §5b: the agent's answer to this prompt is captured into the thread.
-    // Not for TUI commands / menu picks (/model, 2.): they have no answer to capture.
-    if (!body.raw && !validate.isTuiCommand(body.text)) {
-      replyCapture.trackPrompt({
-        agent: agentResult.data,
-        actorId: getActingUser(c).id,
-        prompt: typed,
-        promptEventId: sent?.id ?? null,
-      });
-    }
-
+    // Liveness, persona (spec §5c), send-keys, the prompt event and reply capture (spec §5b): prompting.ts.
+    const res = await promptAgent({ agent: agentResult.data, actorId: user.id, text: body.text });
+    if (!res.ok) return c.json({ error: res.error }, res.status);
     // prompt_event_id lets a caller (a peer WaveCode, an MCP seat) match the captured reply to this prompt
-    return c.json({ ok: true, prompt_event_id: sent?.id ?? null });
+    return c.json({ ok: true, prompt_event_id: res.prompt_event_id });
   });
 
   app.get('/api/agents/:id/output', async (c) => {

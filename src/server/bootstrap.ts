@@ -30,6 +30,7 @@ import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import { startMergeQueueTimer, stopMergeQueueTimer } from './merge-queue.js';
 import { startFableQueue, stopFableQueue } from './fable-queue.js';
+import { startSlackBridge, stopSlackBridge } from './slack-bridge.js';
 import { startOpsLanes, stopOpsLanes } from './ops-lanes.js';
 import { closeAllPaneStreams, resetStalePipes } from './terminal-stream.js';
 import logger from './logger.js';
@@ -88,6 +89,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   overlord.startOverlord();
   productDesk.startDeskRefresh();
   usageProbe.startUsageProbe();
+  startSlackBridge();
 
   return {
     agentCount: listAgents().length,
@@ -111,6 +113,7 @@ export function shutdownApplication(): void {
   stopDeployReconciler();
   stopMergeQueueTimer();
   stopFableQueue();
+  stopSlackBridge();
   stopOpsLanes();
   closeAllPaneStreams();
   outputWatcher.stopAll();

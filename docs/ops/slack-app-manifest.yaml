@@ -1,0 +1,37 @@
+# Slack app manifest for the WaveCode bridge (docs/slack-bridge.md). A separate app from any other bot.
+# Create at https://api.slack.com/apps → Create New App → From a manifest. Then: Install to Workspace,
+# generate an app-level token with connections:write (Basic Information → App-Level Tokens), and give
+# both tokens to SystemOps for the token files. Never paste a token in chat.
+display_information:
+  name: WaveCode
+  description: Ask WaveCode's seats; answers come from the agents.
+  background_color: "#1e293b"
+features:
+  bot_user:
+    display_name: WaveCode
+    always_online: true
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - im:history
+      - im:read
+      - im:write
+      - channels:history
+      - reactions:write
+      - users:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
