@@ -673,18 +673,22 @@ function readFreezeNote(filePath: string | null | undefined): string | null {
  * a latest command event of GREEN for this SHA. A stored column GREEN is not
  * enough once the note was read and does not confirm this SHA.
  */
+const VIEW_STALE_OK_MS = 10 * 60_000;
+
 export async function viewShaChecks(freeze: {
   project: string | null;
   sha: string;
   lane: string | null;
   gate: string | null;
   freeze_path?: string | null;
-}, runs?: TestRun[]): Promise<ShaView> {
+}, runs?: TestRun[], opts: { staleOkMs?: number } = {}): Promise<ShaView> {
   const note = readFreezeNote(freeze.freeze_path);
   const parsed = note != null ? parseNoteChecks(note, freeze.sha) : { quick: null, full: null };
   const configured = !!(freeze.project && testsConfigured(freeze.project));
+  // Without runs, a view for a card or a block is served from a report up to ten minutes
+  // old: every board request and lane walk asks for these, and each read is an ssh.
   const live = configured
-    ? shaChecks(runs ?? await readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha), freeze.sha, suiteNames(freeze.project))
+    ? shaChecks(runs ?? await readLaneTests(freeze.project!, freeze.lane ?? '', freeze.sha, { staleOkMs: opts.staleOkMs ?? VIEW_STALE_OK_MS }), freeze.sha, suiteNames(freeze.project))
     : null;
   const sawNote = parsed.quick != null || parsed.full != null;
   const pick = (liveState: 'green' | 'red' | 'pending' | 'missing' | undefined, noteWord: 'green' | 'red' | null): ShaView['quick'] => {

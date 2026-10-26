@@ -34,7 +34,7 @@ import { clearSyncNoticesForStage } from './lane-sync-notices.js';
 import { productionPrereqGate, stepsPrompt, type GoStep } from './prereqs.js';
 import { evaluateForward, isMissingAncestor, readStagingHealth, type StagingTip } from './staging-forward.js';
 import { setStagingTipStatuses, stagingTipStatuses, type StagingTipStatus } from './staging-tip-status.js';
-import { testsConfigured } from './test-runs.js';
+import { testsConfigured, type TestRun } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { fireStagingDeployed, fireStagingVerified } from './pipeline-hooks.js';
 
@@ -984,8 +984,8 @@ function stagingCommand(): string[] | null {
  * read from the test-status JSON. With no test command, the freeze file's
  * own gate line is the fallback (a named non-GREEN still blocks).
  */
-export async function stageGateBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): Promise<string | null> {
-  const view = await viewShaChecks(freeze);
+export async function stageGateBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }, runs?: TestRun[]): Promise<string | null> {
+  const view = await viewShaChecks(freeze, runs);
   if (view.quick === 'green' || view.full === 'green') return null;
   if (view.quick === 'pending') return QUICK_CHECK_RUNNING;
   if (!testsConfigured(freeze.project)) {
@@ -1002,7 +1002,7 @@ export async function stageGateBlock(freeze: { project: string | null; sha: stri
  * a freeze that names a non-GREEN gate is refused; a missing gate is not.
  */
 export async function promoteFullBlock(freeze: { project: string | null; sha: string; lane: string | null; gate: string | null; freeze_path?: string | null }): Promise<string | null> {
-  const view = await viewShaChecks(freeze);
+  const view = await viewShaChecks(freeze, undefined, { staleOkMs: 0 }); // a promote decision reads fresh
   if (view.full === 'green' || view.full === 'unconfigured') return null;
   return needsGreenFull(freeze.sha.slice(0, 8));
 }

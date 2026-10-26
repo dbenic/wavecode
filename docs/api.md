@@ -1269,3 +1269,6 @@ event type scanned the whole `events` table (no index began with `type`). The ne
 now follows only the lanes whose own run is queued or running (at most 40), not every
 lane on the board; the lanes board reads a lane without a freeze every fifteen minutes
 and a lane behind main every thirty.
+Views built without runs (`viewShaChecks` for cards, stage blocks and the board route) are
+served from a report up to ten minutes old; the pipeline's green decision and the
+production promote check still read fresh.

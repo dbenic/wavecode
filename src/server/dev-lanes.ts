@@ -278,7 +278,7 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
       const stageGreen = shaView.quick === 'green' || fullGreen;
       const testsKnown = shaView.quick !== 'unconfigured' || shaView.full !== 'unconfigured';
       const gateBlock = freeze
-        ? await stageGateBlock(freeze)
+        ? await stageGateBlock(freeze, report.runs)
         : !testsKnown || stageGreen
           ? null
           : shaView.quick === 'pending'

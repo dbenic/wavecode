@@ -785,7 +785,7 @@ async function reconcileLostGates(now: number): Promise<void> {
 }
 
 async function isGreen(freeze: ReleaseFreeze): Promise<boolean> {
-  return (await viewShaChecks(freeze)).full === 'green';
+  return (await viewShaChecks(freeze, undefined, { staleOkMs: 0 })).full === 'green'; // a decision: read fresh
 }
 
 function touches(files: string[], paths: string[]): string | null {
