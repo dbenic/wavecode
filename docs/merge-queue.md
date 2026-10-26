@@ -67,10 +67,15 @@ of every pass (cached five minutes when it passes). While it fails, **every** la
 | `GATE_DISPATCH_FAILED` | the gate tool failed before any suite ran (gateway policy, host unreachable, SHA already in flight); retried, bounced after three tries |
 | `ALREADY_ON_MAIN` | the SHA is in main already, or every lane commit has an equivalent there (the merge would be empty); the row is superseded, the freeze stays for the overview's deploy tracking |
 
-The runner's own `=== RESULT GREEN|RED … ===` line is the verdict on the merge result, even when
-the tool exits by a signal afterwards (the countix-testing gateway's identical-tree reuse path
-prints GREEN, then ends its queued placeholder with SIGTERM and returns 143). A signal exit
-without a RESULT line is `GATE_DISPATCH_FAILED`.
+The runner's own `=== RESULT GREEN|RED … ===` line is the verdict on the merge result, whatever
+the tool's exit code afterwards: the countix-testing gateway's identical-tree reuse path prints
+GREEN, then ends its queued placeholder with SIGTERM and returns 143, and on 26 Oct 2026 its
+post-run bookkeeping (`queue-record.sh` killed) returned 5 after a GREEN and bounced four lanes.
+Only a non-zero exit without a RESULT line is the tool's word (`GATE_DISPATCH_FAILED`).
+
+A lane bounced by the tool rather than by the code goes back without a new freeze:
+`POST /api/merge-queue/:sha/requeue { reason }` (admin) returns the row to waiting with the
+attempts cleared and writes a `merge_queue.requeued` event; the freeze must still be live.
 | `GH_AUTH_MISSING` | the GitHub credential is missing or `gh auth status` fails |
 | `QUEUE_OFF` | eligible, but the kill switch is off |
 | `NOT_CONFIGURED` / `NO_REPO` / `CHECK_FAILED` | config or repo problems; the text says which |
@@ -232,6 +237,7 @@ sqlite3 -readonly /home/wave/wavecode/wavecode.db "select created_at, type, enti
 - `GET /api/merge-queue[?project=]` — switches per configured project and the rows.
 - `POST /api/merge-queue/:project/switch` `{ enabled }` — admin only.
 - `POST /api/merge-queue/:sha/priority` `{ priority: 0-9 }` — admins only (since 26 Oct 2026; it was open to developers, which includes agent seats).
+- `POST /api/merge-queue/:sha/requeue` `{ reason }` — admins only; a bounced row with a live freeze returns to waiting (404 unknown, 409 not bounced or freeze closed).
 - `GET /api/reviews/board` — every card carries `queue` (`state`, `reason`, `tier`,
   `position`, `merge_sha`, `pr`) and the board carries `merge_queue.projects`.
 

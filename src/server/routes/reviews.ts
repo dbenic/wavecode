@@ -185,6 +185,17 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
 
   // Priority is Denis's label: an agent seat is a developer too, and a seat that could raise its
   // own lane would jump every other seat's (throughput brief, 26 Oct 2026).
+  app.post('/api/merge-queue/:sha/requeue', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin may requeue a bounced lane' }, 403);
+    const body = await c.req.json<{ reason?: unknown }>().catch(() => ({} as { reason?: unknown }));
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 3 || reason.length > 200) return c.json({ error: 'reason must be 3 to 200 characters' }, 400);
+    const result = mergeQueue.requeueBounced(c.req.param('sha'), reason, user.name);
+    if (!result.ok) return c.json({ error: result.error }, /Not in the merge queue/.test(result.error) ? 404 : 409);
+    return c.json(result.row);
+  });
+
   app.post('/api/merge-queue/:sha/priority', async (c) => {
     const user = getActingUser(c);
     if (!isAdmin(user)) return c.json({ error: 'Only an admin may set a lane\'s priority' }, 403);

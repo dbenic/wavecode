@@ -50,5 +50,14 @@ describe('merge queue priority is an admin label', () => {
     const admin = await call(app, FALLBACK, { priority: 7 });
     expect(admin.status).toBe(200);
     expect(set).toHaveBeenCalledWith(SHA, 7);
+
+    // requeue of a bounced lane is an admin action too, with a reason, written as an event by the module
+    const rq = vi.spyOn(mergeQueue, 'requeueBounced').mockReturnValue({ ok: false, error: 'queue row is merged, not bounced' });
+    const post = (token: string, body: unknown) => app.request(`/api/merge-queue/${SHA}/requeue`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    expect((await post(dev.data.token, { reason: 'tool exit 5 after GREEN' })).status).toBe(403);
+    expect(rq).not.toHaveBeenCalled();
+    expect((await post(FALLBACK, { reason: 'x' })).status).toBe(400);
+    expect((await post(FALLBACK, { reason: 'tool exit 5 after GREEN' })).status).toBe(409);
+    expect(rq).toHaveBeenCalledWith(SHA, 'tool exit 5 after GREEN', 'owner');
   });
 });

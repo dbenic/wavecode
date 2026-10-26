@@ -497,6 +497,47 @@ describe('merge queue — on a scratch repository', () => {
     expect(messages(ales.id).some((m) => /bounced/.test(m))).toBe(false);
   });
 
+  it('a GREEN RESULT line wins over a non-zero exit from the gateway\'s post-run bookkeeping (remote exit 5, 26 Oct 2026)', async () => {
+    const ales = agent('ales');
+    lane('wc-base-five', { 'five.txt': 'b' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-five:main');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A5' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    gateHook = (env) => ({ code: 5, stdout: [
+      'countix-remote-test: pushed in 1s; running suite tier1 on host=countix-testing',
+      `=== RESULT GREEN sha=${(env?.WAVECODE_SHA ?? '').slice(0, 9)} suite=tier1 who=wavecode.ff4256112 exit=0 lint=PASS build=PASS host=countix-testing ===`,
+      '[15:59:09] exit 0',
+      '/srv/countix-test/bin/queue-record.sh: line 95: 2462364 Killed                     sleep 2',
+      'countix-remote-test: remote exit 5 on host=countix-testing (360s total)',
+    ].join('\n') });
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('merged');
+    expect(messages(ales.id).some((m) => /bounced/.test(m))).toBe(false);
+  });
+
+  it('requeue: an admin returns a bounced lane to the walk when its freeze is still live; a merged row or a closed freeze is refused', async () => {
+    const { requeueBounced } = await import('./merge-queue.js');
+    const ales = agent('ales');
+    lane('wc-base-rq', { 'rq.txt': 'b' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-rq:main');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'RQ' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    gateHook = () => ({ code: 1, stdout: '=== RESULT RED sha=x suite=tier1 who=wave exit=1 host=countix-testing ===\ncountix-remote-test: remote exit 1 on host=countix-testing' });
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('bounced');
+    expect(requeueBounced('0'.repeat(40), 'test', 'denis')).toMatchObject({ ok: false, error: 'Not in the merge queue' });
+    const back = requeueBounced(sha, 'gate tool exit 5 after a GREEN RESULT', 'denis');
+    expect(back).toMatchObject({ ok: true, row: { state: 'waiting', attempts: 0, reason: expect.stringMatching(/^REQUEUED by denis: gate tool exit 5/) } });
+    expect(requeueBounced(sha, 'again', 'denis')).toMatchObject({ ok: false, error: 'queue row is waiting, not bounced' });
+    gateHook = () => ({ code: 0, stdout: '=== RESULT GREEN sha=x suite=tier1 who=wave exit=0 host=countix-testing ===' });
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('merged');
+    expect(requeueBounced(sha, 'again', 'denis')).toMatchObject({ ok: false, error: 'queue row is merged, not bounced' });
+    const { getDb } = await import('./db.js');
+    const ev = getDb().prepare("SELECT payload_json FROM events WHERE type = 'merge_queue.requeued' AND entity_id = ?").get(sha) as { payload_json: string };
+    expect(JSON.parse(ev.payload_json)).toMatchObject({ by: 'denis', reason: 'gate tool exit 5 after a GREEN RESULT', was: expect.stringMatching(/^gate RED on merge/) });
+  });
+
   it('a reconcile step that never resolves does not stop the queue from merging', async () => {
     const ds = await import('./deploy-state.js');
     ds.resetReconcileStepsForTest();

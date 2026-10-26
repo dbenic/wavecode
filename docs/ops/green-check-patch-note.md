@@ -40,3 +40,14 @@ them). `$SHA` must be the full 40 characters; a prefix is exit 1.
 - A reused run counts only when the donor's tree equals the target's tree. The checker compares
   `git rev-parse <sha>^{tree}` on both sides (your hand patch of 26 Oct, now in one place).
 - RUNNING is never green; the latest finished run per suite wins.
+
+## Second item, 26 Oct 2026 16:00 CET: `countix-remote-test` exit 5 after a GREEN
+
+Four merge-gate runs on countix-testing printed `=== RESULT GREEN … exit=0 … ===`, then
+`/srv/countix-test/bin/queue-record.sh: line 95: <pid> Killed sleep 2`, and the tool returned
+`remote exit 5`. The suite had passed; the bookkeeping after it was killed. WaveCode now takes the
+RESULT line as the verdict whatever the exit code (and records `exit_code: 5, state: GREEN` in the
+`gate.result` event), and the four lanes were requeued. On the test host, please make
+`queue-record.sh` not turn a killed `sleep` into the run's exit code (`sleep 2 || true`, or trap
+the signal), so that the exit code and the RESULT line agree again. Runs seen: 20261026-155509-a9117d36c
+(union lane merge), and the merges 18022ac1, c3e24768, eb54ad0c earlier today.

@@ -232,6 +232,25 @@ export function queueSwitch(project: string): QueueSwitch {
   return { project, config_enabled, enabled: config_enabled && queueEnabled(project), enabled_by: kvGet(`merge_queue.${project}.by`), queued, last_pass_at: kvGet(`merge_queue.${project}.last_pass_at`) };
 }
 
+/**
+ * An admin puts one bounced lane back in front of the lane walk without a new freeze: for a
+ * bounce that was the tool's, not the code's (26 Oct 2026: four lanes bounced "gate RED" on
+ * the gateway's exit 5 after a GREEN RESULT). The row returns to waiting with the attempts
+ * cleared; the next pass re-evaluates it and merges it like any other. The freeze must still
+ * be live (open or behind main); otherwise the lane needs a new freeze.
+ */
+export function requeueBounced(sha: string, reason: string, by: string): { ok: true; row: MergeQueueRow } | { ok: false; error: string } {
+  const row = getQueueRow(sha);
+  if (!row) return { ok: false, error: 'Not in the merge queue' };
+  if (row.state !== 'bounced') return { ok: false, error: `queue row is ${row.state}, not bounced` };
+  const freeze = getFreeze(sha);
+  if (!freeze || !['open', 'behind-main'].includes(freeze.status)) return { ok: false, error: `freeze is ${freeze?.status ?? 'gone'}; freeze the lane again instead` };
+  const updated = upsert({ sha, project: row.project, lane: row.lane, state: 'waiting', reason: `REQUEUED by ${by}: ${reason}`.slice(0, 200), eligible_at: null, finished_at: null, attempts: 0 });
+  emit(MERGE_QUEUE_EVENT.requeued, 'run', sha, { sha, project: row.project, lane: row.lane, reason, by, was: row.reason }, null);
+  logger.info({ sha, lane: row.lane, by, reason, was: row.reason }, 'Merge queue: bounced lane requeued by an admin');
+  return { ok: true, row: updated };
+}
+
 export interface ResolveOutcome { resolved: Array<{ sha: string; lane: string | null; status: 'stale' | 'merged' }>; skipped: Array<{ sha: string; why: string }> }
 
 /**
@@ -939,11 +958,13 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
       const gateArgv = fill(gateCmd, { checkout: dir, sha: mergeSha, lane: row.lane, project: row.project, remote: spec.remote });
       const gateStarted = new Date();
       const result = await runArgv(gateArgv, { cwd: dir, env, timeoutMs: minutes * 60_000 });
-      // The runner's RESULT line is the verdict, even when the tool was killed after printing
-      // it (the gateway's reuse path has ended a queued placeholder with SIGTERM after a GREEN).
+      // The runner's RESULT line is the suite's verdict whatever the tool's exit code: the tool
+      // is killed after printing it (the gateway's reuse path ends a placeholder with SIGTERM), or
+      // exits non-zero from bookkeeping on the test host after a GREEN (queue-record.sh killed,
+      // "remote exit 5", four false bounces on 26 Oct 2026). Only a missing RESULT line is the tool's word.
       const verdict = resultLine(result.stdout);
       let word = gateOutcome(result);
-      if (verdict && (result.code === 0 || killedExit(result.code))) word = verdict.word;
+      if (verdict) word = verdict.word;
       // One immutable record per gate WaveCode ran: what the checker and the deploy scripts read.
       await recordGateResult({
         project: row.project, sha: mergeSha, argv: gateArgv, stdout: result.stdout, exit_code: result.code, started_at: gateStarted, finished_at: new Date(),

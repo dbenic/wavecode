@@ -715,6 +715,9 @@ describe('hands-free lane pipeline', () => {
     expect(gateOutcome({ code: 7, stdout: 'DUPLICATE: sha already running' })).toBe('QUEUED');
     expect(gateOutcome({ code: 0, stdout: 'QUEUED' })).toBe('QUEUED');
     expect(gateOutcome({ code: 2, stdout: '' })).toBe('RED');
+    // The suite's own RESULT line wins over the exit code (gateway exit 5 after a GREEN, 26 Oct 2026).
+    expect(gateOutcome({ code: 5, stdout: '=== RESULT GREEN sha=a9117d36c suite=tier1 who=wavecode exit=0 host=countix-testing ===\n/srv/countix-test/bin/queue-record.sh: line 95: Killed sleep 2\ncountix-remote-test: remote exit 5 on host=countix-testing (360s total)' })).toBe('GREEN');
+    expect(gateOutcome({ code: 0, stdout: '=== RESULT RED sha=a9117d36c suite=api exit=1 host=countix-testing ===\ndone' })).toBe('RED');
   });
 
   function openNote(authorName: string, lane: string, sha: string): string {

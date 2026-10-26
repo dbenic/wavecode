@@ -712,7 +712,11 @@ function gateWord(stdout: string): 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED' | null
  * then reports. A submit-only tool prints QUEUED or RUNNING instead.
  */
 export function gateOutcome(result: ExecResult): 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED' {
-  // Only the last line speaks for the outcome: "queued #2" earlier in a waiting tool's output is history.
+  // A `=== RESULT GREEN|RED ... ===` line is the suite's own verdict and wins over the tool's exit
+  // code (the gateway has exited 5 from post-run bookkeeping after a GREEN, 26 Oct 2026).
+  const stated = result.stdout.match(/=== RESULT (GREEN|RED)\b[^\n]*===/g)?.pop()?.match(/RESULT (GREEN|RED)/)?.[1];
+  if (stated === 'GREEN' || stated === 'RED') return stated;
+  // Otherwise only the last line speaks for the outcome: "queued #2" earlier in a waiting tool's output is history.
   const last = result.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() ?? '';
   const word = gateWord(last);
   if (result.code === 0) return word && word !== 'GREEN' ? word : 'GREEN';
