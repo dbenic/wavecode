@@ -71,6 +71,8 @@ export interface QueueSwitch {
   enabled: boolean;
   enabled_by: string | null;
   queued: number;
+  /** When the queue last finished a pass over this project (ISO), from the kv heartbeat. */
+  last_pass_at: string | null;
 }
 
 /** One machine-readable reason per refusal; the row's `reason` starts with it. */
@@ -223,7 +225,7 @@ export function queueEnabled(project: string): boolean {
 export function queueSwitch(project: string): QueueSwitch {
   const config_enabled = mqConfig(project)?.enabled === true;
   const queued = withTable(() => (getDb().prepare("SELECT COUNT(*) AS n FROM merge_queue WHERE project = ? AND state IN ('queued', 'merging')").get(project) as { n: number }).n);
-  return { project, config_enabled, enabled: config_enabled && queueEnabled(project), enabled_by: kvGet(`merge_queue.${project}.by`), queued };
+  return { project, config_enabled, enabled: config_enabled && queueEnabled(project), enabled_by: kvGet(`merge_queue.${project}.by`), queued, last_pass_at: kvGet(`merge_queue.${project}.last_pass_at`) };
 }
 
 /** The stall the last pass found for the project, or null when it is moving. */
@@ -839,6 +841,7 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
       enabled_by: started.enabled_by, author: author?.name ?? freeze.author_name, at: cetStamp(),
     };
     upsert({ sha: row.sha, project: row.project, lane: row.lane, state: 'merged', reason: gateNote, merge_sha: mergeSha, gate_runs: gateRuns.join(','), finished_at: new Date().toISOString() });
+    if (kvGet(`merge_queue.${row.project}.stall`)) kvSet(`merge_queue.${row.project}.stall`, ''); // the queue moved; the banner goes at once
     emit(MERGE_QUEUE_EVENT.merged, 'run', row.sha, payload, null);
     tell(author?.id ?? null, `[from WaveCode] merged ${row.lane} ${sha8} into ${spec.branch} as ${mergeSha.slice(0, 8)}${row.pr ? ` (PR ${row.pr})` : ''}. ${gateNote}. Nothing else to do on this lane.`);
     maestroLine(row.project, `merged ${row.lane} ${sha8} -> ${spec.branch} ${mergeSha.slice(0, 8)} (tier ${row.tier ?? '?'}${row.pr ? `, PR ${row.pr}` : ''}${gateRuns.length ? `, gate ${gateRuns.join(' ')}` : ''}${verdictFiles.length ? `, verdicts ${verdictFiles.map((f) => path.basename(f)).join(' ')}` : ''})`);
@@ -1034,6 +1037,7 @@ export async function mergeQueueTick(opts: { wait?: boolean } = {}): Promise<voi
   recoverOnce();
   for (const project of configuredProjects()) {
     if (inflight.has(project)) { if (opts.wait) await inflight.get(project); continue; }
+    const passT0 = Date.now();
     let head: MergeQueueRow | null = null;
     try { head = await refreshProject(project); } catch (e) {
       logger.warn({ project, error: (e as Error).message }, 'Merge queue: refresh failed');
@@ -1051,8 +1055,11 @@ export async function mergeQueueTick(opts: { wait?: boolean } = {}): Promise<voi
       for (const row of listQueue(project)) {
         if (row.state === 'queued') upsert({ sha: row.sha, project, lane: row.lane, reason: 'QUEUE_OFF: merge queue is off' });
       }
+      kvSet(`merge_queue.${project}.last_pass_at`, new Date().toISOString());
       continue;
     }
+    kvSet(`merge_queue.${project}.last_pass_at`, new Date().toISOString());
+    logger.info({ project, ms: Date.now() - passT0, head: head?.sha ?? null, lane: head?.lane ?? null }, 'Merge queue pass');
     if (!head) continue;
     const job = runMerge(head)
       .catch((e) => logger.warn({ project, sha: head!.sha, error: (e as Error).message }, 'Merge queue: job failed'))
@@ -1062,7 +1069,42 @@ export async function mergeQueueTick(opts: { wait?: boolean } = {}): Promise<voi
   }
 }
 
+/** How often the queue looks at its lanes on its own, between the (slow) deploy reconcile passes. */
+export const MERGE_QUEUE_INTERVAL_MS = 90_000;
+let ticking: Promise<void> | null = null;
+let timer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * One pass at a time: a second caller (the reconcile pass, the timer) joins the pass
+ * already running instead of starting another over the same per-pass caches.
+ */
+export function mergeQueueTickGuarded(opts: { wait?: boolean } = {}): Promise<void> {
+  if (ticking) return ticking;
+  ticking = mergeQueueTick(opts)
+    .catch((e) => logger.warn({ error: (e as Error).message }, 'Merge queue: tick failed'))
+    .finally(() => { ticking = null; });
+  return ticking;
+}
+
+/**
+ * The queue's own clock. A deploy reconcile pass takes minutes (every lane's merge-base
+ * is recomputed when main moves) and used to be the only thing that gave the queue a turn,
+ * so lanes merged one per pass. Now the head is tried every MERGE_QUEUE_INTERVAL_MS.
+ */
+export function startMergeQueueTimer(intervalMs = MERGE_QUEUE_INTERVAL_MS): void {
+  if (timer) return;
+  timer = setInterval(() => { void mergeQueueTickGuarded(); }, intervalMs);
+  timer.unref?.();
+}
+
+export function stopMergeQueueTimer(): void {
+  if (timer) clearInterval(timer);
+  timer = null;
+}
+
 export function resetMergeQueueForTest(): void {
+  stopMergeQueueTimer();
+  ticking = null;
   inflight.clear();
   recovered = false;
   execForTest = null;

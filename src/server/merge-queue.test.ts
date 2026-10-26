@@ -22,7 +22,7 @@ import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
   askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
-  gateRefusal, killedExit, queueStall, queueSwitch, resetMergeQueueForTest, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
+  gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
 } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -493,6 +493,35 @@ describe('merge queue — on a scratch repository', () => {
     await tick();
     expect(getQueueRow(sha)?.state).toBe('merged');
     expect(messages(ales.id).some((m) => /bounced/.test(m))).toBe(false);
+  });
+
+  it('a reconcile step that never resolves does not stop the queue from merging', async () => {
+    const ds = await import('./deploy-state.js');
+    ds.resetReconcileStepsForTest();
+    const hung = ds.reconcileStep('deploy_reconcile', () => new Promise<never>(() => { /* never */ }), 30);
+    expect(await hung).toBe('timeout'); // the pass moves on after the ceiling
+    expect(await ds.reconcileStep('deploy_reconcile', async () => undefined, 30)).toBe('skipped'); // still busy: skipped, not awaited
+
+    agent('ales');
+    lane('wc-base-shift', { 'shift.txt': 's' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-shift:main');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    await mergeQueueTickGuarded({ wait: true }); // the queue's own clock, independent of the hung step
+    expect(getQueueRow(sha)?.state).toBe('merged');
+    expect(queueSwitch('wave').last_pass_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(queueStall('wave')).toBeNull();
+    ds.resetReconcileStepsForTest();
+  });
+
+  it('a second tick while one runs joins it instead of starting another pass', async () => {
+    const a = mergeQueueTickGuarded({ wait: true });
+    const b = mergeQueueTickGuarded({ wait: true });
+    expect(b).toBe(a);
+    await a;
+    const c = mergeQueueTickGuarded({ wait: true });
+    expect(c).not.toBe(a);
+    await c;
   });
 
   it('gateRefusal tells a tool failure from a verdict', () => {

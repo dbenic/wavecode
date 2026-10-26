@@ -381,6 +381,7 @@ export interface MergeQueueSwitch {
   enabled: boolean;
   enabled_by: string | null;
   queued: number;
+  last_pass_at?: string | null;
 }
 
 export interface ReleaseView {

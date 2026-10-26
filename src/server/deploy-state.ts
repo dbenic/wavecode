@@ -780,20 +780,42 @@ function armFresh(reason: string): void {
   if (reason === 'deploy' || reason === 'stage') freshArmed = true;
 }
 
+/** Hard ceilings per pass step. A step over its ceiling is logged and the pass moves on. */
+export const STEP_TIMEOUT_MS = { deploy_reconcile: 10 * 60_000, pipeline_tick: 5 * 60_000, merge_queue: 5 * 60_000, overview_reconcile: 10 * 60_000 } as const;
+const stepBusy = new Set<string>();
+
+/**
+ * Runs one pass step with a ceiling. On timeout the step keeps running in the background
+ * but the pass no longer waits for it, and the next pass skips the step while it is still
+ * busy, so one hung call cannot hold `running` and starve the other steps.
+ */
+export async function reconcileStep(name: string, fn: () => Promise<unknown>, timeoutMs: number, reason = 'test'): Promise<'done' | 'timeout' | 'skipped' | 'failed'> {
+  if (stepBusy.has(name)) { logger.warn({ reason, step: name }, 'Reconcile step still running from the last pass; skipped'); return 'skipped'; }
+  stepBusy.add(name);
+  const t0 = Date.now();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const work = fn().then(() => 'done' as const, (e: unknown) => { logger.warn({ reason, step: name, error: (e as Error).message }, 'Reconcile step failed'); return 'failed' as const; })
+    .finally(() => { stepBusy.delete(name); });
+  const ceiling = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), timeoutMs); timer.unref?.(); });
+  const outcome = await Promise.race([work, ceiling]);
+  if (timer) clearTimeout(timer);
+  if (outcome === 'timeout') logger.warn({ reason, step: name, ms: Date.now() - t0, ceiling_ms: timeoutMs }, 'Reconcile step over its ceiling; the pass moves on without it');
+  return outcome;
+}
+
+export function resetReconcileStepsForTest(): void { stepBusy.clear(); }
+
 async function runOnce(reason: string): Promise<void> {
   if (running) { again = true; armFresh(reason); return; }
   running = true;
   const freshTip = freshArmed || reason === 'deploy' || reason === 'stage';
   freshArmed = false;
+  const passStart = Date.now();
   try {
     maybeAlertStale();
-    try {
-      await reconcileDeployStates(new Date(), { freshTip });
-    } catch (e) {
-      logger.warn({ reason, error: (e as Error).message }, 'Deploy reconcile failed');
-      maybeAlertStale();
-    }
-    try {
+    const r = await reconcileStep('deploy_reconcile', () => reconcileDeployStates(new Date(), { freshTip }), STEP_TIMEOUT_MS.deploy_reconcile, reason);
+    if (r === 'failed') maybeAlertStale();
+    await reconcileStep('pipeline_tick', async () => {
       const pipeline = await import('./lane-pipeline.js');
       const t1 = Date.now();
       pipeline.reassignWaitingReviews();
@@ -801,25 +823,10 @@ async function runOnce(reason: string): Promise<void> {
       const t2 = Date.now();
       await pipeline.pipelineTick();
       recordJob('pipeline_tick', Date.now() - t2);
-    } catch (e) {
-      logger.warn({ reason, error: (e as Error).message }, 'Review reassignment skipped');
-    }
-    try {
-      const queue = await import('./merge-queue.js');
-      const t3 = Date.now();
-      await queue.mergeQueueTick();
-      recordJob('merge_queue', Date.now() - t3);
-    } catch (e) {
-      logger.warn({ reason, error: (e as Error).message }, 'Merge queue tick skipped');
-    }
-    try {
-      const overview = await import('./overview.js');
-      const t0 = Date.now();
-      await overview.reconcileOverview();
-      recordJob('overview_reconcile', Date.now() - t0);
-    } catch (e) {
-      logger.warn({ reason, error: (e as Error).message }, 'Overview reconcile skipped');
-    }
+    }, STEP_TIMEOUT_MS.pipeline_tick, reason);
+    await reconcileStep('merge_queue', async () => { const queue = await import('./merge-queue.js'); const t3 = Date.now(); await queue.mergeQueueTickGuarded(); recordJob('merge_queue', Date.now() - t3); }, STEP_TIMEOUT_MS.merge_queue, reason);
+    await reconcileStep('overview_reconcile', async () => { const overview = await import('./overview.js'); const t0 = Date.now(); await overview.reconcileOverview(); recordJob('overview_reconcile', Date.now() - t0); }, STEP_TIMEOUT_MS.overview_reconcile, reason);
+    logger.info({ reason, ms: Date.now() - passStart }, 'Reconcile pass done');
   } finally {
     running = false;
     if (again) {

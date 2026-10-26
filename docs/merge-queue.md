@@ -98,7 +98,12 @@ The same ask over HTTP: `POST /api/reviews/lanes/request-review { project, lane 
 
 ## How it merges
 
-One lane at a time per project, in the order lanes became eligible; an admin or developer
+The queue has its own clock: every 90 s it re-reads its lanes and tries the head, on top of
+the turn it gets at the end of each deploy reconcile pass (which can take minutes when main
+moves; each pass step now has a ceiling, 5–10 min, after which the pass moves on and the next
+pass skips the step while it is still busy). Every pass writes a heartbeat, shown on the
+Reviews page as "last queue pass N min ago" (`switches[].last_pass_at`), and a merge clears
+the stall banner at once. One lane at a time per project, in the order lanes became eligible; an admin or developer
 may raise a lane's priority. For the head of the queue WaveCode:
 
 1. fetches main and the lane and checks the tip once more;

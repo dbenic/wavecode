@@ -28,6 +28,7 @@ import { startTestPortal } from './test-portal.js';
 import { startPaneMigration } from './pane-migrate.js';
 import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
+import { startMergeQueueTimer, stopMergeQueueTimer } from './merge-queue.js';
 import { startFableQueue, stopFableQueue } from './fable-queue.js';
 import { startOpsLanes, stopOpsLanes } from './ops-lanes.js';
 import { closeAllPaneStreams, resetStalePipes } from './terminal-stream.js';
@@ -71,6 +72,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   startPaneMigration();
   startLaneBoard();
   startDeployReconciler();
+  startMergeQueueTimer();
   startFableQueue();
   startOpsLanes();
 
@@ -107,6 +109,7 @@ export function shutdownApplication(): void {
   usageProbe.stopUsageProbe();
   stopLaneBoard();
   stopDeployReconciler();
+  stopMergeQueueTimer();
   stopFableQueue();
   stopOpsLanes();
   closeAllPaneStreams();

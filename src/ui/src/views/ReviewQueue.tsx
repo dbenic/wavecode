@@ -51,6 +51,7 @@ const QUEUE_ORDER: Record<MergeQueueRowView['state'], number> = { merging: 0, qu
 function MergeQueueFlow({ version }: { version: number }) {
   const [rows, setRows] = useState<MergeQueueRowView[]>([]);
   const [stalls, setStalls] = useState<MergeQueueStallView[]>([]);
+  const [passAt, setPassAt] = useState<string | null>(null);
   const [open, setOpen] = useState(true);
   const [showAll, setShowAll] = useState(false);
   useEffect(() => {
@@ -59,6 +60,7 @@ function MergeQueueFlow({ version }: { version: number }) {
       if (!live) return;
       setRows(Array.isArray(view?.rows) ? view.rows : []);
       setStalls(Array.isArray(view?.stalls) ? view.stalls : []);
+      setPassAt((Array.isArray(view?.switches) ? view.switches : []).reduce<string | null>((acc, s) => (s.last_pass_at && (!acc || s.last_pass_at > acc) ? s.last_pass_at : acc), null));
     }).catch(() => { /* the board still works without the queue view */ });
     return () => { live = false; };
   }, [version]);
@@ -69,7 +71,7 @@ function MergeQueueFlow({ version }: { version: number }) {
   const active = sorted.filter((r) => r.state === 'merging' || r.state === 'queued' || r.state === 'waiting');
   const done = sorted.filter((r) => r.state === 'bounced' || r.state === 'merged').slice(0, 8);
   const shown = showAll ? active : active.slice(0, 12);
-  const lastPass = rows.reduce<string | null>((acc, r) => (r.updated_at && (!acc || r.updated_at > acc) ? r.updated_at : acc), null);
+  const lastPass = passAt ?? rows.reduce<string | null>((acc, r) => (r.updated_at && (!acc || r.updated_at > acc) ? r.updated_at : acc), null);
   const merging = rows.find((r) => r.state === 'merging') ?? null;
   const counts = (['merging', 'queued', 'waiting', 'bounced', 'merged'] as const).map((s) => [s, rows.filter((r) => r.state === s).length] as const).filter(([, n]) => n > 0);
   let position = 0;
