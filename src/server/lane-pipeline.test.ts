@@ -735,7 +735,7 @@ describe('hands-free lane pipeline', () => {
   });
 
   it('a run the gateway cancelled or refused (no RESULT line) is not RED: it is retried after a wait, and the author is not told', async () => {
-    setRefusedRetryMsForTest(200);
+    setRefusedRetryMsForTest(1500);
     let tries = 0;
     setPipelineExecForTest((argv) => {
       calls.push(argv);
@@ -754,13 +754,14 @@ describe('hands-free lane pipeline', () => {
     const author = agent('toni', path.join(tmp, 'wc-toni'));
     await ingestFreezeFile(openNote('toni', 'wc-toni', sha));
     await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'quick-check' || a[0] === 'gate-run')).toHaveLength(2), { timeout: 10_000 });
+    const refusalNotes = () => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.action' AND entity_id = 'wave:wc-toni' ORDER BY id").all() as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { note: string }).note).filter((n) => /not run \(.*CANCELLED: superseded by 537982bb1 tier1/.test(n));
+    await vi.waitFor(() => expect(refusalNotes()).toHaveLength(2), { timeout: 10_000 }); // the quick and the full gate, both refused
     expect(getFreeze(sha)?.gate).toBe('QUEUED');
-    expect(latestPipelineNote('wave', 'wc-toni')).toMatch(/not run \(.*CANCELLED: superseded by 537982bb1 tier1/);
     expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
     // the retry wait holds them back, then one tick resubmits both and they go GREEN
     await pipelineTick();
     expect(calls.filter((a) => a[0] === 'quick-check' || a[0] === 'gate-run')).toHaveLength(2);
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 1600));
     await pipelineTick();
     await vi.waitFor(() => expect(getFreeze(sha)?.gate).toBe('GREEN'), { timeout: 10_000 });
     const quickWords = () => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.quick' AND entity_id = ? ORDER BY id").all(`${sha}:quick`) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick: string }).quick);
