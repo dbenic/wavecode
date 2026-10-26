@@ -469,6 +469,10 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_events_entity
     ON events(entity_type, entity_id, created_at);
+  -- type-filtered lookups (acted-once checks, review events, first-pass requests) scanned
+  -- the whole table: 331k rows x hundreds of lookups per tick on 26 Oct 2026
+  CREATE INDEX IF NOT EXISTS idx_events_type_entity
+    ON events(type, entity_id, id);
   CREATE INDEX IF NOT EXISTS idx_tasks_status_agent
     ON tasks(status, agent_id);
   CREATE INDEX IF NOT EXISTS idx_tasks_goal

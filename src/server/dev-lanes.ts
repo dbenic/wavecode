@@ -229,12 +229,13 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
         ?? null;
       const freeze = current && current.sha === sha ? current : null;
       const behind = await commitsBehindAsync(project, sha) ?? 0;
-      // A lane with a fresh open freeze is read live; a lane behind main or long frozen every ten
-      // minutes; a lane without a freeze every three (the hot poller keeps a run in flight fresh).
+      // A lane with a fresh open freeze is read live; a lane behind main or long frozen every thirty
+      // minutes; a lane without a freeze every fifteen. A run in flight is followed by the poller
+      // (watchTestRuns) once a read has seen it. The board has ~200 lanes; every read is an ssh.
       const freezeAge = freeze ? freezeAgeMs(freeze.created_at) : Number.NaN;
       const staleOkMs = freeze
-        ? (freeze.status === 'open' && (!Number.isFinite(freezeAge) || freezeAge <= LIVE_TEST_WINDOW_MS) ? 0 : 10 * 60_000)
-        : 3 * 60_000;
+        ? (freeze.status === 'open' && (!Number.isFinite(freezeAge) || freezeAge <= LIVE_TEST_WINDOW_MS) ? 0 : 30 * 60_000)
+        : 15 * 60_000;
       const report = await readLaneReport(project, lane, sha, { staleOkMs });
       allRuns.push(...report.runs);
       watched.push({ project, lane, sha });

@@ -5,7 +5,7 @@ vi.mock('./config.js', () => ({
   getConfig: vi.fn(() => ({ projects, releases: {}, peers: {}, paths: {}, artifacts: { storage: '' }, notifications: {} })),
 }));
 
-import { readCachedLaneTests, readLaneTests, readLaneTestsSparingly, runnerLoadForTest, setTestRunExecForTest, setTestRunTtlForTest } from './test-runs.js';
+import { pollTargetsForTest, readCachedLaneTests, readLaneTests, readLaneTestsSparingly, runnerLoadForTest, setTestRunExecForTest, setTestRunTtlForTest, stopTestRunPoller, watchTestRuns } from './test-runs.js';
 
 describe('runner command budget', () => {
   it('shares one command between concurrent reads, serves stale reports on request, and runs at most three at once', async () => {
@@ -64,6 +64,22 @@ describe('runner command budget', () => {
       setTestRunExecForTest(null);
       setTestRunTtlForTest(20_000);
       delete projects.budget;
+    }
+  });
+});
+
+describe('watchTestRuns', () => {
+  it('polls only the lanes whose own run is in flight, never the whole board', () => {
+    const t = (lane: string, sha: string) => ({ project: 'budget', lane, sha });
+    const run = (sha: string, state: string, lane = 'wc-x') => ({ id: `r-${sha}-${state}`, sha, lane, who: 'ales', kind: 'dev', suite: 'api', state, queued_at: '2026-10-26T08:00:00Z' }) as unknown as import('./test-runs.js').TestRun;
+    const targets = [t('wc-a', 'a'.repeat(40)), t('wc-b', 'b'.repeat(40)), t('wc-c', 'c'.repeat(40))];
+    try {
+      watchTestRuns(targets, [run('b'.repeat(9), 'running', 'wc-b'), run('a'.repeat(40), 'pass', 'wc-a')]);
+      expect(pollTargetsForTest().map((x) => x.lane)).toEqual(['wc-b']);
+      watchTestRuns(targets, [run('a'.repeat(40), 'pass'), run('c'.repeat(40), 'fail')]);
+      expect(pollTargetsForTest()).toEqual([]);
+    } finally {
+      stopTestRunPoller();
     }
   });
 });

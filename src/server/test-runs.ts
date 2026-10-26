@@ -539,21 +539,47 @@ export async function readTestLog(project: string, run: { id: string; lane?: str
 
 const POLL_MS = 20_000;
 
+/** At most this many lanes are polled for a run in flight; the board read covers the rest. */
+const MAX_POLL_TARGETS = 40;
+
+function inFlight(run: TestRun): boolean {
+  return run.state === 'queued' || run.state === 'running';
+}
+
+/** The targets whose own runs are in flight: a run on the target's SHA, or on its lane without a SHA. */
+function hotTargets(targets: Array<{ project: string; lane: string; sha: string }>, runs: TestRun[]): Array<{ project: string; lane: string; sha: string }> {
+  const live = runs.filter(inFlight);
+  if (live.length === 0) return [];
+  return targets.filter((t) => live.some((r) => {
+    const sha = (r.sha ?? '').toLowerCase();
+    if (sha) return t.sha.toLowerCase().startsWith(sha) || sha.startsWith(t.sha.toLowerCase());
+    return !!r.lane && r.lane === t.lane;
+  })).slice(0, MAX_POLL_TARGETS);
+}
+
 async function pollOnce(): Promise<void> {
-  let hot = false;
+  const still: typeof pollTargets = [];
   for (const t of pollTargets) {
     cache.delete(`status_command:${t.project}:${t.lane}:${t.sha}`);
     const runs = await readLaneTests(t.project, t.lane, t.sha);
-    if (runs.some((r) => r.state === 'queued' || r.state === 'running')) hot = true;
+    if (hotTargets([t], runs).length > 0) still.push(t);
   }
-  if (!hot) stopTestRunPoller();
+  pollTargets = still;
+  if (still.length === 0) stopTestRunPoller();
 }
 
-/** Keep reading while a run is queued or running. Idle lanes are not polled. */
+export function pollTargetsForTest(): Array<{ project: string; lane: string; sha: string }> {
+  return [...pollTargets];
+}
+
+/**
+ * Keep reading the lanes that have a run queued or running, and only those.
+ * Polling every lane on the board while any run anywhere was in flight sent
+ * one status command per lane every 20 s: with 200 lanes, 600 a minute.
+ */
 export function watchTestRuns(targets: Array<{ project: string; lane: string; sha: string }>, runs: TestRun[]): void {
-  pollTargets = targets;
-  const hot = runs.some((r) => r.state === 'queued' || r.state === 'running');
-  if (!hot) {
+  pollTargets = hotTargets(targets, runs);
+  if (pollTargets.length === 0) {
     stopTestRunPoller();
     return;
   }

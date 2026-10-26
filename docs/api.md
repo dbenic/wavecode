@@ -1262,3 +1262,10 @@ lane's test history live only for a fresh open freeze, every ten minutes for a l
 behind main or long frozen, every three for a lane without a freeze, and no longer warms
 the behind-main count for closed freezes. `review_reassign`, `pipeline_tick` and
 `merge_queue` are timed in `/api/health/perf`.
+
+The 25 s stall left in the pipeline tick was `overdueFirstPasses`: every lookup by
+event type scanned the whole `events` table (no index began with `type`). The new
+`idx_events_type_entity (type, entity_id, id)` serves those lookups. The hot-run poller
+now follows only the lanes whose own run is queued or running (at most 40), not every
+lane on the board; the lanes board reads a lane without a freeze every fifteen minutes
+and a lane behind main every thirty.
