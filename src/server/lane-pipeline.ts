@@ -25,6 +25,8 @@ import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
+import { prodDrift, productionSha } from './deployable.js';
+import { recordsFor } from './gate-status.js';
 import { gateWordsFor, recordGateResult } from './gate-status.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
@@ -1004,7 +1006,13 @@ async function settleGate(freeze: ReleaseFreeze, word: 'QUEUED' | 'RUNNING' | 'G
   emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: word, ...(exitCode === null ? {} : { exit_code: exitCode }) }, null);
   note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate ${word} on ${sha8}`);
   if (word === 'RED') {
-    tell(freeze.author_agent_id, `[from WaveCode] full gate RED on ${sha8} (${freeze.lane ?? 'lane'}). Read the failing step with countix-remote-test log, fix, push, and refreeze.`);
+    const repo = projectRepo(freeze.project);
+    const tip = repo ? await mainTip(repo, freeze.project).catch(() => null) : null;
+    const mainRed = mainApiState(freeze.project, tip?.sha ?? null) === 'RED';
+    tell(freeze.author_agent_id, mainRed
+      ? `[from WaveCode] full gate RED on ${sha8} (${freeze.lane ?? 'lane'}), but main itself (${(tip?.sha ?? '').slice(0, 8)}) is api RED right now: this is probably not your lane. Compare the failing file with countix-remote-test log; if it is the same, wait for the main fix, nothing to do.`
+      : `[from WaveCode] full gate RED on ${sha8} (${freeze.lane ?? 'lane'}). Read the failing step with countix-remote-test log, fix, push, and refreeze.`);
+    if (mainRed) note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate RED on ${sha8}; main ${(tip?.sha ?? '').slice(0, 8)} is api RED too, so the lane may not be at fault [MAIN_RED]`);
   }
   if (word === 'GREEN') {
     pingReviewersForGreenSha(freeze.sha);
@@ -1365,8 +1373,100 @@ async function pushSync(project: string, lane: string, workspace: string, pipe: 
   return runArgv(argv, { cwd: workspace, timeoutMs: 60_000 });
 }
 
+const MAIN_GATE = 'pipeline.main-gate';
+
+/** The api verdict WaveCode recorded for the current main tip, or null. */
+export function mainApiState(project: string, mainSha: string | null): 'GREEN' | 'RED' | null {
+  if (!mainSha) return null;
+  const api = recordsFor(mainSha).filter((r) => r.suite === 'api' && (r.state === 'GREEN' || r.state === 'RED'));
+  const last = api[api.length - 1];
+  return last ? (last.state as 'GREEN' | 'RED') : null;
+}
+
+/**
+ * Every new main tip gets the api suite once ("main is the only road to prod": a deployable main
+ * SHA needs quick + api GREEN on it, and a RED main stops owners being blamed for its failures).
+ * One run per tip; the gateway sees author `main`.
+ */
+export async function ensureMainGate(project: string, mainSha: string | null): Promise<void> {
+  const pipe = pipelineOf(project);
+  if (!mainSha || !pipe.auto_gate || !pipe.gate_command?.length) return;
+  if (acted(mainSha, MAIN_GATE)) return;
+  if (recordsFor(mainSha).some((r) => r.suite === 'api')) return;
+  emit(MAIN_GATE, 'run', mainSha, { sha: mainSha, project }, null);
+  const pseudo = {
+    sha: mainSha, project, lane: null, author_name: 'main', author_agent_id: null, status: 'open', created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+  } as unknown as ReleaseFreeze;
+  note(project, null, mainSha, 'gate', `auto: api suite on the new main tip ${mainSha.slice(0, 8)}`);
+  await queueFullGate(pseudo);
+}
+
+const PROD_SYNC = 'pipeline.prod-sync';
+
+/**
+ * Prod drift (production on a SHA that is not on main): open the sync lane once — main with
+ * prod merged in, pushed as wc-wavecode-prod-sync-<day>, frozen under author wavecode — unless
+ * an open lane already contains prod's SHA. The queue merges it like any lane (gates, one PASS).
+ */
+export async function ensureProdSyncLane(project: string): Promise<string | null> {
+  const drift = await prodDrift(project).catch(() => null);
+  const repo = projectRepo(project);
+  if (!drift || !repo) return null;
+  const key = `${project}:${drift.prod_sha}`;
+  if (acted(key, PROD_SYNC)) return null;
+  const spec = mainSpec(project);
+  const mainRef = await resolveMainRef(repo, project);
+  if (!mainRef) return null;
+  let containing: string[] = [];
+  try {
+    containing = (await git(repo, ['branch', '-r', '--contains', drift.prod_sha, '--format=%(refname:short)'])).split('\n').map((l) => l.trim()).filter((l) => l.startsWith(`${spec.remote}/`)).map((l) => l.slice(spec.remote.length + 1)).filter((l) => l !== spec.branch);
+  } catch { /* none */ }
+  const existing = containing.find((lane) => listFreezes().some((f) => f.project === project && f.lane === lane && (f.status === 'open' || f.status === 'behind-main')));
+  if (existing) {
+    emit(PROD_SYNC, 'project', key, { project, prod_sha: drift.prod_sha, lane: existing, opened: false }, null);
+    note(project, existing, drift.prod_sha, 'prod-sync', `auto: production runs ${drift.prod_sha.slice(0, 8)}, not on main; ${existing} already contains it and merges through the queue`);
+    return existing;
+  }
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const lane = `wc-wavecode-prod-sync-${day}`;
+  const dir = path.join(path.dirname(repo), '.wavecode-gates', `${path.basename(repo)}-prod-sync-${day}`);
+  try {
+    if (fs.existsSync(dir)) { try { await git(repo, ['worktree', 'remove', '--force', dir]); } catch { fs.rmSync(dir, { recursive: true, force: true }); } }
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    await git(repo, ['worktree', 'add', '--detach', dir, mainRef]);
+    try {
+      await git(dir, ['merge', '--no-ff', '--no-edit', '-m', `Merge production ${drift.prod_sha.slice(0, 8)} into main (prod sync)`, drift.prod_sha]);
+    } catch {
+      let files: string[] = [];
+      try { files = (await git(dir, ['diff', '--name-only', '--diff-filter=U'])).split('\n').map((l) => l.trim()).filter(Boolean); } catch { /* none */ }
+      try { await git(dir, ['merge', '--abort']); } catch { /* clean */ }
+      emit(PROD_SYNC, 'project', key, { project, prod_sha: drift.prod_sha, lane: null, opened: false, conflict: files }, null);
+      note(project, null, drift.prod_sha, 'prod-sync', `auto: production ${drift.prod_sha.slice(0, 8)} does not merge cleanly into main (${files.join(', ') || 'unknown files'}): Maestro assigns an owner to open the sync lane by hand [PROD_SYNC_CONFLICT]`);
+      return null;
+    }
+    const sha = await git(dir, ['rev-parse', 'HEAD']);
+    const pushed = await runArgv(['git', 'push', spec.remote, `HEAD:refs/heads/${lane}`], { cwd: dir, timeoutMs: 60_000 });
+    if (pushed.code !== 0) {
+      note(project, lane, sha, 'prod-sync', `auto: could not push the prod sync lane ${lane} (exit ${pushed.code}); trying again on the next tick`);
+      return null;
+    }
+    emit(PROD_SYNC, 'project', key, { project, prod_sha: drift.prod_sha, lane, sha, opened: true }, null);
+    note(project, lane, sha, 'prod-sync', `auto: production runs ${drift.prod_sha.slice(0, 8)}, not on main; opened ${lane} (${sha.slice(0, 8)} = main + prod) and froze it; it merges through the queue`);
+    const dirFreeze = freezeDir(project, pipelineOf(project));
+    if (dirFreeze) await ingestFreezeFile(writeFreeze(dirFreeze, 'wavecode', project, lane, sha));
+    return lane;
+  } catch (e) {
+    logger.warn({ project, error: (e as Error).message }, 'Prod sync lane failed');
+    return null;
+  } finally {
+    try { await git(repo, ['worktree', 'remove', '--force', dir]); } catch { /* gone */ }
+    try { await git(repo, ['worktree', 'prune']); } catch { /* best effort */ }
+  }
+}
+
 export async function onMainAdvanced(project: string, mainSha?: string): Promise<void> {
   const pipe = pipelineOf(project);
+  try { await ensureMainGate(project, mainSha ?? (projectRepo(project) ? (await mainTip(projectRepo(project)!, project))?.sha ?? null : null)); } catch (e) { logger.debug({ project, error: (e as Error).message }, 'Main gate skipped'); }
   if (!pipe.auto_merge_main) return;
   const repo = projectRepo(project);
   if (!repo) return;
@@ -1506,6 +1606,10 @@ function announceFirstPass(result: FirstPassResult): void {
 export async function pipelineTick(now = Date.now()): Promise<void> {
   drainGatePending();
   drainQuickPending();
+  for (const project of Object.keys(getConfig().projects ?? {})) {
+    if (!productionSha(project)) continue;
+    try { await ensureProdSyncLane(project); } catch (e) { logger.debug({ project, error: (e as Error).message }, 'Prod sync skipped'); }
+  }
   try { await reconcileLostGates(now); } catch (e) { logger.debug({ error: (e as Error).message }, 'Gate reconcile skipped'); }
   for (const [sha, at] of [...refusedFreezes.entries()]) {
     if (now - at > REFUSED_TTL_MS) { refusedFreezes.delete(sha); continue; }

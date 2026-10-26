@@ -131,11 +131,16 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
   });
 
   // Merge queue (docs/merge-queue.md): read for everyone; the kill switch, bulk resolve, reset and priority for admins.
-  app.get('/api/merge-queue', (c) => {
+  app.get('/api/merge-queue', async (c) => {
     const project = c.req.query('project') ?? null;
+    const { prodDrift } = await import('../deployable.js');
+    const drifts = (await Promise.all(mergeQueue.configuredProjects().map((name) => prodDrift(name).catch(() => null)))).filter((d) => d !== null);
     return c.json({
       switches: mergeQueue.configuredProjects().map((name) => mergeQueue.queueSwitch(name)),
-      stalls: mergeQueue.configuredProjects().map((name) => mergeQueue.queueStall(name)).filter((s) => s !== null),
+      stalls: [
+        ...drifts.map((d) => ({ project: d!.project, code: 'PROD_DRIFT', text: d!.text, at: null, file: null })),
+        ...mergeQueue.configuredProjects().map((name) => mergeQueue.queueStall(name)).filter((s) => s !== null),
+      ],
       rows: mergeQueue.listQueue(project),
     });
   });

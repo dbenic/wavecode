@@ -365,7 +365,7 @@ export interface MergeQueueStallView {
   project: string;
   code: string;
   text: string;
-  at: string;
+  at: string | null;
   file: string | null;
 }
 

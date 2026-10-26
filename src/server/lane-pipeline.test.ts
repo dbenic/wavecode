@@ -30,7 +30,7 @@ import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
-  authorLoadForTest, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+  authorLoadForTest, ensureMainGate, ensureProdSyncLane, mainApiState, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
 import { setTestRunExecForTest } from './test-runs.js';
@@ -489,6 +489,49 @@ describe('hands-free lane pipeline', () => {
     expect(messages(author.id).join('\n')).toMatch(/Merged latest main into wc-ales/);
     expect(messages(author.id).join('\n')).not.toMatch(/behind main/);
     expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  it('every new main tip gets the api suite once, recorded under the main SHA; a RED main is named to owners of RED lanes', async () => {
+    pipe.auto_gate = true;
+    ensureReleaseFreezeTable();
+    setPipelineExecForTest((argv) => { calls.push(argv); return argv[0] === 'gate-run' ? { code: 1, stdout: '=== RESULT RED sha=x suite=api ===' } : { code: 0, stdout: 'ok' }; });
+    moveMain('main.txt', 'later');
+    const main = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    await ensureMainGate('wave', main);
+    await ensureMainGate('wave', main); // once per tip
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === main)).toHaveLength(1));
+    await vi.waitFor(() => expect(mainApiState('wave', main)).toBe('RED'));
+    expect(latestPipelineNote('wave', '')).toMatch(/full gate RED on/);
+    // A lane gate RED while main is RED: the owner is told it is probably not the lane.
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    const author = agent('ales', path.join(tmp, 'wc-ales'));
+    await ingestFreezeFile(passNote('ales', 'wc-ales', sha));
+    await vi.waitFor(() => expect(messages(author.id).join('\n')).toMatch(/main itself \([0-9a-f]{8}\) is api RED right now: this is probably not your lane/), { timeout: 10_000 });
+    expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/\[MAIN_RED\]/);
+    await vi.waitFor(() => expect(authorLoadForTest()).toEqual({}), { timeout: 10_000 }); // nothing left running into the next test
+  });
+
+  it('prod drift: production on a SHA off main opens one sync lane (main + prod), pushed and frozen under wavecode; an open lane that already contains prod is used instead', async () => {
+    const { setProductionSha } = await import('./deployable.js');
+    const base = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', '-b', 'hotfix', base);
+    fs.writeFileSync(path.join(repo, 'hot.txt'), 'hotfix');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'hotfix');
+    const prod = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', 'main');
+    setProductionSha('wave', prod, 'sysops');
+    const lane = await ensureProdSyncLane('wave');
+    expect(lane).toMatch(/^wc-wavecode-prod-sync-\d{8}$/);
+    const push = calls.find((a) => a[0] === 'git' && a[1] === 'push');
+    expect(push).toEqual(['git', 'push', 'origin', `HEAD:refs/heads/${lane}`]);
+    const frozen = db.getDb().prepare("SELECT sha, lane, author_name FROM release_freezes WHERE lane = ?").all(lane) as Array<{ sha: string; lane: string; author_name: string }>;
+    expect(frozen).toHaveLength(1);
+    expect(frozen[0].author_name).toBe('wavecode');
+    expect(git(repo, 'merge-base', '--is-ancestor', prod, frozen[0].sha)).toBe('');
+    expect(await ensureProdSyncLane('wave')).toBeNull(); // once per prod SHA
+    expect(latestPipelineNote('wave', lane!)).toMatch(/opened wc-wavecode-prod-sync-.* and froze it/);
+    await vi.waitFor(() => expect(authorLoadForTest()).toEqual({}), { timeout: 10_000 }); // the lane's own gate runs are done before the next test
   });
 
   it('syncs only a clean lane at its origin tip: pushes the merge first, then freezes; otherwise tells the owner once', async () => {

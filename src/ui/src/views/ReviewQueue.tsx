@@ -105,8 +105,8 @@ function MergeQueueFlow({ version }: { version: number }) {
         </p>
       )}
       {stalls.map((s) => (
-        <p key={s.project} className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200" data-testid="merge-queue-stall">
-          Stalled · {s.code}: {s.text}{s.at ? ` · since ${sinceLabel(s.at)}` : ''}{s.file ? ` · ${s.file.split('/').pop()}` : ''}
+        <p key={`${s.project}:${s.code}`} className={s.code === 'PROD_DRIFT' ? 'mt-2 rounded-lg border border-red-500/60 bg-red-500/15 px-2 py-1 text-[11px] font-semibold text-red-200' : 'mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200'} data-testid={s.code === 'PROD_DRIFT' ? 'merge-queue-prod-drift' : 'merge-queue-stall'}>
+          {s.code === 'PROD_DRIFT' ? 'Prod drift' : 'Stalled'} · {s.code}: {s.text}{s.at ? ` · since ${sinceLabel(s.at)}` : ''}{s.file ? ` · ${s.file.split('/').pop()}` : ''}
         </p>
       ))}
       {open && (
