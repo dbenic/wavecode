@@ -17,7 +17,8 @@ Plan and the two seats it serves: `docs/slack-bridge-plan.md`.
 | anything else | ignored |
 
 Only Slack users listed in `slack.users` (Slack user ID → WaveCode user name) reach a seat;
-anyone else gets one line and nothing is typed anywhere. The prompt is recorded with that
+anyone else gets one line and nothing is typed anywhere. A route with its own `users` list (a
+private channel for one person, e.g. Denis's ops channel) refuses everyone else, listed or not. The prompt is recorded with that
 WaveCode user as actor, so the Command Center thread and the audit show who asked.
 
 ## What the seat gets
@@ -64,6 +65,7 @@ slack:
   routes:
     - { channel: C0XXXXXXX, seat: support, name: support, mode: all }   # Sonnet 5.5 support seat
     - { channel: C0YYYYYYY, seat: support, name: dev }                  # @mentions only
+    - { channel: C0PPPPPPP, seat: ops, name: denis-ops, mode: all, users: [U0XXXXXXX] }  # private, one person
   users:
     U0XXXXXXX: denis                # Slack user ID → WaveCode user name
   notify_channel: C0ZZZZZZZ         # optional
@@ -77,7 +79,9 @@ start; with the section and a missing token file it stays idle and logs one warn
 
 Create the app from `docs/ops/slack-app-manifest.yaml` (Socket Mode on). Bot scopes:
 `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`, `channels:history`,
-`reactions:write`, `users:read`. Events: `app_mention`, `message.im`, `message.channels`.
+`groups:history` (private channels), `reactions:write`, `users:read`. Events: `app_mention`, `message.im`,
+`message.channels`, `message.groups`. Adding a scope later means "reinstall app" in Slack; the bot token
+normally survives, check it with `auth.test`.
 Install to the workspace, invite the bot to the routed channels, and hand the two tokens to
 SystemOps for the token files. Never paste a token in chat.
 

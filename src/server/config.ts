@@ -303,8 +303,12 @@ export interface SlackConfig {
   bot_token_file: string;
   /** Agent name that answers DMs and bare @mentions (Denis's own seat). */
   dm_seat?: string;
-  /** Channel routes by Slack channel ID. `mode: all` answers every message there; default only @mentions. */
-  routes?: Array<{ channel: string; seat: string; name?: string; mode?: 'mention' | 'all' }>;
+  /**
+   * Channel routes by Slack channel ID. `mode: all` answers every message there; default only
+   * @mentions. `users`: Slack user IDs allowed in that channel (a private channel for one person);
+   * unset = everyone in `slack.users`.
+   */
+  routes?: Array<{ channel: string; seat: string; name?: string; mode?: 'mention' | 'all'; users?: string[] }>;
   /** Slack user ID → WaveCode user name. Anyone else is refused in one line. */
   users?: Record<string, string>;
   /** Channel ID that also receives WaveCode notifications (alerts), optional. */
@@ -861,6 +865,7 @@ function validateSlack(s: SlackConfig | undefined): void {
       if (!seat(r.seat)) throw new Error(`slack.routes[${r.channel}].seat must be an agent name`);
       if (r.mode !== undefined && r.mode !== 'mention' && r.mode !== 'all') throw new Error(`slack.routes[${r.channel}].mode must be mention or all`);
       if (r.name !== undefined && (typeof r.name !== 'string' || !/^[\w-]{1,40}$/.test(r.name))) throw new Error(`slack.routes[${r.channel}].name must be a short channel name`);
+      if (r.users !== undefined && (!Array.isArray(r.users) || r.users.length === 0 || r.users.some((u) => typeof u !== 'string' || !/^[UW][A-Z0-9]{5,20}$/.test(u)))) throw new Error(`slack.routes[${r.channel}].users must be a list of Slack user IDs`);
     }
   }
   if (s.users !== undefined) {

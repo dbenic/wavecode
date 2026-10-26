@@ -117,7 +117,7 @@ function markSeen(key: string): boolean {
   return true;
 }
 
-export interface Route { seat: string; where: string; continues: boolean }
+export interface Route { seat: string; where: string; continues: boolean; users?: string[] }
 
 /** Which seat answers this event, or null when the bridge should stay quiet. */
 export function routeFor(ev: SlackEvent, cfg: SlackConfig, bot: string | null = botUserId): Route | null {
@@ -126,9 +126,9 @@ export function routeFor(ev: SlackEvent, cfg: SlackConfig, bot: string | null = 
   const route = (cfg.routes ?? []).find((r) => r.channel === channel);
   const where = ev.channel_type === 'im' ? 'DM' : `#${route?.name ?? channel}`;
   const continuing = threadSeat(channel, ev.thread_ts);
-  if (continuing) return { seat: continuing, where, continues: true };
+  if (continuing) return { seat: continuing, where, continues: true, users: route?.users };
   if (ev.channel_type === 'im') return cfg.dm_seat ? { seat: cfg.dm_seat, where, continues: false } : null;
-  if (route && (route.mode === 'all' || mentioned)) return { seat: route.seat, where, continues: false };
+  if (route && (route.mode === 'all' || mentioned)) return { seat: route.seat, where, continues: false, users: route.users };
   if (mentioned && cfg.dm_seat) return { seat: cfg.dm_seat, where, continues: false };
   return null;
 }
@@ -158,6 +158,12 @@ export async function handleEvent(ev: SlackEvent): Promise<void> {
   if (!userName) {
     emit(SLACK_EVENT.refused, 'slack', `${ev.channel}:${ev.ts}`, { slack_user: ev.user, channel: ev.channel }, null);
     await post(ev.channel, threadTs, 'Sorry, you are not on WaveCode\'s list. Ask Denis to add your Slack user to `slack.users`.');
+    return;
+  }
+  // A channel with its own list (a private channel for one person) refuses everyone else, listed or not.
+  if (route.users && !route.users.includes(ev.user)) {
+    emit(SLACK_EVENT.refused, 'slack', `${ev.channel}:${ev.ts}`, { slack_user: ev.user, channel: ev.channel, route: 'users' }, null);
+    await post(ev.channel, threadTs, `Sorry, this channel's seat answers only the people listed for it.`);
     return;
   }
   const user = getUserByName(userName);

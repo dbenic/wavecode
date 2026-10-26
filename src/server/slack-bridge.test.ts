@@ -42,7 +42,7 @@ describe('slack bridge', () => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-slack-'));
     db.initDb(path.join(tmp, 't.db'));
     for (const k of Object.keys(slack)) delete slack[k];
-    Object.assign(slack, { app_token_file: '/x/app', bot_token_file: '/x/bot', dm_seat: 'pm-denis', routes: [{ channel: 'C0SUPPORT', seat: 'support', name: 'support', mode: 'all' }, { channel: 'C0DEV', seat: 'support', name: 'dev' }], users: { U0DENIS: 'denis' }, reply_timeout_s: 60 });
+    Object.assign(slack, { app_token_file: '/x/app', bot_token_file: '/x/bot', dm_seat: 'pm-denis', routes: [{ channel: 'C0SUPPORT', seat: 'support', name: 'support', mode: 'all' }, { channel: 'C0DEV', seat: 'support', name: 'dev' }, { channel: 'C0PRIVOPS', seat: 'pm-denis', name: 'denis-ops', mode: 'all', users: ['U0DENIS'] }], users: { U0DENIS: 'denis', U0ANA: 'ana' }, reply_timeout_s: 60 });
     seat = db.insertAgent({ name: 'pm-denis', runtime: 'claude-code', tmux_session: 'wc-pm-denis', workspace: tmp, mode: 'spawned', status: 'idle' }).data!;
     db.insertAgent({ name: 'support', runtime: 'claude-code', tmux_session: 'wc-support', workspace: tmp, mode: 'spawned', status: 'idle' });
     db.insertUser({ name: 'denis', role: 'admin', color: '#fff', token_hash: 'h1' });
@@ -97,6 +97,15 @@ describe('slack bridge', () => {
     expect(promptAgent).not.toHaveBeenCalled();
     expect(posts(api)[0].text).toContain('not on WaveCode');
     expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(SLACK_EVENT.refused)).toHaveLength(1);
+  });
+
+  it('a channel with its own user list refuses a listed developer and answers its owner', async () => {
+    await handleEvent({ type: 'message', channel: 'C0PRIVOPS', channel_type: 'group', user: 'U0ANA', text: 'set up a server', ts: '8.1' });
+    expect(promptAgent).not.toHaveBeenCalled();
+    expect(posts(api)[0].text).toContain('only the people listed');
+    await handleEvent({ type: 'message', channel: 'C0PRIVOPS', channel_type: 'group', user: 'U0DENIS', text: 'set up a server', ts: '8.2' });
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    expect((promptAgent.mock.calls[0][0] as { text: string }).text).toBe('[from Slack #denis-ops, denis] set up a server');
   });
 
   it('ignores bots, edits and its own messages, and a mention delivered twice', async () => {

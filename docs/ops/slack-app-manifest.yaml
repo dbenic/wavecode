@@ -22,6 +22,7 @@ oauth_config:
       - im:read
       - im:write
       - channels:history
+      - groups:history
       - reactions:write
       - users:read
 settings:
@@ -30,6 +31,7 @@ settings:
       - app_mention
       - message.im
       - message.channels
+      - message.groups
   interactivity:
     is_enabled: false
   org_deploy_enabled: false
