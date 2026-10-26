@@ -17,6 +17,7 @@ import { opsStageBlockFromChecks } from '../ops-stage.js';
 import logger from '../logger.js';
 import * as mergeQueue from '../merge-queue.js';
 import { getConfig } from '../config.js';
+import { gateWordsFor } from '../gate-status.js';
 
 async function opsStageBlockFor(
   freeze: { sha: string; project: string | null; lane: string | null; gate: string | null; freeze_path?: string | null; verdict: string | null } | null,
@@ -24,7 +25,9 @@ async function opsStageBlockFor(
 ): Promise<string | null | undefined> {
   if (!freeze) return undefined;
   try {
-    const view = await freezes.viewShaChecks(freeze);
+    // The one checker first; the card view only where it finds nothing (notes written before it existed).
+    const checked = await gateWordsFor(freeze).catch(() => null);
+    const view = checked && checked.quick !== 'missing' ? { quick: checked.quick } : await freezes.viewShaChecks(freeze);
     return opsStageBlockFromChecks({
       sha: freeze.sha,
       quick: view.quick,

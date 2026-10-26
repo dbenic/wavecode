@@ -31,6 +31,7 @@ import { registerDeskRoutes } from './routes/desk.js';
 import { registerDiagramRoutes } from './routes/diagrams.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerTestPortalRoutes } from './routes/test-portal.js';
+import { registerGateStatusRoutes } from './routes/gate-status.js';
 import { registerQueueRoutes } from './routes/queue.js';
 import { registerOpsLaneRoutes } from './routes/ops-lanes.js';
 import { registerOpsJobRoutes } from './routes/ops-jobs.js';
@@ -77,6 +78,7 @@ export function createApp(): Hono<NodeAppEnv> {
   registerMessageRoutes(app);
   registerHealthRoutes(app);
   registerTestPortalRoutes(app);
+  registerGateStatusRoutes(app);
   registerQueueRoutes(app);
   registerOpsLaneRoutes(app);
   registerOpsJobRoutes(app);

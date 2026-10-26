@@ -524,6 +524,39 @@ export async function readLaneTests(project: string, lane: string, sha: string, 
   return (await readLaneReport(project, lane, sha, opts)).runs;
 }
 
+const RECENT_LIMIT = 100; // the gateway's jq breaks above ~150 rows (26 Oct 2026)
+const RECENT_TTL_MS = 30_000;
+
+/**
+ * The gateway's recent runs regardless of SHA: `history_command` with its `--sha <sha>` pair
+ * replaced by `--limit 100`. The checker scans it for results the gateway filed under a donor
+ * SHA (the run id names the requesting SHA). Cached for 30 s; one ssh at a time like every read.
+ */
+export async function readRecentRuns(project: string): Promise<TestRun[]> {
+  const cmd = projectTests(project)?.history_command;
+  if (!cmd?.length) return [];
+  const argv: string[] = [];
+  for (let i = 0; i < cmd.length; i++) {
+    if (cmd[i] === '--sha' && i + 1 < cmd.length) { i++; continue; }
+    if (cmd[i].includes('{sha}')) continue;
+    argv.push(cmd[i]);
+  }
+  if (!argv.includes('--limit')) argv.push('--limit', String(RECENT_LIMIT));
+  const key = `recent:${project}`;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < RECENT_TTL_MS) return hit.report.runs;
+  const joined = pendingReads.get(key);
+  if (joined) return (await joined).runs;
+  const job = withRunnerSlot(async () => {
+    const text = await runCommand(argv);
+    const report = (text ? parseTestReport(text) : null) ?? { generated_at: null, runs: [], errors: [] };
+    cache.set(key, { at: Date.now(), report });
+    return report;
+  }).finally(() => pendingReads.delete(key));
+  pendingReads.set(key, job);
+  return (await job).runs;
+}
+
 export async function liveGateFor(project: string | null, sha: string, lane?: string | null): Promise<LiveGate | null> {
   if (!project || !projectTests(project)?.status_command) return null;
   const runs = await readLaneTests(project, lane ?? '', sha);

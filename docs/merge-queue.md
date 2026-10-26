@@ -165,6 +165,36 @@ A bounced SHA stays bounced; the author fixes, pushes and freezes a new SHA, whi
 over. A daemon restart in the middle of a merge resets that row to queued; the checkout
 is recreated from scratch.
 
+## One checker: is this SHA green?
+
+Every reader of gate results goes through one function (`src/server/gate-status.ts`): the
+queue's admission and merge steps, the Reviews page, agents and the deploy scripts. It answers
+for the exact 40-character SHA and the suites you require:
+
+```
+wavecode gate-status <sha> --require quick,api [--project wavepulse] [--json]
+GET /api/gate-status/<sha>?project=wavepulse&require=quick,api
+```
+
+Exit codes: 0 every required suite GREEN, 2 missing, 3 red, 4 running, 1 error (abbreviated
+SHA, tool error, unreachable source). `--require` takes `quick`, `api`, `full` and `gate`
+(any of the project's full suites). Canonical suite names are `quick`, `api`, `full`; the
+frozen alias map reads `tier1` as `quick` (the gateway files tier1 runs as quick; WaveCode has
+stored them so since 12 Oct 2026), `full-tuned` and `kind: gate` as `full`. Writers in WaveCode
+use canonical names only.
+
+Rules: the latest finished run per suite wins; RUNNING never counts as green; a result the
+gateway reused from another SHA (its run id names the target, its row the donor, as with
+`7e27b7d2` and donor `3857882f` on 26 Oct 2026) counts only when the donor's tree equals the
+target's tree. On anything but all-green the report lists every result found for the SHA with
+why it does not count, never just "none".
+
+Sources: the gateway's history for the SHA and its recent history (reused results), WaveCode's
+own `gate.result` records (one immutable event per gate the queue or the pipeline ran: SHA,
+tree, suite, state, exit code, run id, RESULT line, donor and its tree, build), and the legacy
+`pipeline.gate` words. A freeze note's own "quick check: GREEN" line is read only where the
+checker finds nothing (rollout compatibility).
+
 ## Kill switch
 
 Two switches, both required: `projects.<p>.pipeline.merge_queue.enabled: true` in

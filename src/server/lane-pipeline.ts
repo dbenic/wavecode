@@ -25,6 +25,7 @@ import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
 import { workspaceMatches } from './project-gate.js';
 import { getFreeze, ingestFreezeFile, listFreezes, setFreezeGate, setFreezeReviewer, viewShaChecks, type ReleaseFreeze } from './release-freezes.js';
+import { recordGateResult } from './gate-status.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
@@ -805,13 +806,17 @@ async function runGateBody(freeze: ReleaseFreeze, pipe: PipelineSwitches, spec: 
   const argv = fill(pipe.gate_command, {
     sha: freeze.sha, lane: freeze.lane ?? '', workspace: checkout ?? '', checkout: checkout ?? '', remote: spec.remote, project: freeze.project,
   });
+  const started = new Date();
   const result = await runArgv(argv, {
     ...(checkout ? { cwd: checkout } : {}),
     env: runEnv({ sha: freeze.sha, lane: freeze.lane ?? '', author, ...(checkout ? { checkout } : {}) }),
     timeoutMs: Math.max(1, pipe.gate_timeout_min) * 60_000,
   });
   await dropCheckout(freeze.project, checkout);
-  await settleGate(freeze, gateOutcome(result), result.code);
+  const word = gateOutcome(result);
+  // One immutable record per gate WaveCode ran (the checker reads it; legacy pipeline.gate stays for older readers).
+  await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: result.stdout, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: word === 'RED' && !/=== RESULT (GREEN|RED)\b/.test(result.stdout) ? `exit ${result.code ?? 'none'} without a RESULT line` : null });
+  await settleGate(freeze, word, result.code);
 }
 
 /** Record the gate word and act on it: RED tells the author, GREEN re-pings the reviewer. */

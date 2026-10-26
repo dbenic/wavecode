@@ -36,6 +36,7 @@ import logger from './logger.js';
 import { fireMainAdvanced } from './pipeline-hooks.js';
 import { execFileAsync } from './proc.js';
 import { freezeInboxDirs, getFreeze, listFreezes, listVerdicts, viewShaChecks, type FreezeVerdict, type ReleaseFreeze } from './release-freezes.js';
+import { gateWordsFor, recordGateResult } from './gate-status.js';
 import { samePerson } from './reviewer-assign.js';
 import { freezeAgeMs, readLaneTests, readLaneTestsSparingly, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
@@ -692,11 +693,18 @@ function readNote(file: string | null): string | null {
 }
 
 async function gateWords(freeze: ReleaseFreeze): Promise<{ quick: string; full: string }> {
+  // The one checker (gate-status.ts) decides; the freeze note and the stored column are read only
+  // where it finds nothing, so notes written before the checker existed still count during rollout.
+  const checked = await gateWordsFor(freeze).catch(() => null);
+  if (checked && checked.quick !== 'missing' && checked.full !== 'missing') return { quick: checked.quick, full: checked.full };
   const runs = freeze.project && testsConfigured(freeze.project)
     ? (await readLaneTestsSparingly(freeze, { settled: false, pending: false }).catch(() => null)) ?? []
     : undefined;
   const view = await viewShaChecks(freeze, runs);
-  return { quick: view.quick, full: view.full };
+  return {
+    quick: checked && checked.quick !== 'missing' ? checked.quick : view.quick,
+    full: checked && checked.full !== 'missing' ? checked.full : view.full,
+  };
 }
 
 /** Why a freeze is not merged yet, or `queued` when everything is in. Pure of side effects besides git fetches. */
@@ -928,12 +936,19 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
         WAVECODE_SHA: mergeSha, WAVECODE_LANE: row.lane, WAVECODE_CHECKOUT: dir, WAVECODE_MERGE_OF: row.sha,
         WAVECODE_AUTHOR: author?.name ?? '', COUNTIX_REMOTE_TEST_WHO: author?.name ?? 'wavecode',
       };
-      const result = await runArgv(fill(gateCmd, { checkout: dir, sha: mergeSha, lane: row.lane, project: row.project, remote: spec.remote }), { cwd: dir, env, timeoutMs: minutes * 60_000 });
+      const gateArgv = fill(gateCmd, { checkout: dir, sha: mergeSha, lane: row.lane, project: row.project, remote: spec.remote });
+      const gateStarted = new Date();
+      const result = await runArgv(gateArgv, { cwd: dir, env, timeoutMs: minutes * 60_000 });
       // The runner's RESULT line is the verdict, even when the tool was killed after printing
       // it (the gateway's reuse path has ended a queued placeholder with SIGTERM after a GREEN).
       const verdict = resultLine(result.stdout);
       let word = gateOutcome(result);
       if (verdict && (result.code === 0 || killedExit(result.code))) word = verdict.word;
+      // One immutable record per gate WaveCode ran: what the checker and the deploy scripts read.
+      await recordGateResult({
+        project: row.project, sha: mergeSha, argv: gateArgv, stdout: result.stdout, exit_code: result.code, started_at: gateStarted, finished_at: new Date(),
+        dispatch_failure: word === 'RED' && !verdict ? (killedExit(result.code) ? `gate tool killed (exit ${result.code ?? 'none'}) before a RESULT line` : gateRefusal(result)) : null,
+      });
       if (word === 'RED') {
         const refusal = killedExit(result.code) && !verdict ? `gate tool killed (exit ${result.code ?? 'none'}) before a RESULT line` : gateRefusal(result);
         if (refusal !== null) {

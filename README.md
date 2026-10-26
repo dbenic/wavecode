@@ -235,6 +235,16 @@ WaveCode does not manage your network exposure. The application enforces access 
 | `PERPLEXITY_API_KEY` | Perplexity API key fallback | — |
 | `XAI_API_KEY` | xAI API key fallback | — |
 
+## Is this SHA green? One checker
+
+```bash
+wavecode gate-status <full-sha> --require quick,api --json
+```
+
+Exit 0 when every required suite is GREEN for that exact SHA, 2 missing, 3 red, 4 running, 1
+error. The queue, the Reviews page and the deploy scripts all read this one function
+(`src/server/gate-status.ts`); details in `docs/merge-queue.md`, "One checker".
+
 ## Auth Modes
 
 - **`token`** — Default portable mode. Every request needs `Authorization: Bearer <token>`. SSE accepts `?access_token=<token>` query param.

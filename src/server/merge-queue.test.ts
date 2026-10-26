@@ -638,6 +638,39 @@ describe('merge queue — on a scratch repository', () => {
     expect(['open', 'behind-main']).toContain(getFreeze(shaB)?.status); // its freeze stays live
   });
 
+  it('end to end: the queue records the merge gate it ran, the checker reads it, and a deploy-style call is exit 0', async () => {
+    const gs = await import('./gate-status.js');
+    agent('ales');
+    lane('wc-base-shift', { 'shift.txt': 's' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-shift:main'); // behind main: a real merge, so the gate runs on the merge SHA
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    gateHook = () => ({ code: 0, stdout: 'countix-remote-test: pushed in 1s; running suite api on host=countix-testing\ndispatch 20261026-150000-abcdef012-g77\n=== RESULT GREEN sha=0000000 suite=api who=wave exit=0 host=full-a ===' });
+    await tick();
+    const mergeSha = originMain();
+    expect(getQueueRow(sha)?.state).toBe('merged');
+    const records = gs.recordsFor(mergeSha);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ schema_version: 1, sha: mergeSha, suite: 'api', label: 'api', state: 'GREEN', exit_code: 0, run_id: '20261026-150000-abcdef012-g77', runner: 'gate-run', tree_sha: git(repo, 'rev-parse', `${mergeSha}^{tree}`) });
+    expect(records[0].reused_from).toMatchObject({ sha: '0000000' }); // the RESULT named another SHA: a reuse, recorded as such
+    // the checker: the record counts only on an identical tree; the donor is unknown here, so api is MISSING with the reason…
+    const unknownDonor = await gs.checkGateStatus('wave', mergeSha, ['api']);
+    expect(unknownDonor.suites.api.state).toBe('MISSING');
+    expect(unknownDonor.found[0].why).toMatch(/no tree for donor 0000000/);
+    // …and a gate whose RESULT names the SHA itself is GREEN, exit 0 (what staging's green-check will call)
+    const toni = agent('toni');
+    const shaB = lane('wc-toni', { 'b-lane.txt': 'B' });
+    await reviewed('toni', 'wc-toni', shaB, 'ship');
+    gateHook = (env) => ({ code: 0, stdout: `=== RESULT GREEN sha=${env?.WAVECODE_SHA} suite=api who=wave exit=0 host=full-a ===` });
+    await tick();
+    const mergeB = originMain();
+    expect(getQueueRow(shaB)?.state).toBe('merged');
+    const green = await gs.checkGateStatus('wave', mergeB, ['api']);
+    expect(green).toMatchObject({ verdict: 'GREEN', exit_code: 0, suites: { api: { state: 'GREEN', source: 'wavecode' } } });
+    expect(await gs.checkGateStatus('wave', mergeB, ['quick', 'api'])).toMatchObject({ verdict: 'MISSING', exit_code: 2 });
+    expect(toni.id).toBeTruthy();
+  });
+
   it('a second tick while one runs joins it instead of starting another pass', async () => {
     const a = mergeQueueTickGuarded({ wait: true });
     const b = mergeQueueTickGuarded({ wait: true });

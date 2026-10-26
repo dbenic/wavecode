@@ -603,6 +603,41 @@ profileCmd
     process.exit(result.status ?? 0);
   });
 
+// --- gate-status: the one checker (deploy scripts, agents) ---
+program
+  .command('gate-status <sha>')
+  .description('Is this exact SHA green? Asks the daemon (one checker for the queue, the Reviews page and deploys). Exit 0 all required GREEN, 2 missing, 3 red, 4 running, 1 error')
+  .option('--require <suites>', 'Comma-separated: quick, api, full, gate (gate = any of the project\'s full suites)', 'quick,api')
+  .option('--project <name>', 'Project (default: the only configured one)')
+  .option('--json', 'Print the full report as JSON')
+  .option('--url <url>', 'WaveCode daemon URL (default: $WAVECODE_URL or config server)')
+  .option('--token <token>', 'Bearer token (default: $WAVECODE_TOKEN or config auth.fallback_token)')
+  .action(async (sha: string, opts: { require: string; project?: string; json?: boolean; url?: string; token?: string }) => {
+    try { loadInstalledConfig(); } catch { /* env may carry url + token */ }
+    const { resolveDaemonConnection } = await import('./daemon-connection.js');
+    const { formatReport } = await import('../server/gate-status.js');
+    const conn = resolveDaemonConnection();
+    const url = new URL(`/api/gate-status/${encodeURIComponent(sha.trim())}`, opts.url ?? conn.url);
+    url.searchParams.set('require', opts.require);
+    if (opts.project) url.searchParams.set('project', opts.project);
+    const token = opts.token ?? conn.token;
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    } catch (e) {
+      console.error(`gate-status: daemon unreachable at ${url.origin}: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    const body = await res.json().catch(() => null) as { error?: string; exit_code?: number } | null;
+    if (!res.ok || !body || typeof body.exit_code !== 'number') {
+      console.error(`gate-status: ${body?.error ?? `HTTP ${res.status}`}`);
+      process.exit(1);
+    }
+    if (opts.json) writeLine(process.stdout, JSON.stringify(body, null, 2));
+    else writeLine(process.stdout, formatReport(body as Parameters<typeof formatReport>[0]));
+    process.exit(body.exit_code);
+  });
+
 // --- mcp ---
 program
   .command('mcp')
