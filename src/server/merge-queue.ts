@@ -406,6 +406,11 @@ export async function alreadyOnMain(repo: string, sha: string, mainRef: string):
   const lines = cherry.split('\n').map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) return null; // no commits of its own: nothing to merge, nothing to call equivalent either
   if (lines.every((l) => l.startsWith('-'))) return `all ${lines.length} commit${lines.length === 1 ? '' : 's'} of the lane already have equivalents in ${mainRef.replace(/^refs\/remotes\//, '')} (the merge would be empty)`;
+  // Different commits, same content: a clean merge whose tree equals main's changes nothing.
+  const merged = await runArgv(['git', '-C', repo, 'merge-tree', '--write-tree', '--no-messages', mainRef, sha], { timeoutMs: 30000 });
+  if (merged.code !== 0) return null;
+  const mainTree = await tryGit(repo, ['rev-parse', `${mainRef}^{tree}`]);
+  if (mainTree && merged.stdout.trim() === mainTree) return `merging ${sha.slice(0, 8)} into ${mainRef.replace(/^refs\/remotes\//, '')} would change nothing (its changes are already there)`;
   return null;
 }
 
@@ -641,16 +646,17 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
   const mainRef = await resolveMainRef(repo, project);
   if (!mainRef) return no(none, 'NO_REPO', `${spec.ref} not found`);
 
+  // Nothing left to merge: the SHA is already in main, every commit of the lane has an
+  // equivalent there (a cherry-pick, a squash), or the merge would change nothing. Checked
+  // before the lane's state: a deleted or moved lane does not matter once the work is in.
+  // The freeze itself stays as it is (the overview tracks it until it is deployed).
+  const onMain = await alreadyOnMain(repo, freeze.sha, mainRef);
+  if (onMain) return { ...none, state: 'superseded', code: 'ALREADY_ON_MAIN', reason: `ALREADY_ON_MAIN: ${onMain}` };
+
   // Any commit after the review invalidates it: the remote lane must still be this SHA.
   const tip = await remoteTip(repo, spec.remote, freeze.lane, freeze.sha);
   if (!tip) return no(none, 'LANE_GONE', `${freeze.lane} is not on ${spec.remote}`);
   if (tip.toLowerCase() !== freeze.sha.toLowerCase()) return no(none, 'LANE_MOVED', `lane moved to ${tip.slice(0, 8)} after the freeze; freeze that SHA`);
-
-  // Nothing left to merge: the SHA is already in main, or every commit of the lane has an
-  // equivalent there (a cherry-pick, a squash). The freeze itself stays as it is: the
-  // overview still tracks it until it is deployed; the queue is simply done with it.
-  const onMain = await alreadyOnMain(repo, freeze.sha, mainRef);
-  if (onMain) return { ...none, state: 'superseded', code: 'ALREADY_ON_MAIN', reason: `ALREADY_ON_MAIN: ${onMain}` };
 
   const migrationsDir = getConfig().projects?.[project]?.migrations_dir ?? null;
   const files = await changedFiles(repo, freeze.sha, mainRef).catch(() => [] as string[]);
@@ -1064,6 +1070,7 @@ async function refreshProjectPass(project: string): Promise<MergeQueueRow | null
   for (const freeze of open) {
     const existing = getQueueRow(freeze.sha);
     if (existing && (existing.state === 'merged' || existing.state === 'bounced' || existing.state === 'merging')) continue;
+    if (existing?.state === 'superseded' && existing.reason?.startsWith('ALREADY_ON_MAIN')) continue; // once in main, always in main: not re-checked
     let result: Eligibility;
     try { result = await evaluate(freeze); } catch (e) {
       result = { state: 'waiting', code: 'CHECK_FAILED', reason: `CHECK_FAILED: ${(e as Error).message}`.slice(0, 200), tier: null, pr: null, verdictFiles: [] };

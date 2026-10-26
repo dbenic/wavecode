@@ -538,6 +538,22 @@ describe('merge queue — on a scratch repository', () => {
     expect(getQueueRow(sha)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: all 1 commit of the lane already have equivalents/) });
   });
 
+  it('a lane whose changes main already carries through different commits (a no-op merge) leaves the queue', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'a.txt': 'same change' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'detour');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'a detour on main');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'same change');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'the same end state, reached by hand (a different patch)');
+    git(repo, 'push', '-q', 'origin', 'main');
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: merging [0-9a-f]{8} into origin\/main would change nothing/) });
+  });
+
   it('resolveQueueShas closes the listed freezes in bulk and skips the rest with a reason', async () => {
     agent('ales');
     agent('toni');
