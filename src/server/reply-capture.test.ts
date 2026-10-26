@@ -70,6 +70,28 @@ describe('reply-capture.ts', () => {
     expect(rc.getPendingReply(pm.id)).toBeUndefined();
   });
 
+  it('a pending prompt survives a daemon restart: reloaded from the database, the answer is still captured from the pane', async () => {
+    await rc.trackPrompt({ agent: pm, actorId: 'u-ana', prompt: 'what is chatgpt-countix doing?', promptEventId: 42, now: 1000 });
+    // The daemon stops: memory is gone, the row is not.
+    rc.resetReplyCaptureForTest();
+    expect(rc.getPendingReply(pm.id)).toBeUndefined();
+    expect(rc.loadPendingReplies()).toBe(1);
+    expect(rc.getPendingReply(pm.id)).toMatchObject({ agentId: pm.id, prompt: 'what is chatgpt-countix doing?', promptEventId: 42, sentAt: 1000 });
+    // No working → idle edge after a restart: a quiet pane with the answer behind the echo resolves it.
+    paneHarness.text = ANSWER;
+    expect(await rc.onAgentIdle(pm.id, { transitioned: false, outputChanged: false, now: 20_000 })).toBe(true);
+    expect(replies()).toEqual([expect.objectContaining({ message: 'It is running the invoices suite for T12.', ref_prompt_event_id: 42 })]);
+    // Stored once, gone once answered: nothing to reload.
+    expect(rc.loadPendingReplies()).toBe(0);
+  });
+
+  it('a corrupt pending row is dropped on reload instead of breaking the start', () => {
+    db.getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?)').run('reply:pending:ghost', '{not json');
+    db.getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?)').run('reply:pending:half', '{"agentId":"half"}');
+    expect(rc.loadPendingReplies()).toBe(0);
+    expect(db.getDb().prepare("SELECT count(*) AS n FROM kv_settings WHERE key LIKE 'reply:pending:%'").get()).toEqual({ n: 0 });
+  });
+
   it('ref_task_id is set only when dispatch passes it — a chat prompt during an open run is still a chat prompt', async () => {
     const task = db.insertTask({ prompt: 'T12', created_by: 'u-ana' });
     if (!task.ok) throw new Error(task.error);

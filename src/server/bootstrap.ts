@@ -30,6 +30,7 @@ import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import { startMergeQueueTimer, stopMergeQueueTimer } from './merge-queue.js';
 import { startFableQueue, stopFableQueue } from './fable-queue.js';
+import * as replyCapture from './reply-capture.js';
 import { startSlackBridge, stopSlackBridge } from './slack-bridge.js';
 import { startOpsLanes, stopOpsLanes } from './ops-lanes.js';
 import { closeAllPaneStreams, resetStalePipes } from './terminal-stream.js';
@@ -59,6 +60,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   usageProbe.ensureUsageTable();
   teamManager.ensureTeamTables();
   fileSharing.ensureFileSharingTable();
+  replyCapture.loadPendingReplies(); // prompts still unanswered at the last stop: their answers are captured after the restart
   teamManager.startAllCommsWatchers();
   notifications.getVapidPublicKey();
 

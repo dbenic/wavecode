@@ -69,6 +69,14 @@ resets the backoff; `disconnect` or a socket close reconnects (2 s doubling to 6
 recognised. A mention in a channel arrives twice (`app_mention` and `message`); it is answered
 once (`client_msg_id`).
 
+A daemon restart does not lose a question. The question in flight for a seat and the ones
+queued behind it are written through to `kv_settings` (`slack:job:<agent>`, `slack:queue:<agent>`)
+and restored when the bridge starts; reply capture keeps its pending prompts the same way
+(`reply:pending:<agent>`), so the seat's answer, which was being written in a pane that outlives
+the daemon, is still captured after the restart and posted to the same thread. The reply timeout
+keeps counting from the original send. What a restart does drop is the 30-minute follow-up
+memory (a peer answer that lands after the restart is answered in the pane, not in the thread).
+
 ## Notifications
 
 `slack.notify_channel` adds Slack to `notifications.notify()` next to ntfy and Telegram: the

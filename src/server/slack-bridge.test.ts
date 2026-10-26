@@ -16,7 +16,7 @@ import * as db from './db.js';
 import { emit, resetEventListenersForTest } from './event-bus.js';
 import { chunkText, stripMention, toMrkdwn, type SlackApi } from './slack-api.js';
 import {
-  handleEvent, handleSocketMessage, primeSlackBridgeForTest, resetSlackBridgeForTest, routeFor, setSlackDepsForTest,
+  handleEvent, handleSocketMessage, primeSlackBridgeForTest, resetSlackBridgeForTest, restoreSlackJobs, routeFor, setSlackDepsForTest,
   slackBridgeStatus, startSlackBridge, SLACK_EVENT, type SlackEvent,
 } from './slack-bridge.js';
 
@@ -91,6 +91,48 @@ describe('slack bridge', () => {
     await vi.waitFor(() => expect(slackBridgeStatus().inflight).toBe(0));
     expect(api.calls.some((c) => c.method === 'reactions.remove')).toBe(true);
     expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(SLACK_EVENT.reply)).toHaveLength(1);
+  });
+
+  it('a question in flight survives a daemon restart: restored from the database, its answer still reaches Slack', async () => {
+    await handleEvent({ type: 'message', channel: 'D1', channel_type: 'im', user: 'U0DENIS', text: 'how do we train this?', ts: '9.1' });
+    await handleEvent({ type: 'message', channel: 'D1', channel_type: 'im', user: 'U0DENIS', text: 'and one more', ts: '9.2' });
+    expect(slackBridgeStatus()).toMatchObject({ inflight: 1, queued: 1 });
+    // The daemon restarts: the bridge's memory is gone, the rows are not.
+    resetSlackBridgeForTest();
+    api = fakeApi();
+    primeSlackBridgeForTest({ api, botUserId: 'UBOT' });
+    expect(slackBridgeStatus()).toMatchObject({ inflight: 0, queued: 0 });
+    expect(restoreSlackJobs()).toEqual({ inflight: 1, queued: 1 });
+    expect(slackBridgeStatus()).toMatchObject({ inflight: 1, queued: 1 });
+    // The seat's answer (reply capture restored its side the same way) lands in the DM, and the queued question starts.
+    const msg = db.insertAgentMessage({ from_agent_id: seat.id, message: 'No fine-tuning: labelled test cases first.', message_type: 'reply', ref_prompt_event_id: 41 }).data!;
+    emit('message.created', 'agent_message', msg.id, { from_agent_id: seat.id, message_type: 'reply', ref_prompt_event_id: 41, truncated: false }, null);
+    await vi.waitFor(() => expect(posts(api)).toHaveLength(1));
+    expect(posts(api)[0]).toMatchObject({ channel: 'D1', text: expect.stringContaining('No fine-tuning') });
+    await vi.waitFor(() => expect(promptAgent).toHaveBeenCalledTimes(2));
+    expect((promptAgent.mock.calls[1][0] as { text: string }).text).toContain('and one more');
+    expect(slackBridgeStatus()).toMatchObject({ inflight: 1, queued: 0 });
+    // Only the running question is on disk now.
+    expect(db.getDb().prepare("SELECT key FROM kv_settings WHERE key LIKE 'slack:%' ORDER BY key").all()).toEqual([{ key: `slack:job:${seat.id}` }]);
+  });
+
+  it('a restored question keeps its original timeout: an old one times out soon after the restart', async () => {
+    const now = { t: 1_000_000 };
+    setSlackDepsForTest({ now: () => now.t });
+    await handleEvent({ type: 'message', channel: 'D1', channel_type: 'im', user: 'U0DENIS', text: 'slow one', ts: '9.3' });
+    resetSlackBridgeForTest();
+    api = fakeApi();
+    primeSlackBridgeForTest({ api, botUserId: 'UBOT' });
+    vi.useFakeTimers();
+    try {
+      now.t += 10 * 60_000; // well past reply_timeout_s (60) + 30
+      expect(restoreSlackJobs()).toEqual({ inflight: 1, queued: 0 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(posts(api).at(-1)?.text).toContain('has not answered');
+      expect(slackBridgeStatus().inflight).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('refuses a Slack user who is not on the list and never reaches a seat', async () => {

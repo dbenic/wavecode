@@ -21,7 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 import { getConfig, type SlackConfig } from './config.js';
-import { getAgentByName, getAgentMessage, getDb, getEvent, getUserByName, type Agent, type WaveEvent } from './db.js';
+import { getAgent, getAgentByName, getAgentMessage, getDb, getEvent, getUserByName, type Agent, type WaveEvent } from './db.js';
 import { onEvent, emit } from './event-bus.js';
 import logger from './logger.js';
 import { promptAgent } from './prompting.js';
@@ -77,7 +77,14 @@ interface Job {
   continues: boolean;
   promptEventId: number | null;
   timer: ReturnType<typeof setTimeout> | null;
+  /** When the prompt went to the seat; the reply timeout counts from here, also after a restart. */
+  startedAt: number;
 }
+
+/** A Job on disk: the agent by id, no timer. */
+type StoredJob = Omit<Job, 'agent' | 'timer'> & { agentId: string };
+const JOB_KV = 'slack:job:';
+const QUEUE_KV = 'slack:queue:';
 
 interface Deps {
   fetch: typeof fetch;
@@ -114,6 +121,96 @@ function slackConfig(): SlackConfig | null {
 
 function ensureKv(): void {
   getDb().exec('CREATE TABLE IF NOT EXISTS kv_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+}
+
+function storedJob(job: Job): StoredJob {
+  const { agent, timer: _timer, ...rest } = job;
+  return { ...rest, agentId: agent.id };
+}
+
+function kvSet(key: string, value: unknown): void {
+  try {
+    ensureKv();
+    getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
+  } catch (e) {
+    logger.warn({ key, error: (e as Error).message }, 'Slack bridge state not persisted');
+  }
+}
+
+function kvDelete(key: string): void {
+  try { getDb().prepare('DELETE FROM kv_settings WHERE key = ?').run(key); } catch { /* table missing */ }
+}
+
+/** The in-flight job and the queue of a seat are written through, so a daemon restart keeps every asked question. */
+function saveSeatState(agentId: string): void {
+  const live = inflight.get(agentId);
+  if (live && live.promptEventId !== null) kvSet(`${JOB_KV}${agentId}`, storedJob(live)); else kvDelete(`${JOB_KV}${agentId}`);
+  const q = queued.get(agentId) ?? [];
+  if (q.length) kvSet(`${QUEUE_KV}${agentId}`, q.map(storedJob)); else kvDelete(`${QUEUE_KV}${agentId}`);
+}
+
+function reviveJob(s: StoredJob): Job | null {
+  const agent = getAgent(s.agentId);
+  if (!agent.ok) return null;
+  const { agentId: _id, ...rest } = s;
+  return { ...rest, agent: agent.data, timer: null, startedAt: typeof s.startedAt === 'number' ? s.startedAt : deps.now() };
+}
+
+/**
+ * Startup: questions that were being answered (or waiting their turn) when the daemon last
+ * stopped go back in flight. Reply capture restores its side the same way, so the seat's
+ * answer still reaches the thread; the timeout keeps counting from the original send.
+ */
+export function restoreSlackJobs(): { inflight: number; queued: number } {
+  let rows: Array<{ key: string; value: string }> = [];
+  try {
+    ensureKv();
+    rows = getDb().prepare('SELECT key, value FROM kv_settings WHERE key LIKE ? OR key LIKE ?').all(`${JOB_KV}%`, `${QUEUE_KV}%`) as Array<{ key: string; value: string }>;
+  } catch (e) {
+    logger.warn({ error: (e as Error).message }, 'Slack jobs not restored');
+    return { inflight: 0, queued: 0 };
+  }
+  let restoredInflight = 0;
+  let restoredQueued = 0;
+  const toStart: string[] = [];
+  for (const row of rows) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.value); } catch { kvDelete(row.key); continue; }
+    if (row.key.startsWith(JOB_KV)) {
+      const job = reviveJob(parsed as StoredJob);
+      if (!job || job.promptEventId === null) { kvDelete(row.key); continue; }
+      inflight.set(job.agent.id, job);
+      byPrompt.set(job.promptEventId, job);
+      armTimeout(job);
+      restoredInflight++;
+    } else {
+      const list = Array.isArray(parsed) ? (parsed as StoredJob[]).map(reviveJob).filter((j): j is Job => !!j) : [];
+      if (!list.length) { kvDelete(row.key); continue; }
+      queued.set(list[0].agent.id, list);
+      restoredQueued += list.length;
+      toStart.push(list[0].agent.id);
+    }
+  }
+  // A queue whose in-flight job did not survive (restart between the send and the tracking) starts its first entry.
+  for (const agentId of toStart) {
+    if (inflight.has(agentId)) continue;
+    const next = queued.get(agentId)?.shift();
+    if (next) void run(next);
+  }
+  if (restoredInflight || restoredQueued) logger.info({ inflight: restoredInflight, queued: restoredQueued }, 'Slack questions restored after restart');
+  return { inflight: restoredInflight, queued: restoredQueued };
+}
+
+function armTimeout(job: Job): void {
+  const timeoutS = slackConfig()?.reply_timeout_s ?? DEFAULT_REPLY_TIMEOUT_S;
+  const remaining = Math.max(5_000, job.startedAt + (timeoutS + 30) * 1000 - deps.now());
+  job.timer = setTimeout(() => {
+    void (async () => {
+      if (byPrompt.get(job.promptEventId!) !== job) return;
+      await post(job.channel, job.threadTs, `${job.agent.name} has not answered in ${Math.round(timeoutS / 60)} min. The answer, when it comes, is in the Command Center.`);
+      await finish(job);
+    })();
+  }, remaining);
 }
 
 function rememberThread(channel: string, threadTs: string, seat: string): void {
@@ -204,13 +301,14 @@ export async function handleEvent(ev: SlackEvent): Promise<void> {
   const job: Job = {
     agent: agentRes.data, channel: ev.channel, threadTs, ts: ev.ts, text,
     actorId: user.ok ? user.data.id : null, userLabel: userName, where: route.where, continues: route.continues,
-    promptEventId: null, timer: null,
+    promptEventId: null, timer: null, startedAt: deps.now(),
   };
   if (threadTs) rememberThread(ev.channel, threadTs, route.seat);
   if (inflight.has(job.agent.id)) {
     const q = queued.get(job.agent.id) ?? [];
     q.push(job);
     queued.set(job.agent.id, q);
+    saveSeatState(job.agent.id);
     await post(ev.channel, threadTs, `Queued: ${route.seat} is still answering an earlier question (${q.length} ahead of you).`);
     return;
   }
@@ -219,6 +317,7 @@ export async function handleEvent(ev: SlackEvent): Promise<void> {
 
 async function run(job: Job): Promise<void> {
   inflight.set(job.agent.id, job);
+  job.startedAt = deps.now();
   await api?.addReaction({ channel: job.channel, timestamp: job.ts, name: WORKING });
   // The seat answers in Slack: short, bullets over tables (Slack has no tables or headers).
   const prefix = `[from Slack ${job.where}, ${job.userLabel}${job.continues ? ', same thread' : ''}; answer for Slack: short, bullets, no tables]`;
@@ -236,14 +335,8 @@ async function run(job: Job): Promise<void> {
     return;
   }
   byPrompt.set(job.promptEventId, job);
-  const timeoutS = slackConfig()?.reply_timeout_s ?? DEFAULT_REPLY_TIMEOUT_S;
-  job.timer = setTimeout(() => {
-    void (async () => {
-      if (byPrompt.get(job.promptEventId!) !== job) return;
-      await post(job.channel, job.threadTs, `${job.agent.name} has not answered in ${Math.round(timeoutS / 60)} min. The answer, when it comes, is in the Command Center.`);
-      await finish(job);
-    })();
-  }, (timeoutS + 30) * 1000);
+  saveSeatState(job.agent.id);
+  armTimeout(job);
 }
 
 /**
@@ -287,6 +380,7 @@ async function finish(job: Job): Promise<void> {
   if (job.promptEventId !== null) byPrompt.delete(job.promptEventId);
   inflight.delete(job.agent.id);
   recent.set(job.agent.id, { job, at: deps.now() });
+  saveSeatState(job.agent.id);
   await api?.removeReaction({ channel: job.channel, timestamp: job.ts, name: WORKING });
   const next = queued.get(job.agent.id)?.shift();
   if (next) await run(next);
@@ -406,6 +500,7 @@ export function startSlackBridge(): void {
   api = slackApi(botToken, deps.fetch);
   stopped = false;
   unsubscribe = onEvent(onBusEvent);
+  restoreSlackJobs();
   void whoAmI().then(connect);
 }
 

@@ -16,6 +16,7 @@
 
 import {
   getAgent,
+  getDb,
   getRun,
   getTask,
   insertAgentMessage,
@@ -56,6 +57,54 @@ export interface PendingReply {
 }
 
 const pending = new Map<string, PendingReply>();
+const KV_PREFIX = 'reply:pending:';
+
+/**
+ * The map is written through to kv_settings so a daemon restart does not lose a prompt
+ * that is still being answered: the seat's pane survives the restart, so the answer can
+ * still be captured from it once the map is loaded back (loadPendingReplies at startup).
+ */
+function setPending(p: PendingReply): void {
+  pending.set(p.agentId, p);
+  try {
+    getDb().prepare('INSERT INTO kv_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(`${KV_PREFIX}${p.agentId}`, JSON.stringify(p));
+  } catch (e) {
+    logger.warn({ agentId: p.agentId, error: (e as Error).message }, 'Pending reply not persisted');
+  }
+}
+
+function deletePending(agentId: string): void {
+  pending.delete(agentId);
+  try {
+    getDb().prepare('DELETE FROM kv_settings WHERE key = ?').run(`${KV_PREFIX}${agentId}`);
+  } catch (e) {
+    logger.warn({ agentId, error: (e as Error).message }, 'Pending reply row not removed');
+  }
+}
+
+/** Startup: reload the prompts that were still unanswered when the daemon last stopped. */
+export function loadPendingReplies(): number {
+  pending.clear();
+  let rows: Array<{ key: string; value: string }> = [];
+  try {
+    rows = getDb().prepare('SELECT key, value FROM kv_settings WHERE key LIKE ?').all(`${KV_PREFIX}%`) as Array<{ key: string; value: string }>;
+  } catch (e) {
+    logger.warn({ error: (e as Error).message }, 'Pending replies not loaded');
+    return 0;
+  }
+  for (const row of rows) {
+    try {
+      const p = JSON.parse(row.value) as PendingReply;
+      if (p && typeof p.agentId === 'string' && typeof p.prompt === 'string' && typeof p.sentAt === 'number') pending.set(p.agentId, p);
+      else getDb().prepare('DELETE FROM kv_settings WHERE key = ?').run(row.key);
+    } catch {
+      getDb().prepare('DELETE FROM kv_settings WHERE key = ?').run(row.key);
+    }
+  }
+  if (pending.size) logger.info({ count: pending.size, agents: [...pending.keys()] }, 'Pending replies restored after restart');
+  return pending.size;
+}
 
 export function resetReplyCaptureForTest(): void {
   pending.clear();
@@ -95,7 +144,7 @@ export async function trackPrompt(opts: {
     const pane = await capture(agent);
     const sofar = pane ? extractReply(agent.runtime, pane, superseded.prompt) : { text: '', anchored: false };
     if (superseded.quietIfSuperseded && !(sofar.anchored && sofar.text)) {
-      pending.delete(agent.id);
+      deletePending(agent.id);
     } else persist(
       superseded,
       agent,
@@ -105,7 +154,7 @@ export async function trackPrompt(opts: {
   }
 
   const paneNow = await capture(agent);
-  pending.set(agent.id, {
+  setPending({
     agentId: agent.id,
     actorId: opts.actorId,
     prompt: opts.prompt.slice(0, PROMPT_EXCERPT_CHARS),
@@ -142,7 +191,7 @@ async function capture(agent: Agent): Promise<string | null> {
 }
 
 function persist(p: PendingReply, agent: Agent, text: string, truncated: boolean): void {
-  pending.delete(p.agentId);
+  deletePending(p.agentId);
   const inserted = insertAgentMessage({
     from_agent_id: agent.id,
     to_agent_id: null,
@@ -187,7 +236,7 @@ export async function onAgentIdle(
 
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) {
-    pending.delete(agentId);
+    deletePending(agentId);
     return false;
   }
   const pane = await capture(agentResult.data);
@@ -217,7 +266,7 @@ export async function onAgentTick(agentId: string, opts: { now?: number } = {}):
 
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) {
-    pending.delete(agentId);
+    deletePending(agentId);
     return false;
   }
   const pane = await capture(agentResult.data);
@@ -250,7 +299,7 @@ export async function sweepExpiredReplies(now = Date.now()): Promise<string[]> {
     if (now - p.sentAt < REPLY_TIMEOUT_MS) continue;
     const agentResult = getAgent(p.agentId);
     if (!agentResult.ok) {
-      pending.delete(p.agentId);
+      deletePending(p.agentId);
       continue;
     }
     const pane = await capture(agentResult.data);
