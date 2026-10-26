@@ -506,6 +506,22 @@ describe('release-freezes.ts', () => {
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
     });
 
+    it('a verdict on a freeze whose author is not an agent lands in the ledger without a review card', async () => {
+      const sha = 'ff425611' + '2d'.repeat(16);
+      expect((await rf.ingestFreezeText(`# Freeze\nProject: wavepulse · Author: @wavecode\nLane: wc-wavecode-review-log-union\n- Exact SHA: \`${sha}\`\n`, `wavecode-review-log-union-freeze-${sha.slice(0, 8)}.md`)).ok).toBe(true);
+      expect(rf.getFreeze(sha)).toMatchObject({ status: 'open', author_agent_id: null, author_name: 'wavecode' });
+      const kimi = db.insertAgent({ name: 'kimi1', runtime: 'kimi', tmux_session: 'wc-kimi1', workspace: null, mode: 'spawned', status: 'idle', profile: 'kimi' });
+      if (!kimi.ok) throw new Error('seed');
+      const v = write(`kimi1-verdict-wavecode-review-log-union-${sha.slice(0, 8)}-20261026.md`, `Reviewer: @kimi1\nAuthor: @wavecode\nFreeze SHA: ${sha}\n\nVERDICT: PASS\n`);
+      const r = await rf.ingestFreezeFile(v);
+      expect(r.ok && r.data.effect).toBe('updated');
+      expect(rf.listVerdicts(sha)).toMatchObject([{ reviewer_name: 'kimi1', verdict: 'pass' }]);
+      expect(rf.getFreeze(sha)).toMatchObject({ status: 'open', verdict: 'pass', reviewer_name: 'kimi1', run_id: null }); // no synthetic run for a non-agent author
+      // a self-review by name is still refused
+      const self = write(`wavecode-verdict-self-${sha.slice(0, 8)}.md`, `Reviewer: @wavecode\nFreeze SHA: ${sha}\n\nVERDICT: NEEDS FIXES\n`);
+      expect((await rf.ingestFreezeFile(self)).ok).toBe(false);
+    });
+
     it('the freeze at the lane tip stays live whatever its age, and an admin resolution is not reopened by the lane walk', async () => {
       const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
       const ws = path.join(tmp, 'ws-toni');

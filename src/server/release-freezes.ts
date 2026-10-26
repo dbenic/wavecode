@@ -957,13 +957,24 @@ export async function ingestFreezeText(text: string, filePath: string, opts: Ing
   // A verdict on this SHA — the rules.
   const authorId = author?.id ?? existing?.author_agent_id ?? null;
   const authorName = author?.name ?? existing?.author_name ?? parsed.authorCandidates[0] ?? null;
-  if (!authorId) return { ok: false, error: `${path.basename(filePath)}: author agent not found (${parsed.authorCandidates.join(', ') || 'none named'})` };
+  if (!reviewer && reviewerName && reviewerName.toLowerCase() === authorName?.toLowerCase()) {
+    return { ok: false, error: `${path.basename(filePath)}: self-review refused — ${reviewerName} is the author of ${sha.slice(0, 8)}` };
+  }
+  if (!authorId) {
+    // A freeze whose author is not an agent (a lane WaveCode or a person pushed, author
+    // "@wavecode"): there is no seat to hang a review card on, but the verdict still counts for
+    // the merge queue, which reads the ledger. Record it and keep the freeze; no synthetic run.
+    if (parsed.kind === 'verdict' && reviewerName && existing) {
+      recordVerdict({ sha, reviewer, reviewerName, verdict, path: filePath });
+      patch(sha, { ...enrich, reviewer_agent_id: reviewer?.id ?? null, reviewer_name: reviewerName, verdict, verdict_path: filePath });
+      logger.info({ sha, file: filePath, reviewer: reviewerName, verdict, author: authorName }, 'Verdict recorded for a freeze without an author agent');
+      return { ok: true, data: { sha, effect: 'updated', run_id: existing.run_id } };
+    }
+    return { ok: false, error: `${path.basename(filePath)}: author agent not found (${parsed.authorCandidates.join(', ') || 'none named'})` };
+  }
   if (reviewer && reviewer.id === authorId) {
     logger.warn({ sha, file: filePath, reviewer: reviewer.name }, 'Self-review refused: reviewer is the author');
     return { ok: false, error: `${path.basename(filePath)}: self-review refused — @${reviewer.name} is the author of ${sha.slice(0, 8)}` };
-  }
-  if (!reviewer && reviewerName && reviewerName.toLowerCase() === authorName?.toLowerCase()) {
-    return { ok: false, error: `${path.basename(filePath)}: self-review refused — ${reviewerName} is the author of ${sha.slice(0, 8)}` };
   }
   if (parsed.kind === 'verdict' && reviewerName) recordVerdict({ sha, reviewer, reviewerName, verdict, path: filePath });
   if (opts.passOnly && verdict !== 'pass' && !existing?.run_id) {
