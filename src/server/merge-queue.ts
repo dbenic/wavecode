@@ -79,10 +79,10 @@ export interface QueueSwitch {
 export type EligibilityCode =
   | 'NOT_CONFIGURED' | 'LANE_DENIED' | 'NO_REPO' | 'LANE_GONE' | 'LANE_MOVED' | 'GH_AUTH_MISSING'
   | 'GATE_NOT_GREEN' | 'NEEDS_FIXES' | 'NO_PASS_ON_SHA' | 'NO_PR' | 'MIGRATION_HOLD' | 'ASK_TIER_NO_OK'
-  | 'MIGRATION_COLLISION' | 'QUEUE_OFF' | 'CHECK_FAILED' | 'STALLED_MERGE';
+  | 'MIGRATION_COLLISION' | 'QUEUE_OFF' | 'CHECK_FAILED' | 'STALLED_MERGE' | 'ALREADY_ON_MAIN';
 
 export interface Eligibility {
-  state: 'waiting' | 'queued' | 'bounced';
+  state: 'waiting' | 'queued' | 'bounced' | 'superseded';
   code: EligibilityCode | null;
   /** `CODE: what is missing`, or null when queued. */
   reason: string | null;
@@ -98,6 +98,8 @@ export const MERGE_QUEUE_EVENT = {
   switch: 'merge_queue.switch',
   requeued: 'merge_queue.requeued',
   stall: 'merge_queue.stall',
+  pass: 'merge_queue.pass',
+  resolved: 'merge_queue.resolved',
 } as const;
 
 export interface QueueStall {
@@ -228,6 +230,43 @@ export function queueSwitch(project: string): QueueSwitch {
   return { project, config_enabled, enabled: config_enabled && queueEnabled(project), enabled_by: kvGet(`merge_queue.${project}.by`), queued, last_pass_at: kvGet(`merge_queue.${project}.last_pass_at`) };
 }
 
+export interface ResolveOutcome { resolved: Array<{ sha: string; lane: string | null; status: 'stale' | 'merged' }>; skipped: Array<{ sha: string; why: string }> }
+
+/**
+ * The supported way to take lanes out of the queue in bulk (an admin, after a triage):
+ * each freeze is closed (`stale` by default, `merged` when the work is on main some other
+ * way) with the reason kept as its `superseded_by`, and its queue row turns superseded.
+ * A freeze that is not open, not this project's, or not found is skipped with the reason.
+ */
+export function resolveQueueShas(project: string, shas: string[], reason: string, status: 'stale' | 'merged', by: string): ResolveOutcome {
+  const out: ResolveOutcome = { resolved: [], skipped: [] };
+  const seen = new Set<string>();
+  for (const raw of shas) {
+    const prefix = raw.trim().toLowerCase();
+    if (!/^[0-9a-f]{7,40}$/.test(prefix)) { out.skipped.push({ sha: raw, why: 'not a SHA' }); continue; }
+    const matches = getDb().prepare('SELECT sha FROM release_freezes WHERE sha LIKE ? LIMIT 2').all(`${prefix}%`) as Array<{ sha: string }>;
+    if (matches.length !== 1) { out.skipped.push({ sha: raw, why: matches.length === 0 ? 'no freeze with this SHA' : 'ambiguous prefix' }); continue; }
+    const sha = matches[0].sha;
+    if (seen.has(sha)) continue;
+    seen.add(sha);
+    const freeze = getFreeze(sha);
+    if (!freeze) { out.skipped.push({ sha: raw, why: 'no freeze with this SHA' }); continue; }
+    if (freeze.project !== project) { out.skipped.push({ sha: raw, why: `freeze belongs to ${freeze.project ?? 'no project'}` }); continue; }
+    if (!['open', 'behind-main', 'rejected'].includes(freeze.status)) { out.skipped.push({ sha: raw, why: `freeze is already ${freeze.status}` }); continue; }
+    const row = getQueueRow(sha);
+    if (row && (row.state === 'merging' || row.state === 'merged')) { out.skipped.push({ sha: raw, why: `queue row is ${row.state}` }); continue; }
+    getDb().prepare("UPDATE release_freezes SET status = ?, superseded_by = ?, updated_at = datetime('now') WHERE sha = ?").run(status, `resolved by ${by}: ${reason}`.slice(0, 200), sha);
+    upsert({ sha, project, lane: freeze.lane ?? row?.lane ?? '?', state: 'superseded', reason: `freeze ${status}: ${reason}`.slice(0, 200), eligible_at: null, finished_at: new Date().toISOString() });
+    emit(MERGE_QUEUE_EVENT.resolved, 'run', sha, { sha, project, lane: freeze.lane, status, reason, by }, null);
+    out.resolved.push({ sha, lane: freeze.lane, status });
+  }
+  if (out.resolved.length) {
+    logger.info({ project, by, status, reason, count: out.resolved.length }, 'Merge queue: lanes resolved in bulk');
+    maestroLine(project, `resolved ${out.resolved.length} lane${out.resolved.length === 1 ? '' : 's'} as ${status} by ${by}: ${reason}`);
+  }
+  return out;
+}
+
 /** The stall the last pass found for the project, or null when it is moving. */
 export function queueStall(project: string): QueueStall | null {
   const raw = kvGet(`merge_queue.${project}.stall`);
@@ -351,6 +390,23 @@ async function git(repo: string, args: string[], timeout = 20000): Promise<strin
     timeout, maxBuffer: 8 * 1024 * 1024,
   });
   return out.trim();
+}
+
+/**
+ * The text of why there is nothing to merge, or null when the lane still carries work:
+ * the SHA is an ancestor of main, or `git cherry` finds an equivalent on main for every
+ * lane commit (an unknown answer counts as "still work", never as done).
+ */
+export async function alreadyOnMain(repo: string, sha: string, mainRef: string): Promise<string | null> {
+  const ancestor = await runArgv(['git', '-C', repo, 'merge-base', '--is-ancestor', sha, mainRef], { timeoutMs: 20000 });
+  if (ancestor.code === 0) return `${sha.slice(0, 8)} is already in ${mainRef.replace(/^refs\/remotes\//, '')}`;
+  if (ancestor.code !== 1) return null;
+  const cherry = await tryGit(repo, ['cherry', mainRef, sha]);
+  if (cherry === null) return null;
+  const lines = cherry.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return null; // no commits of its own: nothing to merge, nothing to call equivalent either
+  if (lines.every((l) => l.startsWith('-'))) return `all ${lines.length} commit${lines.length === 1 ? '' : 's'} of the lane already have equivalents in ${mainRef.replace(/^refs\/remotes\//, '')} (the merge would be empty)`;
+  return null;
 }
 
 async function tryGit(repo: string, args: string[], timeout = 20000): Promise<string | null> {
@@ -589,6 +645,12 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
   const tip = await remoteTip(repo, spec.remote, freeze.lane, freeze.sha);
   if (!tip) return no(none, 'LANE_GONE', `${freeze.lane} is not on ${spec.remote}`);
   if (tip.toLowerCase() !== freeze.sha.toLowerCase()) return no(none, 'LANE_MOVED', `lane moved to ${tip.slice(0, 8)} after the freeze; freeze that SHA`);
+
+  // Nothing left to merge: the SHA is already in main, or every commit of the lane has an
+  // equivalent there (a cherry-pick, a squash). The freeze itself stays as it is: the
+  // overview still tracks it until it is deployed; the queue is simply done with it.
+  const onMain = await alreadyOnMain(repo, freeze.sha, mainRef);
+  if (onMain) return { ...none, state: 'superseded', code: 'ALREADY_ON_MAIN', reason: `ALREADY_ON_MAIN: ${onMain}` };
 
   const migrationsDir = getConfig().projects?.[project]?.migrations_dir ?? null;
   const files = await changedFiles(repo, freeze.sha, mainRef).catch(() => [] as string[]);
@@ -1007,6 +1069,13 @@ async function refreshProjectPass(project: string): Promise<MergeQueueRow | null
       result = { state: 'waiting', code: 'CHECK_FAILED', reason: `CHECK_FAILED: ${(e as Error).message}`.slice(0, 200), tier: null, pr: null, verdictFiles: [] };
     }
     const lane = freeze.lane!;
+    if (result.state === 'superseded') {
+      if (existing?.state !== 'superseded' || existing.reason !== result.reason) {
+        upsert({ sha: freeze.sha, project, lane, tier: result.tier, state: 'superseded', reason: result.reason, eligible_at: null, finished_at: new Date().toISOString() });
+        logger.info({ sha: freeze.sha, lane, reason: result.reason }, 'Merge queue: nothing to merge');
+      }
+      continue;
+    }
     if (result.state === 'bounced') {
       const row = upsert({ sha: freeze.sha, project, lane, tier: result.tier, pr: result.pr, verdict_files: result.verdictFiles.join('\n') });
       bounce(freeze, row, result.reason ?? 'not eligible');
@@ -1056,10 +1125,12 @@ export async function mergeQueueTick(opts: { wait?: boolean } = {}): Promise<voi
         if (row.state === 'queued') upsert({ sha: row.sha, project, lane: row.lane, reason: 'QUEUE_OFF: merge queue is off' });
       }
       kvSet(`merge_queue.${project}.last_pass_at`, new Date().toISOString());
+      emit(MERGE_QUEUE_EVENT.pass, 'project', project, { project, ms: Date.now() - passT0, head: null, off: true }, null);
       continue;
     }
     kvSet(`merge_queue.${project}.last_pass_at`, new Date().toISOString());
     logger.info({ project, ms: Date.now() - passT0, head: head?.sha ?? null, lane: head?.lane ?? null }, 'Merge queue pass');
+    emit(MERGE_QUEUE_EVENT.pass, 'project', project, { project, ms: Date.now() - passT0, head: head?.sha ?? null }, null);
     if (!head) continue;
     const job = runMerge(head)
       .catch((e) => logger.warn({ project, sha: head!.sha, error: (e as Error).message }, 'Merge queue: job failed'))

@@ -22,7 +22,7 @@ import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
   askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
-  gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
+  gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
 } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -420,7 +420,7 @@ describe('merge queue — on a scratch repository', () => {
     expect(log).toHaveLength(2);
     expect(log[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} CET merged wc-ales [0-9a-f]{8} -> main [0-9a-f]{8} \(tier ship, verdicts codex3-verdict-ales-[0-9a-f]{8}\.md\)$/);
     expect(log[1]).toMatch(/merged wc-toni .* \(tier show, verdicts /);
-    const events = db.getDb().prepare("SELECT type, payload_json FROM events WHERE type LIKE 'merge_queue.%' ORDER BY id").all() as Array<{ type: string; payload_json: string }>;
+    const events = (db.getDb().prepare("SELECT type, payload_json FROM events WHERE type LIKE 'merge_queue.%' ORDER BY id").all() as Array<{ type: string; payload_json: string }>).filter((e) => e.type !== 'merge_queue.pass');
     expect(events.map((e) => e.type)).toEqual(['merge_queue.queued', 'merge_queue.merged', 'merge_queue.queued', 'merge_queue.merged']);
     expect(JSON.parse(events[1].payload_json)).toMatchObject({ sha_in: shaA, sha_out: mainAfterA, main_before: base, tier: 'ship', author: 'ales' });
     // the working clone is untouched: no merge happened on a checked-out branch
@@ -512,6 +512,50 @@ describe('merge queue — on a scratch repository', () => {
     expect(queueSwitch('wave').last_pass_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(queueStall('wave')).toBeNull();
     ds.resetReconcileStepsForTest();
+  });
+
+  it('a lane whose work is already in main leaves the queue as superseded, freeze untouched', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    git(repo, 'push', '-q', 'origin', 'wc-ales:main'); // merged some other way
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: [0-9a-f]{8} is already in /) });
+    expect(getFreeze(sha)?.status).toBe('open'); // the overview still tracks it until it is deployed
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('superseded');
+  });
+
+  it('a lane whose commits all have equivalents on main (an empty merge) leaves the queue', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'cherry-pick', '--no-commit', sha);
+    git(repo, 'commit', '-q', '-m', 'same patch on main');
+    git(repo, 'push', '-q', 'origin', 'main');
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: all 1 commit of the lane already have equivalents/) });
+  });
+
+  it('resolveQueueShas closes the listed freezes in bulk and skips the rest with a reason', async () => {
+    agent('ales');
+    agent('toni');
+    const shaA = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', shaA, 'ship');
+    const shaB = lane('wc-toni', { 'b-lane.txt': 'B' });
+    await reviewed('toni', 'wc-toni', shaB, 'ship');
+    const out = resolveQueueShas('wave', [shaA.slice(0, 8), 'deadbeef1', 'not-a-sha', shaA], 'SysOps triage: branch abandoned', 'stale', 'owner');
+    expect(out.resolved).toEqual([{ sha: shaA, lane: 'wc-ales', status: 'stale' }]);
+    expect(out.skipped).toEqual([{ sha: 'deadbeef1', why: 'no freeze with this SHA' }, { sha: 'not-a-sha', why: 'not a SHA' }]);
+    expect(getFreeze(shaA)).toMatchObject({ status: 'stale', superseded_by: 'resolved by owner: SysOps triage: branch abandoned' });
+    expect(getQueueRow(shaA)).toMatchObject({ state: 'superseded', reason: 'freeze stale: SysOps triage: branch abandoned' });
+    expect(getFreeze(shaB)?.status).toBe('open'); // the live lane is untouched
+    expect(resolveQueueShas('wave', [shaA], 'again', 'stale', 'owner').skipped).toEqual([{ sha: shaA, why: 'freeze is already stale' }]);
+    expect(resolveQueueShas('other', [shaB], 'wrong project', 'stale', 'owner').skipped[0]?.why).toBe('freeze belongs to wave');
+    await tick(); // the live lane merges; the resolved one stays out
+    expect(getQueueRow(shaA)?.state).toBe('superseded');
+    expect(getQueueRow(shaB)?.state).toBe('merged');
   });
 
   it('a second tick while one runs joins it instead of starting another pass', async () => {

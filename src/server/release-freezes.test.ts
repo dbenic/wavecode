@@ -500,6 +500,10 @@ describe('release-freezes.ts', () => {
       expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
       expect(rf.getFreeze(SHA_A)!.status).toBe('open');
       expect(rf.reconcileSuperseded()).toBe(0);
+      // a behind-main older freeze on the same desk is retired the same way (it is a live candidate until then)
+      db.getDb().prepare("UPDATE release_freezes SET status = 'behind-main', superseded_by = NULL WHERE sha = ?").run(SHA_B);
+      expect(rf.reconcileSuperseded()).toBe(1);
+      expect(rf.getFreeze(SHA_B)).toMatchObject({ status: 'stale', superseded_by: SHA_A });
     });
 
     it('a SHA inside an unreleased candidate branch is "in candidate"; a released candidate (on main) no longer counts', async () => {

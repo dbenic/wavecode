@@ -150,6 +150,22 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result);
   });
 
+  app.post('/api/merge-queue/:project/resolve', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user)) return c.json({ error: 'Only an admin may resolve lanes in bulk' }, 403);
+    const project = c.req.param('project');
+    const known = Object.keys(getConfig().projects ?? {}).includes(project);
+    if (!known) return c.json({ error: `Unknown project ${project}` }, 404);
+    const body = await c.req.json<{ shas?: unknown; reason?: unknown; status?: unknown }>().catch(() => ({} as { shas?: unknown; reason?: unknown; status?: unknown }));
+    const shas = Array.isArray(body.shas) ? body.shas.filter((s): s is string => typeof s === 'string') : [];
+    if (shas.length === 0 || shas.length > 500) return c.json({ error: 'shas must be a list of 1 to 500 SHAs' }, 400);
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+    if (reason.length < 3 || reason.length > 200) return c.json({ error: 'reason must be 3 to 200 characters' }, 400);
+    const status = body.status === undefined ? 'stale' : body.status;
+    if (status !== 'stale' && status !== 'merged') return c.json({ error: "status must be 'stale' (default) or 'merged'" }, 400);
+    return c.json(mergeQueue.resolveQueueShas(project, shas, reason, status, user.name));
+  });
+
   app.post('/api/merge-queue/:sha/priority', async (c) => {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);

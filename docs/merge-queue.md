@@ -65,6 +65,7 @@ of every pass (cached five minutes when it passes). While it fails, **every** la
 | `NO_PR` | `require_pr` is on and no open pull request matches |
 | `MIGRATION_COLLISION` | a new migration is numbered at or below main's latest (bounced) |
 | `GATE_DISPATCH_FAILED` | the gate tool failed before any suite ran (gateway policy, host unreachable, SHA already in flight); retried, bounced after three tries |
+| `ALREADY_ON_MAIN` | the SHA is in main already, or every lane commit has an equivalent there (the merge would be empty); the row is superseded, the freeze stays for the overview's deploy tracking |
 
 The runner's own `=== RESULT GREEN|RED … ===` line is the verdict on the merge result, even when
 the tool exits by a signal afterwards (the countix-testing gateway's identical-tree reuse path
@@ -95,6 +96,22 @@ and tells the author's pane what happened. It works with `auto_review` on or off
 second request on the same SHA moves the review when the first seat has not answered.
 The same ask over HTTP: `POST /api/reviews/lanes/request-review { project, lane }` with no
 `reviewer`. The freeze note must exist first: it is what the reviewer reads.
+
+## Cleaning the list
+
+Rows leave the queue on their own: a newer freeze on the same lane retires the older one
+(open or behind-main) as `stale`; work that is already in main shows `ALREADY_ON_MAIN` and
+the row is superseded. For everything else there is one supported bulk route, for admins:
+
+```
+POST /api/merge-queue/<project>/resolve
+{ "shas": ["9d623bc7", …], "reason": "SysOps triage 26 Oct: branch deleted on origin", "status": "stale" }
+```
+
+Each listed freeze (7- to 40-character SHA) is closed with the reason kept as its
+`superseded_by`, and its queue row turns superseded; `status: "merged"` records work that
+reached main some other way. Freezes that are not open, not this project's, mid-merge or
+unknown are skipped with the reason. Never edit the database by hand for this.
 
 ## How it merges
 

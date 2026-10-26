@@ -73,7 +73,7 @@ function MergeQueueFlow({ version }: { version: number }) {
   const shown = showAll ? active : active.slice(0, 12);
   const lastPass = passAt ?? rows.reduce<string | null>((acc, r) => (r.updated_at && (!acc || r.updated_at > acc) ? r.updated_at : acc), null);
   const merging = rows.find((r) => r.state === 'merging') ?? null;
-  const counts = (['merging', 'queued', 'waiting', 'bounced', 'merged'] as const).map((s) => [s, rows.filter((r) => r.state === s).length] as const).filter(([, n]) => n > 0);
+  const counts = (['merging', 'queued', 'waiting', 'bounced', 'merged', 'superseded'] as const).map((s) => [s, rows.filter((r) => r.state === s).length] as const).filter(([, n]) => n > 0);
   let position = 0;
   const line = (row: MergeQueueRowView) => {
     const step = flowStep(row);

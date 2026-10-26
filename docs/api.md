@@ -1218,6 +1218,7 @@ one line per merge or bounce in `maestro_log`.
 - `GET /api/merge-queue[?project=]` — `{ switches: [{ project, config_enabled, enabled, enabled_by, queued }], rows: [...] }`.
 - `POST /api/merge-queue/:project/switch` `{ enabled }` — admin.
 - `POST /api/merge-queue/:sha/priority` `{ priority }` — 0 to 9, developers and admins.
+- `POST /api/merge-queue/:project/resolve` `{ shas, reason, status? }` — admin; closes the listed freezes (`stale` by default, or `merged`) with the reason and supersedes their rows; returns `{ resolved, skipped }`. Event `merge_queue.resolved`. Every pass also emits `merge_queue.pass` and the switch view carries `last_pass_at`.
 - `GET /api/reviews/board` — cards carry `queue: { state, reason, tier, position, merge_sha, pr } | null`;
   the board carries `merge_queue: { projects, can_switch }`.
 

@@ -1257,7 +1257,8 @@ export async function reconcileMerged(now = Date.now()): Promise<number> {
  * before the rule existed and freezes whose lane or desk was only learned later.
  */
 export function reconcileSuperseded(): number {
-  const open = (getDb().prepare("SELECT * FROM release_freezes WHERE status = 'open' ORDER BY created_at ASC, rowid ASC").all() as ReleaseFreeze[]);
+  // behind-main freezes are live candidates too (the queue merges them forward); an older one is retired by a newer freeze on its lane like an open one.
+  const open = (getDb().prepare("SELECT * FROM release_freezes WHERE status IN ('open', 'behind-main') ORDER BY created_at ASC, rowid ASC").all() as ReleaseFreeze[]);
   const newest = new Map<string, ReleaseFreeze>();
   for (const f of open) {
     if (f.lane) newest.set(`lane:${f.project ?? ''}:${f.lane}`, f);
