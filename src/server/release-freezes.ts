@@ -1075,13 +1075,20 @@ async function settleBehind(sha: string, project: string | null): Promise<void> 
  * (verdict files often carry no lane line, and a desk is one unit of work) — invalidates older
  * open freezes (spec rule 3).
  */
+/**
+ * A newer freeze supersedes older open ones on the same lane, and desk-only rows
+ * (verdicts with no lane line) for the same desk. A freeze on another lane of the
+ * same desk is not superseded: several lanes serve one desk, and the merge queue
+ * merges each lane on its own evidence (26 Oct 2026: cross-lane desk staleness
+ * hid reviewed, green lanes from the queue).
+ */
 function supersedeOlder(sha: string, project: string | null, lane: string | null, desk: number | null): void {
   if (!lane && desk == null) return;
   const rows = getDb().prepare(
     `SELECT * FROM release_freezes WHERE sha <> ? AND status = 'open' AND (project IS ? OR project = ?)
-       AND ((? IS NOT NULL AND lane = ?) OR (? IS NOT NULL AND desk = ?))
+       AND ((? IS NOT NULL AND lane = ?) OR (? IS NOT NULL AND desk = ? AND (lane IS NULL OR lane = ?)))
        AND created_at <= (SELECT created_at FROM release_freezes WHERE sha = ?)`,
-  ).all(sha, project, project, lane, lane, desk, desk, sha) as ReleaseFreeze[];
+  ).all(sha, project, project, lane, lane, desk, desk, lane, sha) as ReleaseFreeze[];
   for (const old of rows) {
     const by = old.lane && old.lane === lane ? 'lane' : 'desk';
     patch(old.sha, { status: 'stale', superseded_by: sha });
@@ -1259,7 +1266,8 @@ export function reconcileSuperseded(): number {
   let n = 0;
   for (const f of open) {
     const byLane = f.lane ? newest.get(`lane:${f.project ?? ''}:${f.lane}`) : undefined;
-    const byDesk = f.desk != null ? newest.get(`desk:${f.project ?? ''}:${f.desk}`) : undefined;
+    // Desk supersession only for rows without a lane: another lane's freeze does not retire this lane's.
+    const byDesk = f.desk != null && !f.lane ? newest.get(`desk:${f.project ?? ''}:${f.desk}`) : undefined;
     const winner = byLane && byLane.sha !== f.sha ? byLane : byDesk && byDesk.sha !== f.sha ? byDesk : null;
     if (!winner) continue;
     patch(f.sha, { status: 'stale', superseded_by: winner.sha });

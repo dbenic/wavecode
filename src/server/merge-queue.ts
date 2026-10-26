@@ -36,6 +36,7 @@ import logger from './logger.js';
 import { fireMainAdvanced } from './pipeline-hooks.js';
 import { execFileAsync } from './proc.js';
 import { freezeInboxDirs, getFreeze, listFreezes, listVerdicts, viewShaChecks, type FreezeVerdict, type ReleaseFreeze } from './release-freezes.js';
+import { samePerson } from './reviewer-assign.js';
 import { freezeAgeMs, readLaneTests, readLaneTestsSparingly, testsConfigured } from './test-runs.js';
 import { deliverSystemLine } from './wire-lines.js';
 
@@ -304,22 +305,26 @@ function sameName(a: string | null | undefined, b: string | null | undefined): b
 }
 
 /**
- * One independent PASS on the exact SHA: a reviewer who is not the author, on a
- * different credential profile than the builder (null = the home-dir login).
- * Every tier needs it; the ask tier adds Denis's OK label on the pull request.
+ * One independent PASS on the exact SHA: a reviewer who is not the author and not
+ * the same person or credential profile as the builder, by the picker's own rule
+ * (`samePerson`: name stems such as ales-claude1/ales-claude2 count as one person;
+ * a `pipeline.service_profiles` profile is a shared pool whose seats are
+ * independent of each other). Every tier needs it; the ask tier adds Denis's OK
+ * label on the pull request.
  */
 export function independentPasses(
   verdicts: FreezeVerdict[],
-  author: { id: string | null; name: string | null; profile: string | null },
+  author: { id: string | null; name: string | null; alias?: string | null; profile: string | null },
+  serviceProfiles: string[] = [],
 ): { ok: boolean; passes: FreezeVerdict[]; why: string | null } {
-  const builderProfile = author.profile ?? 'home';
   const own = (v: FreezeVerdict) => sameName(v.reviewer_name, author.name) || (!!author.id && v.reviewer_agent_id === author.id);
   const allPasses = verdicts.filter((v) => v.verdict === 'pass' && !own(v));
-  const passes = allPasses.filter((v) => (v.profile ?? 'home') !== builderProfile);
+  const builder = { name: author.name ?? '', alias: author.alias ?? null, profile: author.profile ?? 'home' };
+  const passes = allPasses.filter((v) => !samePerson(builder, { name: v.reviewer_name, profile: v.profile ?? 'home' }, serviceProfiles));
   if (passes.length > 0) return { ok: true, passes, why: null };
-  const sameProfile = allPasses.map((v) => `@${v.reviewer_name}`).join(', ');
-  const why = sameProfile
-    ? `needs one PASS from a reviewer on a different profile than the builder (${sameProfile} share profile ${builderProfile})`
+  const same = allPasses.map((v) => `@${v.reviewer_name}`).join(', ');
+  const why = same
+    ? `needs one PASS from a reviewer who is not the builder's own person or profile (${same}: same as @${author.name ?? '?'}${author.profile ? ` on ${author.profile}` : ''})`
     : 'needs one PASS verdict on this exact SHA from a reviewer who is not the author';
   return { ok: false, passes, why };
 }
@@ -600,7 +605,11 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
     return no(base, 'NEEDS_FIXES', `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA`);
   }
   const author = authorFor(freeze);
-  const passed = independentPasses(verdictsFor(freeze), { id: freeze.author_agent_id ?? author?.id ?? null, name: freeze.author_name ?? author?.name ?? null, profile: author?.profile ?? null });
+  const passed = independentPasses(
+    verdictsFor(freeze),
+    { id: freeze.author_agent_id ?? author?.id ?? null, name: freeze.author_name ?? author?.name ?? null, alias: author?.alias ?? null, profile: author?.profile ?? null },
+    getConfig().projects?.[project]?.pipeline?.service_profiles ?? [],
+  );
   if (!passed.ok) return no(base, 'NO_PASS_ON_SHA', passed.why ?? 'no PASS on this SHA');
   const verdictFiles = passed.passes.map((p) => p.path).filter((p): p is string => !!p);
 

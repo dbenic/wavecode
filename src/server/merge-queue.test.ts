@@ -62,7 +62,11 @@ describe('merge queue — pure rules', () => {
     });
     const author = { id: null, name: 'claude2', profile: 'denis20x' };
     expect(independentPasses([v('codex3', 'pool')], author)).toMatchObject({ ok: true, passes: [expect.objectContaining({ reviewer_name: 'codex3' })] });
-    expect(independentPasses([v('codex4', 'denis20x')], author).why).toMatch(/@codex4 share profile denis20x/);
+    expect(independentPasses([v('codex4', 'denis20x')], author).why).toMatch(/@codex4: same as @claude2 on denis20x/);
+    // a service pool profile is not a person: its seats review each other
+    expect(independentPasses([v('codex4', 'denis20x')], author, ['denis20x']).ok).toBe(true);
+    // the same person on two seats is one reviewer, whatever the profile
+    expect(independentPasses([v('ales-claude2', 'pool')], { id: null, name: 'ales-claude1', profile: 'home' }).ok).toBe(false);
     expect(independentPasses([v('codex4', 'denis20x'), v('codex5', 'pool')], author).passes.map((p) => p.reviewer_name)).toEqual(['codex5']);
     expect(independentPasses([v('claude2', 'pool')], author).why).toMatch(/not the author/);
     expect(independentPasses([v('codex3', 'pool', 'needs-fixes')], author).ok).toBe(false);
