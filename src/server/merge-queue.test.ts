@@ -329,6 +329,8 @@ describe('merge queue — on a scratch repository', () => {
 
   it('an eligible lane that waits with no progress raises the stall file once per window; a merge clears it', async () => {
     agent('ales');
+    lane('wc-base-shift', { 'shift.txt': 's' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-shift:main'); // the lane is behind origin/main, so its merge is gated
     const sha = lane('wc-ales', { 's.txt': 's' });
     await reviewed('ales', 'wc-ales', sha, 'ship');
     gateHook = () => ({ code: 7, stdout: 'QUEUED' });
@@ -396,10 +398,10 @@ describe('merge queue — on a scratch repository', () => {
     expect(git(bare, 'rev-list', '--parents', '-1', 'main').split(' ')).toHaveLength(3); // a real merge commit
     expect(git(bare, 'log', '-1', '--format=%s', 'main')).toBe(`Merge wc-ales (${shaA.slice(0, 8)}) into main`);
     expect(git(bare, 'merge-base', '--is-ancestor', shaA, 'main')).toBe('');
-    // the lane already contained main, yet the full suite still ran once on the merge result (the only full run)
-    expect(gateSeen).toHaveLength(1);
-    expect(gateSeen[0].env).toMatchObject({ WAVECODE_SHA: mainAfterA, WAVECODE_MERGE_OF: shaA, COUNTIX_REMOTE_TEST_WHO: 'ales' });
-    expect(getQueueRow(shaA)).toMatchObject({ state: 'merged', merge_sha: mainAfterA, reason: `gate GREEN on ${mainAfterA.slice(0, 8)}` });
+    // the lane already contained main and its own gates are GREEN: the merge tree is the lane's tree, so no merge gate ran
+    expect(gateSeen).toHaveLength(0);
+    expect(git(bare, 'rev-parse', 'main^{tree}')).toBe(git(repo, 'rev-parse', `${shaA}^{tree}`));
+    expect(getQueueRow(shaA)).toMatchObject({ state: 'merged', merge_sha: mainAfterA, reason: `merge gate skipped: ${shaA.slice(0, 8)} already contains main and its quick and api gates are GREEN on that tree` });
     expect(messages(ales.id).some((m) => m.includes(`merged wc-ales ${shaA.slice(0, 8)} into main as ${mainAfterA.slice(0, 8)}`))).toBe(true);
 
     await reviewed('toni', 'wc-toni', shaB, 'show');
@@ -408,12 +410,12 @@ describe('merge queue — on a scratch repository', () => {
     expect(mainAfterB).not.toBe(mainAfterA);
     expect(git(bare, 'merge-base', '--is-ancestor', shaB, 'main')).toBe('');
     expect(git(bare, 'merge-base', '--is-ancestor', mainAfterA, 'main')).toBe('');
-    // the gate ran on B's merge result too, as the author
-    expect(gateSeen).toHaveLength(2);
-    expect(gateSeen[1].env).toMatchObject({ WAVECODE_SHA: mainAfterB, WAVECODE_LANE: 'wc-toni', WAVECODE_MERGE_OF: shaB, COUNTIX_REMOTE_TEST_WHO: 'toni' });
-    expect(gateSeen[1].cwd).toContain(path.join('.wavecode-merges', 'wave-'));
-    expect(fs.existsSync(gateSeen[1].cwd!)).toBe(false); // the checkout is removed afterwards
-    expect(getQueueRow(shaB)).toMatchObject({ state: 'merged', merge_sha: mainAfterB, tier: 'show' });
+    // B was behind the new main: a real merge, so the gate ran on B's merge result, as the author
+    expect(gateSeen).toHaveLength(1);
+    expect(gateSeen[0].env).toMatchObject({ WAVECODE_SHA: mainAfterB, WAVECODE_LANE: 'wc-toni', WAVECODE_MERGE_OF: shaB, COUNTIX_REMOTE_TEST_WHO: 'toni' });
+    expect(gateSeen[0].cwd).toContain(path.join('.wavecode-merges', 'wave-'));
+    expect(fs.existsSync(gateSeen[0].cwd!)).toBe(false); // the checkout is removed afterwards
+    expect(getQueueRow(shaB)).toMatchObject({ state: 'merged', merge_sha: mainAfterB, tier: 'show', reason: `gate GREEN on ${mainAfterB.slice(0, 8)}` });
     expect(messages(toni.id).some((m) => m.includes('merged wc-toni'))).toBe(true);
 
     const log = fs.readFileSync(mq.maestro_log as string, 'utf8').trim().split('\n');
@@ -615,6 +617,25 @@ describe('merge queue — on a scratch repository', () => {
     await tick(); // the reset row stays out; a second reset finds nothing
     expect(getQueueRow(waiting)?.state).toBe('superseded');
     expect(resetQueue('wave', 'again', 'owner').reset).toEqual([]);
+  });
+
+  it('a reset narrowed to bounced rows leaves the waiting ones alone', async () => {
+    agent('ales');
+    agent('toni');
+    lane('wc-base-shift', { 'a-lane.txt': 'main version' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-shift:main');
+    const shaA = lane('wc-ales', { 'a-lane.txt': 'A' }); // conflicts with main: bounces
+    await reviewed('ales', 'wc-ales', shaA, 'ship');
+    const shaB = lane('wc-toni', { 'b-lane.txt': 'B' });
+    await freeze('toni', 'wc-toni', shaB, 'ship'); // waits on its gate
+    await tick();
+    expect(getQueueRow(shaA)?.state).toBe('bounced');
+    expect(getQueueRow(shaB)?.state).toBe('waiting');
+    const out = resetQueue('wave', 'queue reset: merge main, gate, refreeze', 'owner', ['bounced']);
+    expect(out.reset).toEqual([{ sha: shaA, lane: 'wc-ales', was: 'bounced', freeze: 'closed' }]);
+    expect(out.untouched).toEqual({ waiting: 1 });
+    expect(getQueueRow(shaB)?.state).toBe('waiting');
+    expect(['open', 'behind-main']).toContain(getFreeze(shaB)?.status); // its freeze stays live
   });
 
   it('a second tick while one runs joins it instead of starting another pass', async () => {

@@ -172,10 +172,12 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const project = c.req.param('project');
     const known = Object.keys(getConfig().projects ?? {}).includes(project);
     if (!known) return c.json({ error: `Unknown project ${project}` }, 404);
-    const body = await c.req.json<{ reason?: unknown }>().catch(() => ({} as { reason?: unknown }));
+    const body = await c.req.json<{ reason?: unknown; states?: unknown }>().catch(() => ({} as { reason?: unknown; states?: unknown }));
     const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
     if (reason.length < 3 || reason.length > 200) return c.json({ error: 'reason must be 3 to 200 characters' }, 400);
-    return c.json(mergeQueue.resetQueue(project, reason, user.name));
+    const states = body.states === undefined ? ['waiting', 'bounced'] : body.states;
+    if (!Array.isArray(states) || states.length === 0 || !states.every((s) => s === 'waiting' || s === 'bounced')) return c.json({ error: "states must be a list of 'waiting' and/or 'bounced'" }, 400);
+    return c.json(mergeQueue.resetQueue(project, reason, user.name, states as Array<'waiting' | 'bounced'>));
   });
 
   app.post('/api/merge-queue/:sha/priority', async (c) => {

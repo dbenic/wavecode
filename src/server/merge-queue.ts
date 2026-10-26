@@ -282,12 +282,15 @@ export interface ResetOutcome {
  * The queue reset, the supported way to start the list over: every row of the project that is
  * waiting or bounced turns superseded with the given reason, and its freeze, when still open
  * (open / behind-main / rejected), is closed as `stale` with the same reason so the lane can
- * refreeze. Rows that are queued, merging, merged or already superseded are not touched, no
- * branch is touched, and the history stays. One event for the whole reset, not one per row.
+ * refreeze. `states` narrows it to waiting or bounced rows only (default: both). Rows that are
+ * queued, merging, merged or already superseded are not touched, no branch is touched, and the
+ * history stays. One event for the whole reset, not one per row.
  */
-export function resetQueue(project: string, reason: string, by: string): ResetOutcome {
+export function resetQueue(project: string, reason: string, by: string, states: Array<'waiting' | 'bounced'> = ['waiting', 'bounced']): ResetOutcome {
   const out: ResetOutcome = { project, reason, by, reset: [], untouched: {} };
-  const rows = withTable(() => getDb().prepare("SELECT * FROM merge_queue WHERE project = ? AND state IN ('waiting', 'bounced') ORDER BY created_at").all(project)) as MergeQueueRow[];
+  const wanted = states.filter((s) => s === 'waiting' || s === 'bounced');
+  if (wanted.length === 0) return out;
+  const rows = withTable(() => getDb().prepare(`SELECT * FROM merge_queue WHERE project = ? AND state IN (${wanted.map(() => '?').join(', ')}) ORDER BY created_at`).all(project, ...wanted)) as MergeQueueRow[];
   const closeFreeze = getDb().prepare("UPDATE release_freezes SET status = 'stale', superseded_by = ?, updated_at = datetime('now') WHERE sha = ?");
   const now = new Date().toISOString();
   getDb().transaction(() => {
@@ -428,6 +431,22 @@ function verdictsFor(freeze: ReleaseFreeze): FreezeVerdict[] {
     sha: freeze.sha, reviewer_agent_id: agent?.id ?? null, reviewer_name: freeze.reviewer_name, profile: agent?.profile ?? null,
     verdict: 'pass', path: freeze.verdict_path ?? null, created_at: freeze.created_at,
   }];
+}
+
+/**
+ * When the lane already contains main, the merge commit's tree is the lane's own tree, and
+ * that tree is what the lane's quick and api gates ran on: a tier1 run on the merge result
+ * proves nothing new and costs a gate slot. Returns the gate note for the merged row, or
+ * null when the merge gate must run (main moved, a version bump changed the tree, or a gate
+ * is not GREEN on the lane SHA). Never applies to a lane that needed a real merge.
+ */
+async function mergeGateSkip(dir: string, laneSha: string, mainBefore: string, mergeSha: string, freeze: ReleaseFreeze, branch: string): Promise<string | null> {
+  if ((await tryGit(dir, ['merge-base', '--is-ancestor', mainBefore, laneSha])) === null) return null;
+  const [mergeTree, laneTree] = await Promise.all([tryGit(dir, ['rev-parse', `${mergeSha}^{tree}`]), tryGit(dir, ['rev-parse', `${laneSha}^{tree}`])]);
+  if (!mergeTree || mergeTree !== laneTree) return null;
+  const gates = await gateWords(freeze);
+  if (gates.quick !== 'green' || gates.full !== 'green') return null;
+  return `merge gate skipped: ${laneSha.slice(0, 8)} already contains ${branch} and its quick and api gates are GREEN on that tree`;
 }
 
 // --- git ---------------------------------------------------------------------
@@ -895,10 +914,13 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
     }
 
     const mergeSha = await git(dir, ['rev-parse', 'HEAD']);
-    // The merge gate runs once, here, on the merged code — even when the lane already
-    // contained main. The freeze-time run only covered the quick suite and the changed parts.
+    // The merge gate runs once, here, on the merged code — unless the lane already contained
+    // main and the merge result is the lane's own tree, which its quick and api gates covered.
     let gateNote: string;
-    {
+    const skipped = await mergeGateSkip(dir, row.sha, mainBefore, mergeSha, freeze, spec.branch);
+    if (skipped) {
+      gateNote = skipped;
+    } else {
       const gateCmd = cfg.gate_command ?? getConfig().projects?.[row.project]?.pipeline?.gate_command ?? null;
       if (!gateCmd?.length) { bounce(freeze, started, 'no gate_command configured; the merge result cannot be tested'); return; }
       const minutes = cfg.gate_timeout_min ?? getConfig().projects?.[row.project]?.pipeline?.gate_timeout_min ?? 120;

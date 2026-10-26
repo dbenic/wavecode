@@ -122,7 +122,7 @@ POST /api/merge-queue/<project>/reset
 { "reason": "queue reset 26 Oct — merge main, gate, refreeze" }
 ```
 
-Every row that is waiting or bounced turns superseded with that reason, and its freeze, when
+Every row that is waiting or bounced (or only one of the two, with `"states": ["bounced"]`) turns superseded with that reason, and its freeze, when
 still open (open, behind-main or rejected), is closed as `stale` with the same reason so the
 lane can refreeze. Rows that are queued, merging, merged or already superseded are not
 touched, no branch is touched, the history stays. The answer lists each row (`was`, what
@@ -148,8 +148,11 @@ may raise a lane's priority. For the head of the queue WaveCode:
    `pipeline.gate_command`; on countix-dev the tier1 quick check, the full suite stays with
    the release gate before prod), as the author (`COUNTIX_REMOTE_TEST_WHO`), with
    `WAVECODE_SHA=<merge sha>`, `WAVECODE_LANE`, `WAVECODE_CHECKOUT` and
-   `WAVECODE_MERGE_OF=<lane sha>`. It runs even when the lane already contained main:
-   this is the only full run between the nightly ones. RED bounces; a dispatcher QUEUED
+   `WAVECODE_MERGE_OF=<lane sha>`. It is skipped when the lane already contained main and
+   the merge result is the lane's own tree (no version bump changed it) and the lane's quick
+   and api gates are GREEN on that SHA: those gates ran on exactly that tree, so the row says
+   `merge gate skipped: …` instead of `gate GREEN on …`. A lane that needed a real merge is
+   always gated. RED bounces; a dispatcher QUEUED
    or DUPLICATE answer retries on the next pass, three times at most;
 6. checks the kill switch once more and pushes plainly: `git push origin HEAD:refs/heads/main`.
    Never `--force`, never a squash, never a different ref. A rejected push (main moved
