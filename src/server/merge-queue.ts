@@ -688,6 +688,21 @@ function requeue(freeze: ReleaseFreeze, row: MergeQueueRow, reason: string): voi
 
 const MAX_ATTEMPTS = 3;
 
+/** The runner's own verdict line (`=== RESULT GREEN … ===`), the last one when there are several. */
+export function resultLine(stdout: string): { word: 'GREEN' | 'RED'; line: string } | null {
+  const lines = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/^=== RESULT (GREEN|RED)\b.*===$/);
+    if (m) return { word: m[1] as 'GREEN' | 'RED', line: lines[i] };
+  }
+  return null;
+}
+
+/** Exit codes of a process ended by a signal (130 INT, 137 KILL, 143 TERM) or no exit code at all. */
+export function killedExit(code: number | null): boolean {
+  return code === null || code === 130 || code === 137 || code === 143;
+}
+
 /**
  * A non-zero exit with no verdict word anywhere in the output means the gate tool never
  * ran the suite (the remote gateway refused the request, the host was unreachable, the
@@ -695,7 +710,8 @@ const MAX_ATTEMPTS = 3;
  */
 export function gateRefusal(result: { code: number | null; stdout: string }): string | null {
   if (result.code === 0) return null;
-  if (/\b(QUEUED|RUNNING|GREEN|RED)\b/i.test(result.stdout)) return null;
+  if (resultLine(result.stdout)) return null;
+  if (/\b(QUEUED|RUNNING|GREEN|RED)\b/.test(result.stdout)) return null; // a real verdict token; "running suite" or "phase: queued" is not one
   const lines = result.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const said = lines.filter((l) => !/remote exit \d+ on host=/.test(l)).slice(-1)[0] ?? lines.slice(-1)[0] ?? '';
   return `${said || `gate tool exit ${result.code ?? '?'} with no verdict`}`.slice(0, 160);
@@ -772,9 +788,13 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
         WAVECODE_AUTHOR: author?.name ?? '', COUNTIX_REMOTE_TEST_WHO: author?.name ?? 'wavecode',
       };
       const result = await runArgv(fill(gateCmd, { checkout: dir, sha: mergeSha, lane: row.lane, project: row.project, remote: spec.remote }), { cwd: dir, env, timeoutMs: minutes * 60_000 });
-      const word = gateOutcome(result);
+      // The runner's RESULT line is the verdict, even when the tool was killed after printing
+      // it (the gateway's reuse path has ended a queued placeholder with SIGTERM after a GREEN).
+      const verdict = resultLine(result.stdout);
+      let word = gateOutcome(result);
+      if (verdict && (result.code === 0 || killedExit(result.code))) word = verdict.word;
       if (word === 'RED') {
-        const refusal = gateRefusal(result);
+        const refusal = killedExit(result.code) && !verdict ? `gate tool killed (exit ${result.code ?? 'none'}) before a RESULT line` : gateRefusal(result);
         if (refusal !== null) {
           // The tool failed before any suite ran (a gateway policy, an unreachable host, a
           // duplicate): that is not a verdict on the code. Try again; bounce only when it keeps failing.

@@ -65,6 +65,11 @@ of every pass (cached five minutes when it passes). While it fails, **every** la
 | `NO_PR` | `require_pr` is on and no open pull request matches |
 | `MIGRATION_COLLISION` | a new migration is numbered at or below main's latest (bounced) |
 | `GATE_DISPATCH_FAILED` | the gate tool failed before any suite ran (gateway policy, host unreachable, SHA already in flight); retried, bounced after three tries |
+
+The runner's own `=== RESULT GREEN|RED … ===` line is the verdict on the merge result, even when
+the tool exits by a signal afterwards (the countix-testing gateway's identical-tree reuse path
+prints GREEN, then ends its queued placeholder with SIGTERM and returns 143). A signal exit
+without a RESULT line is `GATE_DISPATCH_FAILED`.
 | `GH_AUTH_MISSING` | the GitHub credential is missing or `gh auth status` fails |
 | `QUEUE_OFF` | eligible, but the kill switch is off |
 | `NOT_CONFIGURED` / `NO_REPO` / `CHECK_FAILED` | config or repo problems; the text says which |

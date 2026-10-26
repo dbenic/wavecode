@@ -22,7 +22,7 @@ import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
   askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
-  gateRefusal, queueStall, queueSwitch, resetMergeQueueForTest, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
+  gateRefusal, killedExit, queueStall, queueSwitch, resetMergeQueueForTest, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
 } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -468,7 +468,37 @@ describe('merge queue — on a scratch repository', () => {
     expect(fs.readdirSync(path.join(tmp, 'repos', '.wavecode-merges'))).toEqual([]);
   });
 
+  it('a GREEN RESULT line counts even when the tool was killed after printing it; a kill without a RESULT line is retried', async () => {
+    const ales = agent('ales');
+    lane('wc-base-shift', { 'shift.txt': 's' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-shift:main');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    let calls = 0;
+    gateHook = () => {
+      calls++;
+      if (calls === 1) return { code: 143, stdout: 'countix-remote-test: pushed in 1s; running suite tier1 on host=countix-testing\n===== abort =====\nphase: queued\nwhy: SIGTERM/INT with no recorded reason\ncountix-remote-test: remote exit 143 on host=countix-testing (6s total)' };
+      return { code: 143, stdout: [
+        'countix-remote-test: pushed in 1s; running suite tier1 on host=countix-testing',
+        'note: reused result of 20261026-110012 (identical tree) - not run again',
+        '=== RESULT GREEN sha=2658cb59e suite=tier1 who=wave.countix-dev.ales exit=0 host=runner-c ===',
+        '===== abort =====',
+        'phase: queued',
+        'why: SIGTERM/INT with no recorded reason (sender pid unknown)',
+        'countix-remote-test: remote exit 143 on host=countix-testing (6s total)',
+      ].join('\n') };
+    };
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'queued', attempts: 1, reason: expect.stringMatching(/^GATE_DISPATCH_FAILED: gate tool killed \(exit 143\) before a RESULT line/) });
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('merged');
+    expect(messages(ales.id).some((m) => /bounced/.test(m))).toBe(false);
+  });
+
   it('gateRefusal tells a tool failure from a verdict', () => {
+    expect(resultLine('x\n=== RESULT GREEN sha=1 suite=tier1 ===\nphase: queued')).toMatchObject({ word: 'GREEN' });
+    expect(resultLine('countix-remote-test: pushed; running suite')).toBeNull();
+    expect(gateRefusal({ code: 2, stdout: 'countix-remote-test: pushed in 1s; running suite tier1 on host=x\nrun: refused' })).toBe('run: refused');
     expect(gateRefusal({ code: 0, stdout: 'GREEN' })).toBeNull();
     expect(gateRefusal({ code: 1, stdout: 'step api failed\nRED' })).toBeNull();
     expect(gateRefusal({ code: 1, stdout: '=== RESULT RED host=countix-testing ===' })).toBeNull();
