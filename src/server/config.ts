@@ -229,6 +229,13 @@ export interface MergeQueueConfig {
   /** Tier when the freeze note has no `TIER:` line. Unset: the note must name one. */
   default_tier?: MergeTier;
   /**
+   * How an ask-tier lane gets its OK. `label` (default): an open pull request with
+   * `github.ok_label`. `auto`: no label and no pull request needed; ask-tier lanes merge
+   * like the rest once the gates are green and a PASS is on the SHA (Denis, 26 Oct 2026:
+   * "I don't want to approve anything"). Hold labels on an open PR still park the lane.
+   */
+  ask_tier?: 'label' | 'auto';
+  /**
    * Run in the merge checkout before the merge commit is sealed (a version
    * bump). Its file changes are folded into the merge commit. Argv, no shell.
    */
@@ -707,6 +714,9 @@ function validateMergeQueue(name: string, mq: MergeQueueConfig | undefined): voi
   }
   if (mq.ask_paths !== undefined && (!Array.isArray(mq.ask_paths) || mq.ask_paths.some((p) => typeof p !== 'string' || !p.trim() || p.length > 200 || p.includes('..') || p.startsWith('/')))) {
     throw new Error(`${at}.ask_paths must be a list of relative path globs`);
+  }
+  if (mq.ask_tier !== undefined && !['label', 'auto'].includes(mq.ask_tier as string)) {
+    throw new Error(`${at}.ask_tier must be label or auto`);
   }
   if (mq.default_tier !== undefined && !['ship', 'show', 'ask'].includes(mq.default_tier as string)) {
     throw new Error(`${at}.default_tier must be ship, show or ask`);

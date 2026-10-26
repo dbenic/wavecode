@@ -273,6 +273,16 @@ describe('merge queue — on a scratch repository', () => {
     prs[0].labels = [{ name: 'Ask-Tier-Approved' }];
     state = await evaluate(getFreeze(sha)!);
     expect(state).toMatchObject({ state: 'queued', code: null, tier: 'ask', pr: '#7', reason: null });
+    // ask_tier: auto — no label and no pull request needed; a hold label on an open PR still parks the lane.
+    prs[0].labels = [];
+    mq.ask_tier = 'auto';
+    expect(await evaluate(getFreeze(sha)!)).toMatchObject({ state: 'queued', code: null, tier: 'ask', pr: '#7' });
+    prs = [];
+    expect(await evaluate(getFreeze(sha)!)).toMatchObject({ state: 'queued', code: null, tier: 'ask', pr: null });
+    prs = [{ number: 7, headRefName: 'wc-ales', headRefOid: sha, labels: [{ name: 'migration-hold' }] }];
+    expect(await evaluate(getFreeze(sha)!)).toMatchObject({ code: 'MIGRATION_HOLD' });
+    prs[0].labels = [{ name: 'Ask-Tier-Approved' }];
+    mq.ask_tier = 'label';
     expect(state.verdictFiles).toHaveLength(1);
 
     await tick();

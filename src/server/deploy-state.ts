@@ -781,7 +781,13 @@ function armFresh(reason: string): void {
 }
 
 /** Hard ceilings per pass step. A step over its ceiling is logged and the pass moves on. */
-export const STEP_TIMEOUT_MS = { deploy_reconcile: 10 * 60_000, pipeline_tick: 5 * 60_000, merge_queue: 5 * 60_000, overview_reconcile: 10 * 60_000 } as const;
+/**
+ * The deploy reconcile reads the test host for every live freeze and ran past 10 minutes on
+ * countix-dev (26 Oct 2026), which held the pipeline tick and the merge queue for that long after
+ * every restart. Its ceiling is short: the step keeps running in the background and the next
+ * passes skip it while it is busy, so the other steps run every interval.
+ */
+export const STEP_TIMEOUT_MS = { deploy_reconcile: 90_000, pipeline_tick: 5 * 60_000, merge_queue: 5 * 60_000, overview_reconcile: 10 * 60_000 } as const;
 const stepBusy = new Set<string>();
 
 /**

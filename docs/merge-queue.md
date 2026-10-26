@@ -26,7 +26,9 @@ one that does not, as one machine-readable code and what is missing.
    `NEEDS FIXES` or `REJECT` holds the lane (`NEEDS_FIXES`) until a new SHA is frozen.
 4. **Ask tier: Denis's OK label** on the lane's open pull request (`github.ok_label`,
    default `ask-tier-approved`), else `ASK_TIER_NO_OK`. Ship and show auto-merge: Denis
-   is not a manual merge step and builders never merge.
+   is not a manual merge step and builders never merge. With `ask_tier: auto` (countix-dev
+   since 26 Oct 2026, Denis: "I don't want to approve anything") no label and no pull
+   request is needed: ask-tier lanes merge like the rest. A hold label still parks the lane.
 5. **No hold label** on the pull request (`github.hold_labels`, default `migration-hold`
    and `do-not-merge`), else `MIGRATION_HOLD`. This is how a migration that must wait for
    a release (0394 before R7) is parked without touching the lane.
@@ -265,6 +267,7 @@ projects:
         ask_paths: ['**/booking/**', '**/vat/**', '**/payroll/**', '**/payments/**', '**/billing/**', '**/rls/**', '**/auth/**', 'migrations/**']
         deny_lanes: [main, master, 'release/*', 'prod-*']   # the default; there is no allowlist
         require_pr: false
+        ask_tier: auto          # label (default) = Denis's OK label on the PR; auto = no label, no PR
         github:
           repo: dbenic/Wavepulse
           token_file: /home/wave/.config/wavecode/github-token   # stored by SystemOps, mode 0400, owner wave

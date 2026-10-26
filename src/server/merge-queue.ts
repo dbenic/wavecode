@@ -784,7 +784,7 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
   const holdLabels = (cfg.github?.hold_labels ?? DEFAULT_HOLD_LABELS).map((l) => l.toLowerCase());
   const hold = pr?.labels.find((l) => holdLabels.includes(l.toLowerCase()));
   if (hold) return no(withPr, 'MIGRATION_HOLD', `pull request ${pr!.number} carries the label ${hold}; remove it when the hold is over`);
-  if (tier === 'ask') {
+  if (tier === 'ask' && cfg.ask_tier !== 'auto') {
     const okLabel = cfg.github?.ok_label ?? DEFAULT_OK_LABEL;
     const why = forced ? `ask because of ${forced}` : 'ask by the freeze note';
     if (!cfg.github) return no(withPr, 'ASK_TIER_NO_OK', `${why}; no github block in config to read the ${okLabel} label from`);
