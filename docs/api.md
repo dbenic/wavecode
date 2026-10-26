@@ -1334,3 +1334,11 @@ a reply to a peer answer the seat asked for meanwhile is posted in the same thre
 (`slack.reply` with `follow_up: true`). Events `slack.prompt`, `slack.reply`,
 `slack.refused`, `peer.delivered`. No new HTTP routes. `POST /api/agents/:id/send` is unchanged on the wire; raw
 keys still record `agent.prompt_sent` and capture no reply.
+
+**Subscription usage alerts.** The usage probe (`usage.probe_interval_min`, default 15) stores
+one `profile_usage` row per (runtime, profile) and emits `usage.probed`. When a profile's
+5-hour or weekly window passes `usage.alert_used_pct` (default 80, 0 = off) it emits
+`usage.high {runtime, profile, label, used_pct, resets, threshold}` and sends one
+notification per window (keyed by the window's reset time) on every configured channel:
+"Subscription usage high — assist (claude-code): 5h window 85% used, resets 1:29am". That is
+the signal for moving a Max 5x account to 20x.

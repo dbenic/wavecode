@@ -583,8 +583,11 @@ export interface WaveConfig {
   };
   /** Self-service spawning: at most this many agents per non-admin user's profile (unset = no limit). */
   spawn?: { max_per_user?: number | null };
-  /** Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off). */
-  usage?: { probe_interval_min?: number };
+  /**
+   * Subscription usage probe: WaveCode types /status (Codex) or /usage (Claude) into one idle agent per profile every N minutes (0 = off).
+   * `alert_used_pct` (default 80, 0 = off): when a profile's 5-hour or weekly window passes it, one `usage.high` notification per window.
+   */
+  usage?: { probe_interval_min?: number; alert_used_pct?: number };
   /** Diagram rendering: a self-hosted Kroki (https://kroki.io) for D2 / PlantUML / Graphviz blocks and files. Mermaid renders in the browser. */
   diagrams?: { kroki_url?: string | null };
   llm: {
@@ -907,6 +910,9 @@ function validateDevelopers(list: DeveloperConfig[] | undefined): void {
 
 export function validateConfig(cfg: WaveConfig): void {
   validateSlack(cfg.slack);
+  if (cfg.usage?.alert_used_pct !== undefined && (typeof cfg.usage.alert_used_pct !== 'number' || !(cfg.usage.alert_used_pct >= 0) || !(cfg.usage.alert_used_pct <= 100))) {
+    throw new Error('usage.alert_used_pct must be 0 (off) to 100');
+  }
   const profileErrors = validateProfilesConfig(cfg);
   if (profileErrors.length > 0) {
     throw new Error(`Invalid credential profile config:\n  ${profileErrors.join('\n  ')}`);

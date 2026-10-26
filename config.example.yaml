@@ -82,6 +82,12 @@ auth:
   fallback_token: null           # installer generates one; set manually if you install without it
   trusted_proxies: []
 
+# Subscription usage: /usage (Claude) or /status (Codex) typed into one idle agent per profile every N minutes;
+# alert_used_pct: one notification per 5-hour or weekly window that passes it (0 = off). Watch it to see when Max 5x needs 20x.
+usage:
+  probe_interval_min: 15
+  alert_used_pct: 80
+
 notifications:
   web_push: false
   ntfy_topic: null

@@ -11,6 +11,7 @@ import { getConfig } from './config.js';
 import { getDb, listAgents, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
+import { notify } from './notifications.js';
 import * as tmux from './tmux.js';
 import { getRuntimeState } from './runtime-liveness.js';
 
@@ -24,6 +25,9 @@ export interface ProfileUsage {
 }
 
 const PROBE_COMMAND: Record<string, string> = { codex: '/status', 'claude-code': '/usage' };
+export const DEFAULT_ALERT_USED_PCT = 80;
+/** Windows a subscription can run out of; `context` and `credits` are not plan limits. */
+const ALERT_LABELS = new Set(['5h', 'weekly']);
 const SCREEN_WAIT_MS = 4000;
 const CAPTURE_LINES = 90;
 const TICK_MS = 60_000;
@@ -163,6 +167,7 @@ export async function probeAgent(agent: Agent): Promise<ProfileUsage | null> {
       ON CONFLICT(runtime, profile) DO UPDATE SET data = excluded.data, probed_at = excluded.probed_at`)
       .run(usage.runtime, usage.profile, JSON.stringify(usage), usage.probed_at);
     emit('usage.probed', 'agent', agent.id, { runtime: usage.runtime, profile: usage.profile, summary: usage.summary, metrics }, null);
+    await checkUsageAlert(usage, agent.id);
     return usage;
   } catch (e) {
     logger.warn({ agentId: agent.id, error: (e as Error).message }, 'Usage probe failed');
@@ -190,8 +195,36 @@ export function stopUsageProbe(): void {
   timer = null;
 }
 
+/** `${runtime}:${profile}:${label}` → the reset time already alerted on, so each window alerts once. */
+const alerted = new Map<string, string>();
+
+/**
+ * A subscription window (5-hour or weekly) past `usage.alert_used_pct` → `usage.high` and one
+ * notification per window (keyed by its reset time), so "do we need 20x?" is answered by a
+ * message instead of by a seat that stops answering. Exported for tests.
+ */
+export async function checkUsageAlert(usage: ProfileUsage, agentId: string): Promise<boolean> {
+  const threshold = getConfig().usage?.alert_used_pct ?? DEFAULT_ALERT_USED_PCT;
+  if (!threshold || threshold <= 0) return false;
+  let fired = false;
+  for (const m of usage.metrics) {
+    if (!ALERT_LABELS.has(m.label) || m.used_pct === null || m.used_pct === undefined || m.used_pct < threshold) continue;
+    const k = `${usage.runtime}:${usage.profile}:${m.label}`;
+    const window = m.resets ?? 'unknown';
+    if (alerted.get(k) === window) continue;
+    alerted.set(k, window);
+    fired = true;
+    const body = `${usage.profile} (${usage.runtime}): ${m.label} window ${m.used_pct}% used${m.resets ? `, resets ${shortReset(m.resets)}` : ''}`;
+    emit('usage.high', 'agent', agentId, { runtime: usage.runtime, profile: usage.profile, label: m.label, used_pct: m.used_pct, resets: m.resets, threshold }, null);
+    logger.warn({ runtime: usage.runtime, profile: usage.profile, label: m.label, used_pct: m.used_pct }, 'Subscription window nearly used up');
+    await notify({ title: 'Subscription usage high', body, url: '/agents', tag: `usage-${usage.runtime}-${usage.profile}-${m.label}` });
+  }
+  return fired;
+}
+
 export function resetUsageProbeForTest(): void {
   lastProbe.clear();
+  alerted.clear();
 }
 
 function sleep(ms: number): Promise<void> {

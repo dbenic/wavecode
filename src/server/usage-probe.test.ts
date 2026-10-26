@@ -5,8 +5,11 @@ vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), debug: 
 vi.mock('./tmux.js', () => ({ sendTextAndEnter: vi.fn(), capturePane: vi.fn(), sendRawKey: vi.fn() }));
 vi.mock('./runtime-liveness.js', () => ({ getRuntimeState: vi.fn(() => 'alive') }));
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ usage: { probe_interval_min: 15 } })) }));
+vi.mock('./notifications.js', () => ({ notify: vi.fn(async () => undefined) }));
 
-import { parseClaudeUsage, parseCodexStatus, pickProbeTargets, resetUsageProbeForTest, summarize } from './usage-probe.js';
+import { checkUsageAlert, parseClaudeUsage, parseCodexStatus, pickProbeTargets, resetUsageProbeForTest, summarize } from './usage-probe.js';
+import { notify } from './notifications.js';
+import { emit } from './event-bus.js';
 import type { Agent } from './db.js';
 
 const CODEX = `/status
@@ -73,6 +76,33 @@ describe('pickProbeTargets', () => {
     // a login seat on a profile must never be probed: it is a device-code prompt, and /status would land in it
     const seat = { ...agents[0], id: 'seat', name: 'login-ales-codex', tmux_session: 'wc-login-ales-codex', profile: 'ales', mode: 'adopted' as const };
     expect(pickProbeTargets([seat]).map((a) => a.name)).toEqual([]);
+  });
+
+  it('a 5h or weekly window past the threshold notifies once per window; context/credits never do', async () => {
+    resetUsageProbeForTest();
+    vi.mocked(notify).mockClear();
+    vi.mocked(emit).mockClear();
+    const usage = (fiveUsed: number, weeklyLeft: number, resets = '1:29am (UTC)') => ({
+      runtime: 'claude-code', profile: 'assist', summary: 'x', probed_at: 'now',
+      metrics: [
+        { label: '5h', left_pct: 100 - fiveUsed, used_pct: fiveUsed, resets },
+        { label: 'weekly', left_pct: weeklyLeft, used_pct: 100 - weeklyLeft, resets: 'Oct 28 5:59pm' },
+        { label: 'context', left_pct: 2, used_pct: 98, resets: null },
+      ],
+    });
+    expect(await checkUsageAlert(usage(40, 60), 'a1')).toBe(false);
+    expect(notify).not.toHaveBeenCalled();
+    expect(await checkUsageAlert(usage(85, 60), 'a1')).toBe(true);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(notify).mock.calls[0][0]).toMatchObject({ title: 'Subscription usage high', body: 'assist (claude-code): 5h window 85% used, resets 1:29am', tag: 'usage-claude-code-assist-5h' });
+    expect(vi.mocked(emit).mock.calls.find((c) => c[0] === 'usage.high')?.[3]).toMatchObject({ profile: 'assist', label: '5h', used_pct: 85, threshold: 80 });
+    // same window, probed again: silent
+    expect(await checkUsageAlert(usage(92, 60), 'a1')).toBe(false);
+    expect(notify).toHaveBeenCalledTimes(1);
+    // the window reset and filled up again: a new alert; the weekly window crossing alerts on its own
+    expect(await checkUsageAlert(usage(90, 15, '6:29am (UTC)'), 'a1')).toBe(true);
+    expect(notify).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(notify).mock.calls[2][0].body).toBe('assist (claude-code): weekly window 85% used, resets Oct 28 5:59pm');
   });
 
   it('after /usage one Escape closes the screen; a second is sent only while the screen is still up', async () => {
