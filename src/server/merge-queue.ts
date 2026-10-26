@@ -688,6 +688,19 @@ function requeue(freeze: ReleaseFreeze, row: MergeQueueRow, reason: string): voi
 
 const MAX_ATTEMPTS = 3;
 
+/**
+ * A non-zero exit with no verdict word anywhere in the output means the gate tool never
+ * ran the suite (the remote gateway refused the request, the host was unreachable, the
+ * SHA was already in flight). Returns the line that says why, or null for a real verdict.
+ */
+export function gateRefusal(result: { code: number | null; stdout: string }): string | null {
+  if (result.code === 0) return null;
+  if (/\b(QUEUED|RUNNING|GREEN|RED)\b/i.test(result.stdout)) return null;
+  const lines = result.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const said = lines.filter((l) => !/remote exit \d+ on host=/.test(l)).slice(-1)[0] ?? lines.slice(-1)[0] ?? '';
+  return `${said || `gate tool exit ${result.code ?? '?'} with no verdict`}`.slice(0, 160);
+}
+
 async function dropWorktree(repo: string, dir: string): Promise<void> {
   await tryGit(repo, ['worktree', 'remove', '--force', dir]);
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ }
@@ -761,6 +774,14 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
       const result = await runArgv(fill(gateCmd, { checkout: dir, sha: mergeSha, lane: row.lane, project: row.project, remote: spec.remote }), { cwd: dir, env, timeoutMs: minutes * 60_000 });
       const word = gateOutcome(result);
       if (word === 'RED') {
+        const refusal = gateRefusal(result);
+        if (refusal !== null) {
+          // The tool failed before any suite ran (a gateway policy, an unreachable host, a
+          // duplicate): that is not a verdict on the code. Try again; bounce only when it keeps failing.
+          if (started.attempts + 1 >= MAX_ATTEMPTS) { bounce(freeze, started, `GATE_DISPATCH_FAILED: ${refusal} — after ${MAX_ATTEMPTS} tries`); return; }
+          requeue(freeze, started, `GATE_DISPATCH_FAILED: ${refusal}; trying again`);
+          return;
+        }
         const last = result.stdout.trim().split('\n').filter((l) => l.trim()).slice(-1)[0] ?? '';
         bounce(freeze, started, `gate RED on merge ${mergeSha.slice(0, 8)}${last ? ` — ${last.slice(0, 160)}` : ''}`);
         return;

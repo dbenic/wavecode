@@ -64,6 +64,7 @@ of every pass (cached five minutes when it passes). While it fails, **every** la
 | `LANE_DENIED` | the branch is on the deny list or denied for automation |
 | `NO_PR` | `require_pr` is on and no open pull request matches |
 | `MIGRATION_COLLISION` | a new migration is numbered at or below main's latest (bounced) |
+| `GATE_DISPATCH_FAILED` | the gate tool failed before any suite ran (gateway policy, host unreachable, SHA already in flight); retried, bounced after three tries |
 | `GH_AUTH_MISSING` | the GitHub credential is missing or `gh auth status` fails |
 | `QUEUE_OFF` | eligible, but the kill switch is off |
 | `NOT_CONFIGURED` / `NO_REPO` / `CHECK_FAILED` | config or repo problems; the text says which |
@@ -180,7 +181,7 @@ projects:
           hold_labels: [migration-hold, do-not-merge]
         stall_minutes: 30
         maestro_log: /home/wave/inbox/wavecode-merge-queue.log
-        gate_command: [countix-remote-test, --suite, full]   # the one full run, on the merged code
+        gate_command: [countix-remote-test, --suite, gate]   # the one full run, on the merged code; the remote gateway only lets the full suite through its gate verb
         # version_command: [node, scripts/bump-version.mjs]   # once the project says how a version is bumped
 ```
 

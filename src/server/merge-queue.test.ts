@@ -22,7 +22,7 @@ import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
   askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
-  queueStall, queueSwitch, resetMergeQueueForTest, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
+  gateRefusal, queueStall, queueSwitch, resetMergeQueueForTest, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
 } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -444,6 +444,36 @@ describe('merge queue — on a scratch repository', () => {
     // a bounced SHA stays bounced; the next tick does not retry it
     await tick();
     expect(getQueueRow(sha)?.state).toBe('bounced');
+  });
+
+  it('a gate tool that fails without a verdict is retried, not bounced; three failures bounce with GATE_DISPATCH_FAILED', async () => {
+    const ales = agent('ales');
+    lane('wc-base-shift', { 'shift.txt': 's' });
+    git(repo, 'push', '-q', 'origin', 'wc-base-shift:main');
+    const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    gateHook = () => ({ code: 2, stdout: [
+      'countix-remote-test: pushing 1234567 (merge) to countix-testing:refs/heads/rt/ales/x',
+      'run: full suite is for freeze candidates only; use the quick check. Freeze candidates go through gate <sha>.',
+      'countix-remote-test: remote exit 2 on host=countix-testing (0s total)',
+    ].join('\n') });
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'queued', attempts: 1, reason: expect.stringMatching(/^GATE_DISPATCH_FAILED: run: full suite is for freeze candidates only/) });
+    expect(messages(ales.id).some((m) => /bounced/.test(m))).toBe(false);
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'queued', attempts: 2 });
+    await tick();
+    expect(getQueueRow(sha)).toMatchObject({ state: 'bounced', reason: expect.stringMatching(/^GATE_DISPATCH_FAILED: run: full suite .* — after 3 tries$/) });
+    expect(gateSeen.length).toBe(3);
+    expect(fs.readdirSync(path.join(tmp, 'repos', '.wavecode-merges'))).toEqual([]);
+  });
+
+  it('gateRefusal tells a tool failure from a verdict', () => {
+    expect(gateRefusal({ code: 0, stdout: 'GREEN' })).toBeNull();
+    expect(gateRefusal({ code: 1, stdout: 'step api failed\nRED' })).toBeNull();
+    expect(gateRefusal({ code: 1, stdout: '=== RESULT RED host=countix-testing ===' })).toBeNull();
+    expect(gateRefusal({ code: 90, stdout: 'countix-remote-test: cannot reach countix-testing:22 over the tailnet' })).toBe('countix-remote-test: cannot reach countix-testing:22 over the tailnet');
+    expect(gateRefusal({ code: 2, stdout: '' })).toBe('gate tool exit 2 with no verdict');
   });
 
   it('a RED gate on the merge result bounces; a rejected push because main moved merges again', async () => {
