@@ -412,7 +412,7 @@ describe('merge queue — on a scratch repository', () => {
     expect(git(bare, 'merge-base', '--is-ancestor', mainAfterA, 'main')).toBe('');
     // B was behind the new main: a real merge, so the gate ran on B's merge result, as the author
     expect(gateSeen).toHaveLength(1);
-    expect(gateSeen[0].env).toMatchObject({ WAVECODE_SHA: mainAfterB, WAVECODE_LANE: 'wc-toni', WAVECODE_MERGE_OF: shaB, COUNTIX_REMOTE_TEST_WHO: 'toni' });
+    expect(gateSeen[0].env).toMatchObject({ WAVECODE_SHA: mainAfterB, WAVECODE_LANE: 'wc-toni', WAVECODE_MERGE_OF: shaB, COUNTIX_REMOTE_TEST_WHO: `toni.${mainAfterB.slice(0, 9)}` });
     expect(gateSeen[0].cwd).toContain(path.join('.wavecode-merges', 'wave-'));
     expect(fs.existsSync(gateSeen[0].cwd!)).toBe(false); // the checkout is removed afterwards
     expect(getQueueRow(shaB)).toMatchObject({ state: 'merged', merge_sha: mainAfterB, tier: 'show', reason: `gate GREEN on ${mainAfterB.slice(0, 8)}` });

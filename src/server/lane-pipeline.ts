@@ -154,7 +154,9 @@ function runEnv(vars: { sha: string; lane: string; author: string; checkout?: st
     WAVECODE_SHA: vars.sha,
     WAVECODE_LANE: vars.lane,
     WAVECODE_AUTHOR: vars.author,
-    COUNTIX_REMOTE_TEST_WHO: vars.author,
+    // The gateway keeps one queued run per `who` and cancels the older one ("superseded by …, one queued
+    // run per agent"). Agents submit as <name>.<sha9>; WaveCode's runs for one author must not cancel each other.
+    COUNTIX_REMOTE_TEST_WHO: `${vars.author}.${vars.sha.slice(0, 9)}`,
   };
   if (vars.checkout) env.WAVECODE_CHECKOUT = vars.checkout;
   return env;
@@ -777,6 +779,39 @@ const QUICK = 'pipeline.quick';
 const quickInflight = new Map<string, Set<string>>();
 const quickPending: string[] = [];
 
+/**
+ * A run the tool never carried out: non-zero exit and no `=== RESULT` line (the gateway cancelled it
+ * as superseded, refused a duplicate, could not reach the host). Not a verdict on the code: retried
+ * a few times, then left for the author with the reason. Returns the line that says why.
+ */
+export function runRefusal(result: ExecResult): string | null {
+  if (result.code === 0) return null;
+  if (/=== RESULT (GREEN|RED)\b/.test(result.stdout)) return null;
+  const lines = result.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const last = gateWord(lines[lines.length - 1] ?? '');
+  if (last === 'GREEN' || last === 'RED') return null; // a bare verdict word on the last line is a verdict (older gate tools)
+  const said = lines.filter((l) => !/remote exit \d+ on host=/.test(l)).slice(-1)[0] ?? lines.slice(-1)[0] ?? '';
+  return (said || `exit ${result.code ?? 'none'} with no RESULT line`).slice(0, 160);
+}
+const REFUSED_MAX_TRIES = 3;
+let refusedRetryMs = 90_000;
+export function setRefusedRetryMsForTest(ms: number | null): void { refusedRetryMs = ms ?? 90_000; }
+/** sha → tries so far, and the time before which it is not resubmitted. */
+const refusedRuns = new Map<string, { tries: number; notBefore: number }>();
+function refusedKey(sha: string, kind: 'quick' | 'full'): string { return `${sha}:${kind}`; }
+/** Records a refusal; true when the run should go back to the pending list, false when it is given up. */
+function noteRefusal(sha: string, kind: 'quick' | 'full'): boolean {
+  const key = refusedKey(sha, kind);
+  const prev = refusedRuns.get(key)?.tries ?? 0;
+  if (prev + 1 >= REFUSED_MAX_TRIES) { refusedRuns.delete(key); return false; }
+  refusedRuns.set(key, { tries: prev + 1, notBefore: Date.now() + refusedRetryMs });
+  return true;
+}
+function refusedWait(sha: string, kind: 'quick' | 'full'): boolean {
+  const r = refusedRuns.get(refusedKey(sha, kind));
+  return !!r && Date.now() < r.notBefore;
+}
+
 function quickInflightFor(project: string): Set<string> {
   let set = quickInflight.get(project);
   if (!set) { set = new Set(); quickInflight.set(project, set); }
@@ -812,7 +847,7 @@ function drainQuickPending(): void {
     if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { quickPending.splice(i, 1); continue; }
     const pipe = pipelineOf(freeze.project);
     if (!pipe.auto_gate || !pipe.gate_with_quick || !pipe.quick_check_command?.length) { quickPending.splice(i, 1); continue; }
-    if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight) { i++; continue; }
+    if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight || refusedWait(sha, 'quick')) { i++; continue; }
     quickPending.splice(i, 1);
     void runQuick(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Pending quick check failed'));
   }
@@ -841,8 +876,16 @@ async function runQuick(freeze: ReleaseFreeze): Promise<void> {
       timeoutMs: Math.max(1, pipe.quick_check_timeout_min) * 60_000,
     });
     await dropCheckout(freeze.project, checkout);
-    const word = gateOutcome(result);
-    await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: result.stdout, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: word === 'RED' && !/=== RESULT (GREEN|RED)\b/.test(result.stdout) ? `exit ${result.code ?? 'none'} without a RESULT line` : null });
+    const refusal = runRefusal(result);
+    const word = refusal ? 'QUEUED' : gateOutcome(result);
+    await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: result.stdout, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: refusal });
+    if (refusal) {
+      const again = noteRefusal(freeze.sha, 'quick');
+      if (again && !quickPending.includes(freeze.sha)) quickPending.push(freeze.sha);
+      note(freeze.project, freeze.lane, freeze.sha, 'quick', again ? `auto: quick check on ${sha8} not run (${refusal}); trying again in a few minutes` : `auto: quick check on ${sha8} not run after ${REFUSED_MAX_TRIES} tries (${refusal}); run countix-remote-test tier1 on it yourself`);
+      emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: 'QUEUED', refusal, retry: again }, null);
+      return;
+    }
     emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: word, exit_code: result.code }, null);
     note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check ${word} on ${sha8}`);
     if (word === 'RED') tell(freeze.author_agent_id, `[from WaveCode] quick check RED on ${sha8} (${freeze.lane ?? 'your lane'}). Fix, push and freeze a new SHA.`);
@@ -883,7 +926,7 @@ function drainGatePending(): void {
     if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { gatePending.splice(i, 1); continue; }
     const pipe = pipelineOf(freeze.project);
     if (!pipe.auto_gate || !pipe.gate_command?.length) { gatePending.splice(i, 1); continue; }
-    if (inflightFor(freeze.project).size >= pipe.gate_max_inflight) { i++; continue; }
+    if (inflightFor(freeze.project).size >= pipe.gate_max_inflight || refusedWait(sha, 'full')) { i++; continue; }
     gatePending.splice(i, 1);
     void runGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Pending gate failed'));
   }
@@ -921,9 +964,18 @@ async function runGateBody(freeze: ReleaseFreeze, pipe: PipelineSwitches, spec: 
     timeoutMs: Math.max(1, pipe.gate_timeout_min) * 60_000,
   });
   await dropCheckout(freeze.project, checkout);
-  const word = gateOutcome(result);
+  const refusal = runRefusal(result);
+  const word = refusal ? 'QUEUED' : gateOutcome(result);
   // One immutable record per gate WaveCode ran (the checker reads it; legacy pipeline.gate stays for older readers).
-  await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: result.stdout, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: word === 'RED' && !/=== RESULT (GREEN|RED)\b/.test(result.stdout) ? `exit ${result.code ?? 'none'} without a RESULT line` : null });
+  await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: result.stdout, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: refusal });
+  if (refusal) {
+    // The tool never ran the suite (cancelled as superseded, duplicate, host unreachable): not RED, not the author's.
+    const again = noteRefusal(freeze.sha, 'full');
+    if (again && !gatePending.includes(freeze.sha)) gatePending.push(freeze.sha);
+    note(freeze.project, freeze.lane, freeze.sha, 'gate', again ? `auto: full gate on ${sha8} not run (${refusal}); trying again in a few minutes` : `auto: full gate on ${sha8} not run after ${REFUSED_MAX_TRIES} tries (${refusal}); run countix-remote-test --suite api on it yourself`);
+    emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: 'QUEUED', refusal, retry: again }, null);
+    return;
+  }
   await settleGate(freeze, word, result.code);
 }
 
@@ -1363,6 +1415,8 @@ export function resetPipelineForTest(): void {
   gateRecovered.clear();
   quickInflight.clear();
   quickPending.length = 0;
+  refusedRuns.clear();
+  refusedRetryMs = 90_000;
 }
 
 firstPassHooks.onResult = announceFirstPass;

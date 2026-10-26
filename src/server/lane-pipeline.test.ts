@@ -30,7 +30,7 @@ import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
-  quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, setPipelineExecForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+  quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
 import { setTestRunExecForTest } from './test-runs.js';
@@ -619,7 +619,7 @@ describe('hands-free lane pipeline', () => {
     // The gate ran in a clean detached checkout of the exact SHA, as the author, and the checkout is gone.
     const gateOpts = optsSeen.find((o) => o.argv[0] === 'gate-run')?.opts;
     expect(gateOpts?.cwd).toContain('.wavecode-gates');
-    expect(gateOpts?.env?.COUNTIX_REMOTE_TEST_WHO).toBe('ales');
+    expect(gateOpts?.env?.COUNTIX_REMOTE_TEST_WHO).toBe(`ales.${sha.slice(0, 9)}`); // one queued run per who on the gateway
     expect(gateOpts?.env?.WAVECODE_SHA).toBe(sha);
     expect(fs.existsSync(gateOpts?.cwd ?? '/nonexistent')).toBe(false);
     expect(git(repo, 'worktree', 'list')).not.toContain('.wavecode-gates');
@@ -732,6 +732,40 @@ describe('hands-free lane pipeline', () => {
     await ingestFreezeFile(openNote('ales', 'wc-green', green));
     expect(quicks()).toHaveLength(2);
     expect(quickLoadForTest()).toEqual({ inflight: { wave: [] }, pending: [] });
+  });
+
+  it('a run the gateway cancelled or refused (no RESULT line) is not RED: it is retried after a wait, and the author is not told', async () => {
+    setRefusedRetryMsForTest(200);
+    let tries = 0;
+    setPipelineExecForTest((argv) => {
+      calls.push(argv);
+      if (argv[0] === 'quick-check' || argv[0] === 'gate-run') {
+        tries++;
+        if (tries <= 2) return { code: 143, stdout: '[16:44:36] queued: position 1 (all 2 slots busy)\n[16:44:42] CANCELLED: superseded by 537982bb1 tier1 (one queued run per agent claude5) — not run\ncountix-remote-test: remote exit 143 on host=countix-testing (9s total)' };
+        return { code: 0, stdout: `=== RESULT GREEN sha=x suite=${argv[0] === 'quick-check' ? 'tier1' : 'api'} who=w exit=0 host=h ===` };
+      }
+      return { code: 0, stdout: 'ok' };
+    });
+    expect(runRefusal({ code: 143, stdout: 'a\nCANCELLED: superseded by x\ncountix-remote-test: remote exit 143 on host=countix-testing' })).toBe('CANCELLED: superseded by x');
+    expect(runRefusal({ code: 5, stdout: '=== RESULT GREEN sha=x suite=tier1 exit=0 host=h ===\nremote exit 5' })).toBeNull();
+    pipe.auto_gate = true;
+    pipe.gate_with_quick = true;
+    const sha = branch('wc-toni', 't.txt', 't');
+    const author = agent('toni', path.join(tmp, 'wc-toni'));
+    await ingestFreezeFile(openNote('toni', 'wc-toni', sha));
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'quick-check' || a[0] === 'gate-run')).toHaveLength(2), { timeout: 10_000 });
+    expect(getFreeze(sha)?.gate).toBe('QUEUED');
+    expect(latestPipelineNote('wave', 'wc-toni')).toMatch(/not run \(.*CANCELLED: superseded by 537982bb1 tier1/);
+    expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
+    // the retry wait holds them back, then one tick resubmits both and they go GREEN
+    await pipelineTick();
+    expect(calls.filter((a) => a[0] === 'quick-check' || a[0] === 'gate-run')).toHaveLength(2);
+    await new Promise((r) => setTimeout(r, 250));
+    await pipelineTick();
+    await vi.waitFor(() => expect(getFreeze(sha)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    const quickWords = () => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.quick' AND entity_id = ? ORDER BY id").all(`${sha}:quick`) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick: string }).quick);
+    await vi.waitFor(() => expect(quickWords()).toEqual(['QUEUED', 'QUEUED', 'GREEN']), { timeout: 10_000 });
+    expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
   });
 
   it('after a restart, a QUEUED freeze is settled from the test history, or resubmitted once when the dispatcher never saw it', async () => {

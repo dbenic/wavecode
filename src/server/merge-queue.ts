@@ -953,7 +953,7 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
       const minutes = cfg.gate_timeout_min ?? getConfig().projects?.[row.project]?.pipeline?.gate_timeout_min ?? 120;
       const env: Record<string, string> = {
         WAVECODE_SHA: mergeSha, WAVECODE_LANE: row.lane, WAVECODE_CHECKOUT: dir, WAVECODE_MERGE_OF: row.sha,
-        WAVECODE_AUTHOR: author?.name ?? '', COUNTIX_REMOTE_TEST_WHO: author?.name ?? 'wavecode',
+        WAVECODE_AUTHOR: author?.name ?? '', COUNTIX_REMOTE_TEST_WHO: `${author?.name ?? 'wavecode'}.${mergeSha.slice(0, 9)}`,
       };
       const gateArgv = fill(gateCmd, { checkout: dir, sha: mergeSha, lane: row.lane, project: row.project, remote: spec.remote });
       const gateStarted = new Date();
