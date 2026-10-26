@@ -14,7 +14,7 @@ vi.mock('./prompting.js', () => ({ promptAgent: (...a: unknown[]) => promptAgent
 
 import * as db from './db.js';
 import { emit, resetEventListenersForTest } from './event-bus.js';
-import { chunkText, stripMention, type SlackApi } from './slack-api.js';
+import { chunkText, stripMention, toMrkdwn, type SlackApi } from './slack-api.js';
 import {
   handleEvent, handleSocketMessage, primeSlackBridgeForTest, resetSlackBridgeForTest, routeFor, setSlackDepsForTest,
   slackBridgeStatus, startSlackBridge, SLACK_EVENT, type SlackEvent,
@@ -77,7 +77,7 @@ describe('slack bridge', () => {
     const arg = promptAgent.mock.calls[0][0] as { agent: db.Agent; actorId: string; text: string };
     expect(arg.agent.id).toBe(seat.id);
     expect(arg.actorId).toBe(db.getUserByName('denis').data!.id);
-    expect(arg.text).toBe('[from Slack DM, denis] what is red on main?');
+    expect(arg.text).toBe('[from Slack DM, denis; answer for Slack: short, bullets, no tables] what is red on main?');
     expect(api.calls.some((c) => c.method === 'reactions.add')).toBe(true);
     expect(slackBridgeStatus().inflight).toBe(1);
     // The seat answers: reply capture stores the message and emits message.created with the prompt event id.
@@ -105,7 +105,7 @@ describe('slack bridge', () => {
     expect(posts(api)[0].text).toContain('only the people listed');
     await handleEvent({ type: 'message', channel: 'C0PRIVOPS', channel_type: 'group', user: 'U0DENIS', text: 'set up a server', ts: '8.2' });
     expect(promptAgent).toHaveBeenCalledTimes(1);
-    expect((promptAgent.mock.calls[0][0] as { text: string }).text).toBe('[from Slack #denis-ops, denis] set up a server');
+    expect((promptAgent.mock.calls[0][0] as { text: string }).text).toBe('[from Slack #denis-ops, denis; answer for Slack: short, bullets, no tables] set up a server');
   });
 
   it('ignores bots, edits and its own messages, and a mention delivered twice', async () => {
@@ -116,7 +116,7 @@ describe('slack bridge', () => {
     await handleEvent({ type: 'app_mention', channel: 'C0DEV', user: 'U0DENIS', text: '<@UBOT> hello', ts: '3.4', client_msg_id: 'm1' });
     await handleEvent({ type: 'message', channel: 'C0DEV', channel_type: 'channel', user: 'U0DENIS', text: '<@UBOT> hello', ts: '3.4', client_msg_id: 'm1' });
     expect(promptAgent).toHaveBeenCalledTimes(1);
-    expect((promptAgent.mock.calls[0][0] as { text: string }).text).toBe('[from Slack #dev, denis] hello');
+    expect((promptAgent.mock.calls[0][0] as { text: string }).text).toBe('[from Slack #dev, denis; answer for Slack: short, bullets, no tables] hello');
   });
 
   it('queues a second question for a busy seat and a follow-up in the thread stays with that seat', async () => {
@@ -130,7 +130,7 @@ describe('slack bridge', () => {
     promptAgent.mockImplementationOnce(async () => ({ ok: true, prompt_event_id: 42, typed: 'x' }));
     emit('message.created', 'agent_message', msg.id, { from_agent_id: support.id, message_type: 'reply', ref_prompt_event_id: 41 }, null);
     await vi.waitFor(() => expect(promptAgent).toHaveBeenCalledTimes(2));
-    expect((promptAgent.mock.calls[1][0] as { text: string }).text).toBe('[from Slack #support, denis] second');
+    expect((promptAgent.mock.calls[1][0] as { text: string }).text).toBe('[from Slack #support, denis; answer for Slack: short, bullets, no tables] second');
     // A reply inside the first thread, in a channel that only answers mentions, still goes to the seat that answered.
     await handleEvent({ type: 'message', channel: 'C0SUPPORT', channel_type: 'channel', user: 'U0DENIS', text: 'and why?', ts: '4.3', thread_ts: '4.1' });
     expect(slackBridgeStatus().queued).toBe(1);
@@ -139,7 +139,7 @@ describe('slack bridge', () => {
     promptAgent.mockImplementationOnce(async () => ({ ok: true, prompt_event_id: 43, typed: 'x' }));
     emit('message.created', 'agent_message', msg2.id, { from_agent_id: support.id, message_type: 'reply', ref_prompt_event_id: 42 }, null);
     await vi.waitFor(() => expect(promptAgent).toHaveBeenCalledTimes(q + 1));
-    expect((promptAgent.mock.calls[q][0] as { text: string }).text).toBe('[from Slack #support, denis, same thread] and why?');
+    expect((promptAgent.mock.calls[q][0] as { text: string }).text).toBe('[from Slack #support, denis, same thread; answer for Slack: short, bullets, no tables] and why?');
   });
 
   it('tells the thread when the seat is not running, and frees the seat', async () => {
@@ -220,5 +220,20 @@ describe('slack text helpers', () => {
   it('strips the bot mention and unescapes Slack entities', () => {
     expect(stripMention('<@UBOT> is main &amp; staging ok?', 'UBOT')).toBe('is main & staging ok?');
     expect(stripMention('<@U1|name> hi', null)).toBe('hi');
+  });
+});
+
+describe('markdown → Slack mrkdwn', () => {
+  it('turns headers, bold, bullets, links and option boxes into Slack markup', () => {
+    const md = '## Working now\n- **codex2**: merging main\n* codex8: harness\nSee [the queue](https://x.test/q).\n[ ] Yes, ask Aleš\n[ ] Wait\n~~old~~';
+    expect(toMrkdwn(md)).toBe('*Working now*\n• *codex2*: merging main\n• codex8: harness\nSee <https://x.test/q|the queue>.\n1. Yes, ask Aleš\n2. Wait\n~old~');
+  });
+  it('renders a table as an aligned code block and leaves code fences alone', () => {
+    const md = '| Lane | Commit | Quick |\n| --- | --- | --- |\n| codex6 Desk #155 | 4c75f7bf | GREEN |\n| kimi4 | e1e20336 | missing |\n\n```ts\nconst a = **not bold**;\n```';
+    const out = toMrkdwn(md);
+    expect(out.startsWith('```\nLane              Commit    Quick')).toBe(true);
+    expect(out).toContain('codex6 Desk #155  4c75f7bf  GREEN');
+    expect(out).toContain('```\nconst a = **not bold**;\n```');
+    expect(out).not.toContain('|');
   });
 });

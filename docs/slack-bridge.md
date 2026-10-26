@@ -26,8 +26,10 @@ WaveCode user as actor, so the Command Center thread and the audit show who aske
 `[from Slack #support, denis] <text>` (or `DM`, and `same thread` on a follow-up), typed through
 the same path as the Command Center composer (`prompting.ts`): liveness check, persona prefix,
 send-keys, `agent.prompt_sent`, reply capture. While the seat works, the question carries an
-hourglass reaction. The captured reply is posted in the thread in 3,900-character pieces with
-code fences kept balanced. No reply inside `reply_timeout_s` (default 600, the capture ceiling):
+hourglass reaction. The captured reply is converted to Slack markup (headers → bold lines, `**x**` → `*x*`,
+bullets → `•`, a table → an aligned code block, `[ ] option` lines → a numbered list, links →
+`<url|text>`) and posted in 3,900-character pieces with code fences kept balanced. The prompt
+prefix also tells the seat it answers for Slack: short, bullets, no tables. No reply inside `reply_timeout_s` (default 600, the capture ceiling):
 one line says so and points at the Command Center. One prompt in flight per seat; a second
 question is told it is queued and goes next.
 

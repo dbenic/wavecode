@@ -22,7 +22,7 @@ import { getAgentByName, getAgentMessage, getDb, getUserByName, type Agent, type
 import { onEvent, emit } from './event-bus.js';
 import logger from './logger.js';
 import { promptAgent } from './prompting.js';
-import { chunkText, readTokenFile, slackApi, stripMention, SLACK_API, type SlackApi } from './slack-api.js';
+import { chunkText, readTokenFile, slackApi, stripMention, toMrkdwn, SLACK_API, type SlackApi } from './slack-api.js';
 
 export const SLACK_EVENT = { prompt: 'slack.prompt', reply: 'slack.reply', refused: 'slack.refused' } as const;
 const WORKING = 'hourglass_flowing_sand';
@@ -135,7 +135,7 @@ export function routeFor(ev: SlackEvent, cfg: SlackConfig, bot: string | null = 
 
 async function post(channel: string, threadTs: string | null, text: string): Promise<boolean> {
   if (!api) return false;
-  for (const chunk of chunkText(text)) {
+  for (const chunk of chunkText(toMrkdwn(text))) {
     const r = await api.postMessage({ channel, text: chunk, thread_ts: threadTs });
     if (!r.ok) { logger.warn({ channel, error: r.error }, 'Slack post failed'); return false; }
   }
@@ -193,7 +193,8 @@ export async function handleEvent(ev: SlackEvent): Promise<void> {
 async function run(job: Job): Promise<void> {
   inflight.set(job.agent.id, job);
   await api?.addReaction({ channel: job.channel, timestamp: job.ts, name: WORKING });
-  const prefix = `[from Slack ${job.where}, ${job.userLabel}${job.continues ? ', same thread' : ''}]`;
+  // The seat answers in Slack: short, bullets over tables (Slack has no tables or headers).
+  const prefix = `[from Slack ${job.where}, ${job.userLabel}${job.continues ? ', same thread' : ''}; answer for Slack: short, bullets, no tables]`;
   const res = await promptAgent({ agent: job.agent, actorId: job.actorId, text: `${prefix} ${job.text}` });
   if (!res.ok) {
     await post(job.channel, job.threadTs, `${job.agent.name} could not take the question: ${res.error}`);
