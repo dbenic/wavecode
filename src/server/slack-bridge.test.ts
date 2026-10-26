@@ -84,7 +84,8 @@ describe('slack bridge', () => {
     const msg = db.insertAgentMessage({ from_agent_id: seat.id, message: 'main is RED on the obligation test.\n```\nFAIL x\n```', message_type: 'reply', ref_prompt_event_id: 41 }).data!;
     emit('message.created', 'agent_message', msg.id, { from_agent_id: seat.id, message_type: 'reply', ref_prompt_event_id: 41, truncated: false }, null);
     await vi.waitFor(() => expect(posts(api)).toHaveLength(1));
-    expect(posts(api)[0]).toMatchObject({ channel: 'D1', thread_ts: '1.1' });
+    expect(posts(api)[0].channel).toBe('D1');
+    expect(posts(api)[0].thread_ts).toBeFalsy(); // a DM answer is the next message, not a thread
     expect(posts(api)[0].text).toContain('main is RED');
     await vi.waitFor(() => expect(slackBridgeStatus().inflight).toBe(0));
     expect(api.calls.some((c) => c.method === 'reactions.remove')).toBe(true);

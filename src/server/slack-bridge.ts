@@ -47,8 +47,8 @@ export interface SlackEvent {
 interface Job {
   agent: Agent;
   channel: string;
-  /** The Slack thread the answer goes to (the message's own ts when it started one). */
-  threadTs: string;
+  /** The Slack thread the answer goes to (the message's own ts when it started one); null in a DM, where the answer is the next message. */
+  threadTs: string | null;
   /** The message that asked; carries the "working" reaction. */
   ts: string;
   text: string;
@@ -133,12 +133,13 @@ export function routeFor(ev: SlackEvent, cfg: SlackConfig, bot: string | null = 
   return null;
 }
 
-async function post(channel: string, threadTs: string | null, text: string): Promise<void> {
-  if (!api) return;
+async function post(channel: string, threadTs: string | null, text: string): Promise<boolean> {
+  if (!api) return false;
   for (const chunk of chunkText(text)) {
     const r = await api.postMessage({ channel, text: chunk, thread_ts: threadTs });
-    if (!r.ok) { logger.warn({ channel, error: r.error }, 'Slack post failed'); return; }
+    if (!r.ok) { logger.warn({ channel, error: r.error }, 'Slack post failed'); return false; }
   }
+  return true;
 }
 
 /** Handle one Slack event (already acked). Exported for tests. */
@@ -151,7 +152,8 @@ export async function handleEvent(ev: SlackEvent): Promise<void> {
   if (!markSeen(ev.client_msg_id ?? `${ev.channel}:${ev.ts}`)) return;
   const route = routeFor(ev, cfg);
   if (!route) return;
-  const threadTs = ev.thread_ts ?? ev.ts;
+  // A DM is one conversation with the seat: answers are plain messages, not a thread under each question.
+  const threadTs = ev.channel_type === 'im' ? null : (ev.thread_ts ?? ev.ts);
   const userName = cfg.users?.[ev.user];
   if (!userName) {
     emit(SLACK_EVENT.refused, 'slack', `${ev.channel}:${ev.ts}`, { slack_user: ev.user, channel: ev.channel }, null);
@@ -171,7 +173,7 @@ export async function handleEvent(ev: SlackEvent): Promise<void> {
     actorId: user.ok ? user.data.id : null, userLabel: userName, where: route.where, continues: route.continues,
     promptEventId: null, timer: null,
   };
-  rememberThread(ev.channel, threadTs, route.seat);
+  if (threadTs) rememberThread(ev.channel, threadTs, route.seat);
   if (inflight.has(job.agent.id)) {
     const q = queued.get(job.agent.id) ?? [];
     q.push(job);
@@ -229,8 +231,8 @@ function onBusEvent(event: WaveEvent): void {
   void (async () => {
     const msg = getAgentMessage(event.entity_id);
     const text = msg.ok ? msg.data.message : '(reply could not be read)';
-    await post(job.channel, job.threadTs, payload.truncated ? `(cut short after the reply window)\n${text}` : text);
-    emit(SLACK_EVENT.reply, 'agent', job.agent.id, { channel: job.channel, thread_ts: job.threadTs, message_id: event.entity_id, chars: text.length }, null);
+    const posted = await post(job.channel, job.threadTs, payload.truncated ? `(cut short after the reply window)\n${text}` : text);
+    if (posted) emit(SLACK_EVENT.reply, 'agent', job.agent.id, { channel: job.channel, thread_ts: job.threadTs, message_id: event.entity_id, chars: text.length }, null);
     await finish(job);
   })();
 }

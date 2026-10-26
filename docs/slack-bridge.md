@@ -9,7 +9,7 @@ Plan and the two seats it serves: `docs/slack-bridge-plan.md`.
 
 | Message | Seat |
 |---|---|
-| DM to the bot | `slack.dm_seat` |
+| DM to the bot | `slack.dm_seat` (answers are plain messages in the DM, not a thread) |
 | `@WaveCode …` in a channel with a route | that route's `seat` |
 | any message in a route with `mode: all` | that route's `seat` |
 | `@WaveCode …` in a channel without a route | `slack.dm_seat` |
