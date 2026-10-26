@@ -16,9 +16,12 @@
  * a message routes to. Text from Slack is a prompt to the seat, never an instruction to
  * WaveCode; a "GO" typed in Slack is not a production GO (docs/orchestrator-seat.md).
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import WebSocket from 'ws';
 import { getConfig, type SlackConfig } from './config.js';
-import { getAgentByName, getAgentMessage, getDb, getUserByName, type Agent, type WaveEvent } from './db.js';
+import { getAgentByName, getAgentMessage, getDb, getEvent, getUserByName, type Agent, type WaveEvent } from './db.js';
 import { onEvent, emit } from './event-bus.js';
 import logger from './logger.js';
 import { promptAgent } from './prompting.js';
@@ -30,6 +33,20 @@ const RECONNECT_MIN_MS = 2_000;
 const RECONNECT_MAX_MS = 60_000;
 const SEEN_MAX = 500;
 const DEFAULT_REPLY_TIMEOUT_S = 600;
+/** A peer answer the seat asked for while answering a Slack question is posted to that thread this long after the first reply. */
+const FOLLOW_UP_MS = 30 * 60_000;
+const MAX_FILES = 5;
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
+/** What a seat can read: screenshots, PDFs, plain text. Anything else is named but not fetched. */
+const FILE_MIME_RE = /^(image\/(png|jpe?g|gif|webp)|application\/pdf|text\/(plain|csv|markdown))$/;
+
+export interface SlackFile {
+  id?: string;
+  name?: string;
+  mimetype?: string;
+  size?: number;
+  url_private_download?: string;
+}
 
 export interface SlackEvent {
   type: string;
@@ -42,6 +59,8 @@ export interface SlackEvent {
   ts?: string;
   thread_ts?: string;
   client_msg_id?: string;
+  /** Attachments of a `file_share` message (needs the `files:read` scope to download). */
+  files?: SlackFile[];
 }
 
 interface Job {
@@ -64,8 +83,11 @@ interface Deps {
   fetch: typeof fetch;
   WebSocketCtor: typeof WebSocket;
   now: () => number;
+  /** Where Slack attachments are saved for the seat to read: `<inboxRoot>/<channel>/<ts>-<name>`. */
+  inboxRoot: string;
 }
-let deps: Deps = { fetch, WebSocketCtor: WebSocket, now: Date.now };
+const defaultDeps = (): Deps => ({ fetch, WebSocketCtor: WebSocket, now: Date.now, inboxRoot: path.join(os.homedir(), 'inbox', 'slack') });
+let deps: Deps = defaultDeps();
 
 let api: SlackApi | null = null;
 let appToken: string | null = null;
@@ -78,6 +100,10 @@ let unsubscribe: (() => void) | null = null;
 const inflight = new Map<string, Job>();
 const queued = new Map<string, Job[]>();
 const byPrompt = new Map<number, Job>();
+/** Finished jobs by seat, so a peer question the seat asks right after answering still maps to the thread. */
+const recent = new Map<string, { job: Job; at: number }>();
+/** Peer question id → the Slack thread whose answer is waiting for it. */
+const peerThreads = new Map<string, { job: Job; at: number }>();
 const seen: string[] = [];
 const threads = new Map<string, string>(); // `${channel}:${thread_ts}` → agent name
 
@@ -172,7 +198,8 @@ export async function handleEvent(ev: SlackEvent): Promise<void> {
     await post(ev.channel, threadTs, `Seat ${route.seat} is not registered in WaveCode (${agentRes.error}).`);
     return;
   }
-  const text = stripMention(ev.text ?? '', botUserId);
+  const attached = await saveAttachments(ev);
+  const text = `${stripMention(ev.text ?? '', botUserId) || (attached ? '(see the attached file)' : '')}${attached}`;
   if (!text) return;
   const job: Job = {
     agent: agentRes.data, channel: ev.channel, threadTs, ts: ev.ts, text,
@@ -219,29 +246,108 @@ async function run(job: Job): Promise<void> {
   }, (timeoutS + 30) * 1000);
 }
 
+/**
+ * Download what a `file_share` message carries (screenshots of an invoice, a PDF) into the
+ * seat's inbox and name the files in the prompt, so the seat can read them before answering.
+ * Needs the `files:read` scope; without it Slack refuses and the prompt says the file was not fetched.
+ */
+async function saveAttachments(ev: SlackEvent): Promise<string> {
+  const files = (ev.files ?? []).slice(0, MAX_FILES);
+  if (!files.length || !api || !ev.channel || !ev.ts) return '';
+  const lines: string[] = [];
+  for (const f of files) {
+    const name = (f.name ?? f.id ?? 'file').replace(/[^\w.-]+/g, '_').slice(0, 80);
+    const mime = f.mimetype ?? 'application/octet-stream';
+    if (!f.url_private_download || !FILE_MIME_RE.test(mime) || (f.size ?? 0) > MAX_FILE_BYTES) {
+      lines.push(`Attached in Slack but not fetched (${mime}${(f.size ?? 0) > MAX_FILE_BYTES ? ', too large' : ''}): ${name}`);
+      continue;
+    }
+    const got = await api.download(f.url_private_download);
+    if (!got.ok) {
+      logger.warn({ channel: ev.channel, file: name, error: got.error }, 'Slack file download failed');
+      lines.push(`Attached in Slack but WaveCode could not fetch it (${got.error}): ${name}`);
+      continue;
+    }
+    const dir = path.join(deps.inboxRoot, ev.channel);
+    const file = path.join(dir, `${ev.ts.replace('.', '-')}-${name}`);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, got.data, { mode: 0o600 });
+      lines.push(`Attached from Slack (${mime}) — read it before answering: ${file}`);
+    } catch (e) {
+      logger.warn({ file, error: (e as Error).message }, 'Slack file could not be saved');
+      lines.push(`Attached in Slack but WaveCode could not save it: ${name}`);
+    }
+  }
+  return lines.length ? `\n${lines.join('\n')}` : '';
+}
+
 async function finish(job: Job): Promise<void> {
   if (job.timer) clearTimeout(job.timer);
   if (job.promptEventId !== null) byPrompt.delete(job.promptEventId);
   inflight.delete(job.agent.id);
+  recent.set(job.agent.id, { job, at: deps.now() });
   await api?.removeReaction({ channel: job.channel, timestamp: job.ts, name: WORKING });
   const next = queued.get(job.agent.id)?.shift();
   if (next) await run(next);
 }
 
 function onBusEvent(event: WaveEvent): void {
-  if (event.type !== 'message.created' || !event.payload_json) return;
+  if (!event.payload_json) return;
+  if (event.type === 'peer.question') {
+    // The seat asked another WaveCode (the production agent) while answering a Slack question:
+    // when that answer lands and the seat follows up, the follow-up belongs in the same thread.
+    let q: { question_id?: string; from_agent_id?: string | null };
+    try { q = JSON.parse(event.payload_json); } catch { return; }
+    if (!q.question_id || !q.from_agent_id) return;
+    const live = inflight.get(q.from_agent_id) ?? recentJob(q.from_agent_id);
+    if (live) peerThreads.set(q.question_id, { job: live, at: deps.now() });
+    return;
+  }
+  if (event.type !== 'message.created') return;
   let payload: { message_type?: string; ref_prompt_event_id?: number | null; truncated?: boolean };
   try { payload = JSON.parse(event.payload_json); } catch { return; }
   if (payload.message_type !== 'reply' || typeof payload.ref_prompt_event_id !== 'number') return;
   const job = byPrompt.get(payload.ref_prompt_event_id);
-  if (!job) return;
+  if (job) {
+    void (async () => {
+      const msg = getAgentMessage(event.entity_id);
+      const text = msg.ok ? msg.data.message : '(reply could not be read)';
+      const posted = await post(job.channel, job.threadTs, payload.truncated ? `(cut short after the reply window)\n${text}` : text);
+      if (posted) emit(SLACK_EVENT.reply, 'agent', job.agent.id, { channel: job.channel, thread_ts: job.threadTs, message_id: event.entity_id, chars: text.length }, null);
+      await finish(job);
+    })();
+    return;
+  }
+  const follow = followUpFor(payload.ref_prompt_event_id);
+  if (!follow) return;
   void (async () => {
     const msg = getAgentMessage(event.entity_id);
-    const text = msg.ok ? msg.data.message : '(reply could not be read)';
-    const posted = await post(job.channel, job.threadTs, payload.truncated ? `(cut short after the reply window)\n${text}` : text);
-    if (posted) emit(SLACK_EVENT.reply, 'agent', job.agent.id, { channel: job.channel, thread_ts: job.threadTs, message_id: event.entity_id, chars: text.length }, null);
-    await finish(job);
+    if (!msg.ok || !msg.data.message.trim()) return;
+    const posted = await post(follow.channel, follow.threadTs, msg.data.message);
+    if (posted) emit(SLACK_EVENT.reply, 'agent', follow.agent.id, { channel: follow.channel, thread_ts: follow.threadTs, message_id: event.entity_id, chars: msg.data.message.length, follow_up: true }, null);
   })();
+}
+
+function recentJob(agentId: string): Job | null {
+  const r = recent.get(agentId);
+  if (!r) return null;
+  if (deps.now() - r.at > FOLLOW_UP_MS) { recent.delete(agentId); return null; }
+  return r.job;
+}
+
+/** A reply to a `peer.delivered` prompt (peers.ts) whose question was asked for a Slack thread → that thread, once. */
+function followUpFor(promptEventId: number): Job | null {
+  const ref = getEvent(promptEventId);
+  if (!ref || ref.type !== 'peer.delivered' || !ref.payload_json) return null;
+  let p: { question_id?: string; from_agent_id?: string | null };
+  try { p = JSON.parse(ref.payload_json); } catch { return null; }
+  if (!p.question_id) return null;
+  const hit = peerThreads.get(p.question_id);
+  if (!hit) return null;
+  peerThreads.delete(p.question_id);
+  if (deps.now() - hit.at > FOLLOW_UP_MS || hit.job.agent.id !== p.from_agent_id) return null;
+  return hit.job;
 }
 
 /** One Socket Mode frame: ack by envelope id, then act. Exported for tests. */
@@ -314,6 +420,8 @@ export function stopSlackBridge(): void {
   inflight.clear();
   queued.clear();
   byPrompt.clear();
+  recent.clear();
+  peerThreads.clear();
 }
 
 export function slackBridgeStatus(): { configured: boolean; connected: boolean; inflight: number; queued: number } {
@@ -321,7 +429,7 @@ export function slackBridgeStatus(): { configured: boolean; connected: boolean; 
 }
 
 export function setSlackDepsForTest(d: Partial<Deps> | null): void {
-  deps = d ? { ...deps, ...d } : { fetch, WebSocketCtor: WebSocket, now: Date.now };
+  deps = d ? { ...deps, ...d } : defaultDeps();
 }
 
 export function resetSlackBridgeForTest(): void {

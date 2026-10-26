@@ -23,6 +23,7 @@ oauth_config:
       - im:write
       - channels:history
       - groups:history
+      - files:read
       - reactions:write
       - users:read
 settings:

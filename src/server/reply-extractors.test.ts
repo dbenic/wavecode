@@ -33,6 +33,22 @@ describe('reply extraction', () => {
     expect(text).not.toContain("I'll look");
   });
 
+  it('Claude Code 2.1.28x: collapsed "Called …, ran … shell commands" lines are tool blocks, and the composer ghost text never anchors', () => {
+    const prompt = '[from Slack #ops-support, denis; answer for Slack: short, bullets, no tables] what is on staging and which lane is next';
+    const lines = pane('claude-tool-summary.txt').split('\n');
+    // the composer at the bottom shows an unsent suggestion in the shape of the prompt: not the echo
+    expect(lines[findPromptEcho(lines, prompt)]).toContain('answer for Slack');
+    const { text, anchored } = extractReply('claude-code', pane('claude-tool-summary.txt'), prompt);
+    expect(anchored).toBe(true);
+    expect(text.startsWith("Staging: I can't confirm what's on staging right now.")).toBe(true);
+    expect(text).toContain('Next lane: none is ready to stage right now.');
+    expect(text).not.toContain('Still checking');
+    expect(text).not.toContain('Called wavecode');
+    expect(text).not.toContain('ran 2 shell commands');
+    expect(text).not.toContain('what did fable say');
+    expect(text).not.toMatch(NOISE);
+  });
+
   it('Claude Code PM seat: MCP tool blocks dropped, the question and [ ] options kept', () => {
     const { text } = extractReply('claude-code', pane('claude-pm-question.txt'), 'what is chatgpt-countix doing?');
     expect(text.startsWith('chatgpt-countix (Denis\'s lane) is running the invoices test suite for T12')).toBe(true);

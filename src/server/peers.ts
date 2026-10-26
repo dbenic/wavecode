@@ -27,6 +27,7 @@ import { currentActorIsAdmin } from './request-context.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import * as sessionManager from './session-manager.js';
+import * as replyCapture from './reply-capture.js';
 import { workspaceMatches } from './project-gate.js';
 
 export interface PeerQuestion {
@@ -401,6 +402,12 @@ async function deliver(questionId: string, agent: Agent): Promise<void> {
   const sent = await sessionManager.sendKeys(agent.id, text);
   if (sent.ok) {
     getDb().prepare(`UPDATE peer_questions SET status = 'delivered' WHERE id = ?`).run(q.id);
+    // The answer is a prompt to the asker: what it says next is a reply to it (spec §5b), so a
+    // thread — or the Slack bridge, by question id — can carry that follow-up on.
+    const delivered = emit('peer.delivered', 'agent', agent.id, {
+      question_id: q.id, peer: q.peer, agent: q.agent, from_agent_id: q.from_agent_id, answer_path: q.answer_path,
+    }, q.actor_id ?? null);
+    void replyCapture.trackPrompt({ agent, actorId: q.actor_id ?? null, prompt: text, promptEventId: delivered?.id ?? null, quietIfSuperseded: true });
   } else {
     logger.warn({ questionId: q.id, error: sent.error }, 'Peer answer could not be typed into the asking agent (file is in place)');
   }

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./event-bus.js', () => ({ emit: vi.fn(() => ({ id: 1 })) }));
 vi.mock('./session-manager.js', () => ({ sendKeys: vi.fn(() => ({ ok: true, data: undefined })) }));
+vi.mock('./reply-capture.js', () => ({ trackPrompt: vi.fn(async () => undefined) }));
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() } }));
 
 const peersCfg: Record<string, { url: string; token: string; agents?: string[] }> = {};
@@ -18,6 +19,7 @@ vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ peers: peersCfg })) })
 import * as db from './db.js';
 import { emit } from './event-bus.js';
 import * as sessionManager from './session-manager.js';
+import * as replyCapture from './reply-capture.js';
 import * as peers from './peers.js';
 
 let tmp: string;
@@ -134,6 +136,11 @@ describe('answers', () => {
     const typed = vi.mocked(sessionManager.sendKeys).mock.calls.find((c) => c[0] === asker.id)?.[1] as string;
     expect(typed).toMatch(/^\[Answer from deploy\/fable to your question "Which migration is current\?"\] Full text: /);
     expect(typed).toContain('Applied cleanly.');
+    // the typed answer is a prompt: the asker's next words are a reply to it (peer.delivered), so a Slack thread can carry them on
+    const delivered = vi.mocked(emit).mock.calls.find((c) => c[0] === 'peer.delivered');
+    expect(delivered?.[2]).toBe(asker.id);
+    expect(delivered?.[3]).toMatchObject({ question_id: r.data.id, from_agent_id: asker.id, peer: 'deploy', agent: 'fable' });
+    expect(vi.mocked(replyCapture.trackPrompt)).toHaveBeenCalledWith(expect.objectContaining({ agent: expect.objectContaining({ id: asker.id }), promptEventId: 1, quietIfSuperseded: true, prompt: typed }));
   });
 
   it('holds the answer while the asker is working and delivers on its idle edge', async () => {

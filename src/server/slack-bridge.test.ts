@@ -28,6 +28,7 @@ function fakeApi(): SlackApi & { calls: Array<{ method: string; body: Record<str
     postMessage: (o) => call('chat.postMessage', o as Record<string, unknown>),
     addReaction: (o) => call('reactions.add', o as Record<string, unknown>),
     removeReaction: (o) => call('reactions.remove', o as Record<string, unknown>),
+    download: async (url: string) => { calls.push({ method: 'download', body: { url } }); return { ok: true as const, data: Buffer.from('PNGBYTES') }; },
   };
 }
 
@@ -140,6 +141,51 @@ describe('slack bridge', () => {
     emit('message.created', 'agent_message', msg2.id, { from_agent_id: support.id, message_type: 'reply', ref_prompt_event_id: 42 }, null);
     await vi.waitFor(() => expect(promptAgent).toHaveBeenCalledTimes(q + 1));
     expect((promptAgent.mock.calls[q][0] as { text: string }).text).toBe('[from Slack #support, denis, same thread; answer for Slack: short, bullets, no tables] and why?');
+  });
+
+  it('a peer answer the seat asked for while answering is posted to the same thread as a follow-up, once', async () => {
+    await handleEvent({ type: 'message', channel: 'C0SUPPORT', channel_type: 'channel', user: 'U0DENIS', text: 'why does invoice 190 warn?', ts: '6.1' });
+    const support = db.getAgentByName('support').data!;
+    // the seat asks the production agent (peers.ts) while the Slack question is in flight
+    emit('peer.question', 'peer', 'deploy/fable', { question_id: 'Q1', peer: 'deploy', agent: 'fable', from_agent_id: support.id, question: 'invoice 190?' }, null);
+    const first = db.insertAgentMessage({ from_agent_id: support.id, message: 'Asked the production agent, answer follows here.', message_type: 'reply', ref_prompt_event_id: 41 }).data!;
+    emit('message.created', 'agent_message', first.id, { from_agent_id: support.id, message_type: 'reply', ref_prompt_event_id: 41 }, null);
+    await vi.waitFor(() => expect(posts(api).some((p) => p.text.includes('answer follows'))).toBe(true));
+    await vi.waitFor(() => expect(slackBridgeStatus().inflight).toBe(0));
+    // the answer lands: peers.ts types it in and records peer.delivered as the prompt the seat now answers
+    const delivered = emit('peer.delivered', 'agent', support.id, { question_id: 'Q1', peer: 'deploy', agent: 'fable', from_agent_id: support.id }, null)!;
+    const follow = db.insertAgentMessage({ from_agent_id: support.id, message: 'According to the production agent: the asset line was replaced.', message_type: 'reply', ref_prompt_event_id: delivered.id }).data!;
+    emit('message.created', 'agent_message', follow.id, { from_agent_id: support.id, message_type: 'reply', ref_prompt_event_id: delivered.id }, null);
+    await vi.waitFor(() => expect(posts(api).some((p) => p.text.includes('According to the production agent'))).toBe(true));
+    const posted = posts(api).find((p) => p.text.includes('According to the production agent'))!;
+    expect(posted).toMatchObject({ channel: 'C0SUPPORT', thread_ts: '6.1' });
+    // a second reply to the same delivered prompt (or any unrelated prompt) is not mirrored
+    const n = posts(api).length;
+    const other = db.insertAgentMessage({ from_agent_id: support.id, message: 'private Command Center chat', message_type: 'reply', ref_prompt_event_id: delivered.id }).data!;
+    emit('message.created', 'agent_message', other.id, { from_agent_id: support.id, message_type: 'reply', ref_prompt_event_id: delivered.id }, null);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(posts(api).length).toBe(n);
+  });
+
+  it('a screenshot shared in Slack is downloaded into the inbox and named in the prompt; other types are named but not fetched', async () => {
+    setSlackDepsForTest({ inboxRoot: path.join(tmp, 'inbox-slack') });
+    await handleEvent({
+      type: 'message', subtype: 'file_share', channel: 'C0SUPPORT', channel_type: 'channel', user: 'U0DENIS', text: 'why does this invoice warn?', ts: '7.1',
+      files: [
+        { id: 'F1', name: 'Screenshot 2026-10-26 at 22.28.png', mimetype: 'image/png', size: 1234, url_private_download: 'https://files.slack.com/files-pri/T1-F1/download/shot.png' },
+        { id: 'F2', name: 'model.xlsx', mimetype: 'application/vnd.ms-excel', size: 10, url_private_download: 'https://files.slack.com/files-pri/T1-F2/download/model.xlsx' },
+      ],
+    });
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    const text = (promptAgent.mock.calls[0][0] as { text: string }).text;
+    const saved = path.join(tmp, 'inbox-slack', 'C0SUPPORT', '7-1-Screenshot_2026-10-26_at_22.28.png');
+    expect(text).toContain(`Attached from Slack (image/png) — read it before answering: ${saved}`);
+    expect(text).toContain('Attached in Slack but not fetched (application/vnd.ms-excel): model.xlsx');
+    expect(fs.readFileSync(saved, 'utf8')).toBe('PNGBYTES');
+    expect(api.calls.filter((c) => c.method === 'download').map((c) => c.body.url)).toEqual(['https://files.slack.com/files-pri/T1-F1/download/shot.png']);
+    // a bare screenshot with no words still becomes a prompt
+    await handleEvent({ type: 'message', subtype: 'file_share', channel: 'C0SUPPORT', channel_type: 'channel', user: 'U0DENIS', ts: '7.2', files: [{ id: 'F3', name: 'a.png', mimetype: 'image/png', size: 5, url_private_download: 'https://files.slack.com/files-pri/T1-F3/download/a.png' }] });
+    await vi.waitFor(() => expect(posts(api).some((p) => p.text.includes('Queued'))).toBe(true));
   });
 
   it('tells the thread when the seat is not running, and frees the seat', async () => {

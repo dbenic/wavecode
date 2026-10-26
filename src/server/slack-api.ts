@@ -23,6 +23,8 @@ export interface SlackApi {
   postMessage(opts: { channel: string; text: string; thread_ts?: string | null }): Promise<SlackReply>;
   addReaction(opts: { channel: string; timestamp: string; name: string }): Promise<SlackReply>;
   removeReaction(opts: { channel: string; timestamp: string; name: string }): Promise<SlackReply>;
+  /** Fetch a file's `url_private_download` with the bot token (scope `files:read`). */
+  download(url: string): Promise<{ ok: true; data: Buffer } | { ok: false; error: string }>;
 }
 
 export function slackApi(botToken: string, fetchImpl: typeof fetch = fetch): SlackApi {
@@ -41,11 +43,24 @@ export function slackApi(botToken: string, fetchImpl: typeof fetch = fetch): Sla
       return { ok: false, error: (e as Error).message };
     }
   }
+  async function download(url: string): Promise<{ ok: true; data: Buffer } | { ok: false; error: string }> {
+    if (!/^https:\/\/files\.slack\.com\//.test(url)) return { ok: false, error: 'not a Slack file URL' };
+    try {
+      const res = await fetchImpl(url, { headers: { authorization: `Bearer ${botToken}` }, signal: AbortSignal.timeout(30_000) });
+      if (!res.ok) return { ok: false, error: `http ${res.status}` };
+      // Without files:read Slack answers 200 with an HTML login page instead of the bytes.
+      if (/text\/html/i.test(res.headers.get('content-type') ?? '')) return { ok: false, error: 'login page instead of the file: the app lacks the files:read scope' };
+      return { ok: true, data: Buffer.from(await res.arrayBuffer()) };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
   return {
     call,
     postMessage: ({ channel, text, thread_ts }) => call('chat.postMessage', { channel, text, ...(thread_ts ? { thread_ts } : {}), unfurl_links: false, unfurl_media: false }),
     addReaction: ({ channel, timestamp, name }) => call('reactions.add', { channel, timestamp, name }),
     removeReaction: ({ channel, timestamp, name }) => call('reactions.remove', { channel, timestamp, name }),
+    download,
   };
 }
 

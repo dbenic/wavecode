@@ -42,13 +42,30 @@ export function findPromptEcho(lines: string[], prompt: string): number {
   const needle = normalize(firstLine).slice(0, 24);
   if (!needle) return -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (ECHO_LINE_RE.test(lines[i]) && normalize(lines[i]).includes(needle)) return i;
+    if (ECHO_LINE_RE.test(lines[i]) && normalize(lines[i]).includes(needle) && !isComposerLine(lines, i)) return i;
   }
   // Some TUIs render the user turn without a glyph — accept a plain match as a last resort.
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (normalize(lines[i]).startsWith(needle)) return i;
+    if (normalize(lines[i]).startsWith(needle) && !isComposerLine(lines, i)) return i;
   }
   return -1;
+}
+
+const RULE_LINE_RE = /^\s*[─━]{8,}\s*$/;
+
+/**
+ * Claude Code's composer sits between two rule lines at the bottom of the pane and may show
+ * unsent text: a ghost "prompt suggestion" the CLI drafts (often in the shape of the last
+ * prompt), or a line typed but not yet submitted. A submitted prompt's echo is followed by
+ * output, never by the composer's bottom rule, so a glyph line whose next non-blank line is
+ * a rule is the composer and never anchors a reply.
+ */
+function isComposerLine(lines: string[], i: number): boolean {
+  for (let j = i + 1; j < lines.length; j++) {
+    if (!lines[j].trim()) continue;
+    return RULE_LINE_RE.test(lines[j]);
+  }
+  return false;
 }
 
 /** Drop any line that is part of the prompt itself (wrapped echo continuation). */
@@ -76,6 +93,8 @@ interface BlockGrammar {
   toolContinuation: RegExp;
   /** TUI chrome that is never part of a reply. */
   isChrome: (line: string) => boolean;
+  /** An unmarked line that stands for collapsed tool calls ("Called wavecode 2 times, ran 3 shell commands"): a tool block of its own. */
+  toolSummary?: RegExp;
 }
 
 function parseBlocks(lines: string[], g: BlockGrammar): Block[] {
@@ -85,6 +104,11 @@ function parseBlocks(lines: string[], g: BlockGrammar): Block[] {
     const line = raw.replace(/\s+$/, '');
     if (g.isChrome(line)) {
       current = null;
+      continue;
+    }
+    if (g.toolSummary?.test(line)) {
+      current = { kind: 'tool', lines: [] };
+      blocks.push(current);
       continue;
     }
     const m = g.marker.exec(line);
@@ -186,6 +210,9 @@ const CLAUDE_GRAMMAR: BlockGrammar = {
   isTool: (h) => /^[A-Za-z_][\w.:-]*(\s\(MCP\))?\(/.test(h)
     || /\(MCP\)/.test(h)
     || /^(Running|Update Todos|Read \d+ files?)\b/.test(h),
+  // Claude Code ≥ 2.1.28x folds a run of tool calls into one unmarked line between prose
+  // blocks: "Called wavecode 2 times, ran 3 shell commands" / "Ran 1 shell command" / "Read 3 files".
+  toolSummary: /^\s{0,2}(?:Called [\w-]+(?: \d+ times?)?|Ran \d+ shell commands?|Read \d+ files?|Searched(?: \d+ \w+)?|Edited \d+ files?)(?:, (?:called [\w-]+(?: \d+ times?)?|ran \d+ shell commands?|read \d+ files?|searched(?: \d+ \w+)?|edited \d+ files?))*$/,
   toolContinuation: /^\s*⎿/,
   isChrome: (l) =>
     /^[✻✶✳✢✽✺]/.test(l)                       // "✻ Brewed for 2m 3s", spinners

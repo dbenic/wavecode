@@ -33,6 +33,23 @@ prefix also tells the seat it answers for Slack: short, bullets, no tables. No r
 one line says so and points at the Command Center. One prompt in flight per seat; a second
 question is told it is queued and goes next.
 
+**Attachments.** A screenshot, PDF or text file shared with the message is downloaded with the
+bot token (scope `files:read`) to `~/inbox/slack/<channel>/<ts>-<name>` (service user, 0600, five
+files, 20 MB each) and named in the prompt: `Attached from Slack (image/png) — read it before
+answering: <path>`. The seat reads it with its own file tool. Other types are named but not
+fetched. A message that is only a file still becomes a prompt (`(see the attached file)`).
+
+**Follow-ups.** When the seat asks another WaveCode (the production agent, `ask_peer`) while
+answering, its first reply is posted as usual and the thread is remembered by the peer question
+id. The peer's answer is typed into the seat as a prompt (`peer.delivered`, peers.ts), and the
+seat's reply to *that* prompt is posted in the same thread, once, within 30 minutes. Nothing
+else the seat says later is mirrored to Slack.
+
+**Claude Code ghost text.** The CLI drafts an unsent "prompt suggestion" in its composer, often in
+the shape of the last prompt. Reply capture skips the composer line (the one followed by the
+composer's bottom rule), and WaveCode's profiles set `promptSuggestionEnabled: false` in the
+CLI's `settings.json` so no such text is drawn at all.
+
 ## What it never does
 
 - Sends raw keys, relaunches, kills or re-briefs an agent. A seat that is not running is
@@ -81,7 +98,7 @@ start; with the section and a missing token file it stays idle and logs one warn
 
 Create the app from `docs/ops/slack-app-manifest.yaml` (Socket Mode on). Bot scopes:
 `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`, `channels:history`,
-`groups:history` (private channels), `reactions:write`, `users:read`. Events: `app_mention`, `message.im`,
+`groups:history` (private channels), `files:read` (attachments), `reactions:write`, `users:read`. Events: `app_mention`, `message.im`,
 `message.channels`, `message.groups`. Adding a scope later means "reinstall app" in Slack; the bot token
 normally survives, check it with `auth.test`.
 Install to the workspace, invite the bot to the routed channels, and hand the two tokens to
@@ -90,4 +107,5 @@ SystemOps for the token files. Never paste a token in chat.
 ## Events
 
 `slack.prompt` (agent; channel, thread, user, prompt event id), `slack.reply` (agent; message id,
-characters), `slack.refused` (slack; a user not on the list).
+characters; `follow_up: true` for a peer-answer follow-up), `slack.refused` (slack; a user not on
+the list). `peer.delivered` (agent; question id) marks a peer answer typed into a seat as a prompt.

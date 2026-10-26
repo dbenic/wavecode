@@ -828,7 +828,9 @@ Body `{ agent, question, from_agent_id? }`. Delivers the question to that agent
 on the peer instance and returns 202 with the question row (`status: sent`).
 The answer is written to `~/inbox/answers/<peer>-<agent>-<id>.md`, emitted as
 `peer.answer`, and typed into `from_agent_id`'s pane when it is idle (a seat
-token's own agent is the default). 404 unknown peer/agent or not in the
+token's own agent is the default); that typed answer is recorded as a prompt
+(`peer.delivered`, entity agent; payload question id) so the asker's next reply
+is captured against it and a Slack thread can carry it on (docs/slack-bridge.md). 404 unknown peer/agent or not in the
 allowlist, 502 peer unreachable, 403 observers.
 
 ### `GET /api/peers/questions[?status=sent|answered|delivered|failed]`, `GET /api/peers/questions/:id`
@@ -1326,6 +1328,9 @@ Maestro's brief, approved by Denis: eligibility by evidence, not by branch name.
 `slack:` in config.yaml starts a Socket Mode bridge (docs/slack-bridge.md): a DM or @mention
 becomes a prompt to a seat through the same path as `POST /api/agents/:id/send` (now
 `prompting.ts`: liveness, persona, send-keys, `agent.prompt_sent`, reply capture), and the
-captured reply is posted in the Slack thread. Events `slack.prompt`, `slack.reply`,
-`slack.refused`. No new HTTP routes. `POST /api/agents/:id/send` is unchanged on the wire; raw
+captured reply is posted in the Slack thread. Attachments (`file_share`: screenshots, PDFs,
+text; scope `files:read`) are downloaded to `~/inbox/slack/<channel>/` and named in the prompt;
+a reply to a peer answer the seat asked for meanwhile is posted in the same thread
+(`slack.reply` with `follow_up: true`). Events `slack.prompt`, `slack.reply`,
+`slack.refused`, `peer.delivered`. No new HTTP routes. `POST /api/agents/:id/send` is unchanged on the wire; raw
 keys still record `agent.prompt_sent` and capture no reply.

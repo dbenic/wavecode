@@ -1,0 +1,25 @@
+● I'm set up as @pm-ops and ready for questions.
+  - Staging: I find the newest freeze for the lane and press Stage.
+  Send the first question in the form [from Slack #channel, name] ….
+
+✻ Churned for 6s · done 9:24 PM
+
+❯ [from Slack #ops-support, denis; answer for Slack: short, bullets, no tables] what is on staging and which lane is next
+  Called wavecode 2 times, ran 3 shell commands
+● Still checking: staging release history is pulled, now reading the Reviews board to find the next lane.
+  Called wavecode, ran 2 shell commands
+● Staging: I can't confirm what's on staging right now. I've asked the deploy box and will post its answer in this thread.
+  - The last staging release WaveCode recorded is b14c5178, version 0.443.84, from lane wc-ales-claude1.
+  - The Reviews board's staging pointer is empty.
+
+  Next lane: none is ready to stage right now.
+  - wc-antonio-claude2 ea966a6f, reviewer codex4
+  - wc-kimi1 bef2e217, reviewer codex5
+
+  Prod: only through origin/main and wavecode deployable <sha>, with Denis's own GO.
+
+✻ Cooked for 1m 5s · done 9:29 PM
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ [from Slack #ops-support, denis] same thread: what did fable say
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
