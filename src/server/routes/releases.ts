@@ -5,6 +5,7 @@ import * as releases from '../releases.js';
 import * as reviewQueue from '../review-queue.js';
 import { listCandidates } from '../release-freezes.js';
 import { buildBoard } from '../overview.js';
+import { goNote, seatProductionAllowed } from '../slack-go.js';
 
 /** Releases as records (src/server/releases.ts, docs/peers.md "Releases"). */
 export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
@@ -85,7 +86,8 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     // Promote sends the production GO and is admin only. Stage needs each contained
     // lane's reviewer PASS, unless this composed candidate is already on staging
     // (the deploy agent deployed it) or the caller is an admin.
-    if (action === 'promote' && !isAdmin(user)) {
+    // Promote sends the production GO: admins, or a seat on its person's own Slack GO (checked below, once the tip is known).
+    if (action === 'promote' && !isAdmin(user) && !user.via_seat) {
       return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})` }, 403);
     }
     const body = await c.req.json<{ project?: unknown }>().catch(() => ({} as { project?: unknown }));
@@ -93,6 +95,13 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
     const name = decodeURIComponent(c.req.param('name'));
     const cand = (await listCandidates(project)).find((x) => x.name === name);
     if (!cand) return c.json({ error: `No unreleased candidate '${name}' in project '${project}'` }, 404);
+    let goLine: string | null = null;
+    if (action === 'promote' && !isAdmin(user)) {
+      // A seat (pm-denis) may promote only on its person's own Slack GO for this SHA (slack-go.ts).
+      const seatGo = user.via_seat ? seatProductionAllowed(user, cand.tip) : null;
+      if (!seatGo?.ok) return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})${seatGo ? `; ${seatGo.error}` : ''}` }, 403);
+      goLine = goNote(seatGo.data);
+    }
     const lanes = (await buildBoard()).lanes.filter((l) => l.candidate === name);
     if (action === 'stage' && !isAdmin(user)) {
       const deployed = releases.listReleases({ sha: cand.tip, target: 'staging', limit: 10 }).some((r) => r.status === 'deployed');
@@ -105,10 +114,40 @@ export function registerReleaseRoutes(app: Hono<NodeAppEnv>): void {
       const eligible = await stageEligibility(cand.tip, project, { markStale: true });
       if (eligible.error) return c.json({ error: eligible.error }, 400);
     }
+    const contains = lanes.length ? `contains: ${lanes.map((l) => `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`).join(', ')}` : null;
     const r = await releases.requestRelease({
       project, sha: cand.tip, lane: cand.name, target: action === 'promote' ? 'production' : 'staging',
-      desk: null, reviewer: null, actorName: user.name, actorRole: user.role, actorIsAdmin: isAdmin(user), runId: null,
-      note: lanes.length ? `contains: ${lanes.map((l) => `${l.desk ? `Desk #${l.desk} ` : ''}${l.sha.slice(0, 8)}`).join(', ')}` : null,
+      desk: null, reviewer: null, actorName: user.name, actorRole: goLine ? 'admin' : user.role, actorIsAdmin: isAdmin(user) || goLine !== null, runId: null,
+      note: [contains, goLine].filter(Boolean).join(' · ') || null,
+    });
+    if (!r.ok) return c.json({ error: r.error }, 400);
+    return c.json(r.data, 202);
+  });
+
+  // Push an exact SHA, for people and seats that talk in SHAs rather than candidate names
+  // (pm-denis: "push a78dda93 to staging / production"). Staging: any developer. Production:
+  // an admin, or a seat right after its person's own Slack GO for that SHA (slack-go.ts).
+  app.post('/api/releases/request', async (c) => {
+    const user = getActingUser(c);
+    if (!canMutate(user)) return c.json({ error: 'Forbidden' }, 403);
+    const body = await c.req.json<{ project?: unknown; sha?: unknown; target?: unknown; note?: unknown; lane?: unknown }>().catch(() => ({} as Record<string, unknown>));
+    const project = typeof body.project === 'string' ? body.project.trim() : '';
+    const sha = typeof body.sha === 'string' ? body.sha.trim().toLowerCase() : '';
+    const target = body.target === 'production' ? 'production' : body.target === 'staging' ? 'staging' : null;
+    if (!project) return c.json({ error: 'project is required' }, 400);
+    if (!/^[0-9a-f]{40}$/.test(sha)) return c.json({ error: 'sha must be the exact 40-character commit id' }, 400);
+    if (!target) return c.json({ error: "target must be 'staging' or 'production'" }, 400);
+    let goLine: string | null = null;
+    if (target === 'production' && !isAdmin(user)) {
+      const seatGo = user.via_seat ? seatProductionAllowed(user, sha) : null;
+      if (!seatGo?.ok) return c.json({ error: `${releases.PRODUCTION_RELEASE_ADMIN_ONLY} (you are ${user.name}, ${user.role})${seatGo ? `; ${seatGo.error}` : ''}` }, 403);
+      goLine = goNote(seatGo.data);
+    }
+    const note = typeof body.note === 'string' && body.note.trim() ? body.note.trim().slice(0, 500) : null;
+    const r = await releases.requestRelease({
+      project, sha, lane: typeof body.lane === 'string' ? body.lane : null, target,
+      desk: null, reviewer: null, actorName: user.name, actorRole: goLine ? 'admin' : user.role, actorIsAdmin: isAdmin(user) || goLine !== null, runId: null,
+      note: [note, goLine].filter(Boolean).join(' · ') || null,
     });
     if (!r.ok) return c.json({ error: r.error }, 400);
     return c.json(r.data, 202);

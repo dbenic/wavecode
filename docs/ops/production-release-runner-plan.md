@@ -60,3 +60,16 @@ Freeze notes already declare `prereqs` with `kind: check | code`. Add `kind: ops
 ## Order and timing
 
 Step 1 and 2 after tonight's release (one evening plus Denis's key). Step 3 the day after. Step 4 within the week. Step 5 when 4 has worked twice.
+
+## Status 27 Oct 2026, night
+
+Grok is blocked for cost, so this path replaces SystemOps rather than backing it up. Built
+tonight on top of steps 1–2: `POST /api/releases/request` and the `request_release` MCP tool, with
+the Slack-GO check for seats (`src/server/slack-go.ts`, docs/api.md "Push to staging or
+production from Slack"). Denis talks to pm-denis in Slack; pm-denis asks WaveCode; WaveCode
+verifies Denis's own Slack GO and forwards to the deploy box. Found on the deploy box: the ci
+user already has the alias `countix-production` (user deploy, key file present) — to be probed
+from Denis's shell; the registered seat `fable` is a ghost, the live read seat is tmux
+`wc-prod-read` on the assist profile. Open: update the deploy box to main, set
+`production_command` with that alias, register the read seat, no-op proof deploy, then move the
+key out of the seat's reach.

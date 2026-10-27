@@ -1379,3 +1379,29 @@ review 45, land 30, candidate 60, release 45). One event `delivery.stalled`
 `{ delivery_id, title, stage, code, cause, minutes, actor }` and one system line to every seat in
 `deliveries.notify` plus the span's actor, per new cause; the record keeps `stall_cause` /
 `stall_at` until the span moves. Tables `deliveries` and `delivery_stages` (schema v29).
+
+## Push to staging or production from Slack (27 Oct 2026)
+
+The Grok SystemOps bot is gone; the deploy itself is `releases.production_command` on the
+deploy box (above). The conversation stays in Slack with the person's orchestrator seat
+(pm-denis): "what is on main", "push a78dda93 to staging", "GO: push a78dda93 to production".
+
+- `POST /api/releases/request` `{ project, sha, target: staging|production, note?, lane? }` —
+  an exact SHA instead of a candidate name. Staging: any developer, the usual rules (on main,
+  not behind, not a rollback). Production: an admin, **or a seat token right after its person
+  typed the GO in Slack** (`src/server/slack-go.ts`). Returns 202 with the release record, which
+  is forwarded to the deploy box like a Promote; the note carries the GO line
+  (`GO by @denis in Slack at 18:57 UTC (event 1632656): "GO: push a78dda93… to production"`),
+  so the audit trail and the deploy box both see who said it and when.
+- `POST /api/releases/candidates/:name/promote` accepts the same seat path.
+- MCP tool `request_release` (`src/mcp/tools.ts`) is how the seat calls it.
+
+The check (`seatProductionAllowed`): the seat's person is an admin on
+`releases.production_approvers`; among that person's own prompts recorded by the Slack bridge
+(`agent.prompt_sent` with the person as actor, text prefixed `[from Slack …]`) in the last
+`releases.slack_go_window_min` minutes (default 15) there is one that names the SHA (8+ hex
+characters) and says GO, push, promote, deploy, ship or release together with "prod" or
+"production". A GO typed in the UI, read from a file, quoted by the seat, forwarded by another
+seat, or older than the window is refused with 403 and the reason; the seat is told to answer
+that nothing ran. No model holds a deploy credential: the dev box forwards, the deploy box
+checks main-only and migrations again and runs the command.

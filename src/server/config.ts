@@ -531,6 +531,11 @@ export interface WaveConfig {
      * reconciler does not assume the commit is absent.
      */
     prod_health_command?: string[];
+    /**
+     * Minutes a person's own Slack GO stays valid for their seat's production request
+     * (src/server/slack-go.ts). Default 15.
+     */
+    slack_go_window_min?: number;
   };
   /**
    * Delivery tracker (src/server/deliveries.ts, docs/ops/delivery-tracker-plan.md). `notify`: agent
@@ -972,6 +977,9 @@ export function validateConfig(cfg: WaveConfig): void {
   validateArgvTemplate('releases.production_command', cfg.releases?.production_command, '{sha}');
   validateArgvList('releases.staging_health_command', cfg.releases?.staging_health_command);
   validateArgvList('releases.prod_health_command', cfg.releases?.prod_health_command);
+  if (cfg.releases?.slack_go_window_min !== undefined && (typeof cfg.releases.slack_go_window_min !== 'number' || !(cfg.releases.slack_go_window_min > 0))) {
+    throw new Error('releases.slack_go_window_min must be a positive number of minutes');
+  }
   if (cfg.deliveries?.notify !== undefined && (!Array.isArray(cfg.deliveries.notify) || cfg.deliveries.notify.some((s) => typeof s !== 'string' || !s.trim()))) {
     throw new Error('deliveries.notify must be a list of agent aliases or names');
   }
