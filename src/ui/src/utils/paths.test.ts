@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { fileViewHref, findFilePaths, linkifyPathsHtml } from './paths';
+import { fileViewHref, findFilePaths, linkWrappedPathLines, linkifyPathsHtml } from './paths';
 import { renderMarkdown } from './markdown';
 
 describe('path links', () => {
@@ -66,5 +66,27 @@ describe('findFilePaths', () => {
 
   it('ignores bare words and files without an allowed extension', () => {
     expect(findFilePaths('run /usr/bin/node and /tmp/a.bin')).toEqual([]);
+  });
+});
+
+describe('linkWrappedPathLines', () => {
+  it('links a path the agent page received as two lines (wrapped at a slash, inside colour spans) to one target', () => {
+    const lines = [
+      '<span style="color:#0f0">The report is (/home/wave/.wavecode-data/rooms/wavepulse/</span>',
+      '<span style="color:#0f0">REPORTS/2026-10-27-scout-spec.md</span>).',
+      'plain line',
+    ];
+    const out = linkWrappedPathLines(lines);
+    const href = '/file?path=' + encodeURIComponent('/home/wave/.wavecode-data/rooms/wavepulse/REPORTS/2026-10-27-scout-spec.md');
+    expect(out[0]).toContain(`<a href="${href}"`);
+    expect(out[0]).toContain('/home/wave/.wavecode-data/rooms/wavepulse/</a></span>');
+    expect(out[1]).toContain(`<span style="color:#0f0"><a href="${href}"`);
+    expect(out[1]).toContain('REPORTS/2026-10-27-scout-spec.md</a></span>).');
+    expect(out[2]).toBe('plain line');
+  });
+
+  it('leaves lines alone when the next line is not a file name, or a line is a gap (null)', () => {
+    expect(linkWrappedPathLines(['see /home/wave/inbox/', 'and then nothing'])).toEqual(['see /home/wave/inbox/', 'and then nothing']);
+    expect(linkWrappedPathLines(['see /home/wave/inbox/', null, 'note.md'])).toEqual(['see /home/wave/inbox/', null, 'note.md']);
   });
 });

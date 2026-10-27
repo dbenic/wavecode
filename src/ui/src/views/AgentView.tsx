@@ -8,7 +8,7 @@ import { useSSE, type SSEEvent } from '../hooks/useSSE';
 import type { Agent, Run } from '../types';
 import { shouldRefreshAgentOutput } from '../sse-events';
 import { sanitizeHtml } from '../utils/sanitize';
-import { internalLinkClickHandler, linkifyPathsHtml } from '../utils/paths';
+import { internalLinkClickHandler, linkWrappedPathLines, linkifyPathsHtml } from '../utils/paths';
 import { createAgentDocSlug } from '../utils/docs';
 import StatusBadge from '../components/StatusBadge';
 import { extractMdPaths } from '../components/MdFileActions';
@@ -53,6 +53,12 @@ function cap(s: string): string {
  * The model badge: a WaveCode pin wins; otherwise what the CLI's own
  * settings say ("Opus 5.5 · high"); nothing when neither is known.
  */
+/** One HTML string per output line: colour spans kept, paths linked, a path wrapped over two lines linked as one. */
+export function renderOutputLines(lines: TermLine[]): string[] {
+  const sanitized = lines.map((l) => (l.gap ? null : sanitizeHtml(l.h || escapeHtml(l.t))));
+  return linkWrappedPathLines(sanitized).map((html, i) => (html === null ? lines[i].h : linkifyPathsHtml(html) || '&nbsp;'));
+}
+
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -697,16 +703,16 @@ export default function AgentView() {
             {/* Frozen history: append-only, so reading it is not disturbed by new output */}
             {history.length > 0 && (
               <div data-testid="terminal-history">
-                {history.map((l, i) => (
-                  <div key={i} className={l.gap ? 'py-0.5' : undefined} dangerouslySetInnerHTML={{ __html: l.gap ? l.h : linkifyPathsHtml(sanitizeHtml(l.h || escapeHtml(l.t))) || '&nbsp;' }} />
+                {renderOutputLines(history).map((html, i) => (
+                  <div key={i} className={history[i].gap ? 'py-0.5' : undefined} dangerouslySetInnerHTML={{ __html: html }} />
                 ))}
               </div>
             )}
             {/* The live screen: redrawn in place */}
             {screenLines.length > 0 ? (
               <div data-testid="terminal-screen" className="border-t border-slate-800/40 mt-1 pt-1">
-                {screenLines.map((l, i) => (
-                  <div key={i} dangerouslySetInnerHTML={{ __html: linkifyPathsHtml(sanitizeHtml(l.h || escapeHtml(l.t))) || '&nbsp;' }} />
+                {renderOutputLines(screenLines).map((html, i) => (
+                  <div key={i} dangerouslySetInnerHTML={{ __html: html }} />
                 ))}
               </div>
             ) : history.length === 0 && (

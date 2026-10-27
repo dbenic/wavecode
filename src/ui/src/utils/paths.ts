@@ -37,6 +37,39 @@ export function joinWrappedPaths(html: string): string {
   );
 }
 
+const LINK_CLASS = 'text-sky-300 hover:text-sky-200 underline decoration-sky-500/40 underline-offset-2 break-all';
+const anchorHtml = (path: string, text: string) => `<a href="${fileViewHref(path)}" class="${LINK_CLASS}">${text}</a>`;
+
+// A line that ends in the head of a path broken at `/`, `-` or `_` (closing colour spans may follow).
+const WRAP_HEAD_RE = new RegExp(`(?<![\\w/="'.-])(~?/(?:[\\w.@+-]+/)+[\\w.@+-]*[-_/])((?:</(?:span|b)>)*)\\s*$`);
+// The next line: optional indent and opening colour spans, then the rest of the file name.
+const WRAP_TAIL_RE = new RegExp(`^((?:\\s|&nbsp;|<(?:span|b)(?:\\s[^>]*)?>)*)([\\w.@+-]+(?:/[\\w.@+-]+)*\\.(?:${EXT}))(?![\\w/])`);
+
+/**
+ * The agent page renders output one line per element, so a path the terminal wrapped
+ * (`…/rooms/wavepulse/` then `REPORTS/spec.md` on the next line) never meets PATH_RE as
+ * a whole. Link both halves to the joined path; everything else in each line is then
+ * linkified as usual by the caller.
+ */
+export function linkWrappedPathLines(lines: Array<string | null>): Array<string | null> {
+  const out = lines.slice();
+  for (let i = 0; i + 1 < out.length; i++) {
+    const head = out[i];
+    const tail = out[i + 1];
+    if (head === null || tail === null) continue;
+    const h = WRAP_HEAD_RE.exec(head);
+    if (!h) continue;
+    const t = WRAP_TAIL_RE.exec(tail);
+    if (!t) continue;
+    const path = h[1] + t[2];
+    if (!new RegExp(`^${PATH_RE.source}$`).test(path)) continue;
+    out[i] = head.slice(0, h.index) + anchorHtml(path, h[1]) + h[2];
+    out[i + 1] = t[1] + anchorHtml(path, t[2]) + tail.slice(t[0].length);
+    i++; // the tail line is spoken for
+  }
+  return out;
+}
+
 /** Turn bare paths in already-escaped HTML into viewer links; existing anchors are left alone. */
 export function linkifyPathsHtml(input: string): string {
   const html = joinWrappedPaths(input);
@@ -46,8 +79,7 @@ export function linkifyPathsHtml(input: string): string {
       const open = i < segments.length - 1 ? seg.lastIndexOf('<a ') : -1;
       const head = open === -1 ? seg : seg.slice(0, open);
       const tail = open === -1 ? '' : seg.slice(open);
-      return head.replace(PATH_RE, (p) =>
-        `<a href="${fileViewHref(p)}" class="text-sky-300 hover:text-sky-200 underline decoration-sky-500/40 underline-offset-2 break-all">${p}</a>`) + tail;
+      return head.replace(PATH_RE, (p) => anchorHtml(p, p)) + tail;
     })
     .join('</a>');
 }
