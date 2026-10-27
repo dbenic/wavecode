@@ -69,7 +69,7 @@ One table `deliveries` (id, goal_id, title, spec_path, lanes_json, stage, stage_
 
 ## Order and effort
 
-Status 27 Oct 2026: steps 1 and 2 built (`src/server/deliveries.ts`, `routes/deliveries.ts`, schema v29, page `/deliveries`, `docs/api.md` "Delivery tracker"); the proof is the backfill of the bank posting day once deployed. Steps 3 and 4 open.
+Status 27 Oct 2026, 21:15 CET: steps 1 and 2 built and live on countix-dev (`src/server/deliveries.ts`, `routes/deliveries.ts`, schema v29, page `/deliveries`, `docs/api.md` "Delivery tracker"; `deliveries.notify: [pm-denis]`). Proof: the bank-posting day and the a78dda93 release candidate backfilled from the events table and corrected until they matched the day (a freeze note emits no event, the pipeline's first reaction is the signal; hand merges on GitHub land through `lane.retired`; stalls older than the record are shown, not messaged). Known gap: a release through the SystemOps path is invisible until `releases.production_command` is in use, so such a candidate is closed by hand. Steps 3 and 4 open.
 
 1. Table, derivation from events, `/api/deliveries`, Command Center card with time-in-stage. One day.
 2. Stall tick with the four causes, messages to seats. Half a day.
