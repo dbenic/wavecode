@@ -82,6 +82,12 @@ interface Ev {
 }
 
 const STAGE_ORDER = new Map<Stage, number>(STAGES.map((s, i) => [s, i]));
+/**
+ * A recorded freeze note emits no event of its own: the pipeline's first reaction to it (gate, quick check,
+ * first-pass request, review assignment) or the queue taking the SHA is the freeze signal. A refusal, a note,
+ * a verdict or a gate result names a SHA without adopting it.
+ */
+const ADOPTING = new Set(['pipeline.frozen', 'pipeline.gate', 'pipeline.quick', 'pipeline.first_pass_requested', 'pipeline.review', 'merge_queue.queued', 'merge_queue.merged', 'merge_queue.bounced']);
 const SHA_RE = /^[0-9a-f]{40}$/i;
 
 /** Event types the derivation reads. Everything else stays untouched. */
@@ -269,8 +275,7 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
     const evShas = shasOf(ev.payload, ev.entity_id);
     const known = evShas.find((s) => shas.has(s)) ?? null;
     if (lane && lanes.has(lane)) {
-      const adopts = ev.type === 'pipeline.frozen' || ev.type.startsWith('merge_queue.');
-      return { lane, sha: known ?? (adopts ? evShas[0] ?? null : null) };
+      return { lane, sha: known ?? (ADOPTING.has(ev.type) ? evShas[0] ?? null : null) };
     }
     return { lane: known ? (shaLane.get(known) ?? null) : null, sha: known };
   };
@@ -305,21 +310,20 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
     if (!t.lane && !t.sha) continue;
     // A SHA joins the record when the lane freezes it or the queue takes it; a refusal that names an
     // unpushed SHA, or a gate result for someone else's SHA on the lane, does not.
-    if (t.lane && t.sha && (ev.type === 'pipeline.frozen' || ev.type.startsWith('merge_queue.'))) { shas.add(t.sha); shaLane.set(t.sha, t.lane); }
+    if (t.lane && t.sha && ADOPTING.has(ev.type) && !shas.has(t.sha)) {
+      shas.add(t.sha); shaLane.set(t.sha, t.lane);
+      // The lane froze this SHA: spec is over, the build that produced it is done, the lane's earlier SHAs are history.
+      finish('spec', 'ok', at);
+      if (!open.has('build') && !sawFreeze) start('build', 'build', delivery.since_at, null, { lane: t.lane });
+      sawFreeze = true;
+      supersede(t.lane, t.sha, at);
+      const b = open.get('build');
+      if (b) { b.sha = t.sha; b.lane = t.lane; finish('build', 'ok', at); }
+    }
 
     switch (ev.type) {
-      case 'pipeline.frozen': {
-        if (!t.lane || !t.sha) break;
-        finish('spec', 'ok', at);
-        // The first freeze closes the build that began at since_at. A later freeze with no open build is a
-        // re-freeze of the same work (sync merge, rebase): the earlier spans are superseded, no new build attempt.
-        if (!open.has('build') && !sawFreeze) start('build', 'build', delivery.since_at, null, { lane: t.lane });
-        sawFreeze = true;
-        supersede(t.lane, t.sha, at);
-        const b = open.get('build');
-        if (b) { b.sha = t.sha; b.lane = t.lane; finish('build', 'ok', at); }
-        break;
-      }
+      case 'pipeline.frozen':
+        break; // handled above with every other adopting signal
       case 'pipeline.first_pass_requested':
         if (t.sha) start(`first_pass:${t.sha}`, 'first_pass', at, ev, { sha: t.sha, lane: t.lane, actor: str(p.seat) });
         break;

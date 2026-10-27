@@ -1350,7 +1350,9 @@ the signal for moving a Max 5x account to 20x.
 
 A feature from spec to production as one record (`docs/ops/delivery-tracker-plan.md`: Temporal's
 model, not its server). Stage spans are derived from the events table by lane and SHA, never
-written by hand: `pipeline.frozen` closes `build`, `pipeline.first_pass*` is `first_pass`,
+written by hand: the first pipeline reaction to a freeze note (gate, quick check, first-pass request,
+review assignment, or the queue taking the SHA; a recorded note emits no event of its own) closes
+`build`, `pipeline.first_pass*` is `first_pass`,
 `pipeline.quick`/`gate.result`/`pipeline.gate` are `gates`, `pipeline.review`/`review.ai_completed`
 are `review`, `merge_queue.*` is `land`, the merged `sha_out` opens `candidate`, `release.*` is
 `release`. A RED gate, NEEDS FIXES or a bounce reopens `build` with attempt+1; a new freeze of the
