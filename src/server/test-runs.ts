@@ -191,16 +191,25 @@ function suiteTokens(run: TestRun): string[] {
   return mapped === raw ? [raw] : [raw, mapped];
 }
 
+/**
+ * The gateway files a gate it ran on a cloud runner as `kind=dev, suite=gate`
+ * (27 Oct 2026: run …-runner-a, who claude3@runner-a); the suite word is the
+ * durable signal, the kind is where it ran.
+ */
+function gateSuite(run: TestRun): boolean {
+  return run.kind === 'gate' || suiteTokens(run).includes('gate');
+}
+
 /** A quick check. A gate run is never a quick check, even if its suite name overlaps. */
 export function isQuickRun(run: TestRun, names: string[]): boolean {
-  if (run.kind === 'gate') return false;
+  if (gateSuite(run)) return false;
   const set = new Set(names.map((s) => s.toLowerCase()));
   return suiteTokens(run).some((s) => set.has(s));
 }
 
-/** A full gate: `kind=gate`, or a suite name in the project's full list. */
+/** A full gate: `kind=gate`, suite `gate`, or a suite name in the project's full list. */
 export function isFullRun(run: TestRun, names: string[]): boolean {
-  if (run.kind === 'gate') return true;
+  if (gateSuite(run)) return true;
   const set = new Set(names.map((s) => s.toLowerCase()));
   return suiteTokens(run).some((s) => set.has(s));
 }

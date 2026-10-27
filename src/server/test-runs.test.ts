@@ -112,3 +112,15 @@ describe('shaChecks', () => {
   });
 });
 
+describe('a gate the gateway ran on a cloud runner', () => {
+  it('counts as the full gate although the gateway files it as kind=dev with suite=gate (27 Oct 2026, runner-a)', () => {
+    const runs = [
+      run({ id: '20261027-225155-a78dda939-g335959-runner-a', kind: 'dev', who: 'wave.countix-dev.claude3@runner-a', suite: 'gate', state: 'pass', ended_at: '2026-10-27T23:03:34+01:00', sha: SHA }),
+      run({ id: '20261027-195233-a78dda939-g2863163', kind: 'dev', who: 'wave.countix-dev.claude3', suite: 'gate', state: 'fail', ended_at: '2026-10-27T20:39:22+01:00', sha: SHA }),
+    ];
+    expect(isFullRun(runs[0], NAMES.full)).toBe(true);
+    expect(isQuickRun(runs[0], NAMES.quick)).toBe(false);
+    expect(shaChecks(runs, SHA, NAMES)).toMatchObject({ full: 'green', quick: 'missing' });
+    expect(shaChecks(runs, SHA, NAMES).fullRun?.id).toBe(runs[0].id);
+  });
+});
