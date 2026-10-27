@@ -162,6 +162,9 @@ function MergeQueueSwitches({ switches, canSwitch, onDone }: { switches: MergeQu
           <span className={row.enabled ? 'text-emerald-300' : 'text-amber-300'}>
             merge queue {row.project} {row.config_enabled ? (row.enabled ? 'ON' : 'OFF') : 'not configured'} · {row.queued} queued
           </span>
+          {row.release_lanes && row.release_lanes.length > 0 && (
+            <span className="text-violet-300" data-testid={`merge-queue-release-${row.project}`}>release mode: only {row.release_lanes.join(', ')} land</span>
+          )}
           {canSwitch && row.config_enabled && (
             <button
               type="button"

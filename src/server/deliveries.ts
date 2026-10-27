@@ -14,10 +14,11 @@
 
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
-import { getAgent, getDb, resolveAgent, type Result } from './db.js';
+import { getAgent, getDb, type Result } from './db.js';
+import { listFreezes } from './release-freezes.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
-import { deliverSystemLine } from './wire-lines.js';
+import { tellDriverSeats } from './wire-lines.js';
 
 export const STAGES = ['spec', 'build', 'first_pass', 'gates', 'review', 'land', 'candidate', 'release'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -35,6 +36,8 @@ export interface Delivery {
   project: string | null;
   goal_id: string | null;
   spec_path: string | null;
+  /** Product-desk number (PD-134): every lane whose freeze carries it joins this delivery. */
+  desk: number | null;
   lanes: string[];
   shas: string[];
   release_lane: boolean;
@@ -67,7 +70,7 @@ export interface StageSpan {
 }
 
 interface Row {
-  id: string; title: string; project: string | null; goal_id: string | null; spec_path: string | null;
+  id: string; title: string; project: string | null; goal_id: string | null; spec_path: string | null; desk: number | null;
   lanes_json: string; shas_json: string; release_lane: number; stage: string | null; stage_started_at: string | null;
   last_progress_at: string | null; attempts: number; status: string; stall_cause: string | null; stall_at: string | null;
   created_by: string | null; since_at: string; created_at: string; updated_at: string;
@@ -110,7 +113,7 @@ function toIso(sqlite: string): string {
 
 function rowToDelivery(r: Row): Delivery {
   return {
-    id: r.id, title: r.title, project: r.project, goal_id: r.goal_id, spec_path: r.spec_path,
+    id: r.id, title: r.title, project: r.project, goal_id: r.goal_id, spec_path: r.spec_path, desk: r.desk ?? null,
     lanes: parseList(r.lanes_json), shas: parseList(r.shas_json), release_lane: r.release_lane === 1,
     stage: (r.stage as Stage | null) ?? null, stage_started_at: r.stage_started_at, last_progress_at: r.last_progress_at,
     attempts: r.attempts, status: r.status as DeliveryStatus, stall_cause: r.stall_cause, stall_at: r.stall_at,
@@ -132,7 +135,9 @@ export function normalizeLane(lane: string): string {
 // --- CRUD -----------------------------------------------------------------------------------
 
 export interface CreateDeliveryOpts {
-  title: string;
+  /** Defaults to `PD-<desk>` when a desk number is given. */
+  title?: string;
+  desk?: number | null;
   project?: string | null;
   lanes?: string[];
   goal_id?: string | null;
@@ -144,19 +149,25 @@ export interface CreateDeliveryOpts {
 }
 
 export function createDelivery(opts: CreateDeliveryOpts): Result<Delivery> {
-  const title = opts.title?.trim();
+  const desk = opts.desk === undefined || opts.desk === null ? null : Number(opts.desk);
+  if (desk !== null && (!Number.isInteger(desk) || desk <= 0)) return { ok: false, error: 'desk must be a positive product-desk number' };
+  const title = opts.title?.trim() || (desk !== null ? `PD-${desk}` : '');
   if (!title) return { ok: false, error: 'title is required' };
+  if (desk !== null) {
+    const dup = findOpenByDesk(desk);
+    if (dup) return { ok: false, error: `PD-${desk} is already tracked as ${dup.id} (${dup.title})` };
+  }
   const lanes = [...new Set((opts.lanes ?? []).map(normalizeLane).filter(Boolean))];
   if (lanes.some((l) => l.length > 120 || /\s/.test(l))) return { ok: false, error: 'lanes must be branch names' };
   const since = opts.since ? new Date(opts.since) : new Date(Date.now() - 24 * 3600_000);
   if (Number.isNaN(since.getTime())) return { ok: false, error: 'since must be an ISO date' };
   const id = ulid();
   const now = nowIso();
-  getDb().prepare(`INSERT INTO deliveries (id, title, project, goal_id, spec_path, lanes_json, shas_json, release_lane, stage, stage_started_at, attempts, status, created_by, since_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, '[]', ?, 'spec', ?, 1, 'open', ?, ?, ?, ?)`)
-    .run(id, title, opts.project ?? null, opts.goal_id ?? null, opts.spec_path ?? null, JSON.stringify(lanes), opts.release_lane ? 1 : 0, now, opts.created_by ?? null, since.toISOString(), now, now);
+  getDb().prepare(`INSERT INTO deliveries (id, title, project, goal_id, spec_path, desk, lanes_json, shas_json, release_lane, stage, stage_started_at, attempts, status, created_by, since_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, 'spec', ?, 1, 'open', ?, ?, ?, ?)`)
+    .run(id, title, opts.project ?? null, opts.goal_id ?? null, opts.spec_path ?? null, desk, JSON.stringify(lanes), opts.release_lane ? 1 : 0, now, opts.created_by ?? null, since.toISOString(), now, now);
   const d = getDelivery(id)!;
-  emit('delivery.created', 'delivery', id, { title, project: d.project, lanes, goal_id: d.goal_id, release_lane: d.release_lane });
+  emit('delivery.created', 'delivery', id, { title, project: d.project, desk, lanes, goal_id: d.goal_id, release_lane: d.release_lane });
   return { ok: true, data: d };
 }
 
@@ -165,13 +176,61 @@ export function getDelivery(id: string): Delivery | null {
   return r ? rowToDelivery(r) : null;
 }
 
-export function listDeliveries(opts: { status?: DeliveryStatus | 'all'; limit?: number } = {}): Delivery[] {
+export function listDeliveries(opts: { status?: DeliveryStatus | 'all'; limit?: number; desk?: number | null } = {}): Delivery[] {
   const status = opts.status ?? 'open';
   const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
-  const rows = status === 'all'
-    ? getDb().prepare('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT ?').all(limit) as Row[]
-    : getDb().prepare('SELECT * FROM deliveries WHERE status = ? ORDER BY created_at DESC LIMIT ?').all(status, limit) as Row[];
+  const where: string[] = [];
+  const args: unknown[] = [];
+  if (status !== 'all') { where.push('status = ?'); args.push(status); }
+  if (opts.desk !== undefined && opts.desk !== null) { where.push('desk = ?'); args.push(opts.desk); }
+  const sql = `SELECT * FROM deliveries${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ?`;
+  const rows = getDb().prepare(sql).all(...args, limit) as Row[];
   return rows.map(rowToDelivery);
+}
+
+/** sqlite `datetime('now')` stamps are UTC without a zone; ISO stamps carry one. */
+function parseStamp(text: string): number | null {
+  const t = text.trim();
+  const ms = /(?:Z|[+-]\d\d:?\d\d)$/.test(t) ? Date.parse(t) : Date.parse(`${t.replace(' ', 'T')}Z`);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export function findOpenByDesk(desk: number): Delivery | null {
+  const r = getDb().prepare("SELECT * FROM deliveries WHERE desk = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1").get(desk) as Row | undefined;
+  return r ? rowToDelivery(r) : null;
+}
+
+/**
+ * Desk numbers are the handle people use (27 Oct 2026: "mark each feature and fix with a
+ * product-desk number"). A freeze note that carries one (`desk91-freeze-<sha>.md`, `Desk #134`)
+ * joins its lane to the open delivery of that desk, or opens one named PD-<n>. Off with
+ * `deliveries.auto_desk: false`.
+ */
+export function adoptDeskLanes(freezes: Array<{ desk: number | null; lane: string | null; project: string | null; created_at: string }>): { created: string[]; joined: string[] } {
+  const out = { created: [] as string[], joined: [] as string[] };
+  if (getConfig().deliveries?.auto_desk === false) return out;
+  const byDesk = new Map<number, Array<{ lane: string; project: string | null; created_at: string }>>();
+  for (const f of freezes) {
+    if (!f.desk || !f.lane) continue;
+    const list = byDesk.get(f.desk) ?? [];
+    list.push({ lane: normalizeLane(f.lane), project: f.project, created_at: f.created_at });
+    byDesk.set(f.desk, list);
+  }
+  for (const [desk, list] of byDesk) {
+    const lanes = [...new Set(list.map((l) => l.lane))];
+    const existing = findOpenByDesk(desk);
+    if (existing) {
+      const missing = lanes.filter((l) => !existing.lanes.includes(l));
+      if (missing.length) { addLanes(existing.id, missing); out.joined.push(`${existing.id}:${missing.join(',')}`); }
+      continue;
+    }
+    const first = list.map((l) => l.created_at).sort()[0];
+    const firstMs = parseStamp(first);
+    const since = firstMs !== null ? new Date(firstMs - 24 * 3600_000).toISOString() : null;
+    const created = createDelivery({ desk, project: list.find((l) => l.project)?.project ?? null, lanes, since, created_by: 'tracker' });
+    if (created.ok) out.created.push(created.data.id);
+  }
+  return out;
 }
 
 export function listStages(deliveryId: string): StageSpan[] {
@@ -560,15 +619,7 @@ export async function reportStalls(delivery: Delivery, spans: StageSpan[], now =
 }
 
 async function notifySeats(text: string, actor: string | null): Promise<void> {
-  const targets = new Set<string>(getConfig().deliveries?.notify ?? []);
-  if (actor) targets.add(actor);
-  for (const ref of targets) {
-    const a = resolveAgent(ref);
-    if (!a.ok) continue;
-    try { await deliverSystemLine(a.data, text, { kind: 'info', source: 'delivery' }); } catch (e) {
-      logger.warn({ agent: ref, error: (e as Error).message }, 'Delivery stall message failed');
-    }
-  }
+  await tellDriverSeats(text, actor, 'delivery');
 }
 
 export function resetDeliveryStallMemoryForTest(): void {
@@ -584,6 +635,9 @@ export async function deliveryTick(now = Date.now()): Promise<void> {
   if (ticking) return;
   ticking = true;
   try {
+    try { adoptDeskLanes(listFreezes().filter((f) => f.status === 'open' || f.status === 'behind-main')); } catch (e) {
+      logger.debug({ error: (e as Error).message }, 'Delivery desk adoption skipped'); // no freeze table yet
+    }
     for (const d of listDeliveries({ status: 'open', limit: 200 })) {
       const derived = deriveDelivery(d.id);
       if (!derived.ok) continue;

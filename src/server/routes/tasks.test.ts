@@ -48,6 +48,8 @@ vi.mock('../event-bus.js', () => ({
 
 vi.mock('../task-dispatcher.js', () => ({
   addDependency: vi.fn(),
+  agentUnfit: vi.fn(() => null),
+  freeAgentNames: vi.fn(() => []),
   dispatchNext: vi.fn(),
   finalizeRun: vi.fn(),
   getDependencies: vi.fn(() => []),

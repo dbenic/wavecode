@@ -1346,7 +1346,17 @@ notification per window (keyed by the window's reset time) on every configured c
 "Subscription usage high — assist (claude-code): 5h window 85% used, resets 1:29am". That is
 the signal for moving a Max 5x account to 20x.
 
+## Engine fixes from the 27 Oct 2026 retro
+
+Plan and status: `docs/ops/engine-fixes-27oct-plan.md`.
+
+- `POST /api/tasks` with `agent_id`: **409** `{ error, free_agents }` when that agent's 5h/weekly plan window is under `autonomy.min_quota_pct` (default 10; `hold: true` bypasses). A busy agent is accepted (the task queues behind its run) and the 201 carries `agent_busy: { why, free_agents }`. Auto-dispatch skips agents under the floor and emits `agent.quota_low` once an hour per agent.
+- Merge queue: a GREEN full gate satisfies the quick check. A wait a person must end (`LANE_DENIED`, `LANE_MOVED`, `NEEDS_FIXES`, `NO_PASS_ON_SHA`, `NO_PR`, `MIGRATION_HOLD`, `ASK_TIER_NO_OK`, `GH_AUTH_MISSING`, `CHECK_FAILED`, `RELEASE_MODE`, or `GATE_NOT_GREEN` with a red run) is told once to the author and the driver seats (`deliveries.notify`) when it first appears.
+- `POST /api/merge-queue/:project/release-mode` `{ lanes: string[] | null }` (admin or a seat token): release mode. Only the named lanes land (branch names or `desk:<n>` for every lane whose freeze carries that desk number); every other eligible lane waits with `RELEASE_MODE: only … land until the release is out`. `[]`/`null` ends it. Shown in `switches[].release_lanes` of `GET /api/merge-queue` and on the Reviews page. Seat tool: `set_release_mode`.
+
 ## Delivery tracker (27 Oct 2026)
+
+Deliveries by product-desk number (schema v30): `desk` on the record. A freeze that carries a desk number joins its lane to the open `PD-<n>` delivery or opens one (created_by `tracker`); one open record per desk; `deliveries.auto_desk: false` turns it off. `POST /api/deliveries` accepts `desk` (134 or `PD-134`; title defaults to `PD-<n>`); `GET /api/deliveries?desk=134`.
 
 A feature from spec to production as one record (`docs/ops/delivery-tracker-plan.md`: Temporal's
 model, not its server). Stage spans are derived from the events table by lane and SHA, never

@@ -384,6 +384,8 @@ export interface MergeQueueSwitch {
   enabled_by: string | null;
   queued: number;
   last_pass_at?: string | null;
+  /** Release mode: only these lanes (or desk:<n>) land; null = every eligible lane. */
+  release_lanes?: string[] | null;
 }
 
 export interface ReleaseView {

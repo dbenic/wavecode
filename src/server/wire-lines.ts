@@ -13,6 +13,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { getConfig } from './config.js';
 import { getAgent, insertAgentMessage, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
@@ -123,4 +124,22 @@ export async function onAgentIdle(agentId: string): Promise<void> {
 export function resetWireLinesForTest(): void {
   seen.clear();
   pending.clear();
+}
+
+/**
+ * One line to the driver seats (`deliveries.notify`, e.g. pm-denis) and, when given, one more
+ * agent (the author). Used by the delivery tracker's stall notices and by the merge queue when a
+ * lane starts waiting for something a person must do (27 Oct 2026 retro: "the queue skipped it
+ * without saying why").
+ */
+export async function tellDriverSeats(text: string, extra: string | null = null, source = 'delivery'): Promise<void> {
+  const targets = new Set<string>(getConfig().deliveries?.notify ?? []);
+  if (extra) targets.add(extra);
+  for (const ref of targets) {
+    const a = resolveAgent(ref);
+    if (!a.ok) continue;
+    try { await deliverSystemLine(a.data, text, { kind: 'info', source }); } catch (e) {
+      logger.warn({ agent: ref, error: (e as Error).message }, 'Driver seat line failed');
+    }
+  }
 }

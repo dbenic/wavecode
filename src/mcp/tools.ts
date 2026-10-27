@@ -197,7 +197,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       'Queue a task. Unassigned tasks go to any idle agent when auto_dispatch is on — pass agent_id (ULID or the name from list_agents / get_agent) to pin the existing assignee. Names are resolved to that seat; this does not spawn a new agent. depends_on builds a DAG. Optional goal_id (ULID or external_id like W0/G1) links a child to a seeded goal. Persist-only goals create no tasks; you add children yourself. hold:true skips auto-dispatch. After upload_artifact / share_artifact, put the artifact id and attached_path in the prompt so the implementer can open the file in their workspace — do not leave the file only in chat.',
     schema: {
       prompt: z.string().describe('The task prompt'),
-      agent_id: z.string().optional().describe('Existing agent ID or name (omit for any idle agent)'),
+      agent_id: z.string().optional().describe('Existing agent ID or name (omit for any idle agent). Refused (409, with free_agents) when that agent is under its plan quota floor; accepted with agent_busy when it has a run open — then prefer one of free_agents.'),
       priority: z.number().int().optional().describe('Higher dispatches first (default 0)'),
       depends_on: z.array(z.string()).optional().describe('Task IDs that must finish first'),
       goal_id: z.string().optional().describe('Parent goal ULID or external_id (e.g. W0, G1)'),
@@ -495,6 +495,16 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       note: z.string().max(500).optional().describe('What this SHA contains, for the release record'),
     },
     handler: (client, args) => client.post('/releases/request', { project: args.project, sha: args.sha, target: args.target, note: args.note }),
+  },
+  {
+    name: 'set_release_mode',
+    description:
+      'Release mode for the merge queue: while a release is being finished, only the named lanes land and every other eligible lane waits with RELEASE_MODE (instead of the queue being switched OFF and fixes merged by hand). lanes: branch names or desk:<n> (every lane freezing with that product-desk number). Pass an empty list to end release mode. The queue ON/OFF switch itself stays Denis\'s.',
+    schema: {
+      project: z.string().describe('Project name, e.g. wavepulse'),
+      lanes: z.array(z.string()).describe('Lanes that may land: branch names or desk:<n>; [] ends release mode'),
+    },
+    handler: (client, args) => client.post(`/merge-queue/${encodeURIComponent(String(args.project))}/release-mode`, { lanes: args.lanes }),
   },
   {
     name: 'report_release',

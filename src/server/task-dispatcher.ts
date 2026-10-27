@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { quotaLeftPct } from './usage-probe.js';
 import {
   getDb,
   listTasks,
@@ -407,13 +408,44 @@ function noteWaitingTasks(tasks: Task[], agents: Agent[]): void {
   }
 }
 
+/** Why an agent cannot take new work right now, for callers that chose it by name; null = fine. */
+export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile' | 'status'>): { code: 'busy' | 'quota'; why: string } | null {
+  const floor = getConfig().autonomy.min_quota_pct ?? DEFAULT_MIN_QUOTA_PCT;
+  const left = quotaLeftPct(agent.runtime, agent.profile);
+  if (left !== null && left < floor) return { code: 'quota', why: `@${agent.name} has ${left}% of its plan left (floor ${floor}%)` };
+  if (agent.status === 'working' || hasOpenRun(agent.id)) return { code: 'busy', why: `@${agent.name} is busy with another run` };
+  return null;
+}
+
+/** Free agents a caller could use instead, by name. */
+export function freeAgentNames(except: string | null = null): string[] {
+  return listAgents()
+    .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && !a.owner_id && quotaOk(a))
+    .map((a) => a.alias ? `@${a.alias}` : a.name);
+}
+
+const DEFAULT_MIN_QUOTA_PCT = 10;
+const quotaNoted = new Map<string, number>();
+function quotaOk(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile'>): boolean {
+  const floor = getConfig().autonomy.min_quota_pct ?? DEFAULT_MIN_QUOTA_PCT;
+  const left = quotaLeftPct(agent.runtime, agent.profile);
+  if (left === null || left >= floor) return true;
+  const last = quotaNoted.get(agent.id) ?? 0;
+  if (Date.now() - last > 3600_000) {
+    quotaNoted.set(agent.id, Date.now());
+    logger.info({ agentId: agent.id, agent: agent.name, left, floor }, 'Dispatch skips an agent under its quota floor');
+    emit('agent.quota_low', 'agent', agent.id, { name: agent.name, left_pct: left, floor_pct: floor });
+  }
+  return false;
+}
+
 async function dispatchNextInner(): Promise<void> {
   const config = getConfig();
 
   const allAgents = listAgents();
   // Login seats (spec §5) are OAuth terminals, never work seats.
   const idleAgents = allAgents.filter(
-    (a) => a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat',
+    (a) => a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && quotaOk(a),
   );
 
   if (idleAgents.length === 0) return;

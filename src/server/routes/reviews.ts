@@ -161,6 +161,22 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     return c.json(result);
   });
 
+  // Release mode narrows what lands; it never widens, so a seat may set it (an admin or a seat token).
+  app.post('/api/merge-queue/:project/release-mode', async (c) => {
+    const user = getActingUser(c);
+    if (!isAdmin(user) && !user.via_seat) return c.json({ error: 'Only an admin or a seat may set release mode' }, 403);
+    const project = c.req.param('project');
+    const body = await c.req.json<{ lanes?: unknown }>().catch(() => ({} as { lanes?: unknown }));
+    if (body.lanes !== null && (!Array.isArray(body.lanes) || body.lanes.some((l) => typeof l !== 'string'))) {
+      return c.json({ error: 'lanes must be a list of branch names or desk:<n> (empty or null ends release mode)' }, 400);
+    }
+    const known = Object.keys(getConfig().projects ?? {}).includes(project);
+    if (!known) return c.json({ error: `Unknown project ${project}` }, 404);
+    const result = mergeQueue.setReleaseMode(project, (body.lanes as string[] | null) ?? null, user.name);
+    logger.info({ project, release_lanes: result.release_lanes, by: user.name }, 'Merge queue release mode');
+    return c.json(result);
+  });
+
   app.post('/api/merge-queue/:project/resolve', async (c) => {
     const user = getActingUser(c);
     if (!isAdmin(user)) return c.json({ error: 'Only an admin may resolve lanes in bulk' }, 403);

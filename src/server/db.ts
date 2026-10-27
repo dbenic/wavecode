@@ -284,7 +284,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 29;
+export const SCHEMA_VERSION = 30;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -473,6 +473,7 @@ const SCHEMA_SQL = `
     project TEXT,
     goal_id TEXT,
     spec_path TEXT,
+    desk INTEGER,
     lanes_json TEXT NOT NULL DEFAULT '[]',
     shas_json TEXT NOT NULL DEFAULT '[]',
     release_lane INTEGER NOT NULL DEFAULT 0,
@@ -489,6 +490,7 @@ const SCHEMA_SQL = `
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_deliveries_desk ON deliveries(desk);
   CREATE TABLE IF NOT EXISTS delivery_stages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
@@ -1077,6 +1079,11 @@ const MIGRATIONS: Record<number, string> = {
     event_id INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_delivery_stages_delivery ON delivery_stages(delivery_id, started_at);
+  `,
+  // v29 → v30: deliveries keyed by product-desk number (27 Oct 2026).
+  29: `
+    ALTER TABLE deliveries ADD COLUMN desk INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_deliveries_desk ON deliveries(desk);
   `,
 };
 

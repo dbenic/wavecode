@@ -21,6 +21,7 @@ export interface DeliveryStage {
 export interface DeliverySummary {
   id: string;
   title: string;
+  desk?: number | null;
   project: string | null;
   lanes: string[];
   shas: string[];
@@ -90,7 +91,7 @@ export default function Deliveries() {
   const [showAll, setShowAll] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DeliverySummary | null>(null);
-  const [form, setForm] = useState({ title: '', project: '', lanes: '' });
+  const [form, setForm] = useState({ title: '', desk: '', project: '', lanes: '' });
   const [creating, setCreating] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -121,12 +122,12 @@ export default function Deliveries() {
   useSSE(handleSSE);
 
   const create = async () => {
-    if (!form.title.trim()) { setFormError('title is required'); return; }
+    if (!form.title.trim() && !form.desk.trim()) { setFormError('a title or a desk number is required'); return; }
     setCreating(true); setFormError(null);
     try {
       const lanes = form.lanes.split(/[\s,]+/).map((l) => l.trim()).filter(Boolean);
-      const created = await apiPost<DeliverySummary>('/deliveries', { title: form.title.trim(), project: form.project.trim() || null, lanes });
-      setForm({ title: '', project: '', lanes: '' });
+      const created = await apiPost<DeliverySummary>('/deliveries', { title: form.title.trim() || undefined, desk: form.desk.trim() || null, project: form.project.trim() || null, lanes });
+      setForm({ title: '', desk: '', project: '', lanes: '' });
       setOpenId(created.id);
       load();
     } catch (e) {
@@ -161,6 +162,13 @@ export default function Deliveries() {
               value={form.title}
               onChange={(e) => setForm({ ...form, title: e.target.value })}
               data-testid="delivery-title"
+            />
+            <input
+              className="sm:w-24 rounded bg-slate-950 border border-slate-800 px-2 py-1 text-slate-100 placeholder:text-slate-600 font-mono"
+              placeholder="PD-134"
+              value={form.desk}
+              onChange={(e) => setForm({ ...form, desk: e.target.value })}
+              data-testid="delivery-desk"
             />
             <input
               className="sm:w-32 rounded bg-slate-950 border border-slate-800 px-2 py-1 text-slate-100 placeholder:text-slate-600"
@@ -206,6 +214,7 @@ export default function Deliveries() {
                   className={`rounded-lg border px-4 py-3 ${d.stalls.length ? 'border-amber-500/40 bg-amber-950/10' : 'border-slate-800 bg-slate-900/40'}`}
                 >
                   <div className="flex flex-wrap items-center gap-2 cursor-pointer" onClick={() => setOpenId(expanded ? null : d.id)}>
+                    {d.desk ? <span className="text-[9px] font-mono text-sky-300 border border-sky-500/40 rounded px-1" data-testid={`delivery-desk-${d.id}`}>PD-{d.desk}</span> : null}
                     <span className="font-semibold text-slate-100">{d.title}</span>
                     {d.project && <span className="text-[10px] text-slate-500">{d.project}</span>}
                     {d.release_lane && <span className="text-[9px] uppercase tracking-wider text-violet-300 border border-violet-500/40 rounded px-1">release lane</span>}

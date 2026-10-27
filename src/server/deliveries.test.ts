@@ -6,8 +6,19 @@ import { Hono } from 'hono';
 
 vi.mock('./event-bus.js', () => ({ emit: vi.fn(() => ({ id: 1 })) }));
 vi.mock('./logger.js', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
-vi.mock('./wire-lines.js', () => ({ deliverSystemLine: vi.fn(async () => undefined) }));
-const cfg: { deliveries?: { notify?: string[]; budgets_min?: Record<string, number> } } = {};
+vi.mock('./wire-lines.js', () => {
+  const deliverSystemLine = vi.fn(async () => undefined);
+  return {
+    deliverSystemLine,
+    // the real helper fans one line out to deliveries.notify + the actor through deliverSystemLine
+    tellDriverSeats: vi.fn(async (text: string, extra: string | null) => {
+      const { resolveAgent } = await import('./db.js');
+      const targets = new Set<string>([...(cfg.deliveries?.notify ?? []), ...(extra ? [extra] : [])]);
+      for (const ref of targets) { const a = resolveAgent(ref); if (a.ok) await deliverSystemLine(a.data, text, { kind: 'info', source: 'delivery' }); }
+    }),
+  };
+});
+const cfg: { deliveries?: { notify?: string[]; budgets_min?: Record<string, number>; auto_desk?: boolean } } = {};
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => cfg) }));
 
 import { emit } from './event-bus.js';
@@ -260,5 +271,38 @@ describe('delivery routes', () => {
     expect((await call(obs, '/api/deliveries', 'POST', { title: 'no' })).status).toBe(403);
     expect((await call(obs, `/api/deliveries/${id}`)).status).toBe(200);
     expect((await call(obs, '/api/deliveries/nope')).status).toBe(404);
+  });
+});
+
+describe('deliveries keyed by product-desk number', () => {
+  function freezeRow(sha: string, lane: string, desk: number | null, createdAt: string): void {
+    db.getDb().prepare('INSERT INTO release_freezes (sha, project, desk, lane, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(sha, 'wavepulse', desk, lane, 'open', createdAt, createdAt);
+  }
+  it('a freeze with a desk number opens PD-<n> (or joins it) with its lane; a second desk record is refused', async () => {
+    const { ensureReleaseFreezeTable } = await import('./release-freezes.js');
+    ensureReleaseFreezeTable();
+    freezeRow('1'.repeat(40), 'wc-codex1-pd134-overview', 134, at(-60));
+    freezeRow('2'.repeat(40), 'wc-claude2-pd134-tests', 134, at(-30));
+    freezeRow('3'.repeat(40), 'wc-codex6-no-desk', null, at(-20));
+    const first = del.adoptDeskLanes(db.getDb().prepare('SELECT desk, lane, project, created_at FROM release_freezes').all() as never);
+    expect(first.created).toHaveLength(1);
+    const d = del.findOpenByDesk(134)!;
+    expect(d).toMatchObject({ title: 'PD-134', desk: 134, project: 'wavepulse', created_by: 'tracker' });
+    expect(d.lanes.sort()).toEqual(['wc-claude2-pd134-tests', 'wc-codex1-pd134-overview']);
+    expect(new Date(d.since_at).getTime()).toBe(T0 - 60 * 60_000 - 24 * 3600_000);
+    freezeRow('4'.repeat(40), 'wc-codex1-pd134-fix', 134, at(0));
+    const again = del.adoptDeskLanes(db.getDb().prepare('SELECT desk, lane, project, created_at FROM release_freezes').all() as never);
+    expect(again.created).toEqual([]);
+    expect(again.joined).toEqual([`${d.id}:wc-codex1-pd134-fix`]);
+    expect(del.findOpenByDesk(134)!.lanes).toContain('wc-codex1-pd134-fix');
+    expect(del.createDelivery({ desk: 134 })).toMatchObject({ ok: false, error: expect.stringMatching(/already tracked/) });
+    expect(del.listDeliveries({ desk: 134 }).map((x) => x.id)).toEqual([d.id]);
+    expect(del.listDeliveries({ desk: 999 })).toEqual([]);
+  });
+  it('auto_desk: false leaves freezes alone', () => {
+    cfg.deliveries = { notify: [], auto_desk: false };
+    expect(del.adoptDeskLanes([{ desk: 5, lane: 'wc-x', project: null, created_at: at(0) }])).toEqual({ created: [], joined: [] });
+    expect(del.findOpenByDesk(5)).toBeNull();
   });
 });

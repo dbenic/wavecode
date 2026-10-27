@@ -379,6 +379,8 @@ export interface WaveConfig {
     hang_action: 'alert' | 'restart';
     max_task_retries: number;
     verify_completion: boolean;
+    /** Auto-dispatch skips, and create_task refuses, an agent whose 5h/weekly window has less than this left. Default 10. */
+    min_quota_pct?: number;
   };
   sandbox: {
     disable_git_push: boolean;
@@ -544,6 +546,8 @@ export interface WaveConfig {
    */
   deliveries?: {
     notify?: string[];
+    /** Open a PD-<n> delivery for every freeze that carries a desk number (default true). */
+    auto_desk?: boolean;
     budgets_min?: Partial<Record<'spec' | 'build' | 'first_pass' | 'gates' | 'review' | 'land' | 'candidate' | 'release', number>>;
   };
   /**

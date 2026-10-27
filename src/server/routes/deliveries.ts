@@ -15,7 +15,9 @@ export function registerDeliveryRoutes(app: Hono<NodeAppEnv>): void {
   app.get('/api/deliveries', (c) => {
     const status = (c.req.query('status') ?? 'open') as DeliveryStatus | 'all';
     const limitRaw = Number(c.req.query('limit') ?? 100);
-    const rows = listDeliveries({ status, limit: Number.isFinite(limitRaw) ? limitRaw : 100 });
+    const deskRaw = c.req.query('desk');
+    const desk = deskRaw !== undefined && /^\d+$/.test(deskRaw) ? Number(deskRaw) : null;
+    const rows = listDeliveries({ status, limit: Number.isFinite(limitRaw) ? limitRaw : 100, desk });
     return c.json(rows.map((d) => summarize(d, listStages(d.id))));
   });
 
@@ -30,15 +32,17 @@ export function registerDeliveryRoutes(app: Hono<NodeAppEnv>): void {
     const user = getActingUser(c);
     if (!canMutate(user)) return c.json({ error: 'Forbidden: observers cannot create deliveries' }, 403);
     const body = await c.req.json<{
-      title?: string; project?: string | null; lanes?: string[]; goal_id?: string | null; spec_path?: string | null;
+      title?: string; desk?: number | string | null; project?: string | null; lanes?: string[]; goal_id?: string | null; spec_path?: string | null;
       release_lane?: boolean; since?: string | null;
     }>().catch(() => ({} as Record<string, never>));
-    if (typeof body.title !== 'string') return c.json({ error: 'title is required' }, 400);
+    const desk = body.desk === undefined || body.desk === null || body.desk === '' ? null : Number(String(body.desk).replace(/^(PD|desk)[-#\s]*/i, ''));
+    if (desk !== null && (!Number.isInteger(desk) || desk <= 0)) return c.json({ error: 'desk must be a product-desk number (134 or PD-134)' }, 400);
+    if (typeof body.title !== 'string' && desk === null) return c.json({ error: 'title or desk is required' }, 400);
     if (body.lanes !== undefined && (!Array.isArray(body.lanes) || body.lanes.some((l) => typeof l !== 'string'))) {
       return c.json({ error: 'lanes must be a list of branch names' }, 400);
     }
     const created = createDelivery({
-      title: body.title, project: body.project ?? null, lanes: body.lanes ?? [], goal_id: body.goal_id ?? null,
+      title: typeof body.title === 'string' ? body.title : undefined, desk, project: body.project ?? null, lanes: body.lanes ?? [], goal_id: body.goal_id ?? null,
       spec_path: body.spec_path ?? null, release_lane: body.release_lane === true, since: body.since ?? null, created_by: user.name,
     });
     if (!created.ok) return c.json({ error: created.error }, 400);

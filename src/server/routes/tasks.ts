@@ -159,6 +159,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     let resolvedAgentId: string | undefined;
     let resolvedAgent: import('../db.js').Agent | null = null;
     let waitingFor: string | null = null;
+    let busyNote: { why: string; free_agents: string[] } | null = null;
     if (body.agent_id) {
       // alias → name → id (spec §5c), same as every agent route.
       // Resolve to the existing seat; never spawn a new one here.
@@ -171,6 +172,13 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
       if (!access.ok) waitingFor = leases.userName(agentResult.data.owner_id!);
       resolvedAgentId = agentResult.data.id;
+      // 27 Oct 2026 retro, cause 1: nobody checked quota and current work before handing out a task.
+      // Out of plan: refused, with who is free. Busy: accepted (it queues behind), but said in the answer.
+      const unfit = taskDispatcher.agentUnfit(agentResult.data);
+      if (unfit?.code === 'quota' && body.hold !== true) {
+        return c.json({ error: `${unfit.why}; pick another agent`, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) }, 409);
+      }
+      if (unfit?.code === 'busy') busyNote = { why: unfit.why, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) };
     }
 
     let resolvedReviewerId: string | null = null;
@@ -267,6 +275,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       ...task,
       dependencies: dependencyIds,
       ...(waitingFor ? { waiting_for_agent: { owner: waitingFor } } : {}),
+      ...(busyNote ? { agent_busy: busyNote } : {}),
     }, 201);
   });
 

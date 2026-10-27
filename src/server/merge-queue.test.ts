@@ -22,8 +22,7 @@ import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
   askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
-  gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resetQueue, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, type MergeQueueRow,
-} from './merge-queue.js';
+  gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resetQueue, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, laneInRelease, personMustAct, setReleaseMode, type MergeQueueRow } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 function git(repo: string, ...args: string[]): string {
@@ -891,5 +890,20 @@ describe('merge queue — on a scratch repository', () => {
     db.getDb().prepare("UPDATE release_freezes SET status = 'stale' WHERE sha = ?").run(shaA);
     await tick();
     expect(getQueueRow(shaA)).toMatchObject({ state: 'superseded', reason: 'freeze stale' });
+  });
+});
+
+describe('what the 27 Oct 2026 retro asked of the queue', () => {
+  it('personMustAct: holds, moved lanes, missing PASS and a RED gate are said; a pending or missing run is not', () => {
+    expect(personMustAct({ code: 'LANE_DENIED', reason: 'LANE_DENIED: review_deny' })).toBe(true);
+    expect(personMustAct({ code: 'RELEASE_MODE', reason: 'RELEASE_MODE: only wc-a land' })).toBe(true);
+    expect(personMustAct({ code: 'GATE_NOT_GREEN', reason: 'GATE_NOT_GREEN: quick green, api red on 12345678' })).toBe(true);
+    expect(personMustAct({ code: 'GATE_NOT_GREEN', reason: 'GATE_NOT_GREEN: quick missing, api pending on 12345678' })).toBe(false);
+    expect(personMustAct({ code: null, reason: null })).toBe(false);
+  });
+  it('laneInRelease matches branch names and desk:<n>', () => {
+    expect(laneInRelease(['wc-a', 'desk:134'], { lane: 'wc-a', desk: null })).toBe(true);
+    expect(laneInRelease(['wc-a', 'desk:134'], { lane: 'wc-b', desk: 134 })).toBe(true);
+    expect(laneInRelease(['wc-a', 'desk:134'], { lane: 'wc-b', desk: 162 })).toBe(false);
   });
 });

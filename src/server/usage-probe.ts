@@ -230,3 +230,15 @@ export function resetUsageProbeForTest(): void {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/**
+ * The tightest plan window (5h / weekly) in percent left, from the last probe; null when never
+ * probed or the runtime shows no plan windows. Dispatch refuses an agent under
+ * `autonomy.min_quota_pct` (27 Oct 2026 retro: a task went to a seat with 4% left).
+ */
+export function quotaLeftPct(runtime: string, profile: string | null | undefined): number | null {
+  const u = usageFor(runtime, profile);
+  if (!u) return null;
+  const pcts = u.metrics.filter((m) => ALERT_LABELS.has(m.label) && typeof m.left_pct === 'number').map((m) => m.left_pct as number);
+  return pcts.length ? Math.min(...pcts) : null;
+}

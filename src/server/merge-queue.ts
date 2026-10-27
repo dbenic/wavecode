@@ -39,7 +39,7 @@ import { freezeInboxDirs, getFreeze, listFreezes, listVerdicts, viewShaChecks, t
 import { gateWordsFor, recordGateResult } from './gate-status.js';
 import { samePerson } from './reviewer-assign.js';
 import { freezeAgeMs, readLaneTests, readLaneTestsSparingly, testsConfigured } from './test-runs.js';
-import { deliverSystemLine } from './wire-lines.js';
+import { deliverSystemLine, tellDriverSeats } from './wire-lines.js';
 
 export type QueueState = 'waiting' | 'queued' | 'merging' | 'merged' | 'bounced' | 'superseded';
 
@@ -74,13 +74,15 @@ export interface QueueSwitch {
   queued: number;
   /** When the queue last finished a pass over this project (ISO), from the kv heartbeat. */
   last_pass_at: string | null;
+  /** Release mode: only these lanes (or `desk:<n>`) land; null = every eligible lane. */
+  release_lanes: string[] | null;
 }
 
 /** One machine-readable reason per refusal; the row's `reason` starts with it. */
 export type EligibilityCode =
   | 'NOT_CONFIGURED' | 'LANE_DENIED' | 'NO_REPO' | 'LANE_GONE' | 'LANE_MOVED' | 'GH_AUTH_MISSING'
   | 'GATE_NOT_GREEN' | 'NEEDS_FIXES' | 'NO_PASS_ON_SHA' | 'NO_PR' | 'MIGRATION_HOLD' | 'ASK_TIER_NO_OK'
-  | 'MIGRATION_COLLISION' | 'QUEUE_OFF' | 'CHECK_FAILED' | 'STALLED_MERGE' | 'ALREADY_ON_MAIN';
+  | 'MIGRATION_COLLISION' | 'QUEUE_OFF' | 'CHECK_FAILED' | 'STALLED_MERGE' | 'ALREADY_ON_MAIN' | 'RELEASE_MODE';
 
 export interface Eligibility {
   state: 'waiting' | 'queued' | 'bounced' | 'superseded';
@@ -230,7 +232,39 @@ export function queueEnabled(project: string): boolean {
 export function queueSwitch(project: string): QueueSwitch {
   const config_enabled = mqConfig(project)?.enabled === true;
   const queued = withTable(() => (getDb().prepare("SELECT COUNT(*) AS n FROM merge_queue WHERE project = ? AND state IN ('queued', 'merging')").get(project) as { n: number }).n);
-  return { project, config_enabled, enabled: config_enabled && queueEnabled(project), enabled_by: kvGet(`merge_queue.${project}.by`), queued, last_pass_at: kvGet(`merge_queue.${project}.last_pass_at`) };
+  return { project, config_enabled, enabled: config_enabled && queueEnabled(project), enabled_by: kvGet(`merge_queue.${project}.by`), queued, last_pass_at: kvGet(`merge_queue.${project}.last_pass_at`), release_lanes: releaseLanes(project) };
+}
+
+/**
+ * Release mode (27 Oct 2026 retro, cause 5): during a release only the named lanes land; every
+ * other eligible lane waits with RELEASE_MODE instead of the whole queue being switched OFF and
+ * the chosen fixes merged by hand. null = no release in progress. Lanes are branch names or
+ * `desk:<n>` (every lane whose freeze carries that desk number).
+ */
+export function releaseLanes(project: string): string[] | null {
+  const raw = kvGet(`merge_queue.${project}.release_lanes`);
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0) : null;
+  } catch { return null; }
+}
+
+export function setReleaseMode(project: string, lanes: string[] | null, who: string | null): QueueSwitch {
+  const clean = lanes ? [...new Set(lanes.map((l) => l.trim().replace(/^origin\//, '')).filter(Boolean))] : null;
+  if (clean && clean.length) kvSet(`merge_queue.${project}.release_lanes`, JSON.stringify(clean));
+  else { try { getDb().prepare('DELETE FROM kv_settings WHERE key = ?').run(`merge_queue.${project}.release_lanes`); } catch { /* table absent: nothing stored */ } }
+  emit(MERGE_QUEUE_EVENT.switch, 'project', project, { project, release_lanes: clean && clean.length ? clean : null, by: who }, null);
+  return queueSwitch(project);
+}
+
+/** Does release mode let this lane land? `desk:<n>` entries match the freeze's desk number. */
+export function laneInRelease(lanes: string[], freeze: Pick<ReleaseFreeze, 'lane' | 'desk'>): boolean {
+  return lanes.some((l) => {
+    const m = /^desk:(\d+)$/i.exec(l);
+    if (m) return freeze.desk !== null && freeze.desk !== undefined && Number(m[1]) === freeze.desk;
+    return !!freeze.lane && l === freeze.lane;
+  });
 }
 
 /**
@@ -827,9 +861,11 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
   const carried = await reviewCarriedOver(repo, mainRef, freeze);
   const gates = await gateWords(freeze);
   const full = gates.full === 'green' ? 'green' : carried?.full === 'green' ? 'green' : gates.full;
-  if (gates.quick !== 'green' || full !== 'green') {
+  // A full gate contains the quick suite: GREEN full is quick enough (27 Oct 2026: "quick missing, api green" held a lane 50 min).
+  const quick = gates.quick === 'green' || gates.full === 'green' ? 'green' : gates.quick;
+  if (quick !== 'green' || full !== 'green') {
     const apiWord = carried && carried.full !== 'green' && gates.full !== 'green' ? `${gates.full} (and ${carried.full} on ${carried.donor.slice(0, 8)}, the SHA it would carry from)` : full;
-    return no(base, 'GATE_NOT_GREEN', `quick ${gates.quick}, api ${apiWord} on ${freeze.sha.slice(0, 8)}`);
+    return no(base, 'GATE_NOT_GREEN', `quick ${quick}, api ${apiWord} on ${freeze.sha.slice(0, 8)}`);
   }
 
   if (freeze.verdict === 'needs-fixes' || freeze.verdict === 'reject') {
@@ -887,6 +923,14 @@ function maestroLine(project: string, text: string): void {
   } catch (e) {
     logger.warn({ project, file, error: (e as Error).message }, 'Merge queue: maestro log not written');
   }
+}
+
+/** Waits a person must end: a hold, a moved lane, a red gate, a missing PASS. Not a run still pending or missing. */
+const ACT_CODES = new Set<EligibilityCode>(['LANE_DENIED', 'LANE_MOVED', 'NEEDS_FIXES', 'NO_PR', 'MIGRATION_HOLD', 'ASK_TIER_NO_OK', 'GH_AUTH_MISSING', 'CHECK_FAILED', 'RELEASE_MODE', 'NO_PASS_ON_SHA']);
+export function personMustAct(result: Pick<Eligibility, 'code' | 'reason'>): boolean {
+  if (!result.code) return false;
+  if (result.code === 'GATE_NOT_GREEN') return /\bred\b/i.test(result.reason ?? '');
+  return ACT_CODES.has(result.code);
 }
 
 function tell(agentId: string | null, text: string): void {
@@ -1270,7 +1314,15 @@ async function refreshProjectPass(project: string): Promise<MergeQueueRow | null
       continue;
     }
     const wasQueued = existing?.state === 'queued';
+    const release = releaseLanes(project);
+    if (result.state === 'queued' && release && !laneInRelease(release, freeze)) {
+      result = { ...result, state: 'waiting', code: 'RELEASE_MODE', reason: `RELEASE_MODE: only ${release.join(', ')} land until the release is out` };
+    }
     if (result.state === 'queued' && !queueEnabled(project)) result.reason = 'QUEUE_OFF: merge queue is off';
+    // A wait that a person must end is said once, where people read (author + driver seats), the first time it appears.
+    if (result.state === 'waiting' && result.code && existing?.reason !== result.reason && personMustAct(result)) {
+      void tellDriverSeats(`[from WaveCode] merge queue: ${freeze.sha.slice(0, 8)} on ${lane} is waiting — ${result.reason}`, authorFor(freeze)?.id ?? null, 'merge-queue');
+    }
     upsert({
       sha: freeze.sha, project, lane, tier: result.tier, state: result.state, reason: result.reason, pr: result.pr,
       verdict_files: result.verdictFiles.join('\n'),

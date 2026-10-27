@@ -66,11 +66,11 @@ describe('Deliveries', () => {
     render(<MemoryRouter><Deliveries /></MemoryRouter>);
     await screen.findByText('Bank simple posting');
     fireEvent.click(screen.getByTestId('delivery-submit'));
-    expect(screen.getByTestId('delivery-form-error').textContent).toBe('title is required');
+    expect(screen.getByTestId('delivery-form-error').textContent).toBe('a title or a desk number is required');
     fireEvent.change(screen.getByTestId('delivery-title'), { target: { value: 'Invoices' } });
     fireEvent.change(screen.getByTestId('delivery-lanes'), { target: { value: 'wc-a-x, wc-b-y' } });
     fireEvent.click(screen.getByTestId('delivery-submit'));
-    await waitFor(() => expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/deliveries', { title: 'Invoices', project: null, lanes: ['wc-a-x', 'wc-b-y'] }));
+    await waitFor(() => expect(vi.mocked(apiPost)).toHaveBeenCalledWith('/deliveries', { title: 'Invoices', desk: null, project: null, lanes: ['wc-a-x', 'wc-b-y'] }));
     fireEvent.click(screen.getByTestId('deliveries-show-all'));
     expect(await screen.findByText('PD158')).toBeTruthy();
     expect(screen.getByTestId('delivery-status-d2').textContent).toBe('done');
