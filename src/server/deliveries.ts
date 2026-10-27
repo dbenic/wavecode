@@ -295,7 +295,9 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
     }
     const t = tracked(ev);
     if (!t.lane && !t.sha) continue;
-    if (t.lane && t.sha) { shas.add(t.sha); shaLane.set(t.sha, t.lane); }
+    // A SHA joins the record when the lane freezes it or the queue takes it; a refusal that names an
+    // unpushed SHA, or a gate result for someone else's SHA on the lane, does not.
+    if (t.lane && t.sha && (ev.type === 'pipeline.frozen' || ev.type.startsWith('merge_queue.'))) { shas.add(t.sha); shaLane.set(t.sha, t.lane); }
 
     switch (ev.type) {
       case 'pipeline.frozen': {
@@ -382,7 +384,8 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
       }
       case 'lane.retired': {
         // The pipeline retires a lane whose every commit is on main: landed, by the queue or by hand on GitHub.
-        if (!t.sha || !/on main/i.test(str(p.why) ?? '')) break;
+        // Only a SHA the queue had taken: an empty lane cut from main is retired the same way and landed nothing.
+        if (!t.sha || !/on main/i.test(str(p.why) ?? '') || !open.has(`land:${t.sha}`)) break;
         finish(`gates:${t.sha}`, 'ok', at, 'on main');
         finish(`review:${t.sha}`, 'ok', at, 'on main');
         finish(`first_pass:${t.sha}`, 'skipped', at, 'on main');
