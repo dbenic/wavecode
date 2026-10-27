@@ -73,3 +73,14 @@ from Denis's shell; the registered seat `fable` is a ghost, the live read seat i
 `wc-prod-read` on the assist profile. Open: update the deploy box to main, set
 `production_command` with that alias, register the read seat, no-op proof deploy, then move the
 key out of the seat's reach.
+
+## Status 27 Oct 2026, 23:20 CET: live on the deploy box
+
+On Denis's GO: deploy box WaveCode brought to main (610dac5, schema 29), `releases.production_command`
+set with the existing `countix-production` alias and the `/home/ci/wavepulse` clone as the verification
+repo, the live read seat `prod-read` (tmux `wc-prod-read`, assist profile) registered as alias `fable`
+(the ghost record is `fable-old`; its DELETE fails on foreign keys, fix pending). pm-denis briefed: on
+Denis's own Slack GO it calls `request_release`; the dev box verifies the GO, the deploy box runs the
+script. Proof run: a no-op of the SHA already live. Still to do after the proof: move the production
+key out of the ci user's reach of the seats (the daemon and the seats share that user today), and the
+prerequisite-steps gate for releases that add migrations.
