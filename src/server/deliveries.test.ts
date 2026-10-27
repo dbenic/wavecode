@@ -42,6 +42,8 @@ beforeEach(() => {
   db.initDb(path.join(tmp, 't.db'));
   del.resetDeliveryStallMemoryForTest();
   clock = T0;
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(T0);
   cfg.deliveries = { notify: ['pm-denis'] };
   db.insertAgent({ name: 'pm-denis', runtime: 'claude-code', tmux_session: 'wc-pm-denis', workspace: null, mode: 'spawned', status: 'idle' } as never);
   db.insertAgent({ name: 'codex1', runtime: 'codex', tmux_session: 'wc-codex1', workspace: null, mode: 'spawned', status: 'idle' } as never);
@@ -50,11 +52,39 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   try { db.closeDb?.(); } catch { /* not exported in every build */ }
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 describe('delivery derivation', () => {
+  it('a hand merge on GitHub (lane.retired: every commit on main) closes land; notes stick to their own SHA', () => {
+    const created = del.createDelivery({ title: 'Fixes', lanes: ['wc-x-fix', 'wc-y-fix'], since: new Date(T0).toISOString() });
+    if (!created.ok) throw new Error(created.error);
+    const id = created.data.id;
+    const X = 'a'.repeat(40); const Y = 'b'.repeat(40);
+    ev(1, 'pipeline.frozen', X, { sha: X, lane: 'wc-x-fix' });
+    ev(2, 'pipeline.frozen', Y, { sha: Y, lane: 'wc-y-fix' });
+    ev(3, 'pipeline.quick', `${X}:quick`, { sha: X, lane: 'wc-x-fix', quick: 'QUEUED' });
+    ev(3, 'pipeline.quick', `${Y}:quick`, { sha: Y, lane: 'wc-y-fix', quick: 'QUEUED' });
+    ev(4, 'merge_queue.queued', X, { sha: X, lane: 'wc-x-fix', tier: 'ask' });
+    // a note about Y's quick check must not land on X's spans
+    ev(5, 'pipeline.action', 'wavepulse:wc-y-fix', { action: 'quick', sha: Y, lane: 'wc-y-fix', note: "auto: quick check on bbbbbbbb waits for @y's other run" });
+    // a refusal for a SHA nobody tracks on lane x goes to build only (nothing open there) and never to X's gates/land
+    ev(6, 'pipeline.refused', 'c'.repeat(40), { sha: 'c'.repeat(40), lane: 'wc-x-fix', reason: 'ccccccc is not on origin/wc-x-fix — push the exact SHA first' });
+    ev(10, 'lane.retired', `wc-x-fix@${X.slice(0, 8)}`, { lane: 'wc-x-fix', tip: X, why: 'git cherry origin/main wc-x-fix is empty: every commit of the lane is on main', freezes_closed: 1 });
+    const derived = del.deriveDelivery(id);
+    if (!derived.ok) throw new Error(derived.error);
+    const spans = derived.data.spans;
+    const landX = spans.find((s) => s.stage === 'land' && s.sha === X)!;
+    expect(landX.outcome).toBe('ok');
+    expect(landX.cause).toContain('outside the queue');
+    expect(spans.find((s) => s.stage === 'gates' && s.sha === X)!.outcome).toBe('ok');
+    expect(spans.filter((s) => s.sha === X).every((s) => !(s.cause ?? '').includes('waits for'))).toBe(true);
+    expect(spans.find((s) => s.stage === 'gates' && s.sha === Y)!.cause).toContain("waits for @y's other run");
+    expect(spans.filter((s) => (s.cause ?? '').includes('not on origin'))).toEqual([]);
+  });
+
   it('derives the bank-posting day: freeze, first pass, gates, review, land, candidate, release', () => {
     const created = del.createDelivery({ title: 'Bank simple posting', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
     expect(created.ok).toBe(true);
@@ -122,6 +152,31 @@ describe('delivery derivation', () => {
 });
 
 describe('stalls', () => {
+  it('an overrun is reported once although its minute count grows, and stalls older than the record are shown but not messaged', async () => {
+    const created = del.createDelivery({ title: 'Old', lanes: [LANE], since: new Date(T0 - 120 * 60_000).toISOString() });
+    if (!created.ok) throw new Error(created.error);
+    const id = created.data.id;
+    ev(-100, 'pipeline.frozen', A, { sha: A, lane: LANE });
+    ev(-99, 'pipeline.quick', `${A}:quick`, { sha: A, lane: LANE, quick: 'QUEUED' });
+    const d = del.deriveDelivery(id);
+    if (!d.ok) throw new Error(d.error);
+    // gates open since T0-99 min: over budget already, but it predates the record (created at T0)
+    const first = await del.reportStalls(d.data.delivery, d.data.spans, T0 + 1 * 60_000);
+    expect(first).toEqual([]);
+    expect(del.getDelivery(id)!.stall_cause).toContain('OVERRUN');
+    expect(vi.mocked(deliverSystemLine)).not.toHaveBeenCalled();
+    // a new span after the record's creation is messaged once, and not again as the minutes grow
+    ev(5, 'pipeline.frozen', B, { sha: B, lane: LANE });
+    ev(6, 'pipeline.quick', `${B}:quick`, { sha: B, lane: LANE, quick: 'QUEUED' });
+    const d2 = del.deriveDelivery(id);
+    if (!d2.ok) throw new Error(d2.error);
+    const over = await del.reportStalls(d2.data.delivery, d2.data.spans, T0 + 40 * 60_000);
+    expect(over.map((s) => [s.stage, s.code, s.sha])).toEqual([['gates', 'OVERRUN', B]]);
+    const again = await del.reportStalls(d2.data.delivery, d2.data.spans, T0 + 41 * 60_000);
+    expect(again).toEqual([]);
+    expect(vi.mocked(deliverSystemLine)).toHaveBeenCalledTimes(1);
+  });
+
   it('reports a blocked gate once, with the pipeline note as the cause, and an overrun once the budget passes', async () => {
     const created = del.createDelivery({ title: 'Bank', lanes: [LANE], since: new Date(T0).toISOString() });
     if (!created.ok) throw new Error(created.error);

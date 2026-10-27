@@ -89,7 +89,7 @@ const SIGNAL_TYPES = [
   'pipeline.frozen', 'pipeline.quick', 'pipeline.gate', 'gate.result', 'pipeline.first_pass_requested',
   'pipeline.first_pass', 'pipeline.first_pass_timeout', 'pipeline.review', 'review.ai_completed', 'review.superseded',
   'merge_queue.queued', 'merge_queue.merged', 'merge_queue.bounced', 'pipeline.refused', 'pipeline.action',
-  'release.requested', 'release.reported', 'task.dispatched', 'task.created',
+  'release.requested', 'release.reported', 'task.dispatched', 'task.created', 'lane.retired',
 ];
 
 function nowIso(): string {
@@ -204,7 +204,7 @@ function laneOf(p: Record<string, unknown>): string | null {
 
 function shasOf(p: Record<string, unknown>, entityId: string): string[] {
   const out = new Set<string>();
-  for (const key of ['sha', 'sha_in', 'sha_out', 'superseded_by']) {
+  for (const key of ['sha', 'sha_in', 'sha_out', 'superseded_by', 'tip']) {
     const v = str(p[key]);
     if (v && SHA_RE.test(v)) out.add(v.toLowerCase());
   }
@@ -376,8 +376,18 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
         finish(`first_pass:${shaIn}`, 'skipped', at, 'merged');
         start(`land:${shaIn}`, 'land', at, ev, { sha: shaIn, lane: t.lane });
         finish(`land:${shaIn}`, 'ok', at, shaOut ? `main ${shaOut.slice(0, 8)}` : null);
-        for (const [key, span] of [...open]) if (span.stage === 'candidate') finish(key, 'superseded', at, 'newer merge');
+        for (const [key, span] of [...open]) if (span.stage === 'candidate') { const old = span.sha; finish(key, 'superseded', at, 'newer merge'); if (old) for (const [k2, s2] of [...open]) if (s2.sha === old) finish(k2, 'superseded', at, 'candidate superseded'); }
         if (shaOut) { shas.add(shaOut); start(`candidate:${shaOut}`, 'candidate', at, ev, { sha: shaOut, lane: t.lane }); }
+        break;
+      }
+      case 'lane.retired': {
+        // The pipeline retires a lane whose every commit is on main: landed, by the queue or by hand on GitHub.
+        if (!t.sha || !/on main/i.test(str(p.why) ?? '')) break;
+        finish(`gates:${t.sha}`, 'ok', at, 'on main');
+        finish(`review:${t.sha}`, 'ok', at, 'on main');
+        finish(`first_pass:${t.sha}`, 'skipped', at, 'on main');
+        start(`land:${t.sha}`, 'land', at, ev, { sha: t.sha, lane: t.lane });
+        finish(`land:${t.sha}`, 'ok', at, 'on main (merged outside the queue)');
         break;
       }
       case 'merge_queue.bounced':
@@ -404,9 +414,15 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
         if (!note) break;
         const blocked = /denied|refused|waits for|on hold|not on origin|switched off|conflict/i.test(note);
         if (!blocked) break;
+        const bySha = t.sha ? [...open.values()].filter((span) => span.sha === t.sha) : [];
+        if (bySha.length > 0) { for (const span of bySha) span.cause = note.slice(0, 300); break; }
+        // No open span for that SHA: the note goes to the stage the action is about, on the same lane only.
+        const action = str(p.action) ?? (ev.type === 'pipeline.refused' ? 'freeze' : '');
+        const stage: Stage | null = /quick|gate|api|full/.test(action) ? 'gates' : /review/.test(action) ? 'review' : /first_pass/.test(action) ? 'first_pass' : /freeze|push/.test(action) ? 'build' : null;
+        if (!stage) break;
         for (const span of open.values()) {
-          if (span.stage === 'spec') continue;
-          if ((t.sha && span.sha === t.sha) || (t.lane && span.lane === t.lane) || span.stage === 'build') span.cause = note.slice(0, 300);
+          if (span.stage !== stage) continue;
+          if (stage === 'build' ? (!span.lane || !t.lane || span.lane === t.lane) : (t.lane !== null && span.lane === t.lane)) span.cause = note.slice(0, 300);
         }
         break;
       }
@@ -504,9 +520,12 @@ export async function reportStalls(delivery: Delivery, spans: StageSpan[], now =
   const fresh: Stall[] = [];
   for (const st of stalls) {
     const key = `${st.delivery_id}:${st.stage}:${st.attempt}`;
-    const sig = `${st.code}|${st.cause}`;
+    const sig = st.code === 'OVERRUN' ? st.code : `${st.code}|${st.cause}`;
     if (reported.get(key) === sig) continue;
     reported.set(key, sig);
+    // A span that was already stalled when the record was created is history the creator saw; the record
+    // shows it, nobody is messaged.
+    if (new Date(st.since).getTime() < new Date(toIso(delivery.created_at)).getTime()) continue;
     fresh.push(st);
   }
   const db = getDb();
