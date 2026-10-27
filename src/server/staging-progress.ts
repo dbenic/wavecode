@@ -87,12 +87,13 @@ export interface StagingArgVars {
   lane?: string | null;
   desk?: string | null;
   deploy_id?: string | null;
+  release_id?: string | null;
 }
 
-const PLACEHOLDER = /^\{(sha|lane|desk|deploy_id)\}$/;
+const PLACEHOLDER = /^\{(sha|lane|desk|deploy_id|release_id)\}$/;
 
 /**
- * Fill `{sha}`, `{lane}`, `{desk}`, `{deploy_id}` in an argv template.
+ * Fill `{sha}`, `{lane}`, `{desk}`, `{deploy_id}`, `{release_id}` in an argv template.
  * A placeholder that is its own argument and has no value is dropped, and so
  * is a preceding `--flag`, so an optional lane or desk does not become an
  * empty flag. Never interpreted by a shell.
@@ -114,7 +115,7 @@ export function fillArgv(template: string[], vars: StagingArgVars): string[] {
       out.push(filled);
       continue;
     }
-    out.push(arg.replace(/\{(sha|lane|desk|deploy_id)\}/g, (_, key: string) => value(key)));
+    out.push(arg.replace(/\{(sha|lane|desk|deploy_id|release_id)\}/g, (_, key: string) => value(key)));
   }
   return out;
 }

@@ -494,9 +494,9 @@ export interface WaveConfig {
    *
    * `staging_command` is an argv template. When set, a staging release runs it directly
    * instead of prompting the deploy agent. `{sha}` is required; `{lane}` and `{desk}` are
-   * optional and dropped (with the preceding `--flag`) when empty. Production always
-   * stays with the deploy agent. `staging_watch_command` re-attaches after a restart
-   * and must include `{deploy_id}`.
+   * optional and dropped (with the preceding `--flag`) when empty. `staging_watch_command`
+   * re-attaches after a restart and must include `{deploy_id}`. `production_command` does the
+   * same for Promote: when set, no LLM is on the production path.
    */
   releases?: {
     deploy_agent?: string | null;
@@ -509,6 +509,15 @@ export interface WaveConfig {
     main_only?: boolean;
     staging_command?: string[];
     staging_watch_command?: string[];
+    /**
+     * Argv template for a production release on the deploy box (27 Oct 2026). When set,
+     * Promote runs it instead of prompting the deploy agent: a deterministic runner, no LLM
+     * on the production path. `{sha}` is required; `{release_id}`, `{lane}` and `{desk}` are
+     * optional. Progress lines use the staging schema: `done` = deployed, `failed` = failed,
+     * a silent non-zero exit = failed. There is no watch command: a daemon restart mid-run
+     * leaves the row `sent` and the `prod_health_command` reconciler finds the real tip.
+     */
+    production_command?: string[];
     /**
      * Optional argv that prints the SHA (and version) actually on staging.
      * When it returns a SHA it wins over the latest deployed record.
@@ -951,6 +960,7 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   validateArgvTemplate('releases.staging_command', cfg.releases?.staging_command, '{sha}');
   validateArgvTemplate('releases.staging_watch_command', cfg.releases?.staging_watch_command, '{deploy_id}');
+  validateArgvTemplate('releases.production_command', cfg.releases?.production_command, '{sha}');
   validateArgvList('releases.staging_health_command', cfg.releases?.staging_health_command);
   validateArgvList('releases.prod_health_command', cfg.releases?.prod_health_command);
   if (cfg.artifacts.fixture_inbox !== undefined) {

@@ -980,6 +980,12 @@ function stagingCommand(): string[] | null {
   return cmd && cmd.length > 0 ? cmd : null;
 }
 
+/** The deterministic production runner (`releases.production_command`); null keeps the deploy-agent prompt. */
+function productionCommand(): string[] | null {
+  const cmd = getConfig().releases?.production_command;
+  return cmd && cmd.length > 0 ? cmd : null;
+}
+
 /**
  * Re-check the reviewer PASS and, when the freeze names one, a GREEN gate.
  * An unknown freeze is allowed: the staging command enforces the same gates.
@@ -1072,7 +1078,12 @@ async function applyProgress(id: string, raw: string): Promise<boolean> {
   }
   if (line.phase === 'done') {
     const sha = line.staging_sha && /^[0-9a-f]{40}$/i.test(line.staging_sha) ? line.staging_sha.toLowerCase() : null;
-    await reportRelease(id, { status: 'deployed', version: line.version ?? updated.version, sha, note: line.url ?? updated.staging_url });
+    const reported = await reportRelease(id, { status: 'deployed', version: line.version ?? updated.version, sha, note: line.url ?? updated.staging_url });
+    if (!reported.ok) {
+      // e.g. the runner reported a SHA that is not the requested one: that is a failed release, with the reason on the record
+      await reportRelease(id, { status: 'failed', version: line.version ?? updated.version, note: reported.error });
+      return getRelease(id)?.status === 'failed';
+    }
     return getRelease(id)?.status === 'deployed';
   }
   if (line.phase === 'failed') {
@@ -1146,7 +1157,7 @@ function spawnStaging(row: ReleaseRequest, argv: string[]): void {
         const current = getRelease(row.id);
         if (!current || current.status === 'deployed' || current.status === 'failed' || current.status === 'rejected') return;
         if (!sawTerminal) {
-          await reportRelease(row.id, { status: 'failed', note: stderr.trim().slice(-500) || `staging command exited ${code ?? 'null'}` });
+          await reportRelease(row.id, { status: 'failed', note: stderr.trim().slice(-500) || `${row.target} command exited ${code ?? 'null'}` });
         }
       } catch (err) {
         logger.warn({ releaseId: row.id, err: (err as Error).message }, 'Staging command close handler failed');
@@ -1155,7 +1166,7 @@ function spawnStaging(row: ReleaseRequest, argv: string[]): void {
       logger.warn({ releaseId: row.id, error: (e as Error).message }, 'Staging command close handler failed');
     });
   });
-  logger.info({ releaseId: row.id, command: argv[0], sha: row.sha }, 'Staging deploy command started');
+  logger.info({ releaseId: row.id, command: argv[0], sha: row.sha, target: row.target }, 'Release command started');
 }
 
 function failStaging(row: ReleaseRequest, error: string): Result<ReleaseRequest> {
@@ -1177,6 +1188,27 @@ async function startStagingCommand(row: ReleaseRequest): Promise<Result<ReleaseR
     target: row.target, sha: row.sha, project: row.project, lane: row.lane, desk: row.desk,
     requested_by: row.requested_by, origin: row.origin, origin_id: row.origin_id, staging_command: true,
   }, null);
+  spawnStaging(sent, argv);
+  return { ok: true, data: sent };
+}
+
+/**
+ * Promote with `releases.production_command`: run the argv, stream its progress onto the
+ * record. The request already passed the approver list (and main-only on the requester);
+ * the command enforces its own checks and must refuse anything it cannot verify.
+ */
+async function startProductionCommand(row: ReleaseRequest): Promise<Result<ReleaseRequest>> {
+  const template = productionCommand();
+  if (!template) return failStaging(row, 'releases.production_command is not configured');
+  const argv = fillArgv(template, { sha: row.sha, lane: row.lane, desk: row.desk, release_id: row.id });
+  if (argv.length === 0) return failStaging(row, 'releases.production_command is empty');
+  patch(row.id, { status: 'sent' });
+  const sent = getRelease(row.id)!;
+  emit('release.requested', 'release', row.id, {
+    target: row.target, sha: row.sha, project: row.project, lane: row.lane, desk: row.desk,
+    requested_by: row.requested_by, origin: row.origin, origin_id: row.origin_id, production_command: true,
+  }, null);
+  logger.info({ releaseId: row.id, sha: row.sha, requestedBy: row.requested_by }, 'Production release runs the configured command (no deploy agent)');
   spawnStaging(sent, argv);
   return { ok: true, data: sent };
 }
@@ -1210,6 +1242,7 @@ export async function resumeStagingDeploys(): Promise<void> {
 
 async function handToDeployAgent(row: ReleaseRequest): Promise<Result<ReleaseRequest>> {
   if (row.target === 'staging' && stagingCommand()) return startStagingCommand(row);
+  if (row.target === 'production' && productionCommand()) return startProductionCommand(row);
   const agent = deployAgent();
   if (!agent.ok) {
     patch(row.id, { status: 'failed', error: agent.error });

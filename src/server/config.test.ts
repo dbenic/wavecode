@@ -80,6 +80,16 @@ releases:
     vi.resetModules();
     const missing = await import('./config.js');
     expect(() => missing.loadConfig(configPath)).toThrow(/staging_command must include \{sha\}/);
+
+    fs.writeFileSync(configPath, 'releases:\n  production_command: ["prod-deploy", "--exact-sha", "{sha}", "--release", "{release_id}"]\n', 'utf8');
+    vi.resetModules();
+    const prod = await import('./config.js');
+    expect(prod.loadConfig(configPath).releases?.production_command).toEqual(['prod-deploy', '--exact-sha', '{sha}', '--release', '{release_id}']);
+
+    fs.writeFileSync(configPath, 'releases:\n  production_command: ["prod-deploy", "--release", "{release_id}"]\n', 'utf8');
+    vi.resetModules();
+    const noSha = await import('./config.js');
+    expect(() => noSha.loadConfig(configPath)).toThrow(/production_command must include \{sha\}/);
   });
 
   it('keeps pipeline switches off unless set, and requires the push placeholder', async () => {

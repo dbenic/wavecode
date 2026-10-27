@@ -91,10 +91,11 @@ exact SHA, target, lane, desk and reviewer. A production request also carries th
 user's name (`requested_by`) and role (`requester_role`). The deploy box accepts that production
 request only when the name is in `releases.production_approvers`; an empty or unset list refuses
 every peer production request, including one that omits the user. Staging requests are not checked
-against the list. The deploy box hands an accepted production request to `releases.deploy_agent`.
-A staging request uses `releases.staging_command` when that argv is set, and the dev box mirrors
-`release.progress` as well as `release.reported`. Without the command, staging still prompts the
-deploy agent.
+against the list. The deploy box hands an accepted production request to `releases.deploy_agent`,
+or runs `releases.production_command` when that argv is set (a deterministic runner; no LLM on the
+production path). A staging request uses `releases.staging_command` the same way, and the dev box
+mirrors `release.progress` as well as `release.reported`. Without the commands, both targets prompt
+the deploy agent.
 
 Deploy-box setup (the old box):
 
@@ -106,6 +107,9 @@ releases:
   # {lane} and {desk} are their own arguments so an empty value drops the flag.
   staging_command: ["staging-deploy", "--exact-sha", "{sha}", "--progress-json", "--lane", "{lane}", "--desk", "{desk}"]
   staging_watch_command: ["staging-deploy", "watch", "{deploy_id}"]
+  # Optional. Production without the deploy agent: the script checks out the exact SHA,
+  # builds, reloads and verifies, printing the same progress lines as staging.
+  production_command: ["prod-deploy", "--exact-sha", "{sha}", "--release", "{release_id}", "--progress-json"]
 ```
 
 The peer user's restricted token may `POST /api/releases`, read `GET /api/releases/:id`

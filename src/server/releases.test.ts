@@ -953,6 +953,59 @@ describe('releases.ts', () => {
       expect(fs.existsSync(marker)).toBe(false);
     });
 
+    it('a production command runs on Promote instead of prompting the deploy agent', async () => {
+      const fable = agent('fable');
+      const replay = path.join(tmp, 'replay-prod.cjs');
+      fs.writeFileSync(replay, "const fs=require('fs'); fs.writeSync(1, 'args '+process.argv.slice(4).join(' ')+'\\n'+fs.readFileSync(process.argv[2],'utf8')); process.exit(Number(process.argv[3]||0));\n");
+      const success = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'staging-progress', 'success.ndjson');
+      const failed = success.replace('success.ndjson', 'failed.ndjson');
+      cfg.releases = { deploy_agent: 'fable', production_approvers: ['denis'], production_command: ['node', replay, success, '0', '{sha}', '--release', '{release_id}', '--lane', '{lane}'] };
+      const prod = await rel.acceptRelease({ sha: FIXTURE_SHA, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
+      expect(prod.ok).toBe(true);
+      if (!prod.ok) return;
+      for (let i = 0; i < 50 && rel.getRelease(prod.data.id)!.status !== 'deployed'; i++) await flush(20);
+      expect(rel.getRelease(prod.data.id)).toMatchObject({ status: 'deployed', target: 'production', version: '1.2.3', progress_phase: 'done', deploy_agent_id: null });
+      expect(typedInto(fable.id)).toHaveLength(0);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.requested', 'release', prod.data.id, expect.objectContaining({ target: 'production', production_command: true }), null);
+      expect(vi.mocked(emit)).toHaveBeenCalledWith('release.reported', 'release', prod.data.id, expect.objectContaining({ status: 'deployed', target: 'production' }), null);
+
+      // a runner that finishes on a different SHA than requested is a failed release, with the reason recorded
+      db.getDb().prepare('DELETE FROM release_requests').run();
+      const other = await rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
+      expect(other.ok).toBe(true);
+      if (!other.ok) return;
+      for (let i = 0; i < 50 && rel.getRelease(other.data.id)!.status !== 'failed'; i++) await flush(20);
+      expect(rel.getRelease(other.data.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('is not the requested') });
+
+      // the same runner failing marks the release failed, still without a prompt
+      cfg.releases = { ...cfg.releases, production_command: ['node', replay, failed, '1', '{sha}'] };
+      db.getDb().prepare('DELETE FROM release_requests').run();
+      const broke = await rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
+      expect(broke.ok).toBe(true);
+      if (!broke.ok) return;
+      for (let i = 0; i < 50 && rel.getRelease(broke.data.id)!.status !== 'failed'; i++) await flush(20);
+      expect(rel.getRelease(broke.data.id)).toMatchObject({ status: 'failed', target: 'production', error: expect.stringContaining('build failed in fixture') });
+      expect(typedInto(fable.id)).toHaveLength(0);
+
+      // a runner that exits non-zero without a terminal line is a failure, not a hang
+      fs.writeFileSync(path.join(tmp, 'die.cjs'), "process.stderr.write('refused: sha not on origin/main\\n'); process.exit(3);\n");
+      cfg.releases = { ...cfg.releases, production_command: ['node', path.join(tmp, 'die.cjs'), '{sha}'] };
+      db.getDb().prepare('DELETE FROM release_requests').run();
+      const refused = await rel.acceptRelease({ sha: SHA_B, target: 'production', project: 'wavepulse', requested_by: 'denis', requester_role: 'admin' }, { userName: 'denis', fromPeer: true });
+      expect(refused.ok).toBe(true);
+      if (!refused.ok) return;
+      for (let i = 0; i < 50 && rel.getRelease(refused.data.id)!.status !== 'failed'; i++) await flush(20);
+      expect(rel.getRelease(refused.data.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('sha not on origin/main') });
+
+      // staging is untouched by production_command: without staging_command it still prompts the agent
+      db.getDb().prepare('DELETE FROM release_requests').run();
+      const staged = await rel.acceptRelease({ sha: SHA_B, target: 'staging', project: 'wavepulse' }, { userName: 'antonio', fromPeer: true });
+      expect(staged.ok).toBe(true);
+      await flush(40);
+      expect(typedInto(fable.id)).toHaveLength(1);
+      expect(typedInto(fable.id)[0]).toMatch(/Staging request/);
+    });
+
     it('refuses a staging command when the known freeze is not PASS or not GREEN', async () => {
       agent('claude2');
       const marker = path.join(tmp, 'ran');

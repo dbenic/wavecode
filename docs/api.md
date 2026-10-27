@@ -594,9 +594,10 @@ runtime with the most weekly budget; never below 10%).
 Releases are records, not chat (`src/server/releases.ts`). A person presses **Stage** (automated
 staging deploy, no GO) or **Promote** (the production GO) on a freeze card or in the Release
 view; the daemon posts a release request to the project's `release_peer` box. Production is
-handed to the deploy agent (`releases.deploy_agent`) as one prompt. Staging does the same
-unless `releases.staging_command` is set, in which case the deploy box runs that argv and
-streams progress onto the release record. A hands-free pipeline
+handed to the deploy agent (`releases.deploy_agent`) as one prompt, unless
+`releases.production_command` is set, in which case the deploy box runs that argv (no LLM on
+the production path) and streams its progress onto the record. Staging does the same with
+`releases.staging_command`. A hands-free pipeline
 (`projects.<name>.pipeline`, every switch default off) can freeze, queue one full gate,
 assign a reviewer, and request staging with `requested_by: auto`. It never sends a
 production request. Staging is one lane at a time until Ready for prod or the pin expires.
@@ -694,8 +695,10 @@ staging_url, rollback_status, rollback_to, created_at, updated_at, reported_at`.
   command. Progress lines (schema v1; unknown fields ignored) update the record and emit
   `release.progress`. A `done` line is `deployed`; a `failed` line is `failed`. If the daemon
   restarts mid-deploy and `releases.staging_watch_command` includes `{deploy_id}`, it
-  re-attaches. Production is unchanged and always uses the deploy agent. Without
-  `staging_command`, staging keeps today's prompt.
+  re-attaches. Production runs `releases.production_command` the same way when that argv is
+  set (`{release_id}` is available too; there is no watch command, so a restart mid-run leaves
+  the row `sent` for the `prod_health_command` reconciler). Without the commands, both
+  targets keep today's prompt.
 - Candidates are the unit of production when `projects.<p>.candidate_refs` is set: the board lists each
   unreleased candidate with its tip SHA and the lanes it contains; a lane alone is then never promotable.
   `POST /api/releases/candidates/:name/stage` `{ project }` requests staging. A developer needs every contained lane's reviewer PASS, unless that composed candidate is already deployed to staging. An admin may stage either way.
