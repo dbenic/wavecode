@@ -533,6 +533,15 @@ export interface WaveConfig {
     prod_health_command?: string[];
   };
   /**
+   * Delivery tracker (src/server/deliveries.ts, docs/ops/delivery-tracker-plan.md). `notify`: agent
+   * aliases that get every stall message (the driver seat, e.g. pm-denis). `budgets_min`: Start-To-Close
+   * budget per stage in minutes, overriding the defaults in deliveries.ts.
+   */
+  deliveries?: {
+    notify?: string[];
+    budgets_min?: Partial<Record<'spec' | 'build' | 'first_pass' | 'gates' | 'review' | 'land' | 'candidate' | 'release', number>>;
+  };
+  /**
    * The coordinator (src/server/overlord.ts): wakes on board-changing events and a heartbeat,
    * calls `model` on the configured LLM key (llm.anthropic_api_key), posts reports with
    * one-click recommendations. Off unless `enabled: true` (the default is off): nothing in a
@@ -963,6 +972,15 @@ export function validateConfig(cfg: WaveConfig): void {
   validateArgvTemplate('releases.production_command', cfg.releases?.production_command, '{sha}');
   validateArgvList('releases.staging_health_command', cfg.releases?.staging_health_command);
   validateArgvList('releases.prod_health_command', cfg.releases?.prod_health_command);
+  if (cfg.deliveries?.notify !== undefined && (!Array.isArray(cfg.deliveries.notify) || cfg.deliveries.notify.some((s) => typeof s !== 'string' || !s.trim()))) {
+    throw new Error('deliveries.notify must be a list of agent aliases or names');
+  }
+  if (cfg.deliveries?.budgets_min !== undefined) {
+    const b = cfg.deliveries.budgets_min;
+    if (!b || typeof b !== 'object' || Array.isArray(b) || Object.values(b).some((v) => typeof v !== 'number' || !(v > 0))) {
+      throw new Error('deliveries.budgets_min must map stage names to minutes > 0');
+    }
+  }
   if (cfg.artifacts.fixture_inbox !== undefined) {
     if (!Array.isArray(cfg.artifacts.fixture_inbox) || cfg.artifacts.fixture_inbox.some((d) => typeof d !== 'string' || !d.trim())) {
       throw new Error('artifacts.fixture_inbox must be a list of directory paths');

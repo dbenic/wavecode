@@ -33,7 +33,7 @@ Temporal's engine is MIT and its model is exactly what we lack: a durable multi-
 | 7 | candidate | main frozen for release | full gate GREEN + release reviews PASS on that SHA | 10 min | 1 h | |
 | 8 | release | release request sent (Promote) | release.reported deployed | 5 min | 45 min | 10 min (progress lines) |
 
-Budgets are config (`deliveries.budgets.<stage>`), the numbers above are today's defaults. A stage that fails (gate RED, NEEDS FIXES, bounce) goes back to the stage that owns the fix with attempt+1; the retry policy caps attempts per stage (default 3) before escalation.
+Budgets are config (`deliveries.budgets_min.<stage>`), the numbers above are today's defaults. A stage that fails (gate RED, NEEDS FIXES, bounce) goes back to the stage that owns the fix with attempt+1; the retry policy caps attempts per stage (default 3) before escalation.
 
 ## Stall detection
 
@@ -68,6 +68,8 @@ pm-denis can be this seat for release deliveries; a separate `pm-delivery` seat 
 One table `deliveries` (id, goal_id, title, spec_path, lanes_json, stage, stage_started_at, stage_assigned_at, last_progress_at, attempts, status, created_at) and `delivery_stages` (delivery_id, stage, attempt, started_at, finished_at, outcome, cause, actor). Stage transitions are derived from events by lane and SHA; the first version backfills today's bank posting from the events table as the proof.
 
 ## Order and effort
+
+Status 27 Oct 2026: steps 1 and 2 built (`src/server/deliveries.ts`, `routes/deliveries.ts`, schema v29, page `/deliveries`, `docs/api.md` "Delivery tracker"); the proof is the backfill of the bank posting day once deployed. Steps 3 and 4 open.
 
 1. Table, derivation from events, `/api/deliveries`, Command Center card with time-in-stage. One day.
 2. Stall tick with the four causes, messages to seats. Half a day.

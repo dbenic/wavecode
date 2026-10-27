@@ -1345,3 +1345,35 @@ one `profile_usage` row per (runtime, profile) and emits `usage.probed`. When a 
 notification per window (keyed by the window's reset time) on every configured channel:
 "Subscription usage high — assist (claude-code): 5h window 85% used, resets 1:29am". That is
 the signal for moving a Max 5x account to 20x.
+
+## Delivery tracker (27 Oct 2026)
+
+A feature from spec to production as one record (`docs/ops/delivery-tracker-plan.md`: Temporal's
+model, not its server). Stage spans are derived from the events table by lane and SHA, never
+written by hand: `pipeline.frozen` closes `build`, `pipeline.first_pass*` is `first_pass`,
+`pipeline.quick`/`gate.result`/`pipeline.gate` are `gates`, `pipeline.review`/`review.ai_completed`
+are `review`, `merge_queue.*` is `land`, the merged `sha_out` opens `candidate`, `release.*` is
+`release`. A RED gate, NEEDS FIXES or a bounce reopens `build` with attempt+1; a new freeze of the
+same lane supersedes the earlier SHA's open spans (a sync merge is not a new attempt). The page is
+`/deliveries` (nav "Deliveries"): stage pills, time in the current stage, the stall cause, and the
+span table on click.
+
+- `GET /api/deliveries?status=open|done|failed|cancelled|all&limit=` — summaries: the record plus
+  `stage_minutes`, `open_stages` and `stalls` (`[{ stage, code: BLOCKED|OVERRUN, cause, minutes, actor }]`).
+- `GET /api/deliveries/:id` — the summary plus `stages` (every span: stage, attempt, started_at,
+  finished_at, outcome `ok|fail|skipped|superseded|null`, cause, actor, sha, lane).
+- `POST /api/deliveries` `{ title, project?, lanes?, goal_id?, spec_path?, release_lane?, since? }` —
+  developers and admins; `since` (ISO, default now) is where the event scan starts, so a delivery
+  can be created after the fact. Returns 201 with the derived record.
+- `POST /api/deliveries/:id/lanes` `{ lanes }` — add branches; re-derives.
+- `POST /api/deliveries/:id/status` `{ status }` — close by hand (`done`, `failed`, `cancelled`) or reopen.
+- `POST /api/deliveries/:id/derive` — rebuild the spans now (the tick does it every 60 s for open ones).
+
+Stalls (`findStalls`, every tick): **BLOCKED** when the open span carries a pipeline refusal or a
+queue note that reads as a wait (`denied`, `refused`, `waits for`, `on hold`, `not on origin`,
+`switched off`, `conflict`); **OVERRUN** when an open span passes its Start-To-Close budget
+(`deliveries.budgets_min.<stage>`; defaults spec 120, build 180, first_pass 20, gates 25,
+review 45, land 30, candidate 60, release 45). One event `delivery.stalled`
+`{ delivery_id, title, stage, code, cause, minutes, actor }` and one system line to every seat in
+`deliveries.notify` plus the span's actor, per new cause; the record keeps `stall_cause` /
+`stall_at` until the span moves. Tables `deliveries` and `delivery_stages` (schema v29).

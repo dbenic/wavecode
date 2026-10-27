@@ -284,7 +284,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 28;
+export const SCHEMA_VERSION = 29;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -465,6 +465,45 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_room_proposals_room ON room_proposals(room, status);
+
+  -- v29 delivery tracker (docs/ops/delivery-tracker-plan.md): a feature from spec to production.
+  CREATE TABLE IF NOT EXISTS deliveries (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    project TEXT,
+    goal_id TEXT,
+    spec_path TEXT,
+    lanes_json TEXT NOT NULL DEFAULT '[]',
+    shas_json TEXT NOT NULL DEFAULT '[]',
+    release_lane INTEGER NOT NULL DEFAULT 0,
+    stage TEXT,
+    stage_started_at TEXT,
+    last_progress_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'open',
+    stall_cause TEXT,
+    stall_at TEXT,
+    created_by TEXT,
+    since_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, created_at DESC);
+  CREATE TABLE IF NOT EXISTS delivery_stages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    outcome TEXT,
+    cause TEXT,
+    actor TEXT,
+    sha TEXT,
+    lane TEXT,
+    event_id INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_delivery_stages_delivery ON delivery_stages(delivery_id, started_at);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_users_seat_token ON users(seat_token_hash) WHERE seat_token_hash IS NOT NULL;
 
   CREATE INDEX IF NOT EXISTS idx_events_entity
@@ -997,6 +1036,47 @@ const MIGRATIONS: Record<number, string> = {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_jobs_open_stage
       ON ops_jobs(kind, stage_sha)
       WHERE kind = 'stage' AND status IN ('queued', 'claimed');
+  `,
+  // v28 → v29: delivery tracker. Derived stage rows; the tables are created by the base schema too.
+  28: `
+  -- v29 delivery tracker (docs/ops/delivery-tracker-plan.md): a feature from spec to production.
+  CREATE TABLE IF NOT EXISTS deliveries (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    project TEXT,
+    goal_id TEXT,
+    spec_path TEXT,
+    lanes_json TEXT NOT NULL DEFAULT '[]',
+    shas_json TEXT NOT NULL DEFAULT '[]',
+    release_lane INTEGER NOT NULL DEFAULT 0,
+    stage TEXT,
+    stage_started_at TEXT,
+    last_progress_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'open',
+    stall_cause TEXT,
+    stall_at TEXT,
+    created_by TEXT,
+    since_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, created_at DESC);
+  CREATE TABLE IF NOT EXISTS delivery_stages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    delivery_id TEXT NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    outcome TEXT,
+    cause TEXT,
+    actor TEXT,
+    sha TEXT,
+    lane TEXT,
+    event_id INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_delivery_stages_delivery ON delivery_stages(delivery_id, started_at);
   `,
 };
 

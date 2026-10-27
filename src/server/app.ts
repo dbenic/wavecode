@@ -16,6 +16,7 @@ import { registerTemplateRoutes } from './routes/templates.js';
 import { registerSpecsRoutes } from './routes/specs.js';
 import { registerDecisionRoutes } from './routes/decisions.js';
 import { registerGoalRoutes } from './routes/goals.js';
+import { registerDeliveryRoutes } from './routes/deliveries.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerUserRoutes } from './routes/users.js';
 import { registerThreadRoutes } from './routes/thread.js';
@@ -75,6 +76,7 @@ export function createApp(): Hono<NodeAppEnv> {
   registerSpecsRoutes(app);
   registerDecisionRoutes(app);
   registerGoalRoutes(app);
+  registerDeliveryRoutes(app);
   registerMessageRoutes(app);
   registerHealthRoutes(app);
   registerTestPortalRoutes(app);

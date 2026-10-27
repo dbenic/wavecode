@@ -29,6 +29,7 @@ import { startPaneMigration } from './pane-migrate.js';
 import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import { startMergeQueueTimer, stopMergeQueueTimer } from './merge-queue.js';
+import { startDeliveryTimer, stopDeliveryTimer } from './deliveries.js';
 import { startFableQueue, stopFableQueue } from './fable-queue.js';
 import * as replyCapture from './reply-capture.js';
 import { startSlackBridge, stopSlackBridge } from './slack-bridge.js';
@@ -76,6 +77,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   startLaneBoard();
   startDeployReconciler();
   startMergeQueueTimer();
+  startDeliveryTimer();
   startFableQueue();
   startOpsLanes();
 
@@ -114,6 +116,7 @@ export function shutdownApplication(): void {
   stopLaneBoard();
   stopDeployReconciler();
   stopMergeQueueTimer();
+  stopDeliveryTimer();
   stopFableQueue();
   stopSlackBridge();
   stopOpsLanes();

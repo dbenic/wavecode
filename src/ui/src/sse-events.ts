@@ -85,6 +85,7 @@ export const SSE_EVENT_TYPES = [
   'room.proposal_promoted',
   'room.proposal_rejected',
   'retro.started',
+  'delivery.stalled',
 ] as const;
 
 export type KnownSSEEventType = typeof SSE_EVENT_TYPES[number];
