@@ -234,7 +234,7 @@ function loadSignals(since: string): Ev[] {
  */
 export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<string>): { spans: StageSpan[]; shas: string[] } {
   const lanes = new Set(delivery.lanes);
-  const shas = new Set(delivery.shas.map((s) => s.toLowerCase()));
+  const shas = new Set<string>(); // derived below; the stored list is this derivation's output, not its input
   const shaLane = new Map<string, string>();
   const spans: StageSpan[] = [];
   const open = new Map<string, StageSpan>(); // key: stage or stage:sha or stage:id
@@ -268,12 +268,20 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
     const lane = laneOf(ev.payload);
     const evShas = shasOf(ev.payload, ev.entity_id);
     const known = evShas.find((s) => shas.has(s)) ?? null;
-    if (lane && lanes.has(lane)) return { lane, sha: known ?? evShas[0] ?? null };
+    if (lane && lanes.has(lane)) {
+      const adopts = ev.type === 'pipeline.frozen' || ev.type.startsWith('merge_queue.');
+      return { lane, sha: known ?? (adopts ? evShas[0] ?? null : null) };
+    }
     return { lane: known ? (shaLane.get(known) ?? null) : null, sha: known };
   };
   const supersede = (lane: string, newSha: string, at: string) => {
     for (const [key, span] of [...open]) {
-      if (span.lane === lane && span.sha && span.sha !== newSha && span.stage !== 'build') finish(key, 'superseded', at, `superseded by ${newSha.slice(0, 8)}`);
+      if (!span.sha || span.sha === newSha || span.stage === 'build') continue;
+      const spanLane = span.lane ?? shaLane.get(span.sha) ?? null;
+      if (spanLane !== lane) continue;
+      const old = span.sha;
+      finish(key, 'superseded', at, `superseded by ${newSha.slice(0, 8)}`);
+      if (span.stage === 'candidate') for (const [k2, s2] of [...open]) if (s2.sha === old) finish(k2, 'superseded', at, 'candidate superseded');
     }
   };
   let sawFreeze = false;
