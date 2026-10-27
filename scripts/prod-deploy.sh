@@ -72,6 +72,19 @@ if git -C "$PROD_REPO_DIR" diff --name-only "$prev" "$sha" -- migrations/ 'db/mi
 fi
 line lock ok "\"prev_sha\":\"$prev\""
 
+if [ "$prev" = "$sha" ]; then
+  # Already live: nothing to check out, build or reload. Verify only (the proof run and any repeat GO).
+  for p in predeploy_dump checkout deps build reload_migrate; do phase=$p; line "$p" skip "\"reason\":\"already live\""; done
+  phase=verify; line verify start
+  curl -fsS --max-time 20 "$health" >/dev/null || fail HEALTH "health check failed at $health"
+  version=$(remote "cd $app && sed -n 's/.*APP_VERSION = \"\\([^\"]*\\)\".*/\\1/p' src/version.ts | head -1" || true)
+  line verify ok "\"health\":true,\"sha_match\":true,\"noop\":true"
+  phase=done
+  line done ok "\"result\":\"OK\",\"exit_code\":0,\"duration_s\":$(( $(date +%s) - started )),\"version\":\"${version:-}\",\"staging_sha\":\"$sha\",\"url\":\"$health\",\"noop\":true"
+  echo "RELEASED $release: $sha v$version (already live, verified)" >&2
+  exit 0
+fi
+
 phase=predeploy_dump; line predeploy_dump skip "\"reason\":\"no migration changes\""
 
 phase=checkout; line checkout start
