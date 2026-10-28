@@ -818,42 +818,6 @@ export interface TestPortalState {
   schema_ok: boolean;
 }
 
-export type FablePaneState = 'working' | 'idle' | 'waiting_input' | 'queued' | 'unknown' | 'unreadable (no access)';
-export type FableStageName = 'freeze' | 'review' | 'staged' | 'GO-ready' | 'live';
-export type FableStageCell = { status: 'unknown' } | { status: 'seen'; name: string; age_s: number };
-export interface FableQueueReport {
-  collected_at: string | null;
-  poll_s: number;
-  pending_alert_min: number;
-  notes_unavailable: number;
-  bots: Array<{
-    id: string;
-    socket: string;
-    session: string;
-    state: FablePaneState;
-    state_error: 'socket unavailable' | 'invalid name' | null;
-    inbox_error: 'missing' | 'unavailable' | null;
-    outbox_error: 'missing' | 'unavailable' | null;
-    briefs: Array<{
-      name: string;
-      age_s: number;
-      status: 'done' | 'pending' | 'paired' | 'unpaired';
-      match: 'exact' | 'fallback' | 'unpaired';
-      expected?: Array<{ name: string; status: 'present' | 'missing' }>;
-    }>;
-    pending: Array<{ name: string; age_s: number; status: 'done' | 'pending' | 'paired' | 'unpaired' }>;
-    unpaired: Array<{ name: string; age_s: number; status: 'unpaired' }>;
-    current: { name: string; age_s: number; status: 'done' | 'pending' | 'paired' | 'unpaired' } | null;
-    newest_receipt: { name: string; age_s: number } | null;
-    capture: string | null;
-  }>;
-  alerts: Array<
-    | { kind: 'pending_too_long'; bot: string; name: string; age_s: number }
-    | { kind: 'idle_with_pending'; bot: string; pending: number }
-  >;
-  pipeline: Array<{ card: string; stages: Record<FableStageName, FableStageCell> }>;
-}
-
 export type OpsKeyStatus = 'ok' | 'expired' | 'auth_error' | 'unknown';
 export type OpsLaneReason = 'stale' | 'key' | 'missing' | 'invalid';
 export interface OpsLaneRow {

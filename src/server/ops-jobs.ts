@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { generateId, getDb } from './db.js';
-import { redactSecrets } from './fable-queue-classify.js';
+import { redactSecrets } from './redact.js';
 import { getConfig } from './config.js';
 import {
   boundOpsRole, isOpsJobRole, isOpsOwner, resolveOpsLanes,

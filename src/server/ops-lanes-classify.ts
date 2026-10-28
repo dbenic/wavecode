@@ -3,7 +3,7 @@
  * Callers pass file text. This module does not touch the disk.
  */
 
-import { redactSecrets } from './fable-queue-classify.js';
+import { redactSecrets } from './redact.js';
 
 export const KEY_STATUSES = ['ok', 'expired', 'auth_error', 'unknown'] as const;
 export type KeyStatus = (typeof KEY_STATUSES)[number];

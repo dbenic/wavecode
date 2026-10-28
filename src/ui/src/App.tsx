@@ -17,7 +17,6 @@ import FileView from './views/FileView';
 import Release from './views/Release';
 import Tests from './views/Tests';
 import Overview from './views/Overview';
-import Queue from './views/Queue';
 import Deliveries from './views/Deliveries';
 import OpsLanes from './views/OpsLanes';
 import BottomNav from './components/BottomNav';
@@ -79,7 +78,6 @@ export default function App() {
             <Route path="/tests" element={<Tests />} />
             <Route path="/ops-lanes" element={<OpsLanes />} />
             <Route path="/overview" element={<Overview />} />
-            <Route path="/queue" element={<Queue />} />
             <Route path="/deliveries" element={<Deliveries />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

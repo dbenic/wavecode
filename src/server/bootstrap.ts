@@ -30,7 +30,6 @@ import { startEventRetention } from './event-retention.js';
 import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import { startMergeQueueTimer, stopMergeQueueTimer } from './merge-queue.js';
 import { startDeliveryTimer, stopDeliveryTimer } from './deliveries.js';
-import { startFableQueue, stopFableQueue } from './fable-queue.js';
 import * as replyCapture from './reply-capture.js';
 import { startSlackBridge, stopSlackBridge } from './slack-bridge.js';
 import { startOpsLanes, stopOpsLanes } from './ops-lanes.js';
@@ -78,7 +77,6 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   startDeployReconciler();
   startMergeQueueTimer();
   startDeliveryTimer();
-  startFableQueue();
   startOpsLanes();
 
   const startupReconciliation = await reconcileStartupState();
@@ -117,7 +115,6 @@ export function shutdownApplication(): void {
   stopDeployReconciler();
   stopMergeQueueTimer();
   stopDeliveryTimer();
-  stopFableQueue();
   stopSlackBridge();
   stopOpsLanes();
   closeAllPaneStreams();

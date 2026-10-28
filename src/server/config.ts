@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import yaml from 'js-yaml';
-import { defaultFableBots, DEFAULT_FABLE_CARDS, DEFAULT_PENDING_ALERT_MIN, DEFAULT_POLL_S, type FableQueueConfig } from './fable-queue-config.js';
 import { DEFAULT_OPS_DIR, DEFAULT_OPS_OWNERS, DEFAULT_OPS_POLL_S, DEFAULT_OPS_RECEIPTS, DEFAULT_OPS_ROLES, DEFAULT_OPS_STALE_MIN, type OpsLanesConfig } from './ops-lanes-config.js';
 import { validateProfilesConfig } from './profile-validation.js';
 
@@ -593,10 +592,6 @@ export interface WaveConfig {
     poll_s?: number;
   };
   /**
-   * Read-only Fable Queue monitor. Defaults are the wavecode-countix bots
-   * (fable on socket `fable`, fable2..fable5 on socket `fableN`).
-   */
-  /**
    * Live terminal view on the agent page: `tmux pipe-pane` → FIFO → WebSocket →
    * xterm.js. `enabled` default true; `fifo_dir` default `<data>/terminal`;
    * `max_viewers` default 20 (open sockets across all agents).
@@ -606,7 +601,6 @@ export interface WaveConfig {
     fifo_dir?: string;
     max_viewers?: number;
   };
-  fable_queue?: FableQueueConfig;
   /**
    * Ops lanes Live board and job store. One `<role>.json` in `dir`.
    * Defaults: `/srv/opsbots/heartbeat`, receipts under `/srv/opsbots/receipts`,
@@ -1283,12 +1277,6 @@ function buildDefaults(baseDir: string): WaveConfig {
       gate_dependents_on_approval: false,
       auto_pick: true,
     },
-    fable_queue: {
-      poll_s: DEFAULT_POLL_S,
-      pending_alert_min: DEFAULT_PENDING_ALERT_MIN,
-      cards: [...DEFAULT_FABLE_CARDS],
-      bots: defaultFableBots(),
-    },
     terminal_stream: {
       enabled: true,
       fifo_dir: path.join(dataRoot, 'terminal'),
@@ -1331,15 +1319,6 @@ function normalizeConfigPaths(cfg: WaveConfig, baseDir: string): WaveConfig {
   normalized.artifacts.storage = normalizePathSetting(normalized.artifacts.storage, baseDir);
   normalized.profiles_root = normalizePathSetting(normalized.profiles_root, baseDir);
   normalized.profiles = normalized.profiles ?? {};
-  if (normalized.fable_queue?.bots) {
-    for (const bot of normalized.fable_queue.bots) {
-      bot.inbox = bot.inbox?.trim() ? normalizePathSetting(bot.inbox, baseDir) : '';
-      bot.outbox = bot.outbox?.trim() ? normalizePathSetting(bot.outbox, baseDir) : '';
-    }
-  }
-  if (normalized.fable_queue?.note_dirs) {
-    normalized.fable_queue.note_dirs = normalized.fable_queue.note_dirs.map((dir) => normalizePathSetting(dir, baseDir));
-  }
   if (normalized.terminal_stream?.fifo_dir?.trim()) {
     normalized.terminal_stream.fifo_dir = normalizePathSetting(normalized.terminal_stream.fifo_dir.trim(), baseDir);
   }
