@@ -76,3 +76,26 @@ Status 27 Oct 2026, 21:15 CET: steps 1 and 2 built and live on countix-dev (`src
 3. The two queue rules. Half a day.
 4. Driver seat brief and the reassign/requeue endpoints it needs. One day.
 5. Later: Apache DevLake for the monthly view, if wanted.
+
+## Every task and lane gets a record (28 Oct 2026)
+
+Why: pm-denis set up a 15-minute poll inside its own session to watch codex1's bank fix, because the lane
+(`wc-codex1-bank-multi-konto`, started with a prompt, no desk number) had no delivery record and so no stall
+messages. A poll in a seat's session dies with the session, costs a prompt every 15 minutes and sees only what
+the seat thinks to look at. Denis: "I want tracking for each task."
+
+How: `adoptWork` on the delivery tick (`deliveries.auto_track`, default on).
+- Running tasks (not the pipeline's review/verify tasks): join the open record of the agent's current lane or of
+  the task's goal, else a record titled by the prompt's first line, `task_ids` + `agent_ids` set, since = the
+  task's creation.
+- Lanes ahead of main (the lane board): a desk-marked lane joins or opens PD-<n>; any other lane gets a record
+  named after it, since = its first own commit. Lanes older than 14 days are left alone.
+- A record with tasks or agents opens in `build` (someone is already working), not `spec`.
+- New signals on the build span: `run.failed` of a tracked task = blocked (`run failed: …`), `run.finished`
+  clears; `agent.hung` of a tracked agent = blocked (`@seat quiet for N min`), the new `agent.resumed` (health
+  monitor, first output after an alert) clears. Build over its 180-minute budget is an overrun like before.
+- Stalls that predate the record are shown, not messaged (unchanged), so the first sweep over existing lanes
+  does not flood pm-denis.
+- Seat tools: `list_deliveries` (status, desk, limit) and `create_delivery` (title/desk/project/lanes).
+  Seat brief: follow work from the tracker, never a poll in the session.
+

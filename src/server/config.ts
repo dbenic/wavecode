@@ -560,6 +560,8 @@ export interface WaveConfig {
     notify?: string[];
     /** Open a PD-<n> delivery for every freeze that carries a desk number (default true). */
     auto_desk?: boolean;
+    /** Open a record for every running task and every developer lane ahead of main that no record covers (default true, 28 Oct 2026). */
+    auto_track?: boolean;
     budgets_min?: Partial<Record<'spec' | 'build' | 'first_pass' | 'gates' | 'review' | 'land' | 'candidate' | 'release', number>>;
   };
   /**
@@ -998,6 +1000,9 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   if (cfg.deliveries?.notify !== undefined && (!Array.isArray(cfg.deliveries.notify) || cfg.deliveries.notify.some((s) => typeof s !== 'string' || !s.trim()))) {
     throw new Error('deliveries.notify must be a list of agent aliases or names');
+  }
+  if (cfg.deliveries?.auto_track !== undefined && typeof cfg.deliveries.auto_track !== 'boolean') {
+    throw new Error('deliveries.auto_track must be true or false');
   }
   if (cfg.deliveries?.budgets_min !== undefined) {
     const b = cfg.deliveries.budgets_min;

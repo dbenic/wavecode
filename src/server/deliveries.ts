@@ -14,8 +14,10 @@
 
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
-import { getAgent, getDb, type Result } from './db.js';
+import { getAgent, getDb, listTasks, type Result, type Task } from './db.js';
 import { listFreezes } from './release-freezes.js';
+import { mainSpec } from './lane-main.js';
+import { workspaceMatches } from './project-gate.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { tellDriverSeats } from './wire-lines.js';
@@ -52,6 +54,10 @@ export interface Delivery {
   since_at: string;
   created_at: string;
   updated_at: string;
+  /** Tasks this record tracks: build starts when one is dispatched (v31). */
+  task_ids: string[];
+  /** Agents building it: a hung one blocks the open build span (v31). */
+  agent_ids: string[];
 }
 
 export interface StageSpan {
@@ -73,6 +79,7 @@ interface Row {
   id: string; title: string; project: string | null; goal_id: string | null; spec_path: string | null; desk: number | null;
   lanes_json: string; shas_json: string; release_lane: number; stage: string | null; stage_started_at: string | null;
   last_progress_at: string | null; attempts: number; status: string; stall_cause: string | null; stall_at: string | null;
+  task_ids_json?: string; agent_ids_json?: string;
   created_by: string | null; since_at: string; created_at: string; updated_at: string;
 }
 
@@ -95,6 +102,7 @@ const SHA_RE = /^[0-9a-f]{40}$/i;
 
 /** Event types the derivation reads. Everything else stays untouched. */
 const SIGNAL_TYPES = [
+  'run.finished', 'run.failed', 'agent.hung', 'agent.resumed',
   'pipeline.frozen', 'pipeline.quick', 'pipeline.gate', 'gate.result', 'pipeline.first_pass_requested',
   'pipeline.first_pass', 'pipeline.first_pass_timeout', 'pipeline.review', 'review.ai_completed', 'review.superseded', 'pipeline.candidate_review',
   'merge_queue.queued', 'merge_queue.merged', 'merge_queue.bounced', 'pipeline.refused', 'pipeline.action',
@@ -118,6 +126,7 @@ function rowToDelivery(r: Row): Delivery {
     stage: (r.stage as Stage | null) ?? null, stage_started_at: r.stage_started_at, last_progress_at: r.last_progress_at,
     attempts: r.attempts, status: r.status as DeliveryStatus, stall_cause: r.stall_cause, stall_at: r.stall_at,
     created_by: r.created_by, since_at: r.since_at, created_at: r.created_at, updated_at: r.updated_at,
+    task_ids: parseList(r.task_ids_json ?? '[]'), agent_ids: parseList(r.agent_ids_json ?? '[]'),
   };
 }
 
@@ -146,6 +155,9 @@ export interface CreateDeliveryOpts {
   /** Events before this instant are ignored. Default: 24 h before creation (a lane usually predates its record). */
   since?: string | null;
   created_by?: string | null;
+  /** Tasks the record tracks; with them (or agents) the build stage starts at `since`, not spec. */
+  task_ids?: string[];
+  agent_ids?: string[];
 }
 
 export function createDelivery(opts: CreateDeliveryOpts): Result<Delivery> {
@@ -161,14 +173,33 @@ export function createDelivery(opts: CreateDeliveryOpts): Result<Delivery> {
   if (lanes.some((l) => l.length > 120 || /\s/.test(l))) return { ok: false, error: 'lanes must be branch names' };
   const since = opts.since ? new Date(opts.since) : new Date(Date.now() - 24 * 3600_000);
   if (Number.isNaN(since.getTime())) return { ok: false, error: 'since must be an ISO date' };
+  const taskIds = [...new Set((opts.task_ids ?? []).filter((t) => typeof t === 'string' && t))];
+  const agentIds = [...new Set((opts.agent_ids ?? []).filter((a) => typeof a === 'string' && a))];
   const id = ulid();
   const now = nowIso();
-  getDb().prepare(`INSERT INTO deliveries (id, title, project, goal_id, spec_path, desk, lanes_json, shas_json, release_lane, stage, stage_started_at, attempts, status, created_by, since_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, 'spec', ?, 1, 'open', ?, ?, ?, ?)`)
-    .run(id, title, opts.project ?? null, opts.goal_id ?? null, opts.spec_path ?? null, desk, JSON.stringify(lanes), opts.release_lane ? 1 : 0, now, opts.created_by ?? null, since.toISOString(), now, now);
+  const firstStage = taskIds.length || agentIds.length ? 'build' : 'spec';
+  getDb().prepare(`INSERT INTO deliveries (id, title, project, goal_id, spec_path, desk, lanes_json, shas_json, release_lane, stage, stage_started_at, attempts, status, created_by, since_at, created_at, updated_at, task_ids_json, agent_ids_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 1, 'open', ?, ?, ?, ?, ?, ?)`)
+    .run(id, title, opts.project ?? null, opts.goal_id ?? null, opts.spec_path ?? null, desk, JSON.stringify(lanes), opts.release_lane ? 1 : 0, firstStage, now, opts.created_by ?? null, since.toISOString(), now, now, JSON.stringify(taskIds), JSON.stringify(agentIds));
   const d = getDelivery(id)!;
-  emit('delivery.created', 'delivery', id, { title, project: d.project, desk, lanes, goal_id: d.goal_id, release_lane: d.release_lane });
+  emit('delivery.created', 'delivery', id, { title, project: d.project, desk, lanes, goal_id: d.goal_id, release_lane: d.release_lane, task_ids: taskIds, agent_ids: agentIds });
   return { ok: true, data: d };
+}
+
+export function addTasks(id: string, taskIds: string[]): Result<Delivery> {
+  const d = getDelivery(id);
+  if (!d) return { ok: false, error: 'delivery not found' };
+  const merged = [...new Set([...d.task_ids, ...taskIds.filter(Boolean)])];
+  getDb().prepare('UPDATE deliveries SET task_ids_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(merged), nowIso(), id);
+  return { ok: true, data: getDelivery(id)! };
+}
+
+export function addAgents(id: string, agentIds: string[]): Result<Delivery> {
+  const d = getDelivery(id);
+  if (!d) return { ok: false, error: 'delivery not found' };
+  const merged = [...new Set([...d.agent_ids, ...agentIds.filter(Boolean)])];
+  getDb().prepare('UPDATE deliveries SET agent_ids_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(merged), nowIso(), id);
+  return { ok: true, data: getDelivery(id)! };
 }
 
 export function getDelivery(id: string): Delivery | null {
@@ -258,6 +289,127 @@ export function adoptDeskLanes(freezes: Array<{ desk: number | null; lane: strin
   return out;
 }
 
+// --- every task and lane gets a record (28 Oct 2026) ------------------------------------------
+
+export interface WorkLane {
+  project: string | null;
+  lane: string;
+  /** The lane's author (the agent whose workspace is on it), when known. */
+  author_agent_id: string | null;
+  /** ISO time of the lane's first own commit; the build stage starts there. */
+  started_at: string | null;
+}
+
+export interface WorkSnapshot {
+  /** Running tasks (status `running`) with their agent's current lane, when it has one. */
+  tasks: Array<{ task: Task; lane: string | null; project: string | null }>;
+  /** Developer lanes ahead of main. */
+  lanes: WorkLane[];
+}
+
+/** A review/verify task the pipeline made for a freeze is not a piece of work of its own. */
+function isPipelineTask(t: Task): boolean {
+  return t.template === 'review' || t.template === 'verify' || /^Release freeze /.test(t.prompt);
+}
+
+function titleOf(prompt: string): string {
+  const line = prompt.split('\n').map((l) => l.trim()).find((l) => l && !/^\[/.test(l)) ?? prompt.trim();
+  return (line.length > 90 ? `${line.slice(0, 87)}…` : line) || 'Task';
+}
+
+/**
+ * Open a record for every running task and every developer lane that no open record covers
+ * ("I want tracking for each task", Denis, 28 Oct 2026). A task joins the record of its agent's
+ * lane when one exists; a lane marked with a desk number joins PD-<n>; the rest get a record of
+ * their own, opened in build. Off with `deliveries.auto_track: false`.
+ */
+export function adoptWork(work: WorkSnapshot, now = Date.now()): { created: string[]; joined: string[] } {
+  const out = { created: [] as string[], joined: [] as string[] };
+  if (getConfig().deliveries?.auto_track === false) return out;
+  const open = listDeliveries({ status: 'open', limit: 500 });
+  const byLane = new Map<string, Delivery>();
+  const byTask = new Map<string, Delivery>();
+  for (const d of open) { for (const l of d.lanes) byLane.set(l, d); for (const t of d.task_ids) byTask.set(t, d); }
+  const laneRecord = (lane: string) => byLane.get(normalizeLane(lane)) ?? null;
+
+  for (const { task, lane, project } of work.tasks) {
+    if (task.status !== 'running' || isPipelineTask(task) || byTask.has(task.id)) continue;
+    const born = parseStamp(task.created_at);
+    if (born === null || now - born > ADOPT_MAX_AGE_MS) continue;
+    const agentIds = task.agent_id ? [task.agent_id] : [];
+    const existing = lane ? laneRecord(lane) : null;
+    if (existing) {
+      addTasks(existing.id, [task.id]); if (agentIds.length) addAgents(existing.id, agentIds);
+      byTask.set(task.id, existing); out.joined.push(`${existing.id}:task:${task.id}`); continue;
+    }
+    const goalMate = task.goal_id ? open.find((d) => d.goal_id === task.goal_id) : null;
+    if (goalMate) { addTasks(goalMate.id, [task.id]); if (agentIds.length) addAgents(goalMate.id, agentIds); byTask.set(task.id, goalMate); out.joined.push(`${goalMate.id}:task:${task.id}`); continue; }
+    const created = createDelivery({ title: titleOf(task.prompt), project, lanes: lane ? [lane] : [], goal_id: task.goal_id, task_ids: [task.id], agent_ids: agentIds, since: new Date(born).toISOString(), created_by: 'tracker' });
+    if (created.ok) { out.created.push(created.data.id); byTask.set(task.id, created.data); if (lane) byLane.set(normalizeLane(lane), created.data); }
+  }
+
+  for (const l of work.lanes) {
+    const lane = normalizeLane(l.lane);
+    if (!BRANCH_RE.test(lane) || lane.length < 6 || laneRecord(lane)) continue;
+    const born = l.started_at ? parseStamp(l.started_at) : null;
+    if (born !== null && now - born > ADOPT_MAX_AGE_MS) continue;
+    const desk = markedDesk({ desk: null, lane });
+    const agentIds = l.author_agent_id ? [l.author_agent_id] : [];
+    if (desk) {
+      const pd = findOpenByDesk(desk);
+      if (pd) { addLanes(pd.id, [lane]); if (agentIds.length) addAgents(pd.id, agentIds); byLane.set(lane, pd); out.joined.push(`${pd.id}:${lane}`); continue; }
+      const created = createDelivery({ desk, project: l.project, lanes: [lane], agent_ids: agentIds, since: born !== null ? new Date(born).toISOString() : null, created_by: 'tracker' });
+      if (created.ok) { out.created.push(created.data.id); byLane.set(lane, created.data); }
+      continue;
+    }
+    const created = createDelivery({ title: lane, project: l.project, lanes: [lane], agent_ids: agentIds, since: born !== null ? new Date(born).toISOString() : null, created_by: 'tracker' });
+    if (created.ok) { out.created.push(created.data.id); byLane.set(lane, created.data); }
+  }
+  return out;
+}
+
+/** What the tick hands to adoptWork: running tasks with their agent's lane, and the lane board. */
+async function gatherWork(): Promise<WorkSnapshot> {
+  if (getConfig().deliveries?.auto_track === false) return { tasks: [], lanes: [] };
+  const { lanesForRequest } = await import('./dev-lanes.js'); // late: dev-lanes reaches the pipeline, which reaches this module
+  const { execFileAsync } = await import('./proc.js');
+  const board = await lanesForRequest();
+  const lanes: WorkLane[] = [];
+  for (const b of board) {
+    const repo = getConfig().projects?.[b.project]?.repo;
+    let startedAt: string | null = null;
+    if (repo) {
+      try {
+        const spec = mainSpec(b.project);
+        const out = await execFileAsync('git', ['-C', repo, 'log', '--reverse', '--format=%cI', `${spec.ref}..${b.sha}`], { timeout: 15_000 });
+        startedAt = out.split('\n').map((l: string) => l.trim()).find(Boolean) ?? null;
+      } catch { /* a lane git cannot read gets no start time */ }
+    }
+    lanes.push({ project: b.project, lane: b.lane, author_agent_id: b.author_agent_id, started_at: startedAt });
+  }
+  const tasks: WorkSnapshot['tasks'] = [];
+  for (const task of listTasks({ status: 'running' })) {
+    let lane: string | null = null; let project: string | null = null;
+    if (task.agent_id) {
+      const a = getAgent(task.agent_id);
+      if (a.ok && a.data.workspace) {
+        try { lane = (await execFileAsync('git', ['-C', a.data.workspace, 'branch', '--show-current'], { timeout: 10_000 })).trim() || null; } catch { /* no branch */ }
+        project = board.find((b) => b.lane === lane)?.project ?? projectOfWorkspace(a.data.workspace);
+      }
+    }
+    tasks.push({ task, lane, project });
+  }
+  return { tasks, lanes };
+}
+
+function projectOfWorkspace(workspace: string): string | null {
+  for (const [name, p] of Object.entries(getConfig().projects ?? {})) {
+    if (p.repo && workspace.startsWith(p.repo)) return name;
+    if (p.workspace_match && workspaceMatches(workspace, p.workspace_match)) return name;
+  }
+  return null;
+}
+
 export function listStages(deliveryId: string): StageSpan[] {
   return getDb().prepare('SELECT * FROM delivery_stages WHERE delivery_id = ? ORDER BY started_at, id').all(deliveryId) as StageSpan[];
 }
@@ -322,8 +474,19 @@ function loadSignals(since: string): Ev[] {
  * Walk the signals of a delivery and produce its stage spans. Pure: takes the
  * events and returns the spans plus the SHAs it discovered.
  */
-export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<string>): { spans: StageSpan[]; shas: string[] } {
+export interface DeriveContext {
+  /** run id → task id, for the runs of the tracked tasks. */
+  taskRuns?: Map<string, string>;
+  /** agent id → name, for the agents named on the record. */
+  agentNames?: Map<string, string>;
+}
+
+export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<string>, ctx: DeriveContext = {}): { spans: StageSpan[]; shas: string[] } {
   const lanes = new Set(delivery.lanes);
+  const taskIds = new Set([...goalTaskIds, ...delivery.task_ids]);
+  const agentIds = new Set(delivery.agent_ids); // grows with every dispatch seen
+  const taskRuns = ctx.taskRuns ?? new Map<string, string>();
+  const agentNames = ctx.agentNames ?? new Map<string, string>();
   const shas = new Set<string>(); // derived below; the stored list is this derivation's output, not its input
   const shaLane = new Map<string, string>();
   const spans: StageSpan[] = [];
@@ -378,16 +541,44 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
     if (!open.has('build')) start('build', 'build', at, ev, { lane, cause: null }).cause = cause;
   };
 
-  // The spec stage runs from the record's start until the first build signal.
-  start('spec', 'spec', delivery.since_at > delivery.created_at ? delivery.created_at : delivery.since_at, null);
+  const since = delivery.since_at > delivery.created_at ? delivery.created_at : delivery.since_at;
+  if (delivery.task_ids.length || delivery.agent_ids.length) {
+    // Work already handed to an agent: the record opens in build, with the agent as the actor.
+    const first = delivery.agent_ids.map((id) => agentNames.get(id)).find(Boolean) ?? null;
+    start('build', 'build', since, null, { actor: first, lane: delivery.lanes[0] ?? null });
+  } else {
+    // The spec stage runs from the record's start until the first build signal.
+    start('spec', 'spec', since, null);
+  }
 
   for (const ev of events) {
     const at = ev.created_at;
     const p = ev.payload;
     if (ev.type === 'task.created' || ev.type === 'task.dispatched') {
-      if (!goalTaskIds.has(ev.entity_id)) continue;
+      if (!taskIds.has(ev.entity_id)) continue;
       finish('spec', 'ok', at);
-      start('build', 'build', at, ev, { actor: str(p.agent_name) });
+      const b = start('build', 'build', at, ev, { actor: str(p.agent_name) });
+      if (str(p.agent_name)) b.actor = str(p.agent_name);
+      if (str(p.agent_id)) agentIds.add(str(p.agent_id)!);
+      continue;
+    }
+    if (ev.type === 'run.finished' || ev.type === 'run.failed') {
+      // A run of a tracked task: a failure blocks the build (the agent or a person must act); a finish clears it.
+      const taskId = taskRuns.get(ev.entity_id);
+      if (!taskId || !taskIds.has(taskId)) continue;
+      const b = open.get('build');
+      if (!b) continue;
+      if (ev.type === 'run.failed') b.cause = `run failed: ${str(p.error) ?? `exit ${p.exit_code ?? '?'}`}`.slice(0, 300);
+      else b.cause = null;
+      continue;
+    }
+    if (ev.type === 'agent.hung' || ev.type === 'agent.resumed') {
+      // The agent building it went quiet (health monitor) or spoke again.
+      if (!agentIds.has(ev.entity_id)) continue;
+      const b = open.get('build');
+      if (!b) continue;
+      if (ev.type === 'agent.hung') b.cause = `@${str(p.name) ?? 'agent'} quiet for ${Number(p.stale_minutes ?? 0)} min (no output while working)`;
+      else if (/quiet for \d+ min/.test(b.cause ?? '')) b.cause = null;
       continue;
     }
     const t = tracked(ev);
@@ -558,12 +749,26 @@ function goalTasks(goalId: string | null): Set<string> {
   return new Set(rows.map((r) => r.id));
 }
 
+function deriveContext(d: Delivery): DeriveContext {
+  const taskRuns = new Map<string, string>();
+  const ids = [...new Set([...d.task_ids, ...goalTasks(d.goal_id)])];
+  if (ids.length) {
+    try {
+      const rows = getDb().prepare(`SELECT id, task_id FROM runs WHERE task_id IN (${ids.map(() => '?').join(', ')})`).all(...ids) as Array<{ id: string; task_id: string }>;
+      for (const r of rows) taskRuns.set(r.id, r.task_id);
+    } catch { /* no runs table in a bare test db */ }
+  }
+  const agentNames = new Map<string, string>();
+  for (const id of d.agent_ids) { const a = getAgent(id); if (a.ok) agentNames.set(id, a.data.alias ?? a.data.name); }
+  return { taskRuns, agentNames };
+}
+
 /** Rebuild the stage rows of one delivery from events. Idempotent. */
 export function deriveDelivery(id: string): Result<{ delivery: Delivery; spans: StageSpan[] }> {
   const d = getDelivery(id);
   if (!d) return { ok: false, error: 'delivery not found' };
   const events = loadSignals(d.since_at);
-  const { spans, shas } = deriveSpans(d, events, goalTasks(d.goal_id));
+  const { spans, shas } = deriveSpans(d, events, goalTasks(d.goal_id), deriveContext(d));
   const db = getDb();
   const current = currentStage(spans);
   const lastProgress = spans.reduce<string | null>((acc, s) => {
@@ -677,6 +882,9 @@ export async function deliveryTick(now = Date.now()): Promise<void> {
   try {
     try { adoptDeskLanes(listFreezes().filter((f) => f.status === 'open' || f.status === 'behind-main'), now); } catch (e) {
       logger.debug({ error: (e as Error).message }, 'Delivery desk adoption skipped'); // no freeze table yet
+    }
+    try { adoptWork(await gatherWork(), now); } catch (e) {
+      logger.debug({ error: (e as Error).message }, 'Delivery auto-track skipped');
     }
     for (const d of listDeliveries({ status: 'open', limit: 200 })) {
       const derived = deriveDelivery(d.id);

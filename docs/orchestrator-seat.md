@@ -76,6 +76,13 @@ release is cut, only the last merge is unreviewed. `GET /api/candidate-reviews/<
 A freeze that replaces an older one on the same lane stops WaveCode's runs on the old SHA (the gate reads
 `CANCELLED`, never RED) and the new SHA goes next; nothing to do about it.
 
+## Following work: the delivery tracker, not a poll (since 28 Oct 2026)
+
+- Every running task and every developer lane ahead of main gets a delivery record on its own (desk-marked lanes as PD-<n>); nothing you start is untracked, whether you made a task or sent a prompt. `list_deliveries` shows each one's stage, minutes in it, lanes, SHAs and any stall with its cause.
+- Stalls come to you: a stage over its budget, a blocked gate, a failed run, a NEEDS FIXES, an agent quiet for too long while working. One message per cause, when it starts. If no message came, nothing is stuck.
+- So: do not set up a check every N minutes inside your session, and do not read an agent's screen to find out whether it is moving. For a status question or an hourly summary, call `list_deliveries` and answer from it. Use `get_agent_output` only to unblock a stall you were told about.
+- `create_delivery` is for a record you want before the tracker opens one (a title of your own, a desk number before any lane).
+
 ## Releases since 27 Oct 2026: WaveCode deploys, there is no SystemOps and no Maestro
 
 - The Grok bots (Maestro the PM, SystemOps the deployer) are switched off for good. Do not address them, wait for them, or offer to relay anything to them. Room notes older than 27 Oct that name them describe the past.

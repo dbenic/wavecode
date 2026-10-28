@@ -284,7 +284,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 30;
+export const SCHEMA_VERSION = 31;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -487,7 +487,9 @@ const SCHEMA_SQL = `
     created_by TEXT,
     since_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    task_ids_json TEXT NOT NULL DEFAULT '[]',   -- v31 tasks this record tracks (build starts at dispatch)
+    agent_ids_json TEXT NOT NULL DEFAULT '[]'   -- v31 agents building it (a hung one blocks the build span)
   );
   CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_deliveries_desk ON deliveries(desk);
@@ -1084,6 +1086,11 @@ const MIGRATIONS: Record<number, string> = {
   29: `
     ALTER TABLE deliveries ADD COLUMN desk INTEGER;
     CREATE INDEX IF NOT EXISTS idx_deliveries_desk ON deliveries(desk);
+  `,
+  // v30 → v31: every task and lane gets a delivery record (28 Oct 2026).
+  30: `
+    ALTER TABLE deliveries ADD COLUMN task_ids_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE deliveries ADD COLUMN agent_ids_json TEXT NOT NULL DEFAULT '[]';
   `,
 };
 

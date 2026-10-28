@@ -497,6 +497,36 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
     handler: (client, args) => client.post('/releases/request', { project: args.project, sha: args.sha, target: args.target, note: args.note }),
   },
   {
+    name: 'list_deliveries',
+    description:
+      'The delivery tracker: one record per piece of work (every running task and every developer lane gets one automatically since 28 Oct 2026, desk-marked lanes as PD-<n>). Each row has the current stage (spec, build, first_pass, gates, review, land, candidate, release), minutes in it, the lanes and SHAs, and any stall (a stage over its budget or blocked, with the cause). Read this for "how is X going" instead of polling an agent\'s screen; stalls are also pushed to you as they start.',
+    schema: {
+      status: z.enum(['open', 'done', 'failed', 'cancelled', 'all']).optional().describe('Default open'),
+      desk: z.number().int().positive().optional().describe('Only the delivery of this product-desk number'),
+      limit: z.number().int().positive().max(200).optional(),
+    },
+    handler: (client, args) => {
+      const q = new URLSearchParams();
+      if (args.status) q.set('status', String(args.status));
+      if (args.desk !== undefined) q.set('desk', String(args.desk));
+      if (args.limit !== undefined) q.set('limit', String(args.limit));
+      const qs = q.toString();
+      return client.get(`/deliveries${qs ? `?${qs}` : ''}`);
+    },
+  },
+  {
+    name: 'create_delivery',
+    description:
+      'Open a delivery record by hand for work the tracker cannot see yet (a lane not pushed, a task you are about to hand out under a title of your own, a desk number before any lane exists). Running tasks and pushed lanes get a record on their own; call this only when you want the record before that, or a better title. Stalls on it reach you like every other.',
+    schema: {
+      title: z.string().optional().describe('What is being delivered; defaults to PD-<desk> when desk is given'),
+      desk: z.number().int().positive().optional().describe('Product-desk number; every lane marked with it joins this record'),
+      project: z.string().optional().describe('Project name, e.g. wavepulse'),
+      lanes: z.array(z.string()).optional().describe('Branch names that belong to it'),
+    },
+    handler: (client, args) => client.post('/deliveries', { title: args.title, desk: args.desk, project: args.project, lanes: args.lanes ?? [] }),
+  },
+  {
     name: 'set_release_mode',
     description:
       'Release mode for the merge queue: while a release is being finished, only the named lanes land and every other eligible lane waits with RELEASE_MODE (instead of the queue being switched OFF and fixes merged by hand). lanes: branch names or desk:<n> (every lane freezing with that product-desk number). Pass an empty list to end release mode. The queue ON/OFF switch itself stays Denis\'s.',

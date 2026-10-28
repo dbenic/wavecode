@@ -1365,6 +1365,8 @@ Plan and status: `docs/ops/engine-fixes-27oct-plan.md`.
 
 Deliveries by product-desk number (schema v30): `desk` on the record. A lane MARKED with a desk number — in the branch name (`wc-codex7-pd162-reland`, `codex2/pd108-s1-fixes`, `wc-claude5-desk138`) or in the freeze note's file name (`desk91-freeze-<sha>.md`) — joins the open `PD-<n>` delivery or opens one (created_by `tracker`) when its freeze is open and under 14 days old. A desk only mentioned in the note's prose is a reference and does not count. One open record per desk; `deliveries.auto_desk: false` turns it off. `POST /api/deliveries` accepts `desk` (134 or `PD-134`; title defaults to `PD-<n>`); `GET /api/deliveries?desk=134`.
 
+**Every task and lane is tracked** (schema v31, 28 Oct 2026): each tick the tracker opens a record for every running task (title = the prompt's first line; pipeline review/verify tasks excluded) and every developer lane ahead of main that no open record covers; a task joins the record of its agent's lane, a desk-marked lane joins PD-<n>. Such records open in `build` with the agent as actor (`task_ids`, `agent_ids` on the record). `run.failed` of a tracked task and `agent.hung` of a tracked agent block the build span (`agent.resumed` clears it); `deliveries.auto_track: false` turns the sweep off. Seat tools `list_deliveries` and `create_delivery`.
+
 A feature from spec to production as one record (`docs/ops/delivery-tracker-plan.md`: Temporal's
 model, not its server). Stage spans are derived from the events table by lane and SHA, never
 written by hand: the first pipeline reaction to a freeze note (gate, quick check, first-pass request,

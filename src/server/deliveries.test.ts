@@ -18,7 +18,7 @@ vi.mock('./wire-lines.js', () => {
     }),
   };
 });
-const cfg: { deliveries?: { notify?: string[]; budgets_min?: Record<string, number>; auto_desk?: boolean } } = {};
+const cfg: { deliveries?: { notify?: string[]; budgets_min?: Record<string, number>; auto_desk?: boolean; auto_track?: boolean }; projects?: Record<string, { repo?: string }> } = {};
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => cfg) }));
 
 import { emit } from './event-bus.js';
@@ -337,6 +337,97 @@ describe('deliveries keyed by product-desk number', () => {
     expect(del.listDeliveries({ desk: 134 }).map((x) => x.id)).toEqual([d.id]);
     expect(del.listDeliveries({ desk: 999 })).toEqual([]);
   });
+  it('a task record opens in build with the agent as actor; a failed run and a hung agent block it, a finished run and resumed output clear it, the freeze ends it', async () => {
+    const codex1 = db.listAgents().find((a) => a.name === 'codex1')!;
+    const task = db.insertTask({ agent_id: codex1.id, prompt: 'Bank line: post to several konto rows\nDetails below…', created_by: null });
+    expect(task.ok).toBe(true);
+    if (!task.ok) return;
+    const run = db.insertRun({ task_id: task.data.id, agent_id: codex1.id });
+    if (!run.ok) return;
+    const created = del.createDelivery({ title: 'Bank multi-konto', project: 'wavepulse', task_ids: [task.data.id], agent_ids: [codex1.id], since: new Date(T0).toISOString(), created_by: 'tracker' });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const id = created.data.id;
+    expect(created.data).toMatchObject({ stage: 'build', task_ids: [task.data.id], agent_ids: [codex1.id] });
+    db.getDb().prepare('INSERT INTO events (type, entity_type, entity_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)').run('task.dispatched', 'task', task.data.id, JSON.stringify({ agent_id: codex1.id, agent_name: 'codex1' }), at(1));
+    let d = del.deriveDelivery(id);
+    expect(d.ok && stages(id)).toEqual(['build#1:open']);
+    expect(d.ok && d.data.spans[0]).toMatchObject({ stage: 'build', actor: 'codex1', started_at: new Date(T0).toISOString(), cause: null });
+    // the run fails: the build is blocked until the agent or a person acts
+    db.getDb().prepare('INSERT INTO events (type, entity_type, entity_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)').run('run.failed', 'run', run.data.id, JSON.stringify({ agent_id: codex1.id, exit_code: 1, error: 'tests red' }), at(20));
+    d = del.deriveDelivery(id);
+    expect(d.ok && d.data.spans[0].cause).toBe('run failed: tests red');
+    vi.setSystemTime(T0 + 21 * 60_000);
+    await del.reportStalls(d.ok ? d.data.delivery : created.data, d.ok ? d.data.spans : [], T0 + 21 * 60_000);
+    // the driver seat and the actor (codex1) both hear it, once
+    expect(vi.mocked(deliverSystemLine).mock.calls.map((c) => c[1])).toEqual([expect.stringMatching(/\[delivery "Bank multi-konto"\] build is blocked: run failed: tests red/), expect.stringMatching(/build is blocked: run failed: tests red/)]);
+    // a second run finishes: cleared. Then the agent goes quiet while working: blocked again, until it speaks.
+    const run2 = db.insertRun({ task_id: task.data.id, agent_id: codex1.id, attempt: 2 });
+    if (!run2.ok) return;
+    db.getDb().prepare('INSERT INTO events (type, entity_type, entity_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)').run('run.finished', 'run', run2.data.id, JSON.stringify({ agent_id: codex1.id, exit_code: 0 }), at(30));
+    d = del.deriveDelivery(id);
+    expect(d.ok && d.data.spans[0].cause).toBeNull();
+    db.getDb().prepare('INSERT INTO events (type, entity_type, entity_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)').run('agent.hung', 'agent', codex1.id, JSON.stringify({ name: 'codex1', stale_minutes: 12, action: 'alert' }), at(50));
+    d = del.deriveDelivery(id);
+    expect(d.ok && d.data.spans[0].cause).toBe('@codex1 quiet for 12 min (no output while working)');
+    db.getDb().prepare('INSERT INTO events (type, entity_type, entity_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?)').run('agent.resumed', 'agent', codex1.id, JSON.stringify({ name: 'codex1', quiet_minutes: 14 }), at(52));
+    d = del.deriveDelivery(id);
+    expect(d.ok && d.data.spans[0].cause).toBeNull();
+    // the lane freezes: the build is done, the lane and SHA join the record
+    const laneRec = del.addLanes(id, ['wc-codex1-bank-multi-konto']);
+    expect(laneRec.ok).toBe(true);
+    ev(60, 'pipeline.frozen', A, { sha: A, project: 'wavepulse', lane: 'wc-codex1-bank-multi-konto' });
+    d = del.deriveDelivery(id);
+    expect(stages(id)).toEqual(['build#1:ok@4fa5']);
+    expect(d.ok && d.data.delivery.shas).toEqual([A]);
+  });
+
+  it('adoptWork: every running task and every lane ahead of main gets a record; pipeline review tasks, covered work and old lanes are skipped; a desk lane joins PD-<n>', () => {
+    const codex1 = db.listAgents().find((a) => a.name === 'codex1')!;
+    const pm = db.listAgents().find((a) => a.name === 'pm-denis')!;
+    const bank = db.insertTask({ agent_id: codex1.id, prompt: '[you are @codex1 — builder]\nBank line: post to several konto rows.\nMore.', created_by: null });
+    const review = db.insertTask({ agent_id: pm.id, prompt: 'Release freeze wavepulse @ e8092c0f (lane wc-x) — author @codex4', template: 'review', created_by: null });
+    const pending = db.insertTask({ agent_id: null, prompt: 'Not started yet', created_by: null });
+    if (!bank.ok || !review.ok || !pending.ok) return;
+    db.getDb().prepare("UPDATE tasks SET status = 'running' WHERE id IN (?, ?)").run(bank.data.id, review.data.id);
+    const running = (id: string) => db.getTask(id).ok ? (db.getTask(id) as { ok: true; data: never }).data : (null as never);
+    const work = {
+      tasks: [
+        { task: running(bank.data.id), lane: 'wc-codex1-bank-multi-konto', project: 'wavepulse' },
+        { task: running(review.data.id), lane: null, project: 'wavepulse' },
+        { task: { ...running(pending.data.id), status: 'pending' as const }, lane: null, project: null },
+      ],
+      lanes: [
+        { project: 'wavepulse', lane: 'wc-codex1-bank-multi-konto', author_agent_id: codex1.id, started_at: new Date(T0 - 40 * 60_000).toISOString() },
+        { project: 'wavepulse', lane: 'wc-kimi2-pd164-cad-label', author_agent_id: null, started_at: new Date(T0 - 30 * 60_000).toISOString() },
+        { project: 'wavepulse', lane: 'wc-codex8', author_agent_id: null, started_at: new Date(T0 - 10 * 60_000).toISOString() },
+        { project: 'wavepulse', lane: 'wc-old-forgotten', author_agent_id: null, started_at: new Date(T0 - 20 * 24 * 3600_000).toISOString() },
+        { project: 'wavepulse', lane: 'x', author_agent_id: null, started_at: null },
+      ],
+    };
+    const first = del.adoptWork(work);
+    expect(first.created).toHaveLength(3); // the bank task (lane joins it), PD-164, wc-codex8
+    expect(first.joined).toEqual([]);
+    const open = del.listDeliveries({ status: 'open' });
+    const bankRec = open.find((d) => d.task_ids.includes(bank.data.id))!;
+    expect(bankRec).toMatchObject({ title: 'Bank line: post to several konto rows.', project: 'wavepulse', lanes: ['wc-codex1-bank-multi-konto'], agent_ids: [codex1.id], stage: 'build', created_by: 'tracker' });
+    expect(bankRec.since_at).toBe(new Date(`${running(bank.data.id).created_at.replace(' ', 'T')}Z`).toISOString()); // the task's creation (sqlite clock)
+    expect(del.findOpenByDesk(164)).toMatchObject({ title: 'PD-164', lanes: ['wc-kimi2-pd164-cad-label'] });
+    expect(open.find((d) => d.title === 'wc-codex8')).toMatchObject({ lanes: ['wc-codex8'], since_at: new Date(T0 - 10 * 60_000).toISOString() });
+    expect(open.some((d) => d.task_ids.includes(review.data.id) || d.task_ids.includes(pending.data.id))).toBe(false);
+    expect(open.some((d) => d.lanes.includes('wc-old-forgotten') || d.lanes.includes('x'))).toBe(false);
+    // the second sweep adds nothing; a new task on a tracked lane joins that record
+    expect(del.adoptWork(work)).toEqual({ created: [], joined: [] });
+    const fix = db.insertTask({ agent_id: codex1.id, prompt: 'Fix the review findings', created_by: null });
+    if (!fix.ok) return;
+    db.getDb().prepare("UPDATE tasks SET status = 'running' WHERE id = ?").run(fix.data.id);
+    const again = del.adoptWork({ tasks: [{ task: running(fix.data.id), lane: 'wc-codex1-bank-multi-konto', project: 'wavepulse' }], lanes: [] });
+    expect(again).toEqual({ created: [], joined: [`${bankRec.id}:task:${fix.data.id}`] });
+    expect(del.getDelivery(bankRec.id)!.task_ids).toEqual([bank.data.id, fix.data.id]);
+    cfg.deliveries = { notify: [], auto_track: false };
+    expect(del.adoptWork({ tasks: [{ task: running(bank.data.id), lane: 'wc-new', project: null }], lanes: [{ project: null, lane: 'wc-another-lane', author_agent_id: null, started_at: null }] })).toEqual({ created: [], joined: [] });
+  });
+
   it('auto_desk: false leaves freezes alone', () => {
     cfg.deliveries = { notify: [], auto_desk: false };
     expect(del.adoptDeskLanes([{ desk: 5, lane: 'wc-x-pd5-fix', project: null, created_at: at(0) }])).toEqual({ created: [], joined: [] });

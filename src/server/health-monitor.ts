@@ -160,7 +160,8 @@ async function checkAgent(agent: Agent, hangTimeoutMs: number): Promise<void> {
   }
 
   if (outputHash !== state.lastOutputHash) {
-    // Output changed — agent is alive
+    // Output changed — agent is alive; a quiet stretch that was alerted is over (the delivery tracker clears its block)
+    if (state.hungNotified) emit('agent.resumed', 'agent', agent.id, { name: agent.name, quiet_minutes: Math.round((now - state.lastChangeAt) / 60_000) });
     state.hungNotified = false;
     state.lastOutputHash = outputHash;
     state.lastChangeAt = now;
