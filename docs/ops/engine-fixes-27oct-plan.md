@@ -97,3 +97,29 @@ A 24-hour audit on countix-dev found the day's time going into work WaveCode mad
 4. **Lane names come only from a labelled field.** `Lane:`/`Branch:` need the colon right
    after the keyword; a colon later in a sentence no longer turns its first word into the
    lane. A stored real lane name outranks a parsed word that is not one.
+
+### Hour-two measurement and three more fixes (28 Oct 2026, 14:00)
+
+Re-measured 80 minutes after the restart: pipeline freezes 3/h (was ~20), first-pass
+timeouts 1, bogus-lane refusals 0, 58 stale freezes closed, 17 lanes retired, merges resumed.
+Three leaks were left:
+
+5. **The freeze nudge repeats once a day per lane, whatever main is at.** It was keyed per
+   (lane, main SHA), so main's five moves in 80 minutes drew 56 nudges on 26 lanes through
+   the freeze-write and review-queue callers of `pingLaneAboutMain`, which bypass the
+   reconcile pass's own check. `kind: 'freeze'` now consults `laneNudgedRecently(lane, 24 h)`
+   first.
+6. **A freeze with nothing main lacks is closed when it is recorded.** One seat wrote 14 hand
+   freezes on 7 already-merged lanes in an hour, each costing a quick run, a gate run and two
+   review pings. `onFreezeRecorded` now runs `git cherry main <sha>` on the frozen SHA (after
+   the push check fetched the lane, so a stale ref cannot close a live lane); when it is
+   empty the lane is retired (freezes `merged`, `pipeline.retired` event) and the author told
+   once to start the next lane. The merge-only carry note is emitted once per SHA
+   (`pipeline.carried`), not on every re-delivery of the file.
+7. **A refused auto-freeze is said once.** `onAuthorDone` runs on every pane poll; one lane
+   drew 16 "not on origin" notes in two minutes. `publishFreeze` keeps a two-minute quiet
+   period per (lane, SHA) after a push-check refusal.
+
+Still open after this: 76 pending tasks, 58 of them from before 26 Oct or on retired seats
+(cancelled by hand); reviewer load (codex5) to be read after a day under the new rules;
+`deploy_reconcile` over its 90 s ceiling and the test-portal timeout on the deploy box.

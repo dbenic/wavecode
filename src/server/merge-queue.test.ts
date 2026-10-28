@@ -626,7 +626,7 @@ describe('merge queue — on a scratch repository', () => {
     expect(getQueueRow(sha)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: all 1 commit of the lane already have equivalents/) });
   });
 
-  it('a lane whose tip is only a merge of main, its own commits already there, leaves the queue', async () => {
+  it('a lane whose tip is only a merge of main, its own commits already there, is closed as merged before the queue sees it', async () => {
     agent('ales');
     const sha = lane('wc-ales', { 'a-lane.txt': 'A' });
     git(repo, 'push', '-q', 'origin', 'wc-ales:main'); // the work reached main
@@ -642,8 +642,11 @@ describe('merge queue — on a scratch repository', () => {
     const tip = git(repo, 'rev-parse', 'HEAD');
     expect(tip).not.toBe(sha);
     await reviewed('ales', 'wc-ales', tip, 'ship');
+    // 28 Oct 2026: a freeze with nothing main lacks is closed when it is recorded (lane-pipeline);
+    // the queue's own ALREADY_ON_MAIN answer stays for work that reaches main after the freeze.
+    expect(getFreeze(tip)?.status).toBe('merged');
     await tick();
-    expect(getQueueRow(tip)).toMatchObject({ state: 'superseded', reason: expect.stringMatching(/^ALREADY_ON_MAIN: [0-9a-f]{8} has no commits of its own beyond origin\/main/) });
+    expect(getQueueRow(tip)).toBeNull();
   });
 
   it('a lane whose changes main already carries through different commits (a no-op merge) leaves the queue', async () => {

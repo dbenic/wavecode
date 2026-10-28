@@ -378,6 +378,24 @@ describe('lane retire: nothing main lacks', () => {
     expect(main2).not.toBe(mainSha);
     expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: main2, kind: 'moved' }))).toBe(true);
     expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(LANE_RETIRED)).toHaveLength(0);
+    // The freeze nudge is once a day per lane, whatever main is at. 28 Oct 2026: keyed per main
+    // SHA, main's five moves in 80 minutes drew 56 nudges on 26 lanes.
+    let now = Date.now();
+    setLaneAlertNowForTest(() => now);
+    try {
+      git(repo, 'checkout', '-q', 'main');
+      fs.writeFileSync(path.join(repo, 'n3.txt'), 'and again');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-q', '-m', 'main a third time');
+      const main3 = git(repo, 'rev-parse', 'HEAD');
+      git(repo, 'update-ref', 'refs/remotes/origin/main', main3);
+      expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: main3, kind: 'freeze' }))).toBe(false);
+      now += 24 * 60 * 60 * 1000 + 1000;
+      expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: main3, kind: 'freeze' }))).toBe(true);
+      expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(2);
+    } finally {
+      setLaneAlertNowForTest(null);
+    }
   });
 
   it('reconcile closes an open freeze as stale after 48 h without a push, tells the author once, and never nudges it', async () => {

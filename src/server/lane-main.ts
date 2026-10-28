@@ -537,6 +537,9 @@ export async function pingLaneAboutMain(opts: {
   const key = pingKey(opts.lane, opts.mainSha);
   const latest = latestPing(opts.lane, opts.mainSha);
   const repeat = opts.kind === 'freeze' ? FREEZE_NUDGE_REPEAT_MS : REPEAT_MS;
+  // The freeze nudge repeats once a day per lane, whatever main is at: keyed per main SHA it
+  // fired once per main move (28 Oct 2026: 56 nudges on 26 lanes in 80 min, main moved 5 times).
+  if (opts.kind === 'freeze' && laneNudgedRecently(opts.lane, repeat)) return false;
   if (latest) {
     if (nowMs() - latest.at < repeat) return false;
     // A lane that has caught up with this main cannot fall behind the same main again, so

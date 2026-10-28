@@ -30,6 +30,7 @@ import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
+  setPublishRefusalQuietMsForTest,
   authorLoadForTest, cancelStateForTest, ensureMainGate, ensureProdSyncLane, mainApiState, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { recordCandidateReviewFile } from './candidate-review.js';
 import { emit } from './event-bus.js';
@@ -523,6 +524,46 @@ describe('hands-free lane pipeline', () => {
     expect(messages(author.id).filter((m) => /wc-ales is fully on main/.test(m))).toHaveLength(1);
   });
 
+  it('a hand-written freeze on a lane with nothing main lacks is closed as merged: no quick, gate or review, the author told once', async () => {
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    const author = agent('ales', repo);
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', sha, '/reviews/prev.md')));
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'merge', '--no-ff', '--no-edit', '-m', 'land wc-ales', 'wc-ales');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    moveMain('main.txt', 'later');
+    // The seat merges main into its already-merged lane by hand and freezes the merge commit
+    // (28 Oct 2026: 14 such freezes on 7 lanes in an hour, each a quick run, a gate run and two review pings).
+    const mergeOnly = contain('main', 'wc-ales');
+    pipe.auto_gate = true;
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { codex: ['codex3'] };
+    calls.length = 0;
+    (await ingestFreezeFile(openNote('ales', 'wc-ales', mergeOnly)));
+    expect(getFreeze(mergeOnly)?.status).toBe('merged');
+    expect(getFreeze(mergeOnly)?.reviewer_agent_id).toBeNull();
+    expect(calls.filter((argv) => argv[0] === 'gate-run' || argv[0] === 'quick-check')).toEqual([]);
+    const closed = () => messages(author.id).filter((m) => /every commit of the lane is already on main/.test(m));
+    expect(closed()).toHaveLength(1);
+    expect(messages(codex3.id).join('\n')).not.toMatch(/Please review/);
+    expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/closed — every commit of wc-ales is already on main/);
+    // The same file delivered again: still closed, not told twice.
+    (await ingestFreezeFile(openNote('ales', 'wc-ales', mergeOnly)));
+    expect(closed()).toHaveLength(1);
+    expect(calls.filter((argv) => argv[0] === 'gate-run' || argv[0] === 'quick-check')).toEqual([]);
+    // Real new work on the lane is frozen as usual.
+    git(repo, 'checkout', '-q', 'wc-ales');
+    fs.writeFileSync(path.join(repo, 'more.txt'), 'more');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'more lane work');
+    const more = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/wc-ales', more);
+    (await ingestFreezeFile(openNote('ales', 'wc-ales', more)));
+    expect(getFreeze(more)?.status).toBe('open');
+    expect(closed()).toHaveLength(1);
+  });
+
   it('every new main tip gets the api suite once, recorded under the main SHA; a RED main is named to owners of RED lanes', async () => {
     pipe.auto_gate = true;
     ensureReleaseFreezeTable();
@@ -726,9 +767,9 @@ describe('hands-free lane pipeline', () => {
       '',
     ].join('\n'));
     (await ingestFreezeFile(file));
-    (await ingestFreezeFile(file));
     // Submitted at once, run in the background: QUEUED first, the word when the command returns.
     expect(getFreeze(sha)?.gate).toBe('QUEUED');
+    (await ingestFreezeFile(file)); // the same note again submits nothing
     await vi.waitFor(() => expect(getFreeze(sha)?.gate).toBe('GREEN'), { timeout: 10_000 });
     const gates = calls.filter((argv) => argv[0] === 'gate-run');
     expect(gates).toHaveLength(1);
@@ -1202,6 +1243,32 @@ describe('hands-free lane pipeline', () => {
     // A SHA behind the pushed tip is fine; a SHA the remote never saw is not.
     const newer = branch('wc-ales', 'lane2.txt', 'more');
     expect(await pushedShaError('wave', 'wc-ales', newer)).toMatch(/is not on origin\/wc-ales/);
+  });
+
+  it('says a refused auto-freeze once: the pane polls that retry it inside the quiet period are silent', async () => {
+    const bare = path.join(tmp, 'remote.git');
+    execFileSync('git', ['init', '-q', '--bare', bare], { env });
+    git(repo, 'remote', 'add', 'origin', bare);
+    git(repo, 'push', '-q', 'origin', 'main');
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    const author = agent('ales', repo);
+    pipe.auto_freeze = true;
+    delete pipe.push_command; // the author pushes; the exact SHA must be on the remote lane
+    const refusals = () => messages(author.id).filter((m) => /freeze refused: wc-ales is not on origin/.test(m));
+    expect((await onAuthorDone(author.id))).toMatchObject({ ok: false, error: expect.stringMatching(/not on origin/) });
+    // 28 Oct 2026: one lane drew 16 refusal notes in two minutes, one per pane poll.
+    expect((await onAuthorDone(author.id))).toMatchObject({ ok: false, error: 'refused recently' });
+    (await onAuthorDone(author.id));
+    expect(refusals()).toHaveLength(1);
+    const notes = db.getDb().prepare("SELECT 1 FROM events WHERE type = 'pipeline.action' AND json_extract(payload_json, '$.note') LIKE '%freeze refused%'").all();
+    expect(notes).toHaveLength(1);
+    expect(getFreeze(sha)).toBeFalsy();
+    // Pushed and the quiet period over: the next poll freezes it.
+    git(repo, 'push', '-q', 'origin', 'wc-ales');
+    setPublishRefusalQuietMsForTest(0);
+    expect((await onAuthorDone(author.id))).toMatchObject({ ok: true, data: { sha } });
+    expect(getFreeze(sha)?.status).toBe('open');
+    expect(refusals()).toHaveLength(1);
   });
 
   it('skips a reviewer whose plan is below the capacity floor', async () => {

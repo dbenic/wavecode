@@ -387,11 +387,21 @@ function freezeDir(project: string, pipe: PipelineSwitches): string | null {
   return inbox[0] ?? null;
 }
 
+/** A SHA refused by publishFreeze (not on the remote lane) is not re-checked, re-noted or re-told for this long. */
+let publishRefusalQuietMs = 2 * 60_000;
+export function setPublishRefusalQuietMsForTest(ms: number | null): void { publishRefusalQuietMs = ms ?? 2 * 60_000; }
+const refusedPublish = new Map<string, number>();
+
 async function publishFreeze(opts: {
   workspace: string; project: string; lane: string; sha: string; author: Agent; pipe: PipelineSwitches;
 }): Promise<Result<{ sha: string }>> {
   const refused = laneRefError(opts.project, opts.lane);
   if (refused) return { ok: false, error: refused };
+  // onAuthorDone runs on every pane poll: a refusal said once is enough (28 Oct 2026: one lane
+  // drew 16 "not on origin" notes in two minutes).
+  const quietKey = `${opts.lane}:${opts.sha}`;
+  const refusedAt = refusedPublish.get(quietKey);
+  if (refusedAt !== undefined && Date.now() - refusedAt < publishRefusalQuietMs) return { ok: false, error: 'refused recently' };
   const spec = mainSpec(opts.project);
   const vars = { workspace: opts.workspace, lane: opts.lane, sha: opts.sha, remote: spec.remote, project: opts.project, checkout: opts.workspace };
   if (opts.pipe.push_command?.length) {
@@ -406,6 +416,7 @@ async function publishFreeze(opts: {
     // No push command: the author pushed. The exact SHA must be on the remote lane.
     const missing = await pushedShaError(opts.project, opts.lane, opts.sha);
     if (missing) {
+      refusedPublish.set(quietKey, Date.now());
       const text = `freeze refused: ${missing}. The freeze was not written.`;
       tell(opts.author.id, text);
       note(opts.project, opts.lane, opts.sha, 'push', `auto: freeze refused — ${missing}`);
@@ -1711,6 +1722,19 @@ const refusedFreezes = new Map<string, number>();
 const REFUSED_RECHECK_MS = 2 * 60_000;
 const REFUSED_TTL_MS = 12 * 60 * 60_000;
 
+/** True when `git cherry main <sha>` is empty: no commit of the frozen SHA is missing from main. */
+async function freezeHasNothingMainLacks(project: string, sha: string): Promise<boolean> {
+  try {
+    const repo = projectRepo(project);
+    const mainRef = repo ? await resolveMainRef(repo, project) : null;
+    if (!repo || !mainRef) return false;
+    return (await laneHasNothingMainLacks(repo, mainRef, sha)) === true;
+  } catch (e) {
+    logger.debug({ project, sha, error: (e as Error).message }, 'Nothing-main-lacks check skipped');
+    return false;
+  }
+}
+
 export async function onFreezeRecorded(sha: string): Promise<void> {
   const freeze = getFreeze(sha);
   if (!freeze || (freeze.status !== 'open' && freeze.status !== 'behind-main')) return;
@@ -1728,6 +1752,20 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
       return;
     }
     refusedFreezes.delete(sha);
+  }
+  // A freeze whose every commit is already on main has nothing to check, review or merge: the lane
+  // is retired and the author told once. 28 Oct 2026: one seat wrote 14 such freezes on 7 merged
+  // lanes in an hour, each costing a quick run, a gate run and two review pings. The check reads
+  // the frozen SHA itself (fetched just above), so a stale lane ref cannot retire a live lane.
+  if (freeze.project && freeze.lane && await freezeHasNothingMainLacks(freeze.project, sha)) {
+    const sha8 = sha.slice(0, 8);
+    retireLane(freeze.project, freeze.lane, sha, `git cherry main ${sha8} is empty: every commit of the freeze is on main`);
+    if (!acted(sha, 'pipeline.retired')) {
+      emit('pipeline.retired', 'run', sha, { sha, project: freeze.project, lane: freeze.lane }, null);
+      note(freeze.project, freeze.lane, sha, 'review', `auto: freeze ${sha8} closed — every commit of ${freeze.lane} is already on main; nothing to check, review or merge`);
+      tell(freeze.author_agent_id, `[from WaveCode] freeze ${sha8} on ${freeze.lane} closed: every commit of the lane is already on main, so there is nothing to review or merge. Run git checkout main in your workspace and start the next lane instead of refreezing.`);
+    }
+    return;
   }
   // Runs on the SHA this freeze replaced are worthless now: stop them and let this SHA go first.
   for (const old of freeze.project ? listFreezes() : []) {
@@ -1747,7 +1785,10 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
   let carried: ReleaseFreeze | null = null;
   try { carried = freeze.lane ? await carriedPassFreeze(freeze.project!, freeze.lane, sha) : null; } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Carried-pass check skipped'); }
   if (carried) {
-    note(freeze.project!, freeze.lane, sha, 'review', `auto: merge-only delta from ${carried.sha.slice(0, 8)} — its PASS carries over; no first pass or review asked on ${sha.slice(0, 8)}`);
+    if (!acted(sha, 'pipeline.carried')) {
+      emit('pipeline.carried', 'run', sha, { sha, project: freeze.project, lane: freeze.lane, from: carried.sha }, null);
+      note(freeze.project!, freeze.lane, sha, 'review', `auto: merge-only delta from ${carried.sha.slice(0, 8)} — its PASS carries over; no first pass or review asked on ${sha.slice(0, 8)}`);
+    }
   } else {
     try { await requestFirstPassFor(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'First pass skipped'); }
     try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
@@ -1830,6 +1871,8 @@ export async function pipelineTick(now = Date.now()): Promise<void> {
 
 export function resetPipelineForTest(): void {
   refusedFreezes.clear();
+  refusedPublish.clear();
+  publishRefusalQuietMs = 2 * 60_000;
   gateInflight.clear();
   gatePending.length = 0;
   gateRecovered.clear();
