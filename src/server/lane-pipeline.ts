@@ -19,7 +19,7 @@ import { getConfig, type ProjectConfig } from './config.js';
 import { getAgent, getDb, getRun, listAgents, listAllAgentTags, type Agent, type Result } from './db.js';
 import { emit } from './event-bus.js';
 import { pingReviewersForGreenSha } from './gate-ping.js';
-import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, laneAutomationDenied, mainSpec, mainTip, projectRepo, resolveMainRef } from './lane-main.js';
+import { alertBehind, alertMerged, changedFiles, commitsBehind, isMergeOnlyDelta, laneAutomationDenied, laneHasNothingMainLacks, mainSpec, mainTip, projectRepo, resolveMainRef, retireLane } from './lane-main.js';
 import logger from './logger.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
@@ -524,12 +524,23 @@ async function laneSizeSentence(freeze: ReleaseFreeze, pipe: PipelineSwitches): 
   }
 }
 
-async function deltaSentence(project: string, lane: string, sha: string): Promise<string | null> {
+/**
+ * The earlier PASS on this lane whose patch this SHA repeats (only main merged since), or null.
+ * The merge queue carries that PASS and its api GREEN over (patch-id rule), so such a freeze
+ * needs no first pass and no reviewer: only the quick check runs again.
+ */
+async function carriedPassFreeze(project: string, lane: string, sha: string): Promise<ReleaseFreeze | null> {
   const repo = projectRepo(project);
   const mainRef = repo ? await resolveMainRef(repo, project) : null;
   if (!repo || !mainRef) return null;
   const previous = listFreezes().find((f) => f.project === project && f.lane === lane && f.sha !== sha && f.verdict === 'pass');
   if (!previous || !await isMergeOnlyDelta(repo, previous.sha, sha, mainRef)) return null;
+  return previous;
+}
+
+async function deltaSentence(project: string, lane: string, sha: string): Promise<string | null> {
+  const previous = await carriedPassFreeze(project, lane, sha);
+  if (!previous) return null;
   return `delta review: merge only. Previous verdict: ${previous.verdict_path ?? previous.sha}`;
 }
 
@@ -1643,6 +1654,19 @@ export async function onMainAdvanced(project: string, mainSha?: string): Promise
     if (!before) continue;
     const behind = await commitsBehind(project, before);
     if (behind == null || behind <= 0) continue;
+    // A lane with no commit main lacks is done: retire it instead of merging main into it and
+    // freezing again (28 Oct 2026: six merged lanes got 19 sync freezes each in a day). The
+    // author hears it once per tip and moves the checkout off the lane.
+    if (await laneHasNothingMainLacks(repo, mainRef, before) === true) {
+      const key = `${lane}@${before.slice(0, 8)}`;
+      const fresh = !acted(key, 'lane.retired');
+      retireLane(project, lane, before, `git cherry ${mainRef} ${lane} is empty: every commit of the lane is on main (sync skipped)`);
+      if (fresh) {
+        note(project, lane, before, SYNC, `auto: ${lane} has nothing main lacks — retired, not synced; @${author.name} switches the checkout to main`);
+        tell(author.id, `[from WaveCode] ${lane} is fully on main. Not synced or frozen again; run git checkout main in ${author.workspace} (or start the next lane) so main moves stop touching it.`);
+      }
+      continue;
+    }
     // Only a clean checkout at the lane's origin tip is synced: the merge is pushed first and
     // frozen second, so the frozen SHA is always the origin tip (spec item 2, 26 Oct 2026).
     const skip = await syncSkipReason(project, lane, author.workspace, before, author);
@@ -1717,8 +1741,17 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
   if (quick === 'submitted' || quick === 'known:pending') gateAfterQuick.add(sha); // settles from the run, or from the tick once the word is in
   else if (quick === 'known:red') note(freeze.project!, freeze.lane, sha, 'gate', `auto: full gate not submitted on ${sha.slice(0, 8)} — the quick check on it is RED; fix, push and freeze a new SHA`);
   else void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
-  try { await requestFirstPassFor(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'First pass skipped'); }
-  try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
+  // A merge-only SHA (same patch as an earlier PASS, main merged since) carries that PASS in the
+  // queue: no first pass, no reviewer ping. 28 Oct 2026: 340 of 471 freezes in a day were such
+  // syncs, each costing a first-pass prompt and a review ask.
+  let carried: ReleaseFreeze | null = null;
+  try { carried = freeze.lane ? await carriedPassFreeze(freeze.project!, freeze.lane, sha) : null; } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Carried-pass check skipped'); }
+  if (carried) {
+    note(freeze.project!, freeze.lane, sha, 'review', `auto: merge-only delta from ${carried.sha.slice(0, 8)} — its PASS carries over; no first pass or review asked on ${sha.slice(0, 8)}`);
+  } else {
+    try { await requestFirstPassFor(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'First pass skipped'); }
+    try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
+  }
   try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
 }
 

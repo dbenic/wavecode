@@ -283,6 +283,11 @@ function pingKey(lane: string, mainSha: string): string {
 }
 
 const REPEAT_MS = 30 * 60 * 1000;
+/** The behind-main nudge for an open freeze (reconcile pass) repeats at most once a day per lane. */
+const FREEZE_NUDGE_REPEAT_MS = 24 * 60 * 60 * 1000;
+/** An open freeze whose lane has not been pushed for this long is closed as stale. */
+const STALE_FREEZE_MS = 48 * 60 * 60 * 1000;
+export const FREEZE_STALE = 'freeze.stale';
 let nowMs = (): number => Date.now();
 
 /** Tests inject the clock so a 30-minute repeat does not wait. */
@@ -531,8 +536,9 @@ export async function pingLaneAboutMain(opts: {
   if (opts.kind !== 'merged' && await retireIfNothingMainLacks(opts.project, opts.lane)) return false;
   const key = pingKey(opts.lane, opts.mainSha);
   const latest = latestPing(opts.lane, opts.mainSha);
+  const repeat = opts.kind === 'freeze' ? FREEZE_NUDGE_REPEAT_MS : REPEAT_MS;
   if (latest) {
-    if (nowMs() - latest.at < REPEAT_MS) return false;
+    if (nowMs() - latest.at < repeat) return false;
     // A lane that has caught up with this main cannot fall behind the same main again, so
     // the git questions are asked once per lane and main, not on every board refresh.
     const settled = caughtUp.get(key);
@@ -700,7 +706,44 @@ export async function alertLanesPastStaging(project: string | null, stagingSha: 
 }
 
 /** Latest nudge for this lane, whatever main SHA it named. A new main tip must not ping again inside 30 minutes. */
-function laneNudgedRecently(lane: string): boolean {
+function autoMergeMain(project: string | null): boolean {
+  if (!project) return false;
+  try { return getConfig().projects?.[project]?.pipeline?.auto_merge_main === true; } catch { return false; }
+}
+
+function freezeAgeMs(createdAt: string): number {
+  const at = Date.parse(createdAt.includes('T') ? createdAt : `${createdAt.replace(' ', 'T')}Z`);
+  return Number.isFinite(at) ? at : nowMs();
+}
+
+function closeStaleFreeze(f: FreezeRow & { created_at: string }, why: string): void {
+  try {
+    getDb().prepare(
+      "UPDATE release_freezes SET status = 'stale', decision_reason = ?, updated_at = datetime('now') WHERE sha = ? AND status IN ('open', 'behind-main')",
+    ).run(why, f.sha);
+  } catch { return; }
+  emit(FREEZE_STALE, 'run', f.sha, { sha: f.sha, project: f.project, lane: f.lane, why }, null);
+  const agent = authorForLane(f.lane ?? '', f.author_agent_id ?? null, f.author_name ?? null, f.project);
+  if (agent) deliverSystemLine(agent, `[from WaveCode] freeze ${f.sha.slice(0, 8)} on ${f.lane} closed as stale: ${why}. Push and freeze again when the lane is live.`, { kind: 'info', source: 'main' });
+  logger.info({ sha: f.sha, lane: f.lane, project: f.project, why }, 'Freeze closed as stale');
+}
+
+/** Lane → the agent whose workspace has it checked out; computed once per reconcile pass. */
+let checkedOutMemo: { at: number; map: Map<string, Agent> } | null = null;
+async function lanesCheckedOut(): Promise<Map<string, Agent>> {
+  if (checkedOutMemo && nowMs() - checkedOutMemo.at < 60_000) return checkedOutMemo.map;
+  const map = new Map<string, Agent>();
+  for (const agent of listAgents()) {
+    if (!agent.workspace) continue;
+    const branch = await git(agent.workspace, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (branch && branch !== 'HEAD' && !map.has(branch)) map.set(branch, agent);
+  }
+  checkedOutMemo = { at: nowMs(), map };
+  return map;
+}
+export function resetLanesCheckedOutForTest(): void { checkedOutMemo = null; }
+
+function laneNudgedRecently(lane: string, within = REPEAT_MS): boolean {
   try {
     const rows = getDb().prepare(
       "SELECT entity_id, payload_json, created_at FROM events WHERE entity_type = 'lane' AND type = ? ORDER BY id DESC LIMIT 200",
@@ -717,7 +760,7 @@ function laneNudgedRecently(lane: string): boolean {
       const parsed = Date.parse(row.created_at.includes('T') ? row.created_at : `${row.created_at.replace(' ', 'T')}Z`);
       at = Number.isNaN(parsed) ? 0 : parsed;
     }
-    return nowMs() - at < REPEAT_MS;
+    return nowMs() - at < within;
   } catch {
     return false;
   }
@@ -758,7 +801,19 @@ export async function reconcileBehindFreezes(): Promise<void> {
       } catch { /* ignore */ }
     }
     const main = repo ? await mainTip(repo, f.project) : null;
-    if (!main || !f.lane || laneNudgedRecently(f.lane)) continue;
+    if (!main || !f.lane) continue;
+    // No push on the lane for 48 h: the freeze is abandoned. Close it as stale (the queue drops
+    // it) and say so once; a new push and freeze reopen the lane. 28 Oct 2026: open freezes from
+    // days ago drew 54 nudges a day each.
+    if (tip && tip === f.sha && nowMs() - freezeAgeMs(f.created_at) >= STALE_FREEZE_MS) {
+      closeStaleFreeze(f, 'no push on the lane for 48 h');
+      continue;
+    }
+    // When WaveCode syncs main itself (auto_merge_main) and a seat has the lane checked out, the
+    // sync pass merges, pushes and refreezes, or tells the author what blocks it. The nudge is
+    // for a lane nobody has checked out.
+    if (autoMergeMain(f.project) && (await lanesCheckedOut()).has(f.lane)) continue;
+    if (laneNudgedRecently(f.lane, FREEZE_NUDGE_REPEAT_MS)) continue;
     await pingLaneAboutMain({
       lane: f.lane, project: f.project, mainSha: main.sha, subject: main.subject,
       authorAgentId: f.author_agent_id, authorName: f.author_name, kind: 'freeze',

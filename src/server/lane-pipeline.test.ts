@@ -471,7 +471,7 @@ describe('hands-free lane pipeline', () => {
     expect(listReleases({ target: 'production' })).toEqual([]);
   });
 
-  it('merges main into an open lane and asks for a delta review', async () => {
+  it('merges main into an open lane; the merge-only SHA carries the PASS, so no reviewer or first pass is asked', async () => {
     const sha = branch('wc-ales', 'lane.txt', 'lane');
     const author = agent('ales', repo);
     const reviewer = agent('codex3', path.join(tmp, 'codex3'));
@@ -484,12 +484,43 @@ describe('hands-free lane pipeline', () => {
     const head = git(repo, 'rev-parse', 'HEAD');
     expect(head).not.toBe(sha);
     expect((await commitsBehind('wave', head))).toBe(0);
-    const text = messages(reviewer.id).join('\n');
-    expect(text).toMatch(/delta review: merge only/);
-    expect(text).toContain('/reviews/prev.md');
+    // The merge-only SHA repeats the reviewed patch: the queue carries the PASS, so no reviewer ask.
+    expect(messages(reviewer.id).join('\n')).not.toMatch(/delta review|Please review/);
+    const notes = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.action'").all() as { payload_json: string }[]).map((r) => JSON.parse(r.payload_json).note as string);
+    expect(notes).toContain(`auto: merge-only delta from ${sha.slice(0, 8)} — its PASS carries over; no first pass or review asked on ${head.slice(0, 8)}`);
+    expect(notes.some((n) => /first pass asked/.test(n))).toBe(false);
     expect(messages(author.id).join('\n')).toMatch(/Merged latest main into wc-ales/);
     expect(messages(author.id).join('\n')).not.toMatch(/behind main/);
     expect(listReleases({ target: 'production' })).toEqual([]);
+  });
+
+  it('a lane with nothing main lacks is retired when main moves, not merged into and refrozen; the author hears it once', async () => {
+    const sha = branch('wc-ales', 'lane.txt', 'lane');
+    const author = agent('ales', repo);
+    (await ingestFreezeFile(passNote('ales', 'wc-ales', sha, '/reviews/prev.md')));
+    // The lane lands on main (merge), then main moves on: the lane is behind but has nothing main lacks.
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'merge', '--no-ff', '--no-edit', '-m', 'land wc-ales', 'wc-ales');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    moveMain('main.txt', 'later');
+    git(repo, 'checkout', '-q', 'wc-ales');
+    pipe.auto_merge_main = true;
+    pipe.auto_review = true;
+    calls.length = 0;
+    (await onMainAdvanced('wave'));
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(sha); // untouched checkout
+    expect(calls.filter((argv) => argv[0] === 'push-lane')).toEqual([]);
+    expect(listReviewFreezes().filter((f) => f.lane === 'wc-ales').map((f) => f.status)).toEqual(['merged']);
+    const retired = db.getDb().prepare("SELECT entity_id FROM events WHERE type = 'lane.retired'").all() as { entity_id: string }[];
+    expect(retired.map((r) => r.entity_id)).toEqual([`wc-ales@${sha.slice(0, 8)}`]);
+    expect(messages(author.id).filter((m) => /wc-ales is fully on main/.test(m))).toHaveLength(1);
+    expect(latestPipelineNote('wave', 'wc-ales')).toMatch(/nothing main lacks — retired, not synced/);
+    // Main moves again: still nothing to do, and the author is not told twice.
+    moveMain('main.txt', 'later still');
+    git(repo, 'checkout', '-q', 'wc-ales');
+    (await onMainAdvanced('wave'));
+    expect(calls.filter((argv) => argv[0] === 'push-lane')).toEqual([]);
+    expect(messages(author.id).filter((m) => /wc-ales is fully on main/.test(m))).toHaveLength(1);
   });
 
   it('every new main tip gets the api suite once, recorded under the main SHA; a RED main is named to owners of RED lanes', async () => {

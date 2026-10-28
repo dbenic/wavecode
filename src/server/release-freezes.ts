@@ -338,8 +338,10 @@ function fieldToken(line: string): string | null {
   const kw = line.search(/\b(?:lane|branch)\b/i);
   const head = line.slice(kw);
   const rest = head.replace(/^\**\s*(?:lane|branch)\b\**\s*[:：]?\**\s*/i, '');
-  // A colon or a `wc-*` / known id. Prose ("the lane remains update…") is not a name.
-  const labelled = /[:：]/.test(head);
+  // A colon right after the keyword (`Lane:`, `**Branch**:`) or a `wc-*` / known id. Prose
+  // ("the lane remains update…", "Branch tip `sha` was pushed: up to date") is not a name: a
+  // colon later in the sentence used to make its first word the lane ("tip", "adds").
+  const labelled = /^\**\s*(?:lane|branch)\b\**\s*[:：]/i.test(head);
   const take = (token: string | null): string | null => {
     if (!token) return null;
     if (labelled || isRealLaneId(token)) return token;
@@ -470,12 +472,15 @@ export async function laneFromRunRecord(row: { sha: string; author_agent_id: str
 
 async function chooseLane(noteLane: string | null, noteBranch: string | null, row: LaneSource): Promise<string | null> {
   const agentId = runAgentId(row);
-  if (noteLane && !namesOtherSeat(noteLane, agentId)) return noteLane;
-  if (noteBranch && !namesOtherSeat(noteBranch, agentId)) return noteBranch;
+  // A stored real lane name outranks a parsed word that is not one (a second note about the
+  // same SHA, written in prose, must not rename the lane).
+  const stored = row.lane;
+  const storedReal = !!stored && isRealLaneId(stored) && !namesOtherSeat(stored, agentId);
+  if (noteLane && !namesOtherSeat(noteLane, agentId) && (!storedReal || isRealLaneId(noteLane))) return noteLane;
+  if (noteBranch && !namesOtherSeat(noteBranch, agentId) && (!storedReal || isRealLaneId(noteBranch))) return noteBranch;
   const recorded = await laneFromRunRecord(row);
   if (recorded) return recorded;
   // A lane already stored stays, unless it is filler, a hex SHA, or another seat.
-  const stored = row.lane;
   if (stored && !isInvalidLane(stored) && !namesOtherSeat(stored, agentId)) return stored;
   return null;
 }

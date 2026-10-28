@@ -71,3 +71,29 @@ gate; `known:red` gets no gate. The tick (`settleGatesWaitingOnQuick`) settles e
 word instead of queueing the gate.
 
 Effect: RED known in ~4 minutes instead of ~27; no gate run on a red SHA; one remote run per freeze until the quick is in.
+
+## Churn audit and fixes (28 Oct 2026, afternoon)
+
+A 24-hour audit on countix-dev found the day's time going into work WaveCode made for itself:
+471 freezes (340 on lanes with nothing left to merge), 1,346 behind-main nudges to agents,
+461 first-pass requests (283 timed out), 188 auto fix tasks that could never dispatch, and
+25 freezes refused over a lane name read from prose. Four fixes:
+
+1. **Sync loop retires a finished lane.** `onMainAdvanced` no longer merges main into a lane
+   with no commit main lacks (`git cherry` empty): it retires the lane, tells the author once
+   to switch the checkout to main, and stops. A merge-only freeze (same patch as an earlier
+   PASS, main merged since) gets no first pass and no reviewer ping; the merge queue already
+   carries that PASS and its api GREEN (patch-id rule). Note: `auto: merge-only delta from
+   <sha8> — its PASS carries over`.
+2. **Nudges once a day, and only for lanes nobody has checked out.** The behind-main nudge
+   from the reconcile pass (`kind: 'freeze'`) repeats after 24 h, not 30 min, and is skipped
+   when `auto_merge_main` is on and a seat's workspace has the lane (the sync pass handles it
+   or says what blocks it). An open freeze whose lane has not been pushed for 48 h is closed
+   as `stale` (`freeze.stale` event, author told once); a new push and freeze reopen it.
+3. **WaveCode's own task runs on the seat it names.** A task with no creator that is assigned
+   to an agent (the auto fix task after a needs-fixes verdict) is that agent's own work and
+   dispatches regardless of the profile rule. The 188 stale ones from before this fix were
+   cancelled by hand on the box.
+4. **Lane names come only from a labelled field.** `Lane:`/`Branch:` need the colon right
+   after the keyword; a colon later in a sentence no longer turns its first word into the
+   lane. A stored real lane name outranks a parsed word that is not one.

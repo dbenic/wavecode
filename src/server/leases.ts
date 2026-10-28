@@ -144,7 +144,10 @@ export function canDispatchTaskToAgent(task: Task, agent: Agent): boolean {
  * - 'owner' (§2 rule 6): someone else holds the lease.
  */
 export function waitReason(task: Task, agent: Agent): 'profile' | 'owner' | null {
-  if (agent.profile && !isProfileCompatible(agent.profile, lookupActor(task.created_by))) return 'profile';
+  // WaveCode's own task for this very agent (no creator: a fix task after a needs-fixes verdict,
+  // a pipeline chore) is the agent's own work, not someone else's spend on its subscription.
+  const own = task.created_by == null && !!task.agent_id && task.agent_id === agent.id;
+  if (agent.profile && !own && !isProfileCompatible(agent.profile, lookupActor(task.created_by))) return 'profile';
   if (!agent.owner_id) return null;
   if (task.created_by && task.created_by === agent.owner_id) return null;
   if (task.agent_id === agent.id && !!task.created_by && isAdminUserId(task.created_by)) return null;

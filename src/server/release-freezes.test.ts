@@ -403,6 +403,12 @@ describe('release-freezes.ts', () => {
       expect(rf.getFreeze(canary)?.lane).toBe('canary-e2e-stage-v5');
       expect(rf.isShaLane('6ed9192e')).toBe(true);
       expect(rf.laneFromLines(['Lane: `6ed9192e`'])).toBeNull();
+      // A colon later in a sentence does not make its first word the lane (28 Oct 2026: "tip", "adds").
+      expect(rf.laneFromLines(['Branch tip `6d3028051ae2e3cbff02e1e7ce55ddf6565694cf` was pushed: Everything up-to-date'])).toBeNull();
+      expect(rf.laneFromLines(['Lane adds no new code; status: quick GREEN'])).toBeNull();
+      expect(rf.laneFromLines(['Lane adds no new code; status: quick GREEN', '- Lane: `wc-codex2-vasco-v2-a1`'])).toBe('wc-codex2-vasco-v2-a1');
+      expect(rf.laneFromLines(['**Lane:** wc-kimi3'])).toBe('wc-kimi3');
+      expect(rf.laneFromLines(['**Branch**: canary-e2e-stage-v5'])).toBe('canary-e2e-stage-v5');
 
       const fableDir = path.join(os.tmpdir(), `wc-fable-${process.pid}`);
       fs.rmSync(fableDir, { recursive: true, force: true });

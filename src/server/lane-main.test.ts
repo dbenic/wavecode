@@ -11,7 +11,7 @@ const projects: Record<string, { repo?: string; workspace_match?: string; lane_g
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {} })) }));
 
 import * as db from './db.js';
-import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, LANE_RETIRED, laneHasNothingMainLacks, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, reconcileBehindFreezes, resetLaneRetireMemoForTest, setLaneAlertNowForTest, withRefMemoAsync } from './lane-main.js';
+import { alertBehind, alertLanesPastStaging, alertMerged, behindMainAlert, commitsBehind, isMergeOnlyDelta, LANE_RETIRED, laneHasNothingMainLacks, MAIN_PING, mergedMainAlert, observeRepo, pingLaneAboutMain, reconcileBehindFreezes, resetLaneRetireMemoForTest, resetLanesCheckedOutForTest, setLaneAlertNowForTest, withRefMemoAsync } from './lane-main.js';
 import { ensureReleaseFreezeTable } from './release-freezes.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -236,7 +236,7 @@ describe('lane main ancestry', () => {
     expect(db.listAgentMessages({ to_agent_id: seat.data.id }).map((row) => row.message).join('\n')).not.toMatch(/behind main|Merged latest main/);
   });
 
-  it('a merge-only tip is not a nudge, and the same lane is not nudged twice inside 30 minutes', async () => {
+  it('a merge-only tip is not a nudge, and the same open freeze is nudged once a day, not on every main move', async () => {
     ensureReleaseFreezeTable();
     const ales = db.listAgents().find((a) => a.name === 'ales')!;
     const oldSha = git(repo, 'rev-parse', 'wc-ales');
@@ -275,6 +275,10 @@ describe('lane main ancestry', () => {
     expect(pings()).toHaveLength(1);
 
     now += 30 * 60 * 1000;
+    (await reconcileBehindFreezes());
+    expect(pings()).toHaveLength(1); // 28 Oct 2026: 30-minute repeats drew 54 nudges a day per lane
+
+    now += 24 * 60 * 60 * 1000;
     (await reconcileBehindFreezes());
     expect(pings()).toHaveLength(2);
   });
@@ -374,6 +378,58 @@ describe('lane retire: nothing main lacks', () => {
     expect(main2).not.toBe(mainSha);
     expect((await pingLaneAboutMain({ lane: 'wc-ales', project: 'wave', mainSha: main2, kind: 'moved' }))).toBe(true);
     expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(LANE_RETIRED)).toHaveLength(0);
+  });
+
+  it('reconcile closes an open freeze as stale after 48 h without a push, tells the author once, and never nudges it', async () => {
+    let now = Date.parse('2026-10-28T10:00:00Z');
+    setLaneAlertNowForTest(() => now);
+    const laneTip = git(repo, 'rev-parse', 'wc-ales');
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'm.txt'), 'later');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main moved');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, project, lane, author_name, status, created_at) VALUES (?, 'wave', 'wc-ales', 'ales', 'open', '2026-10-26 09:00:00')`).run(laneTip);
+    await reconcileBehindFreezes();
+    const row = db.getDb().prepare('SELECT status, decision_reason FROM release_freezes WHERE sha = ?').get(laneTip) as { status: string; decision_reason: string };
+    expect(row).toEqual({ status: 'stale', decision_reason: 'no push on the lane for 48 h' });
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(0);
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all('freeze.stale')).toHaveLength(1);
+    const told = db.listAgentMessages({ limit: 10 }).map((m) => m.message).filter((m) => /closed as stale/.test(m));
+    expect(told).toHaveLength(1);
+    expect(told[0]).toContain(`freeze ${laneTip.slice(0, 8)} on wc-ales closed as stale: no push on the lane for 48 h`);
+    await reconcileBehindFreezes();
+    expect(db.listAgentMessages({ limit: 10 }).map((m) => m.message).filter((m) => /closed as stale/.test(m))).toHaveLength(1);
+  });
+
+  it('reconcile does not nudge a lane a seat has checked out while WaveCode syncs main itself; a lane nobody has is nudged once a day', async () => {
+    let now = Date.parse('2026-10-28T10:00:00Z');
+    setLaneAlertNowForTest(() => now);
+    resetLanesCheckedOutForTest();
+    const laneTip = git(repo, 'rev-parse', 'wc-ales'); // the agent's workspace (repo) has wc-ales checked out
+    git(repo, 'checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'm.txt'), 'later');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '-m', 'main moved');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', git(repo, 'rev-parse', 'HEAD'));
+    git(repo, 'checkout', '-q', 'wc-ales');
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, project, lane, author_name, status, created_at) VALUES (?, 'wave', 'wc-ales', 'ales', 'open', '2026-10-28 09:00:00')`).run(laneTip);
+    (projects.wave as { pipeline?: unknown }).pipeline = { auto_merge_main: true };
+    await reconcileBehindFreezes();
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(0);
+    expect(db.listAgentMessages({ limit: 10 }).some((m) => m.message.includes('behind main'))).toBe(false);
+    // Nobody has the lane checked out: one nudge, repeated only after a day.
+    git(repo, 'checkout', '-q', 'main');
+    resetLanesCheckedOutForTest();
+    await reconcileBehindFreezes();
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(1);
+    now += 31 * 60 * 1000;
+    await reconcileBehindFreezes();
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(1);
+    now += 24 * 60 * 60 * 1000;
+    await reconcileBehindFreezes();
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(2);
+    delete (projects.wave as { pipeline?: unknown }).pipeline;
   });
 
   it('reconcileBehindFreezes retires rather than marks behind-main', async () => {

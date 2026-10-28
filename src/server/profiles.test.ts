@@ -281,6 +281,13 @@ describe('credential profiles', () => {
       expect(leases.waitReason(task(ana.data.user.id), seat.data)).toBeNull();
       expect(leases.waitReason(task(bob.data.user.id), seat.data)).toBe('profile');
       expect(leases.waitReason(task('owner'), seat.data)).toBe('profile');
+      // WaveCode's own task (no creator) for this very seat is the seat's own work; for another seat it is not.
+      const own = db.insertTask({ prompt: '[fix 1234abcd] fix the findings', created_by: null, agent_id: seat.data.id });
+      if (!own.ok) throw new Error(own.error);
+      expect(leases.waitReason(own.data, seat.data)).toBeNull();
+      const other = db.insertTask({ prompt: 'x', created_by: null });
+      if (!other.ok) throw new Error(other.error);
+      expect(leases.waitReason(other.data, seat.data)).toBe('profile');
 
       // Even if bob somehow held the lease, his task would not run on ana's subscription
       const owned = { ...seat.data, owner_id: bob.data.user.id, lease_reason: 'reserved' as const };
