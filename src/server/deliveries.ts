@@ -368,24 +368,50 @@ export function adoptWork(work: WorkSnapshot, now = Date.now()): { created: stri
   return out;
 }
 
-/** What the tick hands to adoptWork: running tasks with their agent's lane, and the lane board. */
+/** Lanes already examined, by tip: a lane is re-read from git only when its tip moves. */
+const laneSeen = new Map<string, { sha: string; lane: WorkLane | null }>();
+
+/**
+ * What the tick hands to adoptWork: running tasks with their agent's lane, and every developer lane
+ * (`lane_glob`) on the remote that is ahead of main and younger than 14 days, read from git directly
+ * (the lane board is cold after a restart and slow with hundreds of stale refs). Two git calls per
+ * lane, once per tip.
+ */
 async function gatherWork(): Promise<WorkSnapshot> {
   if (getConfig().deliveries?.auto_track === false) return { tasks: [], lanes: [] };
-  const { lanesForRequest } = await import('./dev-lanes.js'); // late: dev-lanes reaches the pipeline, which reaches this module
   const { execFileAsync } = await import('./proc.js');
-  const board = await lanesForRequest();
+  const { globToRe } = await import('./developers.js');
+  const git = async (repo: string, args: string[]) => (await execFileAsync('git', ['-C', repo, ...args], { timeout: 15_000 })).trim();
+  const freezes = (() => { try { return listFreezes(); } catch { return []; } })();
   const lanes: WorkLane[] = [];
-  for (const b of board) {
-    const repo = getConfig().projects?.[b.project]?.repo;
-    let startedAt: string | null = null;
-    if (repo) {
+  for (const [project, pc] of Object.entries(getConfig().projects ?? {})) {
+    if (!pc.repo) continue;
+    const spec = mainSpec(project);
+    const re = globToRe(pc.lane_glob || 'wc-*');
+    let refs: string[] = [];
+    try { refs = (await git(pc.repo, ['for-each-ref', '--format=%(refname:short) %(objectname)', `refs/remotes/${spec.remote}`])).split('\n'); } catch { continue; }
+    for (const line of refs) {
+      const [short, sha] = line.trim().split(/\s+/);
+      if (!short || !sha) continue;
+      const lane = short.startsWith(`${spec.remote}/`) ? short.slice(spec.remote.length + 1) : short;
+      if (lane === 'HEAD' || lane === spec.branch || !re.test(lane)) continue;
+      const key = `${project}:${lane}`;
+      const seen = laneSeen.get(key);
+      if (seen && seen.sha === sha) { if (seen.lane) lanes.push(seen.lane); continue; }
+      let entry: WorkLane | null = null;
       try {
-        const spec = mainSpec(b.project);
-        const out = await execFileAsync('git', ['-C', repo, 'log', '--reverse', '--format=%cI', `${spec.ref}..${b.sha}`], { timeout: 15_000 });
-        startedAt = out.split('\n').map((l: string) => l.trim()).find(Boolean) ?? null;
-      } catch { /* a lane git cannot read gets no start time */ }
+        const own = await git(pc.repo, ['log', '--reverse', '--format=%cI', `${spec.ref}..${sha}`]);
+        const firstOwn = own.split('\n').map((l) => l.trim()).find(Boolean) ?? null;
+        const tipAt = Date.parse(await git(pc.repo, ['log', '-1', '--format=%cI', sha]));
+        // ahead of main, and touched in the last 14 days: a stale lane is not work in progress
+        if (firstOwn && Number.isFinite(tipAt) && Date.now() - tipAt <= ADOPT_MAX_AGE_MS) {
+          const freeze = freezes.find((f) => f.lane === lane && f.project === project && f.author_agent_id);
+          entry = { project, lane, author_agent_id: freeze?.author_agent_id ?? null, started_at: firstOwn };
+        }
+      } catch { /* a ref git cannot read is not a lane */ }
+      laneSeen.set(key, { sha, lane: entry });
+      if (entry) lanes.push(entry);
     }
-    lanes.push({ project: b.project, lane: b.lane, author_agent_id: b.author_agent_id, started_at: startedAt });
   }
   const tasks: WorkSnapshot['tasks'] = [];
   for (const task of listTasks({ status: 'running' })) {
@@ -393,14 +419,16 @@ async function gatherWork(): Promise<WorkSnapshot> {
     if (task.agent_id) {
       const a = getAgent(task.agent_id);
       if (a.ok && a.data.workspace) {
-        try { lane = (await execFileAsync('git', ['-C', a.data.workspace, 'branch', '--show-current'], { timeout: 10_000 })).trim() || null; } catch { /* no branch */ }
-        project = board.find((b) => b.lane === lane)?.project ?? projectOfWorkspace(a.data.workspace);
+        try { lane = (await git(a.data.workspace, ['branch', '--show-current'])) || null; } catch { /* no branch */ }
+        project = lanes.find((b) => b.lane === lane)?.project ?? projectOfWorkspace(a.data.workspace);
       }
     }
     tasks.push({ task, lane, project });
   }
   return { tasks, lanes };
 }
+
+export function resetWorkSweepForTest(): void { laneSeen.clear(); }
 
 function projectOfWorkspace(workspace: string): string | null {
   for (const [name, p] of Object.entries(getConfig().projects ?? {})) {
