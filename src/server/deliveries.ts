@@ -376,7 +376,7 @@ export function adoptWork(work: WorkSnapshot, now = Date.now()): { created: stri
 
 /** Lanes already examined, by tip: a lane is re-read from git only when its tip moves. */
 const laneSeen = new Map<string, { sha: string; lane: WorkLane | null }>();
-/** A remote lane counts as work in progress when its tip moved in the last two days, or it has an open freeze, or an agent's workspace is on it. */
+/** A remote lane counts as work in progress when its tip moved or it was frozen in the last two days, or an agent's workspace is on it (109 open freezes on the box go back three weeks; an old open freeze is an abandoned lane). */
 const ACTIVE_LANE_MS = 48 * 3600_000;
 
 /**
@@ -413,7 +413,7 @@ async function gatherWork(): Promise<WorkSnapshot> {
         const firstOwn = own.split('\n').map((l) => l.trim()).find(Boolean) ?? null;
         const tipAt = Date.parse(await git(pc.repo, ['log', '-1', '--format=%cI', sha]));
         // ahead of main, and active: touched in the last two days or frozen and still open. An abandoned lane is not work in progress.
-        const freeze = freezes.find((f) => f.lane === lane && f.project === project && (f.status === 'open' || f.status === 'behind-main'));
+        const freeze = freezes.find((f) => f.lane === lane && f.project === project && (f.status === 'open' || f.status === 'behind-main') && (parseStamp(f.created_at) ?? 0) >= Date.now() - ACTIVE_LANE_MS);
         const recent = Number.isFinite(tipAt) && Date.now() - tipAt <= ACTIVE_LANE_MS;
         if (firstOwn && (recent || freeze)) {
           const author = freeze?.author_agent_id ?? freezes.find((f) => f.lane === lane && f.project === project && f.author_agent_id)?.author_agent_id ?? null;
