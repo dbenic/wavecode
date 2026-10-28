@@ -96,7 +96,7 @@ const SHA_RE = /^[0-9a-f]{40}$/i;
 /** Event types the derivation reads. Everything else stays untouched. */
 const SIGNAL_TYPES = [
   'pipeline.frozen', 'pipeline.quick', 'pipeline.gate', 'gate.result', 'pipeline.first_pass_requested',
-  'pipeline.first_pass', 'pipeline.first_pass_timeout', 'pipeline.review', 'review.ai_completed', 'review.superseded',
+  'pipeline.first_pass', 'pipeline.first_pass_timeout', 'pipeline.review', 'review.ai_completed', 'review.superseded', 'pipeline.candidate_review',
   'merge_queue.queued', 'merge_queue.merged', 'merge_queue.bounced', 'pipeline.refused', 'pipeline.action',
   'release.requested', 'release.reported', 'task.dispatched', 'task.created', 'lane.retired',
 ];
@@ -421,6 +421,7 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
       case 'pipeline.gate': {
         if (!t.sha) break;
         const state = str(p.quick) ?? str(p.gate);
+        if (state === 'CANCELLED') { finish(`gates:${t.sha}`, 'superseded', at, str(p.reason) ?? 'run stopped'); break; }
         if (state === 'QUEUED' || state === 'RUNNING') start(`gates:${t.sha}`, 'gates', at, ev, { sha: t.sha, lane: t.lane });
         if (state === 'GREEN' || state === 'RUNNING') { const g = open.get(`gates:${t.sha}`); if (g) g.cause = null; }
         if (state === 'GREEN' && ev.type === 'pipeline.gate') finish(`gates:${t.sha}`, 'ok', at, 'full GREEN');
@@ -462,6 +463,20 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
       case 'review.superseded':
         if (t.sha) finish(`review:${t.sha}`, 'superseded', at, 'newer SHA on the lane');
         break;
+      case 'pipeline.candidate_review': {
+        // The rolling review of main: it rides on the candidate span of the main SHA the merge produced.
+        if (!t.sha) break;
+        const span = open.get(`candidate:${t.sha}`);
+        if (!span) break;
+        const kind = str(p.kind) ?? '';
+        const seat = str(p.reviewer) ?? str(p.seat) ?? null;
+        if (kind === 'assign') { if (seat) span.actor = seat; }
+        else if (kind === 'result') {
+          if (seat) span.actor = seat;
+          span.cause = str(p.result) === 'pass' ? null : `candidate review NEEDS FIXES by @${seat ?? '?'} (${Number(p.issues ?? 0)} issue${Number(p.issues ?? 0) === 1 ? '' : 's'}), see ${str(p.file) ?? 'the file'}`;
+        }
+        break;
+      }
       case 'merge_queue.queued':
         if (t.sha) start(`land:${t.sha}`, 'land', at, ev, { sha: t.sha, lane: t.lane });
         break;

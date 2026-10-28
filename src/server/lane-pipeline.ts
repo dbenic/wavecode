@@ -33,7 +33,8 @@ import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-ru
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
 import { assignmentFacts, loadFor, loadMemo, minCapacityPct, projectReassignMs, reviewEvents, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign, type ReviewerLoad } from './reviewer-assign.js';
 import { firstPassFor, firstPassHooks, overdueFirstPasses, requestFirstPass, type FirstPassResult } from './first-pass.js';
-import { deliverSystemLine } from './wire-lines.js';
+import { deliverSystemLine, tellDriverSeats } from './wire-lines.js';
+import { candidateHooks, overdueCandidateReviews, requestCandidateReview, type CandidateResult } from './candidate-review.js';
 
 export const PIPELINE_ACTION = 'pipeline.action';
 const FROZEN = 'pipeline.frozen';
@@ -69,6 +70,11 @@ export interface PipelineSwitches {
   gate_max_inflight: number;
   /** Lane size warning threshold in changed files. 0 disables. */
   max_lane_files: number;
+  /** Rolling candidate review after each main advance. Null = follow `auto_review`. */
+  candidate_review: boolean | null;
+  candidate_review_timeout_min: number;
+  /** Gateway cancel for a superseded run (`{sha}`); null = abandon the local submission only. */
+  cancel_command: string[] | null;
   /** Open-ladder allowlist (lowercased). Empty = anyone not denied. */
   reviewer_allow: string[];
   /** Shared service profiles (lowercased): seats on one are independent of each other. */
@@ -76,7 +82,7 @@ export interface PipelineSwitches {
 }
 
 type ExecResult = { code: number; stdout: string };
-export interface ExecOptions { cwd?: string; env?: Record<string, string>; timeoutMs?: number }
+export interface ExecOptions { cwd?: string; env?: Record<string, string>; timeoutMs?: number; signal?: AbortSignal }
 type ExecForTest = (argv: string[], opts: ExecOptions) => ExecResult | Promise<ExecResult>;
 let execForTest: ExecForTest | null = null;
 
@@ -92,6 +98,7 @@ export function pipelineOf(project: string | null): PipelineSwitches {
     lane_deny: [], agent_deny: [], reviewer_prefer: {}, reviewer_pool_by_author_glob: {},
     review_reassign_minutes: 15, freeze_dir: null,
     gate_with_quick: false, gate_timeout_min: 120, quick_check_timeout_min: 20, gate_max_inflight: 3, max_lane_files: 40,
+    candidate_review: null, candidate_review_timeout_min: 45, cancel_command: null,
     reviewer_allow: [], service_profiles: [],
   };
   if (!raw) return off;
@@ -119,6 +126,9 @@ export function pipelineOf(project: string | null): PipelineSwitches {
     quick_check_timeout_min: minutesOr(raw.quick_check_timeout_min, 20),
     gate_max_inflight: Math.max(1, minutesOr(raw.gate_max_inflight, 3)),
     max_lane_files: minutesOr(raw.max_lane_files, 40),
+    candidate_review: typeof raw.candidate_review === 'boolean' ? raw.candidate_review : null,
+    candidate_review_timeout_min: Math.max(1, minutesOr(raw.candidate_review_timeout_min, 45)),
+    cancel_command: raw.cancel_command?.length ? raw.cancel_command : null,
     reviewer_allow: (raw.reviewer_allow ?? []).map((s) => s.toLowerCase()),
     service_profiles: (raw.service_profiles ?? []).map((s) => s.toLowerCase()),
   };
@@ -196,6 +206,7 @@ async function runArgv(argv: string[], opts: ExecOptions = {}): Promise<ExecResu
       maxBuffer: 4 * 1024 * 1024,
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
       ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
     return { code: 0, stdout };
   } catch (e) {
@@ -765,11 +776,72 @@ function queuePriorityOf(sha: string): number {
   } catch { return 0; }
 }
 
-/** Highest queue priority first, then the order the SHAs arrived (Denis, 26 Oct 2026: "put this lane in front of the gate runners"). */
+/**
+ * Highest queue priority first, then SHAs that replaced a cancelled run (the lane already paid for a
+ * slot), then the order the SHAs arrived (Denis, 26 Oct 2026: "put this lane in front of the gate runners").
+ */
 function sortByQueuePriority(pending: string[]): void {
-  const keyed = pending.map((sha, i) => ({ sha, i, p: queuePriorityOf(sha) }));
-  keyed.sort((a, b) => b.p - a.p || a.i - b.i);
+  const keyed = pending.map((sha, i) => ({ sha, i, p: queuePriorityOf(sha), j: jumped.has(sha) ? 1 : 0 }));
+  keyed.sort((a, b) => b.p - a.p || b.j - a.j || a.i - b.i);
   pending.splice(0, pending.length, ...keyed.map((k) => k.sha));
+}
+
+// --- runs on replaced SHAs (27 Oct retro, cause 3) ----------------------------------------
+// A newer freeze on the same lane makes the old SHA's runs worthless. WaveCode stops waiting for its
+// own submissions on it (the local tool process is killed), records them as cancelled, never RED, and
+// the new SHA takes the next free slot ahead of older waiters. The remote run is told to stop through
+// `pipeline.cancel_command` when the gateway has a cancel verb; without it, it finishes on its own.
+const liveRuns = new Map<string, AbortController>();
+const cancelledRuns = new Map<string, string>();
+/** SHAs that replaced a cancelled run: next in line after admin priority. */
+const jumped = new Set<string>();
+function runKey(sha: string, kind: 'quick' | 'full'): string { return `${sha}:${kind}`; }
+
+/** Stop WaveCode's own quick and full-gate submissions on a SHA. Returns how many were stopped. */
+export function cancelRunsFor(sha: string, reason: string, opts: { project?: string | null; by?: string | null } = {}): number {
+  let n = 0;
+  for (const kind of ['quick', 'full'] as const) {
+    const key = runKey(sha, kind);
+    const live = liveRuns.get(key);
+    if (live) { cancelledRuns.set(key, reason); live.abort(); n++; }
+    refusedRuns.delete(refusedKey(sha, kind));
+  }
+  // Waiting here, never submitted: dropped with the word, no gate record (nothing ran).
+  const freeze = getFreeze(sha);
+  const project = opts.project ?? freeze?.project ?? null;
+  const lane = freeze?.lane ?? null;
+  const qi = quickPending.indexOf(sha);
+  if (qi >= 0) {
+    quickPending.splice(qi, 1); n++;
+    emit(QUICK, 'run', `${sha}:quick`, { sha, project, lane, quick: 'CANCELLED', reason }, null);
+  }
+  const gi = gatePending.indexOf(sha);
+  if (gi >= 0) {
+    gatePending.splice(gi, 1); n++;
+    setFreezeGate(sha, 'CANCELLED');
+    emit(GATED, 'run', `${sha}:full`, { sha, project, lane, gate: 'CANCELLED', reason }, null);
+  }
+  if (opts.by) jumped.add(opts.by);
+  const pipe = pipelineOf(opts.project ?? null);
+  if (n && pipe.cancel_command?.length) {
+    const argv = fill(pipe.cancel_command, { sha, lane: '', workspace: '', checkout: '', remote: mainSpec(opts.project ?? '').remote, project: opts.project ?? '' });
+    void runArgv(argv, { timeoutMs: 60_000 }).then((r) => {
+      logger.info({ sha, code: r.code, said: r.stdout.trim().split(/\r?\n/).slice(-1)[0] ?? '' }, 'Gateway cancel asked');
+    }).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Gateway cancel failed'));
+  }
+  return n;
+}
+
+/** The reason this run was cancelled while it waited on the tool, consumed once. */
+function takeCancelled(sha: string, kind: 'quick' | 'full'): string | null {
+  const key = runKey(sha, kind);
+  const reason = cancelledRuns.get(key) ?? null;
+  cancelledRuns.delete(key);
+  return reason;
+}
+
+export function cancelStateForTest(): { live: string[]; jumped: string[] } {
+  return { live: [...liveRuns.keys()], jumped: [...jumped] };
 }
 
 // --- the quick check WaveCode runs when nobody did ---------------------------------------
@@ -884,12 +956,27 @@ async function runQuick(freeze: ReleaseFreeze): Promise<void> {
       sha: freeze.sha, lane: freeze.lane ?? '', workspace: checkout ?? '', checkout: checkout ?? '', remote: spec.remote, project: freeze.project,
     });
     const started = new Date();
-    const result = await runArgv(argv, {
-      ...(checkout ? { cwd: checkout } : {}),
-      env: runEnv({ sha: freeze.sha, lane: freeze.lane ?? '', author, ...(checkout ? { checkout } : {}) }),
-      timeoutMs: Math.max(1, pipe.quick_check_timeout_min) * 60_000,
-    });
+    const controller = new AbortController();
+    liveRuns.set(runKey(freeze.sha, 'quick'), controller);
+    let result: ExecResult;
+    try {
+      result = await runArgv(argv, {
+        ...(checkout ? { cwd: checkout } : {}),
+        env: runEnv({ sha: freeze.sha, lane: freeze.lane ?? '', author, ...(checkout ? { checkout } : {}) }),
+        timeoutMs: Math.max(1, pipe.quick_check_timeout_min) * 60_000,
+        signal: controller.signal,
+      });
+    } finally {
+      liveRuns.delete(runKey(freeze.sha, 'quick'));
+    }
     await dropCheckout(freeze.project, checkout);
+    const cancelled = takeCancelled(freeze.sha, 'quick');
+    if (cancelled) {
+      await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: `${result.stdout}\nCANCELLED by WaveCode: ${cancelled}`, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: `cancelled: ${cancelled}` });
+      emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: 'CANCELLED', reason: cancelled }, null);
+      note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check on ${sha8} stopped — ${cancelled}`);
+      return;
+    }
     const refusal = runRefusal(result);
     const word = refusal ? 'QUEUED' : gateOutcome(result);
     await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: result.stdout, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: refusal });
@@ -977,12 +1064,28 @@ async function runGateBody(freeze: ReleaseFreeze, pipe: PipelineSwitches, spec: 
     sha: freeze.sha, lane: freeze.lane ?? '', workspace: checkout ?? '', checkout: checkout ?? '', remote: spec.remote, project: freeze.project,
   });
   const started = new Date();
-  const result = await runArgv(argv, {
-    ...(checkout ? { cwd: checkout } : {}),
-    env: runEnv({ sha: freeze.sha, lane: freeze.lane ?? '', author, ...(checkout ? { checkout } : {}) }),
-    timeoutMs: Math.max(1, pipe.gate_timeout_min) * 60_000,
-  });
+  const controller = new AbortController();
+  liveRuns.set(runKey(freeze.sha, 'full'), controller);
+  let result: ExecResult;
+  try {
+    result = await runArgv(argv, {
+      ...(checkout ? { cwd: checkout } : {}),
+      env: runEnv({ sha: freeze.sha, lane: freeze.lane ?? '', author, ...(checkout ? { checkout } : {}) }),
+      timeoutMs: Math.max(1, pipe.gate_timeout_min) * 60_000,
+      signal: controller.signal,
+    });
+  } finally {
+    liveRuns.delete(runKey(freeze.sha, 'full'));
+  }
   await dropCheckout(freeze.project, checkout);
+  const cancelled = takeCancelled(freeze.sha, 'full');
+  if (cancelled) {
+    await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: `${result.stdout}\nCANCELLED by WaveCode: ${cancelled}`, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: `cancelled: ${cancelled}` });
+    setFreezeGate(freeze.sha, 'CANCELLED');
+    emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: 'CANCELLED', reason: cancelled }, null);
+    note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate on ${sha8} stopped — ${cancelled}`);
+    return;
+  }
   const refusal = runRefusal(result);
   const word = refusal ? 'QUEUED' : gateOutcome(result);
   // One immutable record per gate WaveCode ran (the checker reads it; legacy pipeline.gate stays for older readers).
@@ -1467,6 +1570,7 @@ export async function ensureProdSyncLane(project: string): Promise<string | null
 export async function onMainAdvanced(project: string, mainSha?: string): Promise<void> {
   const pipe = pipelineOf(project);
   try { await ensureMainGate(project, mainSha ?? (projectRepo(project) ? (await mainTip(projectRepo(project)!, project))?.sha ?? null : null)); } catch (e) { logger.debug({ project, error: (e as Error).message }, 'Main gate skipped'); }
+  if (mainSha) { try { await requestCandidateReviewFor(project, mainSha); } catch (e) { logger.debug({ project, error: (e as Error).message }, 'Candidate review skipped'); } }
   if (!pipe.auto_merge_main) return;
   const repo = projectRepo(project);
   if (!repo) return;
@@ -1555,6 +1659,12 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
     }
     refusedFreezes.delete(sha);
   }
+  // Runs on the SHA this freeze replaced are worthless now: stop them and let this SHA go first.
+  for (const old of freeze.project ? listFreezes() : []) {
+    if (old.sha === sha || old.lane !== freeze.lane || old.project !== freeze.project || (old.superseded_by ?? '').toLowerCase() !== sha.toLowerCase()) continue;
+    const stopped = cancelRunsFor(old.sha, `superseded by ${sha.slice(0, 8)}`, { project: freeze.project, by: sha });
+    if (stopped) note(freeze.project!, freeze.lane, old.sha, 'cancel', `auto: ${stopped} run${stopped === 1 ? '' : 's'} on ${old.sha.slice(0, 8)} stopped — superseded by ${sha.slice(0, 8)}, which goes next`);
+  }
   // The gate runs for as long as the remote suite takes; the review starts now.
   // Quick first (minutes), then the full gate: WaveCode submits one run per author at a time.
   void queueQuickCheck(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-quick skipped'));
@@ -1627,6 +1737,13 @@ export async function pipelineTick(now = Date.now()): Promise<void> {
     if (!freeze?.project) continue;
     note(freeze.project, freeze.lane, req.sha, 'first-pass', `auto: no first pass from @${req.seat} after ${Math.round((now - req.atMs) / 60_000)} min — the reviewer continues without it`);
   }
+  for (const req of overdueCandidateReviews(now)) {
+    const minutes = Math.round((now - req.atMs) / 60_000);
+    const text = `[from WaveCode] candidate review of main ${req.sha.slice(0, 8)} by @${req.reviewer} has no answer after ${minutes} min (${req.file}). Finish it or say who takes it.`;
+    note(req.project, req.lane, req.sha, CANDIDATE_NOTE, `auto: no candidate review from @${req.reviewer} after ${minutes} min`);
+    tell(req.reviewerId, text);
+    void tellDriverSeats(text, null, CANDIDATE_NOTE).catch(() => {});
+  }
 }
 
 export function resetPipelineForTest(): void {
@@ -1639,9 +1756,80 @@ export function resetPipelineForTest(): void {
   refusedRuns.clear();
   refusedRetryMs = 90_000;
   authorInflight.clear();
+  liveRuns.clear();
+  cancelledRuns.clear();
+  jumped.clear();
 }
 
 firstPassHooks.onResult = announceFirstPass;
+
+// --- rolling candidate review (27 Oct retro, cause 2) --------------------------------------
+const CANDIDATE_NOTE = 'candidate-review';
+
+/** The queue merge that produced this main SHA: its lane, author and the main it merged onto. */
+function mergeThatMade(project: string, mainSha: string): { lane: string | null; author: Agent | null; mainBefore: string | null } {
+  try {
+    const rows = getDb().prepare(
+      "SELECT payload_json FROM events WHERE type = 'merge_queue.merged' ORDER BY id DESC LIMIT 100",
+    ).all() as Array<{ payload_json: string | null }>;
+    for (const row of rows) {
+      if (!row.payload_json) continue;
+      const p = JSON.parse(row.payload_json) as { project?: string; sha_out?: string; lane?: string; author?: string; main_before?: string };
+      if (p.project !== project || (p.sha_out ?? '').toLowerCase() !== mainSha.toLowerCase()) continue;
+      const name = (p.author ?? '').toLowerCase();
+      const author = name ? listAgents().find((a) => a.name.toLowerCase() === name || (a.alias ?? '').toLowerCase() === name) ?? null : null;
+      return { lane: p.lane ?? null, author, mainBefore: p.main_before?.toLowerCase() ?? null };
+    }
+  } catch { /* no events */ }
+  return { lane: null, author: null, mainBefore: null };
+}
+
+/** Pseudo-author for a main advance nobody merged through the queue: the picker needs someone to avoid. */
+const MAIN_AUTHOR = { id: 'main', name: 'main', runtime: 'none', tmux_session: '', workspace: null, mode: 'adopted', status: 'idle', model: null, effort: null } as unknown as Agent;
+
+export async function requestCandidateReviewFor(project: string, mainSha: string): Promise<void> {
+  const pipe = pipelineOf(project);
+  const on = pipe.candidate_review ?? pipe.auto_review;
+  if (!on) return;
+  const merge = mergeThatMade(project, mainSha);
+  const spec = mainSpec(project);
+  const result = await requestCandidateReview({
+    project, sha: mainSha, repo: projectRepo(project), remote: spec.remote, lane: merge.lane, author: merge.author,
+    mainBefore: merge.mainBefore, productionSha: productionSha(project)?.sha ?? null,
+    pick: (author) => chooseReviewer(author ?? MAIN_AUTHOR, pipe, null),
+    deliver: (agent, text) => deliverSystemLine(agent, text, { kind: 'info', source: CANDIDATE_NOTE }),
+  });
+  if (result.ok) {
+    const d = result.data;
+    note(project, merge.lane, mainSha, CANDIDATE_NOTE, `auto: candidate review of ${mainSha.slice(0, 8)} (since ${d.base.slice(0, 8)}: ${d.merges} merge${d.merges === 1 ? '' : 's'}, ${d.files} file${d.files === 1 ? '' : 's'}) asked from @${d.reviewer}${d.folded ? `, ${d.folded.slice(0, 8)} folded in` : ''}`);
+  } else if (result.error !== 'off' && result.error !== 'already requested' && result.error !== 'empty') {
+    note(project, merge.lane, mainSha, CANDIDATE_NOTE, `auto: no candidate review of ${mainSha.slice(0, 8)} — ${result.error}`);
+  }
+}
+
+function announceCandidateReview(result: CandidateResult): void {
+  const sha8 = result.sha.slice(0, 8);
+  const by = result.seat ? ` by @${result.seat}` : '';
+  let project: string | null = null;
+  let lane: string | null = null;
+  let authorId: string | null = null;
+  try {
+    const row = getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.candidate_review' AND entity_id = ? ORDER BY id DESC LIMIT 1").get(result.sha) as { payload_json: string | null } | undefined;
+    const p = row?.payload_json ? JSON.parse(row.payload_json) as { project?: string | null; lane?: string | null; author_id?: string | null } : {};
+    project = p.project ?? null; lane = p.lane ?? null; authorId = p.author_id ?? null;
+  } catch { /* no record */ }
+  if (result.result === 'pass') {
+    if (project) note(project, lane, result.sha, CANDIDATE_NOTE, `auto: candidate review${by} — PASS on ${sha8}`);
+    return;
+  }
+  const word = `NEEDS FIXES (${result.issues} issue${result.issues === 1 ? '' : 's'})`;
+  if (project) note(project, lane, result.sha, CANDIDATE_NOTE, `auto: candidate review${by} — ${word} on ${sha8}, see ${result.file}`);
+  const text = `[from WaveCode] Candidate review of main ${sha8}${by}: ${word}, see ${result.file}. This is already on main: open a fix lane now so the next release does not carry it.`;
+  // The merged lane's author and the driver seats, each once.
+  void tellDriverSeats(text, authorId, CANDIDATE_NOTE).catch((e) => logger.debug({ sha: result.sha, error: (e as Error).message }, 'Candidate review line failed'));
+}
+
+candidateHooks.onResult = announceCandidateReview;
 
 export async function onStagingDeployed(releaseId: string): Promise<void> {
   const release = getRelease(releaseId);

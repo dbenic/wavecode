@@ -18,6 +18,7 @@ import logger from '../logger.js';
 import * as mergeQueue from '../merge-queue.js';
 import { getConfig } from '../config.js';
 import { gateWordsFor } from '../gate-status.js';
+import { listCandidateReviews } from '../candidate-review.js';
 
 async function opsStageBlockFor(
   freeze: { sha: string; project: string | null; lane: string | null; gate: string | null; freeze_path?: string | null; verdict: string | null } | null,
@@ -159,6 +160,15 @@ export function registerReviewRoutes(app: Hono<NodeAppEnv>): void {
     const result = mergeQueue.setQueueSwitch(project, body.enabled, user.name);
     logger.info({ project, enabled: body.enabled, by: user.name }, 'Merge queue switch');
     return c.json(result);
+  });
+
+  // Rolling candidate reviews of main (27 Oct retro, cause 2): newest first, with the answer when it came.
+  app.get('/api/candidate-reviews/:project', (c) => {
+    const project = c.req.param('project');
+    const known = Object.keys(getConfig().projects ?? {}).includes(project);
+    if (!known) return c.json({ error: `Unknown project ${project}` }, 404);
+    const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 20) || 20));
+    return c.json({ project, reviews: listCandidateReviews(project, limit) });
   });
 
   // Release mode narrows what lands; it never widens, so a seat may set it (an admin or a seat token).

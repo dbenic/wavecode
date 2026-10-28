@@ -8,8 +8,8 @@ The retro (pm-denis): about 9 hours on bank posting, 2 of them real work. Five c
 | # | Cause | Change | State |
 |---|-------|--------|-------|
 | 1 | Nobody checks quota and current work before handing out a task | `create_task` with an agent refuses (409, with `free_agents`) when the agent's 5h/weekly window is under `autonomy.min_quota_pct` (default 10); a busy agent is accepted but the answer carries `agent_busy` with the free ones. Auto-dispatch skips agents under the floor (`agent.quota_low` event, once an hour). | built 27 Oct |
-| 2 | The release review comes only at the end | Rolling candidate review: after every merge into main, review the diff since the last production SHA as a stage of the candidate delivery; by freeze time only the last merge is unreviewed. | planned (next) |
-| 3 | Test time goes to replaced SHAs; no cancel, no priority | WaveCode side: when a lane moves, its old SHA's queued or running run is treated as dead and the new SHA is submitted at the front. Needs a `cancel <run-id>` on the test gateway (test box, Denis's side). | planned; waits for the gateway |
+| 2 | The release review comes only at the end | Rolling candidate review: after every merge into main, WaveCode asks one seat to review the diff since the last reviewed candidate (first time: since the merge's own base), writes the request file, and records the answer on the candidate stage of the delivery. By freeze time only the last merge is unreviewed. | built 28 Oct |
+| 3 | Test time goes to replaced SHAs; no cancel, no priority | WaveCode side: a newer freeze on the same lane stops WaveCode's own quick and gate runs on the old SHA (recorded as cancelled, never RED), drops them from the waiting lists, and the new SHA takes the next slot ahead of older waiters. The remote run is told to stop through `pipeline.cancel_command` once the gateway has a `cancel` verb (test box, Denis's side; spec below). | built 28 Oct (WaveCode side); gateway verb pending |
 | 4 | WaveCode blocks without saying why | (a) A wait a person must end (hold, moved lane, red gate, missing PASS, release mode) is said once to the author and the driver seats (`deliveries.notify`) the first time it appears. (b) A GREEN full gate counts as the quick check too. (c) A gate the gateway ran on a cloud runner (`kind=dev, suite=gate`) counts as the full gate (6a8e1ec). | built 27 Oct |
 | 5 | No release mode: during a freeze chosen lanes cannot land without Denis | `POST /api/merge-queue/:project/release-mode {lanes}` and the seat tool `set_release_mode`: only the named lanes (branch names or `desk:<n>`) land; every other eligible lane waits with `RELEASE_MODE`. The ON/OFF switch stays Denis's. Shown on the Reviews page. | built 27 Oct |
 | gap | Moving old mappings to day 0 was not in the feature | One mandatory line in the room's spec template: "what happens to existing records". | room file; Denis or pm-denis |
@@ -21,3 +21,38 @@ The retro (pm-denis): about 9 hours on bank posting, 2 of them real work. Five c
 ## How we will know it worked
 
 The tracker's stall notices per delivery and the retro numbers: minutes in build before the first run, minutes waiting on GATE_NOT_GREEN with a green full run, time from the last merge to a green candidate, hand merges on GitHub (should be zero).
+
+## Rolling candidate review (cause 2), built 28 Oct 2026
+
+- Trigger: every main advance the pipeline sees (`pipelineHooks.onMain`: a queue merge, or main moving with `auto_merge_main`).
+  Switch `projects.<p>.pipeline.candidate_review` (default: on when `auto_review` is on).
+- Base of the diff: the newest candidate review that already has an answer and is an ancestor of the new main; the first
+  time, the merge's own `main_before`; failing that, the production SHA. Nothing to compare against: no request, one note.
+- Reviewer: the usual picker (`chooseReviewer`), with the merged lane's author as the author to avoid. An unanswered earlier
+  request on the same project is marked superseded; its delta is inside the new one.
+- Request file: `<freeze_dir>/wave-candidate-<sha8>-<yyyymmdd>.md`, written by WaveCode with the merge list and the diffstat.
+  The seat appends `ISSUES:` lines (`- [HIGH|MED|LOW] path:line — why`) and ends with one line `CANDIDATE REVIEW: PASS` or
+  `CANDIDATE REVIEW: NEEDS FIXES`. The inbox watcher records it (`pipeline.candidate_review`, kind `result`).
+- NEEDS FIXES: the merged lane's author and the driver seats (`deliveries.notify`) get one line with the file. PASS: a note.
+  No answer after `candidate_review_timeout_min` (default 45): one line to the reviewer and the driver seats.
+- Tracker: the candidate span of a delivery shows the reviewer as actor; NEEDS FIXES is its cause (a BLOCKED stall).
+- API: `GET /api/candidate-reviews/:project?limit=20`.
+
+## Run cancel on replaced SHAs (cause 3), built 28 Oct 2026
+
+WaveCode side (live): when a freeze supersedes an older one on the same lane (`superseded_by`), `cancelRunsFor(oldSha)`
+aborts WaveCode's own quick and full-gate submissions on the old SHA (the local `countix-remote-test` process is killed),
+drops the SHA from the waiting lists, records `gate.result` with a `cancelled: superseded by <sha8>` dispatch failure
+(the checker never reads it as RED), emits `pipeline.quick`/`pipeline.gate` with the word `CANCELLED`, and marks the new
+SHA as "jumped": it takes the next free slot ahead of older waiters (admin priority still first).
+
+Gateway side (Denis, on countix-testing): a `cancel` verb on the submit gateway, called by WaveCode as
+`pipeline.cancel_command: ["countix-remote-test", "cancel", "{sha}"]` once it exists.
+
+    countix-remote-test cancel <sha|run-id>
+      cancels every queued or running run for that SHA submitted from this box (any suite, any who);
+      prints one `CANCELLED <run-id>` line per run, or `NOTHING TO CANCEL`; exit 0 either way;
+      a cancelled run is recorded in history with state `cancelled` and `superseded_by` empty
+      (the result line, when the run had started, is `=== RESULT CANCELLED sha=… ===`, never RED).
+
+Without the verb the remote run finishes on its own; WaveCode just stops waiting for it and moves on.

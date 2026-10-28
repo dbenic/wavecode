@@ -96,6 +96,37 @@ describe('delivery derivation', () => {
     expect(spans.filter((s) => (s.cause ?? '').includes('not on origin'))).toEqual([]);
   });
 
+  it('the rolling candidate review rides on the candidate span: reviewer as actor, NEEDS FIXES as its cause; a cancelled run supersedes its gates span', () => {
+    const created = del.createDelivery({ title: 'Posting', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
+    if (!created.ok) throw new Error(created.error);
+    const id = created.data.id;
+    ev(10, 'pipeline.frozen', A, { sha: A, project: 'wavepulse', lane: LANE });
+    ev(11, 'pipeline.quick', `${A}:quick`, { sha: A, lane: LANE, quick: 'QUEUED' });
+    ev(12, 'pipeline.gate', `${A}:full`, { sha: A, lane: LANE, gate: 'QUEUED' });
+    ev(20, 'pipeline.frozen', B, { sha: B, project: 'wavepulse', lane: LANE });
+    ev(20, 'pipeline.gate', `${A}:full`, { sha: A, lane: LANE, gate: 'CANCELLED', reason: `superseded by ${B.slice(0, 8)}` });
+    ev(21, 'pipeline.quick', `${B}:quick`, { sha: B, lane: LANE, quick: 'QUEUED' });
+    ev(40, 'gate.result', B, { sha: B, suite: 'full', state: 'GREEN' });
+    ev(41, 'merge_queue.queued', B, { sha: B, lane: LANE, tier: 'ship' });
+    ev(50, 'merge_queue.merged', B, { lane: LANE, sha_in: B, sha_out: M, main_before: 'a'.repeat(40), author: 'codex1' });
+    ev(51, 'pipeline.candidate_review', M, { kind: 'assign', project: 'wavepulse', sha: M, base: 'a'.repeat(40), lane: LANE, reviewer: 'claude4', reviewer_id: 'x' });
+    let spans = del.deriveDelivery(id);
+    if (!spans.ok) throw new Error(spans.error);
+    const gatesA = spans.data.spans.find((s) => s.stage === 'gates' && s.sha === A)!;
+    expect(gatesA.outcome).toBe('superseded');
+    expect(gatesA.cause).toContain('superseded by');
+    let cand = spans.data.spans.find((s) => s.stage === 'candidate' && s.sha === M)!;
+    expect(cand.actor).toBe('claude4');
+    expect(cand.cause).toBeNull();
+    ev(70, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'needs-fixes', issues: 2, seat: 'claude4', file: '/inbox/wave-candidate-43bca6d9-20261028.md' });
+    spans = del.deriveDelivery(id);
+    if (!spans.ok) throw new Error(spans.error);
+    cand = spans.data.spans.find((s) => s.stage === 'candidate' && s.sha === M)!;
+    expect(cand.outcome).toBeNull();
+    expect(cand.cause).toBe('candidate review NEEDS FIXES by @claude4 (2 issues), see /inbox/wave-candidate-43bca6d9-20261028.md');
+    expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 71 * 60_000).map((s) => `${s.stage}:${s.code}`)).toContain('candidate:BLOCKED');
+  });
+
   it('derives the bank-posting day: freeze, first pass, gates, review, land, candidate, release', () => {
     const created = del.createDelivery({ title: 'Bank simple posting', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
     expect(created.ok).toBe(true);

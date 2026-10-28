@@ -188,7 +188,7 @@ export default function Release() {
           <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${l.verdict === 'pass' ? 'text-emerald-300 border-emerald-500/40' : 'text-amber-300 border-amber-500/40'}`}>
             {(l.verdict ?? 'none').toUpperCase().replace('-', ' ')}
           </span>
-          {l.gate && <span className={`ml-2 text-[9px] font-bold ${l.gate === 'GREEN' ? 'text-emerald-300' : 'text-red-300'}`}>{l.gate}</span>}
+          {l.gate && <span className={`ml-2 text-[9px] font-bold ${l.gate === 'GREEN' ? 'text-emerald-300' : l.gate === 'CANCELLED' ? 'text-slate-400' : 'text-red-300'}`}>{l.gate}</span>}
           <div className="mt-1 flex gap-2 text-[9px]">
             {card?.freeze_path && <a href={fileViewHref(card.freeze_path)} onClick={openFile} className="text-sky-300 underline underline-offset-2">freeze</a>}
             {card?.verdict_path && <a href={fileViewHref(card.verdict_path)} onClick={openFile} className="text-sky-300 underline underline-offset-2">verdict</a>}

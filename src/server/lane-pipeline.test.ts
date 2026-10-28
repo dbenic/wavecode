@@ -30,7 +30,8 @@ import { laneStatusLine } from './lane-status.js';
 import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } from './lane-main.js';
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
-  authorLoadForTest, ensureMainGate, ensureProdSyncLane, mainApiState, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+  authorLoadForTest, cancelStateForTest, ensureMainGate, ensureProdSyncLane, mainApiState, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+import { recordCandidateReviewFile } from './candidate-review.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
 import { setTestRunExecForTest } from './test-runs.js';
@@ -854,6 +855,85 @@ describe('hands-free lane pipeline', () => {
     const quickWords = () => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.quick' AND entity_id = ? ORDER BY id").all(`${sha}:quick`) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick: string }).quick);
     await vi.waitFor(() => expect(quickWords()).toEqual(['QUEUED', 'QUEUED', 'GREEN']), { timeout: 10_000 });
     expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
+  });
+
+  it('a newer freeze on the same lane stops the old SHA\'s running quick and gate (cancelled, never RED), asks the gateway to cancel, and the new SHA runs next', async () => {
+    // The tool blocks until the daemon aborts it (a real gate takes 20+ minutes).
+    setPipelineExecForTest((argv, opts) => {
+      calls.push(argv);
+      if (argv[0] === 'cancel-run') return { code: 0, stdout: `CANCELLED 20261028-0001-${argv[1].slice(0, 9)}` };
+      if ((argv[0] === 'quick-check' || argv[0] === 'gate-run') && argv.some((a) => a === shaA)) {
+        return new Promise((resolve) => {
+          opts.signal?.addEventListener('abort', () => resolve({ code: 1, stdout: '' }));
+        });
+      }
+      if (argv[0] === 'quick-check') return { code: 0, stdout: '=== RESULT GREEN sha=x suite=tier1 exit=0 host=h ===' };
+      if (argv[0] === 'gate-run') return { code: 0, stdout: '=== RESULT GREEN sha=x suite=api exit=0 host=h ===' };
+      return { code: 0, stdout: 'ok' };
+    });
+    pipe.auto_gate = true;
+    pipe.gate_with_quick = true;
+    pipe.cancel_command = ['cancel-run', '{sha}'];
+    const shaA = branch('wc-toni', 't1.txt', 'one');
+    const author = agent('toni', path.join(tmp, 'wc-toni'));
+    await ingestFreezeFile(openNote('toni', 'wc-toni', shaA));
+    // The full gate took the author's slot first; the quick check waits behind it in WaveCode.
+    await vi.waitFor(() => expect(cancelStateForTest().live).toContain(`${shaA}:full`), { timeout: 10_000 });
+    await vi.waitFor(() => expect(quickLoadForTest().pending).toEqual([shaA]), { timeout: 10_000 });
+    expect(getFreeze(shaA)?.gate).toBe('QUEUED');
+
+    const shaB = branch('wc-toni', 't2.txt', 'two');
+    await ingestFreezeFile(openNote('toni', 'wc-toni', shaB));
+    expect(getFreeze(shaA)?.status).toBe('stale');
+    await vi.waitFor(() => expect(getFreeze(shaA)?.gate).toBe('CANCELLED'), { timeout: 10_000 });
+    await vi.waitFor(() => expect(getFreeze(shaB)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    expect(calls.filter((a) => a[0] === 'cancel-run').map((a) => a[1])).toEqual([shaA]);
+    // A's runs: recorded as a dispatch failure (never RED), one CANCELLED word each; nobody told the author RED.
+    const results = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'gate.result' AND entity_id = ? ORDER BY id").all(shaA) as Array<{ payload_json: string }>).map((r) => JSON.parse(r.payload_json) as { state: string; steps: { tail: string[] } });
+    expect(results.map((r) => r.state)).toEqual(['ERROR']);
+    expect(results.map((r) => r.steps.tail.slice(-1)[0])).toEqual([`CANCELLED by WaveCode: superseded by ${shaB.slice(0, 8)}`]);
+    const words = (type: string, key: string) => (db.getDb().prepare('SELECT payload_json FROM events WHERE type = ? AND entity_id = ? ORDER BY id').all(type, key) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick?: string; gate?: string }));
+    expect(words('pipeline.quick', `${shaA}:quick`).map((w) => w.quick)).toEqual(['QUEUED', 'CANCELLED']);
+    expect(words('pipeline.gate', `${shaA}:full`).map((w) => w.gate)).toEqual(['QUEUED', 'CANCELLED']);
+    expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
+    const notes = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.action' AND entity_id = 'wave:wc-toni' ORDER BY id").all() as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { note: string }).note);
+    expect(notes.some((n) => new RegExp(`stopped — superseded by ${shaB.slice(0, 8)}, which goes next`).test(n))).toBe(true);
+    expect(cancelStateForTest().jumped).toEqual([shaB]);
+    expect(cancelStateForTest().live).toEqual([]);
+    // B went through: its quick and its gate both ran, A's never finished.
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'quick-check' && a.includes(shaB))).toHaveLength(1), { timeout: 10_000 });
+    expect(calls.filter((a) => a[0] === 'gate-run' && a.includes(shaB))).toHaveLength(1);
+  });
+
+  it('after a queue merge the pipeline asks one seat for the rolling candidate review and announces NEEDS FIXES to the author', async () => {
+    pipe.auto_review = true;
+    const base = git(repo, 'rev-parse', 'HEAD');
+    const laneSha = branch('wc-ales-x', 'x.txt', 'x');
+    git(repo, 'checkout', '-q', 'main');
+    git(repo, 'merge', '-q', '--no-ff', '-m', 'Merge wc-ales-x', laneSha);
+    const mainSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', mainSha);
+    const author = agent('ales', path.join(tmp, 'ales'));
+    const toni = agent('toni', path.join(tmp, 'toni'));
+    emit('merge_queue.merged', 'run', laneSha, { project: 'wave', lane: 'wc-ales-x', sha_in: laneSha, sha_out: mainSha, main_before: base, author: 'ales' }, null);
+    await onMainAdvanced('wave', mainSha);
+    const asked = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.candidate_review' AND entity_id = ?").all(mainSha) as Array<{ payload_json: string }>).map((r) => JSON.parse(r.payload_json) as { kind: string; base: string; reviewer: string; reviewer_id: string; file: string; lane: string; author: string });
+    expect(asked.map((a) => a.kind)).toEqual(['assign']);
+    expect(asked[0].base).toBe(base);
+    expect(asked[0].lane).toBe('wc-ales-x');
+    expect(asked[0].author).toBe('ales');
+    expect(asked[0].reviewer).not.toBe('ales');
+    expect(messages(asked[0].reviewer_id).some((m) => /Candidate review: main is at/.test(m))).toBe(true);
+    expect(fs.existsSync(asked[0].file)).toBe(true);
+    expect(latestPipelineNote('wave', 'wc-ales-x')).toMatch(/candidate review of .* asked from @/);
+    await onMainAdvanced('wave', mainSha); // once per main SHA
+    expect((db.getDb().prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'pipeline.candidate_review'").get() as { n: number }).n).toBe(1);
+
+    fs.appendFileSync(asked[0].file, `\nISSUES:\n- [HIGH] x.txt:1 — wrong\nSeat: @${asked[0].reviewer}\nCANDIDATE REVIEW: NEEDS FIXES\n`);
+    expect(recordCandidateReviewFile(asked[0].file)).toMatchObject({ sha: mainSha, result: 'needs-fixes', issues: 1 });
+    expect(messages(author.id).some((m) => /Candidate review of main .*NEEDS FIXES \(1 issue\)/.test(m))).toBe(true);
+    expect(messages(toni.id).filter((m) => /NEEDS FIXES/.test(m))).toHaveLength(toni.id === asked[0].reviewer_id ? 0 : 0);
+    expect(latestPipelineNote('wave', 'wc-ales-x')).toMatch(/candidate review by @.* — NEEDS FIXES \(1 issue\)/);
   });
 
   it('WaveCode submits one run per author at a time (the gateway cancels a second queued run per agent); other authors run alongside', async () => {

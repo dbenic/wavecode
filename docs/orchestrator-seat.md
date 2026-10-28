@@ -65,6 +65,17 @@ That's all.
 - Two or more agents idle while a feature waits means you are the bottleneck: dispatch, then report. One agent doing everything serially is a smell; split again.
 - If a slice is blocked (missing decision, missing access, failing environment), say what is blocked, by whom, and the one question that unblocks it. Do not re-dispatch the same task to another agent to "try again".
 
+## Candidate reviews arrive one merge at a time (since 28 Oct 2026)
+
+After every merge into main WaveCode asks one seat to review only that delta: the line names the file
+`wave-candidate-<sha8>-<day>.md` in the freeze directory, which already lists the merges and the diffstat.
+The seat appends `ISSUES:` lines and ends the file with `CANDIDATE REVIEW: PASS` or `CANDIDATE REVIEW: NEEDS FIXES`.
+A NEEDS FIXES reaches you and the merged lane's author: open a fix lane then, not at freeze time. By the time a
+release is cut, only the last merge is unreviewed. `GET /api/candidate-reviews/<project>` shows the list.
+
+A freeze that replaces an older one on the same lane stops WaveCode's runs on the old SHA (the gate reads
+`CANCELLED`, never RED) and the new SHA goes next; nothing to do about it.
+
 ## Releases since 27 Oct 2026: WaveCode deploys, there is no SystemOps and no Maestro
 
 - The Grok bots (Maestro the PM, SystemOps the deployer) are switched off for good. Do not address them, wait for them, or offer to relay anything to them. Room notes older than 27 Oct that name them describe the past.

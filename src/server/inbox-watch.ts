@@ -21,6 +21,7 @@ import { getConfig } from './config.js';
 import { insertAgentMessage, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
 import { isFirstPassFileName, recordFirstPassFile } from './first-pass.js';
+import { isCandidateFileName, recordCandidateReviewFile } from './candidate-review.js';
 import logger from './logger.js';
 import { deliverSystemLine } from './wire-lines.js';
 import { archiveDocumentFile } from './fixtures.js';
@@ -122,6 +123,10 @@ export function announceFile(file: string, label: string): void {
   const base = path.basename(file);
   if (isFirstPassFileName(base)) {
     recordFirstPassFile(file);
+    return;
+  }
+  if (isCandidateFileName(base)) {
+    recordCandidateReviewFile(file);
     return;
   }
   const busy = isFreezeInboxDir(path.dirname(file));

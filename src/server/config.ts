@@ -191,6 +191,18 @@ export interface ProjectConfig {
     /** A lane that changes more files than this gets a size warning in the review ping. 0 disables. Default 40. */
     max_lane_files?: number;
     /**
+     * Rolling candidate review: after every main advance one seat reviews the diff since the last
+     * reviewed candidate (docs/ops/engine-fixes-27oct-plan.md). Default: on when `auto_review` is on.
+     */
+    candidate_review?: boolean;
+    /** Minutes until a candidate review with no answer is chased. Default 45. */
+    candidate_review_timeout_min?: number;
+    /**
+     * Told to the test gateway when a run WaveCode submitted is superseded (`{sha}` = the old SHA);
+     * the local submission is abandoned either way.
+     */
+    cancel_command?: string[];
+    /**
      * When set, only these seats (name or alias) may be picked as reviewers,
      * besides the prefer tiers and the author-glob pools. Keeps the open
      * ladder away from other people's seats.

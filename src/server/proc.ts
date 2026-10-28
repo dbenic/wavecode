@@ -13,6 +13,8 @@ export interface ExecFileAsyncOptions {
   env?: NodeJS.ProcessEnv;
   /** Written to stdin, then the stream is closed. */
   input?: string;
+  /** Aborting it kills the child (SIGTERM); the promise rejects like any other failure. */
+  signal?: AbortSignal;
 }
 
 export interface ExecFileFailure extends Error {
@@ -36,6 +38,7 @@ export function execFileAsync(file: string, args: string[], opts: ExecFileAsyncO
       timeout: opts.timeout,
       maxBuffer: opts.maxBuffer ?? 1024 * 1024,
       env: opts.env,
+      ...(opts.signal ? { signal: opts.signal } : {}),
       encoding: 'utf8' as const,
       // Node ignores this. Callers and tests read it; the bytes also go to stdin.
       ...(opts.input != null ? { input: opts.input } : {}),

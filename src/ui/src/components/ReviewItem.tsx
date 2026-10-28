@@ -250,7 +250,7 @@ export default function ReviewItem({
                 </span>
               )}
               {freeze.gate && (
-                <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${freeze.gate === 'GREEN' ? 'text-emerald-300 border-emerald-500/40' : 'text-red-300 border-red-500/40'}`}>
+                <span className={`text-[9px] font-bold tracking-wider rounded px-1.5 py-0.5 border ${freeze.gate === 'GREEN' ? 'text-emerald-300 border-emerald-500/40' : freeze.gate === 'CANCELLED' ? 'text-slate-400 border-slate-600' : 'text-red-300 border-red-500/40'}`}>
                   GATE {freeze.gate}
                 </span>
               )}

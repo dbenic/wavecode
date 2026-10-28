@@ -194,7 +194,7 @@ export function getFreezeByRun(runId: string): ReleaseFreeze | null {
 /** Record the gate command's result word on the freeze. */
 export function setFreezeGate(sha: string, gate: string): void {
   const g = gate.toUpperCase();
-  if (g !== 'GREEN' && g !== 'RED' && g !== 'QUEUED' && g !== 'RUNNING') return;
+  if (g !== 'GREEN' && g !== 'RED' && g !== 'QUEUED' && g !== 'RUNNING' && g !== 'CANCELLED') return;
   patch(sha, { gate: g });
 }
 
