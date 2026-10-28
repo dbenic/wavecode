@@ -1191,9 +1191,13 @@ event contract).
   `WAVECODE_SHA`, `WAVECODE_LANE` and `WAVECODE_CHECKOUT` in the environment, for up to
   `pipeline.gate_timeout_min` (default 120). The exit code decides: 0 GREEN, 1 RED, 7 (the
   dispatcher's duplicate) stays QUEUED; a submit-only tool may print QUEUED or RUNNING on its
-  last line instead. `pipeline.gate_with_quick` skips the pipeline's own quick check so one
-  remote run per freeze is submitted while the review runs. Quick and gate commands no longer
-  need a `{sha}` placeholder; `{checkout}` is available.
+  last line instead. `pipeline.gate_with_quick` makes WaveCode run the quick check itself first
+  and submit the full gate only once that quick is GREEN (since 28 Oct 2026): a RED quick ends
+  the matter in minutes with the note `full gate not submitted on <sha8> — the quick check is
+  RED`, and a red lane holds no gate slot. An author's own quick on the exact SHA counts (GREEN:
+  straight to the gate; RED: no gate; still running: the gate follows once the word is in). A
+  quick the gateway refuses three times lets the gate run anyway. Quick and gate commands no
+  longer need a `{sha}` placeholder; `{checkout}` is available.
 - **Reviewer capacity.** A seat whose profile has less than `review.min_capacity_pct`
   (default 10) left on its 5-hour or weekly window, as read by the usage probe, is not
   picked. An unprobed profile is not excluded. `pipeline.reviewer_allow` limits the open
@@ -1354,6 +1358,7 @@ Plan and status: `docs/ops/engine-fixes-27oct-plan.md`.
 - Merge queue: a GREEN full gate satisfies the quick check. A wait a person must end (`LANE_DENIED`, `LANE_MOVED`, `NEEDS_FIXES`, `NO_PASS_ON_SHA`, `NO_PR`, `MIGRATION_HOLD`, `ASK_TIER_NO_OK`, `GH_AUTH_MISSING`, `CHECK_FAILED`, `RELEASE_MODE`, or `GATE_NOT_GREEN` with a red run) is told once to the author and the driver seats (`deliveries.notify`) when it first appears.
 - **Rolling candidate review** (28 Oct 2026). After every main advance the pipeline asks one seat (the usual picker, the merged lane's author excluded) to review the diff since the last answered candidate review; the first time since the merge's own base. WaveCode writes `<freeze_dir>/wave-candidate-<sha8>-<yyyymmdd>.md` with the merge list and the diffstat; the seat appends `ISSUES:` lines and ends the file with `CANDIDATE REVIEW: PASS` or `CANDIDATE REVIEW: NEEDS FIXES`. Events `pipeline.candidate_review` on the main SHA (`kind`: `assign`, `result`, `superseded`, `overdue`). NEEDS FIXES goes to the author and the driver seats; no answer after `pipeline.candidate_review_timeout_min` (default 45) is chased once. Switch `pipeline.candidate_review` (default: follows `auto_review`). `GET /api/candidate-reviews/:project?limit=20` lists them, newest first, with the answer. The delivery tracker shows the reviewer on the candidate span and NEEDS FIXES as its cause.
 - **Runs on replaced SHAs** (28 Oct 2026). A freeze that supersedes an older one on the same lane stops WaveCode's own quick and full-gate submissions on the old SHA: a run in flight is aborted (the local tool process is killed) and recorded as `gate.result` state `ERROR` with `CANCELLED by WaveCode: superseded by <sha8>` as the last tail line, a run still waiting is dropped; both get `pipeline.quick`/`pipeline.gate` with the word `CANCELLED` and the freeze's gate reads `CANCELLED`. The new SHA takes the next free slot ahead of older waiters (admin priority still first). `pipeline.cancel_command` (`{sha}`), when set, is run once per cancelled SHA so the gateway can stop the remote run.
+- **Quick first, gate after** (28 Oct 2026). With `pipeline.gate_with_quick` the full gate is submitted only after the quick check on the SHA is GREEN (WaveCode's own run or the author's); a RED quick leaves the gate unsubmitted (`pipeline.action` note `full gate not submitted … the quick check is RED`, the author is told), a quick the gateway refuses three times lets the gate run anyway. Before this the gate took the author's one gateway slot first and the quick waited behind a 20-minute run.
 - `POST /api/merge-queue/:project/release-mode` `{ lanes: string[] | null }` (admin or a seat token): release mode. Only the named lanes land (branch names or `desk:<n>` for every lane whose freeze carries that desk number); every other eligible lane waits with `RELEASE_MODE: only … land until the release is out`. `[]`/`null` ends it. Shown in `switches[].release_lanes` of `GET /api/merge-queue` and on the Reviews page. Seat tool: `set_release_mode`.
 
 ## Delivery tracker (27 Oct 2026)

@@ -821,6 +821,7 @@ export function cancelRunsFor(sha: string, reason: string, opts: { project?: str
     setFreezeGate(sha, 'CANCELLED');
     emit(GATED, 'run', `${sha}:full`, { sha, project, lane, gate: 'CANCELLED', reason }, null);
   }
+  gateAfterQuick.delete(sha); // a gate still waiting for its quick never ran: nothing to stop
   if (opts.by) jumped.add(opts.by);
   const pipe = pipelineOf(opts.project ?? null);
   if (n && pipe.cancel_command?.length) {
@@ -903,25 +904,67 @@ function quickInflightFor(project: string): Set<string> {
   return set;
 }
 
-async function queueQuickCheck(freeze: ReleaseFreeze): Promise<void> {
-  if (!freeze.project) return;
-  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return;
+/**
+ * Quick first, gate after (28 Oct 2026): the full gate is submitted only once the quick check on the
+ * SHA is GREEN. A RED quick ends the matter after four minutes instead of twenty-seven, and a red lane
+ * no longer holds a gate slot. SHAs whose gate waits for their quick check live here.
+ */
+const gateAfterQuick = new Set<string>();
+type QuickDecision = 'off' | 'submitted' | 'known:green' | 'known:red' | 'known:pending';
+
+/** Decide the quick check for a fresh freeze: not WaveCode's, already known, or submitted (it runs in the background). */
+async function queueQuickCheck(freeze: ReleaseFreeze): Promise<QuickDecision> {
+  if (!freeze.project) return 'off';
+  if (laneAutomationDenied(freeze.project, { name: freeze.author_name }, freeze.lane)) return 'off';
   const pipe = pipelineOf(freeze.project);
-  if (!pipe.auto_gate || !pipe.gate_with_quick || !pipe.quick_check_command?.length) return;
-  if (acted(`${freeze.sha}:quick`, QUICK)) return;
+  if (!pipe.auto_gate || !pipe.gate_with_quick || !pipe.quick_check_command?.length) return 'off';
   const sha8 = freeze.sha.slice(0, 8);
+  // WaveCode already ran or queued it (a re-ingest): its word decides the gate; none yet = still running.
+  if (acted(`${freeze.sha}:quick`, QUICK)) {
+    try { const words = await gateWordsFor(freeze); return words.quick === 'missing' ? 'known:pending' : `known:${words.quick}` as QuickDecision; } catch { return 'known:pending'; }
+  }
   // The author's own quick on the exact SHA counts; only a missing one is WaveCode's to run.
   try {
     const words = await gateWordsFor(freeze);
-    if (words.quick !== 'missing') return;
+    if (words.quick !== 'missing') return `known:${words.quick}` as QuickDecision;
   } catch (e) { logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'quick check: checker read failed; running it'); }
   emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: 'QUEUED' }, null);
   if (quickInflightFor(freeze.project).size >= pipe.gate_max_inflight || authorBusy(freeze)) {
     if (!quickPending.includes(freeze.sha)) quickPending.push(freeze.sha);
     note(freeze.project, freeze.lane, freeze.sha, 'quick', authorBusy(freeze) ? `auto: quick check on ${sha8} waits for @${freeze.author_name ?? 'wavecode'}'s other run (the gateway keeps one queued run per agent)` : `auto: quick check on ${sha8} waits for a slot (${quickInflightFor(freeze.project).size} running, ${quickPending.length} waiting)`);
+    return 'submitted';
+  }
+  void runQuick(freeze).catch((e) => logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Quick check failed'));
+  return 'submitted';
+}
+
+/** Gates waiting on a quick WaveCode is not running itself (the author's own run, or one lost to a restart): settle them from the checker's word. */
+async function settleGatesWaitingOnQuick(): Promise<void> {
+  for (const sha of [...gateAfterQuick]) {
+    if (liveRuns.has(runKey(sha, 'quick')) || quickPending.includes(sha) || refusedRuns.has(refusedKey(sha, 'quick'))) continue;
+    const freeze = getFreeze(sha);
+    if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { gateAfterQuick.delete(sha); continue; }
+    try {
+      const words = await gateWordsFor(freeze);
+      if (words.quick === 'green') afterQuickSettled(sha, 'GREEN');
+      else if (words.quick === 'red') afterQuickSettled(sha, 'RED');
+    } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'quick word read failed'); }
+  }
+}
+
+/** The quick check on a SHA settled: a GREEN releases its full gate, a RED cancels it, a given-up refusal lets the gate run anyway. */
+function afterQuickSettled(sha: string, outcome: 'GREEN' | 'RED' | 'GAVE_UP' | 'CANCELLED'): void {
+  if (!gateAfterQuick.delete(sha)) return;
+  const freeze = getFreeze(sha);
+  if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) return;
+  const sha8 = sha.slice(0, 8);
+  if (outcome === 'RED') {
+    note(freeze.project, freeze.lane, sha, 'gate', `auto: full gate not submitted on ${sha8} — the quick check is RED; fix, push and freeze a new SHA`);
     return;
   }
-  await runQuick(freeze);
+  if (outcome === 'CANCELLED') return;
+  if (outcome === 'GAVE_UP') note(freeze.project, freeze.lane, sha, 'gate', `auto: quick check on ${sha8} could not run; submitting the full gate anyway`);
+  void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
 }
 
 function drainQuickPending(): void {
@@ -975,6 +1018,7 @@ async function runQuick(freeze: ReleaseFreeze): Promise<void> {
       await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: `${result.stdout}\nCANCELLED by WaveCode: ${cancelled}`, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: `cancelled: ${cancelled}` });
       emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: 'CANCELLED', reason: cancelled }, null);
       note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check on ${sha8} stopped — ${cancelled}`);
+      afterQuickSettled(freeze.sha, 'CANCELLED');
       return;
     }
     const refusal = runRefusal(result);
@@ -985,11 +1029,13 @@ async function runQuick(freeze: ReleaseFreeze): Promise<void> {
       if (again && !quickPending.includes(freeze.sha)) quickPending.push(freeze.sha);
       note(freeze.project, freeze.lane, freeze.sha, 'quick', again ? `auto: quick check on ${sha8} not run (${refusal}); trying again in a few minutes` : `auto: quick check on ${sha8} not run after ${REFUSED_MAX_TRIES} tries (${refusal}); run countix-remote-test tier1 on it yourself`);
       emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: 'QUEUED', refusal, retry: again }, null);
+      if (!again) afterQuickSettled(freeze.sha, 'GAVE_UP');
       return;
     }
     emit(QUICK, 'run', `${freeze.sha}:quick`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, quick: word, exit_code: result.code }, null);
     note(freeze.project, freeze.lane, freeze.sha, 'quick', `auto: quick check ${word} on ${sha8}`);
-    if (word === 'RED') tell(freeze.author_agent_id, `[from WaveCode] quick check RED on ${sha8} (${freeze.lane ?? 'your lane'}). Fix, push and freeze a new SHA.`);
+    if (word === 'RED') tell(freeze.author_agent_id, `[from WaveCode] quick check RED on ${sha8} (${freeze.lane ?? 'your lane'}). Fix, push and freeze a new SHA; the full gate was not submitted.`);
+    if (word === 'GREEN' || word === 'RED') afterQuickSettled(freeze.sha, word);
   } finally {
     inflight.delete(freeze.sha);
     authorDone(freeze);
@@ -1665,10 +1711,12 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
     const stopped = cancelRunsFor(old.sha, `superseded by ${sha.slice(0, 8)}`, { project: freeze.project, by: sha });
     if (stopped) note(freeze.project!, freeze.lane, old.sha, 'cancel', `auto: ${stopped} run${stopped === 1 ? '' : 's'} on ${old.sha.slice(0, 8)} stopped — superseded by ${sha.slice(0, 8)}, which goes next`);
   }
-  // The gate runs for as long as the remote suite takes; the review starts now.
-  // Quick first (minutes), then the full gate: WaveCode submits one run per author at a time.
-  void queueQuickCheck(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-quick skipped'));
-  void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
+  // Quick first (minutes), the full gate only once it is GREEN; the review starts now.
+  let quick: QuickDecision = 'off';
+  try { quick = await queueQuickCheck(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-quick skipped'); }
+  if (quick === 'submitted' || quick === 'known:pending') gateAfterQuick.add(sha); // settles from the run, or from the tick once the word is in
+  else if (quick === 'known:red') note(freeze.project!, freeze.lane, sha, 'gate', `auto: full gate not submitted on ${sha.slice(0, 8)} — the quick check on it is RED; fix, push and freeze a new SHA`);
+  else void queueFullGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Auto-gate skipped'));
   try { await requestFirstPassFor(freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'First pass skipped'); }
   try { await assignReviewer(getFreeze(sha) ?? freeze); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-review skipped'); }
   try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
@@ -1721,6 +1769,7 @@ export async function pipelineTick(now = Date.now()): Promise<void> {
     try { await ensureProdSyncLane(project); } catch (e) { logger.debug({ project, error: (e as Error).message }, 'Prod sync skipped'); }
   }
   try { await reconcileLostGates(now); } catch (e) { logger.debug({ error: (e as Error).message }, 'Gate reconcile skipped'); }
+  await settleGatesWaitingOnQuick();
   for (const [sha, at] of [...refusedFreezes.entries()]) {
     if (now - at > REFUSED_TTL_MS) { refusedFreezes.delete(sha); continue; }
     if (now - at < REFUSED_RECHECK_MS) continue;
@@ -1759,6 +1808,7 @@ export function resetPipelineForTest(): void {
   liveRuns.clear();
   cancelledRuns.clear();
   jumped.clear();
+  gateAfterQuick.clear();
 }
 
 firstPassHooks.onResult = announceFirstPass;

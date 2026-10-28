@@ -815,21 +815,68 @@ describe('hands-free lane pipeline', () => {
     await vi.waitFor(() => expect(quickWords(red)).toEqual(['QUEUED', 'RED']), { timeout: 10_000 });
     const gs = await import('./gate-status.js');
     expect(gs.recordsFor(green).map((r) => [r.suite, r.state])).toContainEqual(['quick', 'GREEN']);
-    await vi.waitFor(() => expect(messages(author.id).some((m) => /quick check RED on/.test(m))).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(messages(author.id).some((m) => /quick check RED on .*the full gate was not submitted/.test(m))).toBe(true), { timeout: 10_000 });
+    // Quick first, gate after: the green lane's full gate was submitted only once its quick was GREEN; the red lane gets no gate at all.
+    const gates = () => calls.filter((a) => a[0] === 'gate-run').map((a) => a[2]);
+    await vi.waitFor(() => expect(gates()).toEqual([green]), { timeout: 10_000 });
+    expect(calls.findIndex((a) => a[0] === 'gate-run')).toBeGreaterThan(calls.findIndex((a) => a[0] === 'quick-check' && a[1] === green));
+    await vi.waitFor(() => expect(getFreeze(green)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    expect(getFreeze(red)?.gate ?? null).toBeNull();
+    expect(latestPipelineNote('wave', 'wc-red')).toMatch(/full gate not submitted on .* — the quick check is RED/);
     // A second ingest of the same note runs nothing again.
     await ingestFreezeFile(openNote('ales', 'wc-green', green));
     expect(quicks()).toHaveLength(2);
+    expect(gates()).toEqual([green]);
     expect(quickLoadForTest()).toEqual({ inflight: { wave: [] }, pending: [] });
+  });
+
+  it('a SHA whose quick check is already known skips straight to the gate (GREEN) or gets none (RED); a quick WaveCode cannot run after three refusals lets the gate run anyway', async () => {
+    setRefusedRetryMsForTest(300);
+    const refused = { code: 143, stdout: 'CANCELLED: no runner (one queued run per agent) — not run\ncountix-remote-test: remote exit 143 on host=countix-testing' };
+    setPipelineExecForTest((argv) => {
+      calls.push(argv);
+      if (argv[0] === 'quick-check') return refused;
+      if (argv[0] === 'gate-run') return { code: 0, stdout: '=== RESULT GREEN sha=x suite=api who=w exit=0 host=h ===' };
+      return { code: 0, stdout: 'ok' };
+    });
+    pipe.auto_gate = true;
+    pipe.gate_with_quick = true;
+    agent('ales', path.join(tmp, 'wc-known-green'));
+    agent('toni', path.join(tmp, 'wc-known-red'));
+    agent('mira', path.join(tmp, 'wc-refused'));
+    const knownGreen = branch('wc-known-green', 'kg.txt', 'kg');
+    const knownRed = branch('wc-known-red', 'kr.txt', 'kr');
+    const stuck = branch('wc-refused', 'st.txt', 'st');
+    const gs = await import('./gate-status.js');
+    const t0 = new Date();
+    await gs.recordGateResult({ project: 'wave', sha: knownGreen, argv: ['countix-remote-test', '--suite', 'tier1', knownGreen], stdout: `=== RESULT GREEN sha=${knownGreen} suite=tier1 who=ales exit=0 host=h ===`, exit_code: 0, started_at: t0, finished_at: t0 });
+    await gs.recordGateResult({ project: 'wave', sha: knownRed, argv: ['countix-remote-test', '--suite', 'tier1', knownRed], stdout: `=== RESULT RED sha=${knownRed} suite=tier1 who=toni exit=1 host=h ===`, exit_code: 1, started_at: t0, finished_at: t0 });
+    await ingestFreezeFile(openNote('ales', 'wc-known-green', knownGreen));
+    await ingestFreezeFile(openNote('toni', 'wc-known-red', knownRed));
+    await ingestFreezeFile(openNote('mira', 'wc-refused', stuck));
+    const gates = () => calls.filter((a) => a[0] === 'gate-run').map((a) => a[2]);
+    await vi.waitFor(() => expect(gates()).toEqual([knownGreen]), { timeout: 10_000 }); // the author's own GREEN quick counts; no quick run by WaveCode
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'quick-check').map((a) => a[1])).toEqual([stuck]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(getFreeze(knownGreen)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    expect(getFreeze(knownRed)?.gate ?? null).toBeNull();
+    expect(latestPipelineNote('wave', 'wc-known-red')).toMatch(/full gate not submitted on .* — the quick check on it is RED/);
+    // Three refusals of the quick: WaveCode gives up on it and submits the full gate anyway.
+    for (let i = 0; i < 12 && calls.filter((a) => a[0] === 'quick-check').length < 3; i++) { await new Promise((r) => setTimeout(r, 400)); await pipelineTick(); }
+    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'quick-check')).toHaveLength(3), { timeout: 10_000 });
+    await vi.waitFor(() => expect(gates()).toEqual([knownGreen, stuck]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(getFreeze(stuck)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    const notes = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.action' AND entity_id = 'wave:wc-refused' ORDER BY id").all() as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { note: string }).note);
+    expect(notes.some((n) => /quick check on .* could not run; submitting the full gate anyway/.test(n))).toBe(true);
   });
 
   it('a run the gateway cancelled or refused (no RESULT line) is not RED: it is retried after a wait, and the author is not told', async () => {
     setRefusedRetryMsForTest(1500);
-    let tries = 0;
+    const tries: Record<string, number> = {};
     setPipelineExecForTest((argv) => {
       calls.push(argv);
       if (argv[0] === 'quick-check' || argv[0] === 'gate-run') {
-        tries++;
-        if (tries <= 2) return { code: 143, stdout: '[16:44:36] queued: position 1 (all 2 slots busy)\n[16:44:42] CANCELLED: superseded by 537982bb1 tier1 (one queued run per agent claude5) — not run\ncountix-remote-test: remote exit 143 on host=countix-testing (9s total)' };
+        tries[argv[0]] = (tries[argv[0]] ?? 0) + 1;
+        if (tries[argv[0]] === 1) return { code: 143, stdout: '[16:44:36] queued: position 1 (all 2 slots busy)\n[16:44:42] CANCELLED: superseded by 537982bb1 tier1 (one queued run per agent claude5) — not run\ncountix-remote-test: remote exit 143 on host=countix-testing (9s total)' };
         return { code: 0, stdout: `=== RESULT GREEN sha=x suite=${argv[0] === 'quick-check' ? 'tier1' : 'api'} who=w exit=0 host=h ===` };
       }
       return { code: 0, stdout: 'ok' };
@@ -841,17 +888,24 @@ describe('hands-free lane pipeline', () => {
     const sha = branch('wc-toni', 't.txt', 't');
     const author = agent('toni', path.join(tmp, 'wc-toni'));
     await ingestFreezeFile(openNote('toni', 'wc-toni', sha));
-    await vi.waitFor(() => expect(calls.filter((a) => a[0] === 'quick-check' || a[0] === 'gate-run')).toHaveLength(2), { timeout: 10_000 });
+    const runs = () => calls.filter((a) => a[0] === 'quick-check' || a[0] === 'gate-run').map((a) => a[0]);
+    await vi.waitFor(() => expect(runs()).toEqual(['quick-check']), { timeout: 10_000 }); // quick first; the full gate waits for a GREEN quick
     const refusalNotes = () => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.action' AND entity_id = 'wave:wc-toni' ORDER BY id").all() as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { note: string }).note).filter((n) => /not run \(.*CANCELLED: superseded by 537982bb1 tier1/.test(n));
-    await vi.waitFor(() => expect(refusalNotes()).toHaveLength(2), { timeout: 10_000 }); // the quick and the full gate, both refused
-    expect(getFreeze(sha)?.gate).toBe('QUEUED');
+    await vi.waitFor(() => expect(refusalNotes()).toHaveLength(1), { timeout: 10_000 });
+    expect(getFreeze(sha)?.gate ?? null).toBeNull(); // not submitted yet
     expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
-    // the retry wait holds them back, then one tick resubmits both and they go GREEN
+    // the retry wait holds the quick back, then one tick resubmits it; GREEN releases the gate, itself refused once and retried
     await pipelineTick();
-    expect(calls.filter((a) => a[0] === 'quick-check' || a[0] === 'gate-run')).toHaveLength(2);
+    expect(runs()).toEqual(['quick-check']);
+    await new Promise((r) => setTimeout(r, 1600));
+    await pipelineTick();
+    await vi.waitFor(() => expect(runs()).toEqual(['quick-check', 'quick-check', 'gate-run']), { timeout: 10_000 });
+    await vi.waitFor(() => expect(refusalNotes()).toHaveLength(2), { timeout: 10_000 }); // the quick and the full gate, both refused once
+    expect(getFreeze(sha)?.gate).toBe('QUEUED');
     await new Promise((r) => setTimeout(r, 1600));
     await pipelineTick();
     await vi.waitFor(() => expect(getFreeze(sha)?.gate).toBe('GREEN'), { timeout: 10_000 });
+    expect(runs()).toEqual(['quick-check', 'quick-check', 'gate-run', 'gate-run']);
     const quickWords = () => (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.quick' AND entity_id = ? ORDER BY id").all(`${sha}:quick`) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick: string }).quick);
     await vi.waitFor(() => expect(quickWords()).toEqual(['QUEUED', 'QUEUED', 'GREEN']), { timeout: 10_000 });
     expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
@@ -877,24 +931,24 @@ describe('hands-free lane pipeline', () => {
     const shaA = branch('wc-toni', 't1.txt', 'one');
     const author = agent('toni', path.join(tmp, 'wc-toni'));
     await ingestFreezeFile(openNote('toni', 'wc-toni', shaA));
-    // The full gate took the author's slot first; the quick check waits behind it in WaveCode.
-    await vi.waitFor(() => expect(cancelStateForTest().live).toContain(`${shaA}:full`), { timeout: 10_000 });
-    await vi.waitFor(() => expect(quickLoadForTest().pending).toEqual([shaA]), { timeout: 10_000 });
-    expect(getFreeze(shaA)?.gate).toBe('QUEUED');
+    // Quick first: A's quick runs, its full gate is not submitted until the quick is GREEN.
+    await vi.waitFor(() => expect(cancelStateForTest().live).toEqual([`${shaA}:quick`]), { timeout: 10_000 });
+    expect(getFreeze(shaA)?.gate ?? null).toBeNull();
+    expect(calls.filter((a) => a[0] === 'gate-run')).toHaveLength(0);
 
     const shaB = branch('wc-toni', 't2.txt', 'two');
     await ingestFreezeFile(openNote('toni', 'wc-toni', shaB));
     expect(getFreeze(shaA)?.status).toBe('stale');
-    await vi.waitFor(() => expect(getFreeze(shaA)?.gate).toBe('CANCELLED'), { timeout: 10_000 });
     await vi.waitFor(() => expect(getFreeze(shaB)?.gate).toBe('GREEN'), { timeout: 10_000 });
     expect(calls.filter((a) => a[0] === 'cancel-run').map((a) => a[1])).toEqual([shaA]);
-    // A's runs: recorded as a dispatch failure (never RED), one CANCELLED word each; nobody told the author RED.
-    const results = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'gate.result' AND entity_id = ? ORDER BY id").all(shaA) as Array<{ payload_json: string }>).map((r) => JSON.parse(r.payload_json) as { state: string; steps: { tail: string[] } });
-    expect(results.map((r) => r.state)).toEqual(['ERROR']);
+    // A's quick: recorded as a dispatch failure (never RED) with one CANCELLED word; its gate never ran, so no gate record for it and nobody told the author RED.
+    const results = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'gate.result' AND entity_id = ? ORDER BY id").all(shaA) as Array<{ payload_json: string }>).map((r) => JSON.parse(r.payload_json) as { suite: string; state: string; steps: { tail: string[] } });
+    expect(results.map((r) => [r.suite, r.state])).toEqual([['quick', 'ERROR']]);
     expect(results.map((r) => r.steps.tail.slice(-1)[0])).toEqual([`CANCELLED by WaveCode: superseded by ${shaB.slice(0, 8)}`]);
     const words = (type: string, key: string) => (db.getDb().prepare('SELECT payload_json FROM events WHERE type = ? AND entity_id = ? ORDER BY id').all(type, key) as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { quick?: string; gate?: string }));
     expect(words('pipeline.quick', `${shaA}:quick`).map((w) => w.quick)).toEqual(['QUEUED', 'CANCELLED']);
-    expect(words('pipeline.gate', `${shaA}:full`).map((w) => w.gate)).toEqual(['QUEUED', 'CANCELLED']);
+    expect(words('pipeline.gate', `${shaA}:full`)).toHaveLength(0);
+    expect(calls.filter((a) => a[0] === 'gate-run' && a.includes(shaA))).toHaveLength(0);
     expect(messages(author.id).some((m) => /RED/.test(m))).toBe(false);
     const notes = (db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'pipeline.action' AND entity_id = 'wave:wc-toni' ORDER BY id").all() as Array<{ payload_json: string }>).map((r) => (JSON.parse(r.payload_json) as { note: string }).note);
     expect(notes.some((n) => new RegExp(`stopped — superseded by ${shaB.slice(0, 8)}, which goes next`).test(n))).toBe(true);

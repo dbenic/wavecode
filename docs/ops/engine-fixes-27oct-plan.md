@@ -12,6 +12,7 @@ The retro (pm-denis): about 9 hours on bank posting, 2 of them real work. Five c
 | 3 | Test time goes to replaced SHAs; no cancel, no priority | WaveCode side: a newer freeze on the same lane stops WaveCode's own quick and gate runs on the old SHA (recorded as cancelled, never RED), drops them from the waiting lists, and the new SHA takes the next slot ahead of older waiters. The remote run is told to stop through `pipeline.cancel_command` once the gateway has a `cancel` verb (test box, Denis's side; spec below). | built 28 Oct (WaveCode side); gateway verb pending |
 | 4 | WaveCode blocks without saying why | (a) A wait a person must end (hold, moved lane, red gate, missing PASS, release mode) is said once to the author and the driver seats (`deliveries.notify`) the first time it appears. (b) A GREEN full gate counts as the quick check too. (c) A gate the gateway ran on a cloud runner (`kind=dev, suite=gate`) counts as the full gate (6a8e1ec). | built 27 Oct |
 | 5 | No release mode: during a freeze chosen lanes cannot land without Denis | `POST /api/merge-queue/:project/release-mode {lanes}` and the seat tool `set_release_mode`: only the named lanes (branch names or `desk:<n>`) land; every other eligible lane waits with `RELEASE_MODE`. The ON/OFF switch stays Denis's. Shown on the Reviews page. | built 27 Oct |
+| 6 | The full gate ran before the quick: a red lane cost a 23-minute gate run before the 4-minute quick even started, and the quick waited behind the gate for the author's one gateway slot | Quick first, gate after: with `gate_with_quick` WaveCode submits the quick check, and the full gate only once it is GREEN. RED: no gate, the author is told, note on the lane. An author's own quick on the SHA counts; a quick refused three times lets the gate run anyway. | built 28 Oct |
 | gap | Moving old mappings to day 0 was not in the feature | One mandatory line in the room's spec template: "what happens to existing records". | room file; Denis or pm-denis |
 
 ## Deliveries by product-desk number
@@ -56,3 +57,17 @@ Gateway side (Denis, on countix-testing): a `cancel` verb on the submit gateway,
       (the result line, when the run had started, is `=== RESULT CANCELLED sha=… ===`, never RED).
 
 Without the verb the remote run finishes on its own; WaveCode just stops waiting for it and moves on.
+
+## Quick first, gate after (cause 6), built 28 Oct 2026
+
+Before: `onFreezeRecorded` queued the quick check and the full gate together; the gate claimed the author's one gateway
+slot first (the quick awaited the checker before submitting), so the quick waited ~23 minutes behind the gate and a RED
+lane was known only after both. Now `queueQuickCheck` returns a decision (`off`, `submitted`, `known:green|red|pending`):
+`submitted`/`known:pending` put the SHA in `gateAfterQuick`; the quick's own GREEN releases `queueFullGate`, a RED leaves a
+`gate` note (`full gate not submitted on <sha8> — the quick check is RED`) and tells the author, a refusal given up after
+three tries submits the gate anyway, a cancel drops the entry. `known:green` (the author's own quick) goes straight to the
+gate; `known:red` gets no gate. The tick (`settleGatesWaitingOnQuick`) settles entries whose quick is not WaveCode's own run
+(an author's run still in flight, or one lost to a restart) from the checker's word. A re-ingested freeze reads the quick
+word instead of queueing the gate.
+
+Effect: RED known in ~4 minutes instead of ~27; no gate run on a red SHA; one remote run per freeze until the quick is in.
