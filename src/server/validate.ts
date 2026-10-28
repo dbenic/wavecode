@@ -134,9 +134,13 @@ export function validateTaskBody(body: {
   goal_id?: string;
   hold?: boolean;
   reviewer?: string;
+  context?: string;
 }): string | null {
   if (!body.prompt || typeof body.prompt !== 'string') {
     return 'prompt is required';
+  }
+  if (body.context !== undefined && body.context !== 'fresh' && body.context !== 'keep') {
+    return "context must be 'fresh' or 'keep'";
   }
   if (body.reviewer !== undefined && (typeof body.reviewer !== 'string' || !body.reviewer.trim())) {
     return 'reviewer must be an agent (@alias, name or id)';

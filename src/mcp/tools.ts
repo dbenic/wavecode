@@ -202,6 +202,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       depends_on: z.array(z.string()).optional().describe('Task IDs that must finish first'),
       goal_id: z.string().optional().describe('Parent goal ULID or external_id (e.g. W0, G1)'),
       hold: z.boolean().optional().describe('If true, do not auto-dispatch this task'),
+      context: z.enum(['fresh', 'keep']).optional().describe("'fresh' clears the agent's conversation before the prompt (default for a new task); 'keep' continues the running one (default for a fix task)"),
     },
     handler: (client, args) => client.post('/tasks', args),
   },

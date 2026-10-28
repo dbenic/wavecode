@@ -67,6 +67,12 @@ export interface Task {
   reviewer?: string | null;
   /** Exact freeze SHA this task was queued to fix. Lookup key for the overview; the prompt still carries `[fix <sha8>]`. */
   fix_sha?: string | null;
+  /**
+   * Runtime context at dispatch: 'fresh' clears the CLI's conversation first (`/clear`, `/new`),
+   * 'keep' sends the prompt into the running one; null = the default (fresh unless it is a fix
+   * task, or autonomy.fresh_context is off).
+   */
+  context?: 'fresh' | 'keep' | null;
 }
 
 export const GOAL_STATUSES = ['active', 'done', 'failed', 'cancelled'] as const;
@@ -284,7 +290,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 32;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -344,7 +350,8 @@ const SCHEMA_SQL = `
     room TEXT,
     template TEXT,
     reviewer TEXT,
-    fix_sha TEXT
+    fix_sha TEXT,
+    context TEXT
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_num ON tasks(num) WHERE num IS NOT NULL;
   CREATE INDEX IF NOT EXISTS idx_tasks_fix_sha ON tasks(fix_sha) WHERE fix_sha IS NOT NULL;
@@ -1092,6 +1099,10 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE deliveries ADD COLUMN task_ids_json TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE deliveries ADD COLUMN agent_ids_json TEXT NOT NULL DEFAULT '[]';
   `,
+  // v31 → v32: a task says whether the runtime's context is cleared before its prompt (28 Oct 2026).
+  31: `
+    ALTER TABLE tasks ADD COLUMN context TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -1326,14 +1337,15 @@ export function insertTask(task: {
   template?: string | null;
   reviewer?: string | null;
   fix_sha?: string | null;
+  context?: 'fresh' | 'keep' | null;
 }): Result<Task> {
   const id = generateId();
   const createdBy = task.created_by === undefined ? currentActorId() : task.created_by;
   try {
     getDb().prepare(`
-      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num, room, template, reviewer, fix_sha)
-      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks), ?, ?, ?, ?)
-    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy, task.room ?? null, task.template ?? null, task.reviewer ?? null, task.fix_sha ?? null);
+      INSERT INTO tasks (id, agent_id, prompt, priority, goal_id, created_by, num, room, template, reviewer, fix_sha, context)
+      VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(num), 0) + 1 FROM tasks), ?, ?, ?, ?, ?)
+    `).run(id, task.agent_id ?? null, task.prompt, task.priority ?? 0, task.goal_id ?? null, createdBy, task.room ?? null, task.template ?? null, task.reviewer ?? null, task.fix_sha ?? null, task.context ?? null);
     const row = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task;
     return { ok: true, data: row };
   } catch (e) {

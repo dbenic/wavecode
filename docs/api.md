@@ -406,7 +406,15 @@ and MCP `create_task` all use this endpoint so the daemon owns the runner
 lifecycle.
 
 Body:
-`{ prompt: string, agent_id?: string, priority?: number, depends_on?: string[], goal_id?: string, hold?: boolean }`
+`{ prompt: string, agent_id?: string, priority?: number, depends_on?: string[], goal_id?: string, hold?: boolean, context?: 'fresh' | 'keep' }`
+
+`context` (since 28 Oct 2026): `fresh` sends the runtime's own new-conversation
+command (`/clear` for Claude Code, `/new` for Codex, `/clear` for Aider) into
+the pane and waits 1.5 s before the prompt; `keep` sends the prompt into the
+running conversation. Default: fresh for a new task, keep for a fix task
+(`fix_sha` set). `autonomy.fresh_context: false` makes keep the default.
+Spawned and file-runner seats start each run fresh anyway. Event:
+`agent.context_cleared { task_id, command }`.
 
 `agent_id` is an agent ULID or the name `GET /api/agents` / `list_agents`
 exposes (same lookup as `GET /api/agents/:id`). The name is resolved to

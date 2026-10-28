@@ -29,6 +29,7 @@ import { emit } from './event-bus.js';
 import { executeRun } from './runner.js';
 import { executeFileRun, isFileRunnerSeat, stopFileRun } from './file-runner.js';
 import * as sessionManager from './session-manager.js';
+import * as tmux from './tmux.js';
 import { buildBriefing } from './briefing-builder.js';
 import { maybeInvokeProjectGate } from './project-gate.js';
 import { clearPendingForDispatch } from './reply-capture.js';
@@ -634,6 +635,7 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
       }
     }
 
+    await clearContextForTask(agent, task);
     const sendResult = await sessionManager.sendKeys(agent.id, prompt);
     if (!sendResult.ok) {
       if (runResult.ok) {
@@ -645,6 +647,42 @@ async function dispatchTaskToAgent(task: Task, agent: Agent): Promise<void> {
         error: sendResult.error,
       });
     }
+  }
+}
+
+/** The runtime's own "start a new conversation" command, or null when it has none WaveCode knows. */
+export function contextClearCommand(runtime: string): string | null {
+  if (runtime === 'claude-code') return '/clear';
+  if (runtime === 'codex') return '/new';
+  if (runtime === 'aider') return '/clear';
+  return null;
+}
+
+/**
+ * Fresh context for a new task; the running one for a fix round on the same lane. The task's own
+ * `context` wins; `autonomy.fresh_context: false` turns the default off.
+ */
+export function wantsFreshContext(task: Pick<Task, 'context' | 'fix_sha'>): boolean {
+  if (task.context === 'fresh') return true;
+  if (task.context === 'keep') return false;
+  if (task.fix_sha) return false;
+  try { return getConfig().autonomy?.fresh_context !== false; } catch { return true; }
+}
+
+/** Settle time for the TUI after its clear command, before the prompt is typed. */
+const CONTEXT_CLEAR_SETTLE_MS = 1_500;
+
+async function clearContextForTask(agent: Agent, task: Task): Promise<void> {
+  if (!wantsFreshContext(task)) return;
+  const command = contextClearCommand(agent.runtime);
+  if (!command) return;
+  try {
+    await tmux.sendTextAndEnter(agent.tmux_session, command, { mode: 'type' });
+    await new Promise((resolve) => setTimeout(resolve, CONTEXT_CLEAR_SETTLE_MS));
+    emit('agent.context_cleared', 'agent', agent.id, { task_id: task.id, command }, null);
+    logger.info({ agentId: agent.id, taskId: task.id, command }, 'Runtime context cleared before the task');
+  } catch (err) {
+    logger.warn({ agentId: agent.id, taskId: task.id, error: (err as Error).message }, 'Context clear failed; sending the prompt anyway');
   }
 }
 

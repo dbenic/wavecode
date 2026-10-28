@@ -149,6 +149,8 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       template?: string;
       /** Explicit reviewer for this task's runs (@alias, name or id) — ladder rung 1. */
       reviewer?: string;
+      /** 'fresh' clears the runtime's conversation before the prompt, 'keep' does not; default: fresh unless a fix task. */
+      context?: 'fresh' | 'keep';
     }>();
 
     const taskValidation = validate.validateTaskBody(body);
@@ -238,6 +240,7 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
           ...(taskRoom ? { room: taskRoom } : {}),
           ...(body.template ? { template: body.template } : {}),
           ...(resolvedReviewerId ? { reviewer: resolvedReviewerId } : {}),
+          ...(body.context ? { context: body.context } : {}),
         });
         if (!result.ok) {
           throw new Error(result.error);

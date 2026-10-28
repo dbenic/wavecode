@@ -61,6 +61,10 @@ vi.mock('./session-manager.js', () => ({
   sendKeys: vi.fn(),
 }));
 
+vi.mock('./tmux.js', () => ({
+  sendTextAndEnter: vi.fn(async () => undefined),
+}));
+
 describe('task-dispatcher.ts', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -261,6 +265,42 @@ describe('task-dispatcher.ts', () => {
     );
     expect(runner.executeRun).not.toHaveBeenCalled();
     expect(sessionManager.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it('an adopted dispatch clears the runtime context first for a new task, not for a fix task or context=keep', async () => {
+    const db = await import('./db.js');
+    const config = await import('./config.js');
+    const sessionManager = await import('./session-manager.js');
+    const tmux = await import('./tmux.js');
+    const dispatcher = await import('./task-dispatcher.js');
+    const order: string[] = [];
+    vi.mocked(tmux.sendTextAndEnter).mockImplementation(async (_session, text) => { order.push(`tmux:${text}`); });
+    vi.mocked(sessionManager.sendKeys).mockImplementation(async (_id, text) => { order.push(`prompt:${text.slice(0, 20)}`); return { ok: true, data: undefined }; });
+    vi.mocked(db.listRuns).mockReturnValue([]);
+    vi.mocked(db.insertRun).mockReturnValue({ ok: true, data: { id: 'run-a', result_path: null } } as never);
+    vi.mocked(db.getTask).mockImplementation((id: string) => ({ ok: true, data: { id, status: 'running' } } as never));
+
+    const agentRow = (runtime: string) => ({ id: 'agent-a', name: 'agent-a', runtime, tmux_session: 'wc-agent-a', workspace: '/w', mode: 'adopted', status: 'idle', created_at: '2026-04-03T00:00:00Z' });
+    const run = async (task: Record<string, unknown>, runtime = 'claude-code', freshDefault = true) => {
+      vi.mocked(config.getConfig).mockReturnValue({ autonomy: { auto_dispatch: true, max_task_retries: 2, fresh_context: freshDefault } } as never);
+      vi.mocked(db.listAgents).mockReturnValue([agentRow(runtime)] as never);
+      vi.mocked(db.listTasks).mockImplementation(() => [{ id: 'task-a', agent_id: 'agent-a', prompt: 'Build the thing', status: 'pending', priority: 1, created_at: '2026-04-03T00:00:00Z', goal_id: null, ...task }] as never);
+      vi.mocked(db.getDb).mockReturnValue({ prepare: (sql: string) => sql.includes(`UPDATE tasks SET status = 'running'`) ? { run: () => ({ changes: 1 }) } : { all: () => [] } } as never);
+      order.length = 0;
+      dispatcher.resetDispatcherForTest();
+      await dispatcher.dispatchNext({ manual: true });
+      await vi.runAllTimersAsync();
+      return [...order];
+    };
+
+    expect(await run({})).toEqual(['tmux:/clear', 'prompt:Build the thing']);
+    expect(await run({}, 'codex')).toEqual(['tmux:/new', 'prompt:Build the thing']);
+    expect(await run({ fix_sha: 'a'.repeat(40) })).toEqual(['prompt:Build the thing']);
+    expect(await run({ context: 'keep' })).toEqual(['prompt:Build the thing']);
+    expect(await run({ fix_sha: 'a'.repeat(40), context: 'fresh' })).toEqual(['tmux:/clear', 'prompt:Build the thing']);
+    expect(await run({}, 'claude-code', false)).toEqual(['prompt:Build the thing']);
+    expect(await run({}, 'grok')).toEqual(['prompt:Build the thing']); // no known clear command
+    expect(dispatcher.contextClearCommand('aider')).toBe('/clear');
   });
 
   it('does not idle the agent when a later run is still running', async () => {

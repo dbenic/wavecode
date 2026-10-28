@@ -390,6 +390,13 @@ export interface WaveConfig {
     hang_action: 'alert' | 'restart';
     max_task_retries: number;
     verify_completion: boolean;
+    /**
+     * Clear the runtime's conversation (`/clear` for Claude Code, `/new` for Codex, `/clear` for
+     * Aider) before a task prompt goes into a pane, unless the task is a fix round on the same
+     * lane or says `context: 'keep'`. Default true. A long session carries stale SHAs, verdicts
+     * and reversed instructions into the next task (28 Oct 2026).
+     */
+    fresh_context?: boolean;
     /** Auto-dispatch skips, and create_task refuses, an agent whose 5h/weekly window has less than this left. Default 10. */
     min_quota_pct?: number;
   };
@@ -998,6 +1005,9 @@ export function validateConfig(cfg: WaveConfig): void {
   if (cfg.deliveries?.auto_track !== undefined && typeof cfg.deliveries.auto_track !== 'boolean') {
     throw new Error('deliveries.auto_track must be true or false');
   }
+  if (cfg.autonomy?.fresh_context !== undefined && typeof cfg.autonomy.fresh_context !== 'boolean') {
+    throw new Error('autonomy.fresh_context must be true or false');
+  }
   if (cfg.deliveries?.budgets_min !== undefined) {
     const b = cfg.deliveries.budgets_min;
     if (!b || typeof b !== 'object' || Array.isArray(b) || Object.values(b).some((v) => typeof v !== 'number' || !(v > 0))) {
@@ -1219,6 +1229,7 @@ function buildDefaults(baseDir: string): WaveConfig {
       hang_action: 'alert',
       max_task_retries: 2,
       verify_completion: false,
+      fresh_context: true,
     },
     sandbox: { disable_git_push: true, restrict_network: true },
     runtimes: {
