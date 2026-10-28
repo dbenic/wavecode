@@ -88,8 +88,10 @@ How: `adoptWork` on the delivery tick (`deliveries.auto_track`, default on).
 - Running tasks (not the pipeline's review/verify tasks): join the open record of the agent's current lane or of
   the task's goal, else a record titled by the prompt's first line, `task_ids` + `agent_ids` set, since = the
   task's creation.
-- Lanes ahead of main (the lane board): a desk-marked lane joins or opens PD-<n>; any other lane gets a record
-  named after it, since = its first own commit. Lanes older than 14 days are left alone.
+- Lanes ahead of main, read from git: a desk-marked lane joins or opens PD-<n>; any other lane gets a record
+  named after it, since = its first own commit. Only active lanes count: tip moved in the last 48 h, or an open
+  freeze, or an agent's workspace is on it (then from the moment the branch exists, before any push). The
+  first sweep used 14 days and opened 106 records, mostly abandoned lanes; those were cancelled.
 - A record with tasks or agents opens in `build` (someone is already working), not `spec`.
 - New signals on the build span: `run.failed` of a tracked task = blocked (`run failed: …`), `run.finished`
   clears; `agent.hung` of a tracked agent = blocked (`@seat quiet for N min`), the new `agent.resumed` (health

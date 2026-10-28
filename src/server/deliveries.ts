@@ -376,12 +376,15 @@ export function adoptWork(work: WorkSnapshot, now = Date.now()): { created: stri
 
 /** Lanes already examined, by tip: a lane is re-read from git only when its tip moves. */
 const laneSeen = new Map<string, { sha: string; lane: WorkLane | null }>();
+/** A remote lane counts as work in progress when its tip moved in the last two days, or it has an open freeze, or an agent's workspace is on it. */
+const ACTIVE_LANE_MS = 48 * 3600_000;
 
 /**
  * What the tick hands to adoptWork: running tasks with their agent's lane, and every developer lane
- * (`lane_glob`) on the remote that is ahead of main and younger than 14 days, read from git directly
- * (the lane board is cold after a restart and slow with hundreds of stale refs). Two git calls per
- * lane, once per tip.
+ * (`lane_glob`) on the remote that is ahead of main and active (tip moved in the last two days, or an
+ * open freeze), read from git directly (the lane board is cold after a restart and slow with hundreds
+ * of stale refs; the first sweep over 14 days opened 106 records, mostly abandoned lanes). Two git
+ * calls per lane, once per tip.
  */
 async function gatherWork(): Promise<WorkSnapshot> {
   if (getConfig().deliveries?.auto_track === false) return { tasks: [], lanes: [] };
@@ -409,10 +412,12 @@ async function gatherWork(): Promise<WorkSnapshot> {
         const own = await git(pc.repo, ['log', '--reverse', '--format=%cI', `${spec.ref}..${sha}`]);
         const firstOwn = own.split('\n').map((l) => l.trim()).find(Boolean) ?? null;
         const tipAt = Date.parse(await git(pc.repo, ['log', '-1', '--format=%cI', sha]));
-        // ahead of main, and touched in the last 14 days: a stale lane is not work in progress
-        if (firstOwn && Number.isFinite(tipAt) && Date.now() - tipAt <= ADOPT_MAX_AGE_MS) {
-          const freeze = freezes.find((f) => f.lane === lane && f.project === project && f.author_agent_id);
-          entry = { project, lane, author_agent_id: freeze?.author_agent_id ?? null, started_at: firstOwn };
+        // ahead of main, and active: touched in the last two days or frozen and still open. An abandoned lane is not work in progress.
+        const freeze = freezes.find((f) => f.lane === lane && f.project === project && (f.status === 'open' || f.status === 'behind-main'));
+        const recent = Number.isFinite(tipAt) && Date.now() - tipAt <= ACTIVE_LANE_MS;
+        if (firstOwn && (recent || freeze)) {
+          const author = freeze?.author_agent_id ?? freezes.find((f) => f.lane === lane && f.project === project && f.author_agent_id)?.author_agent_id ?? null;
+          entry = { project, lane, author_agent_id: author, started_at: firstOwn };
         }
       } catch { /* a ref git cannot read is not a lane */ }
       laneSeen.set(key, { sha, lane: entry });
