@@ -64,7 +64,7 @@ phase=lock; line lock start
 state=$(remote "cd $app && git status --porcelain --untracked-files=no | head -5; echo __SHA__; git rev-parse HEAD") || fail SSH "cannot inspect production"
 dirty=$(printf '%s' "$state" | sed '/^__SHA__$/,$d')
 prev=$(printf '%s' "$state" | sed -n '/^__SHA__$/{n;p;}')
-[ -z "$dirty" ] || fail DIRTY "production has modified tracked files; stop"
+[ -z "$dirty" ] || fail DIRTY "production has modified tracked files ($(printf '%s' "$dirty" | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')); stop"
 [[ "$prev" =~ ^[0-9a-f]{40}$ ]] || fail PREV "cannot read the SHA production runs"
 git -C "$PROD_REPO_DIR" merge-base --is-ancestor "$prev" "$sha" || fail REWIND "$sha does not contain what production runs ($prev)"
 if git -C "$PROD_REPO_DIR" diff --name-only "$prev" "$sha" -- migrations/ 'db/migrations/' 2>/dev/null | grep -q .; then
@@ -97,7 +97,9 @@ if git -C "$PROD_REPO_DIR" diff --quiet "$prev" "$sha" -- package.json package-l
   line deps skip "\"reason\":\"lock unchanged\""
 else
   line deps start
-  remote "set -euo pipefail; cd $app; npm install --include=dev --no-audit --no-fund >/dev/null" || fail DEPS "npm install failed"
+  # npm ci never rewrites package-lock.json (npm install did, and the next deploy then refused with DIRTY, 28 Oct 2026);
+  # when the lock is out of step with package.json, fall back to npm install and put the committed lock back.
+  remote "set -euo pipefail; cd $app; npm ci --include=dev --no-audit --no-fund >/dev/null 2>&1 || { npm install --include=dev --no-audit --no-fund >/dev/null && git checkout -- package-lock.json; }" || fail DEPS "npm ci / npm install failed"
   line deps ok
 fi
 
