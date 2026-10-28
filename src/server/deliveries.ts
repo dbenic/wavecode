@@ -376,7 +376,7 @@ export function adoptWork(work: WorkSnapshot, now = Date.now()): { created: stri
 
 /** Lanes already examined, by tip: a lane is re-read from git only when its tip moves. */
 const laneSeen = new Map<string, { sha: string; lane: WorkLane | null }>();
-/** A remote lane counts as work in progress when its tip moved or it was frozen in the last two days, or an agent's workspace is on it (109 open freezes on the box go back three weeks; an old open freeze is an abandoned lane). */
+/** A remote lane counts as work in progress when its last own (non-merge) commit or its freeze is under two days old, or an agent's workspace is on it (109 open freezes on the box go back three weeks, and main syncs move every clean lane's tip: neither means anyone is working). */
 const ACTIVE_LANE_MS = 48 * 3600_000;
 
 /**
@@ -411,7 +411,8 @@ async function gatherWork(): Promise<WorkSnapshot> {
       try {
         const own = await git(pc.repo, ['log', '--reverse', '--format=%cI', `${spec.ref}..${sha}`]);
         const firstOwn = own.split('\n').map((l) => l.trim()).find(Boolean) ?? null;
-        const tipAt = Date.parse(await git(pc.repo, ['log', '-1', '--format=%cI', sha]));
+        // the lane's last own commit, merges excluded: WaveCode's main syncs move every clean lane's tip without anyone working on it
+        const tipAt = Date.parse(await git(pc.repo, ['log', '-1', '--no-merges', '--format=%cI', `${spec.ref}..${sha}`]));
         // ahead of main, and active: touched in the last two days or frozen and still open. An abandoned lane is not work in progress.
         const freeze = freezes.find((f) => f.lane === lane && f.project === project && (f.status === 'open' || f.status === 'behind-main') && (parseStamp(f.created_at) ?? 0) >= Date.now() - ACTIVE_LANE_MS);
         const recent = Number.isFinite(tipAt) && Date.now() - tipAt <= ACTIVE_LANE_MS;
