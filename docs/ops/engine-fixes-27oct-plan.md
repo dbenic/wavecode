@@ -200,3 +200,24 @@ sat in the thread (pull-only) and the seat was never told. Three changes:
     rev-list with full SHAs, exit 0/1) are written through to `git_memo` and reloaded at daemon
     start (`loadGitMemo`), bounded to the memo's 4,000 entries. A restart no longer empties the
     memo, so the lane board and the deploy reconcile stop re-asking git for half an hour.
+
+## Hour-five: the daemon's CPU with 33 agents (28 Oct, 23:00 CET)
+
+With 33 seats the daemon sat at 80–99 % of a core; the loop stayed healthy (p99 138 ms) but
+with no headroom. A 30 s `strace` sample found two repeat offenders besides the known
+capture-pane load:
+
+21. **Settled gate results are not re-read.** Every open freeze was read twice per pass by
+    the merge queue, the lane board and the deploy reconcile (`history --sha` + `status
+    --lane`, TTL 20 s): bursts of four gateway commands a second, each a bash + jq + two ssh
+    sessions to the test server. A SHA whose quick and full gates are both green is now served
+    from the cache for six hours (`SETTLED_GREEN_TTL_MS`), both red for two minutes (a rerun
+    after an infra error may turn it green); pending or missing stays live. A host error never
+    settles.
+22. **Candidate branches by SHA.** `candidateFor` asked `merge-base --is-ancestor <sha>
+    origin/fable/rc-…` by branch name for every freeze on every overview pass (16 SHAs × 4
+    candidates); a ref name is never memoised. `candidateRefs` now lists the branches with
+    their tips (`for-each-ref … %(objectname)`) once per minute and asks about SHA pairs, which
+    the persisted memo answers.
+23. **Memo cap 4,000 → 20,000.** The boards filled the 4,000-entry memo the day it was
+    persisted (FIFO eviction, so hot pairs were asked again every pass). About 240 bytes a row.

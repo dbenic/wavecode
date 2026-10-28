@@ -21,7 +21,8 @@ type GitExec = (repo: string, args: string[], timeout: number) => Promise<GitRes
  * (a full lane diff can be megabytes; thousands of freezes would turn the
  * memo into the daemon's biggest allocation). Oldest entries go first.
  */
-export const MEMO_MAX_ENTRIES = 4000;
+/** 4,000 was the cap until 28 Oct 2026; the boards hit it the same day (FIFO eviction, every pass re-asked). About 240 bytes a row. */
+export const MEMO_MAX_ENTRIES = 20_000;
 export const MEMO_MAX_BYTES = 256 * 1024;
 const memo = new Map<string, GitResult>();
 let custom: GitExec | null = null;

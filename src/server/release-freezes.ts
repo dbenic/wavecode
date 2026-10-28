@@ -1167,24 +1167,33 @@ function globToRe(glob: string): RegExp {
   return new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
 }
 
-const candidateCache = new Map<string, { at: number; refs: Array<{ ref: string; name: string }> }>();
+interface CandidateBranch { ref: string; name: string; /** the branch tip when listed; ancestry is asked about SHAs so the memo answers it */ tip: string | null }
+const candidateCache = new Map<string, { at: number; refs: CandidateBranch[] }>();
 
-/** Unreleased candidate branches (newest first) matching projects.<p>.candidate_refs, as remote-tracking refs. */
-async function candidateRefs(project: string, repo: string, now: number): Promise<Array<{ ref: string; name: string }>> {
+/**
+ * Unreleased candidate branches (newest first) matching projects.<p>.candidate_refs, as
+ * remote-tracking refs with their tips. The tips are resolved once per cache period
+ * (MERGED_TTL_MS) so every "is this SHA in the candidate" question is a pair of SHAs,
+ * an immutable fact the git memo keeps; asked by ref name it ran git for every freeze on
+ * every overview pass (28 Oct 2026: 16 SHAs x 4 candidates every pass).
+ */
+async function candidateRefs(project: string, repo: string, now: number): Promise<CandidateBranch[]> {
   const glob = getConfig().projects?.[project]?.candidate_refs;
   if (!glob) return [];
   const hit = candidateCache.get(repo);
   if (hit && now - hit.at < MERGED_TTL_MS) return hit.refs;
   const re = globToRe(glob);
-  const refs: Array<{ ref: string; name: string }> = [];
+  const refs: CandidateBranch[] = [];
   try {
-    const out = await gitText(repo, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/remotes/origin'], 5000);
+    const out = await gitText(repo, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short) %(objectname)', 'refs/remotes/origin'], 5000);
     const listed = (out ?? '').split('\n').map((l) => l.trim()).filter(Boolean)
-      .map((short) => ({ ref: short, name: short.replace(/^origin\//, '') }))
-      .filter((r) => re.test(r.name));
+      .map((line) => { const [short = '', tip = ''] = line.split(/\s+/); return { ref: short, name: short.replace(/^origin\//, ''), tip: /^[0-9a-f]{40}$/i.test(tip) ? tip.toLowerCase() : null }; })
+      .filter((r) => r.ref && re.test(r.name));
+    const mainSha = listed.length ? await gitText(repo, ['rev-parse', '--verify', '--quiet', 'origin/main^{commit}'], 5000) : null;
+    const main = mainSha && /^[0-9a-f]{40}$/i.test(mainSha.trim()) ? mainSha.trim().toLowerCase() : 'origin/main';
     for (const r of listed) {
       // released candidates are already on main: not "in candidate" any more
-      if (await gitAncestor(repo, r.ref, 'origin/main') === true) continue;
+      if (await gitAncestor(repo, r.tip ?? r.ref, main) === true) continue;
       refs.push(r);
     }
   } catch (e) {
@@ -1223,7 +1232,7 @@ export async function candidateFor(project: string | null, sha: string, now = Da
   if (!fetchDisabled) await refreshMain(repo, now);
   if (await isOnMain(project, sha, now) === true) return null; // released: on main, not "in candidate"
   for (const c of await candidateRefs(project, repo, now)) {
-    if (await gitAncestor(repo, sha, c.ref) === true) return c;
+    if (await gitAncestor(repo, sha.toLowerCase(), c.tip ?? c.ref) === true) return { ref: c.ref, name: c.name };
   }
   return null;
 }

@@ -385,6 +385,40 @@ let pollTargets: Array<{ project: string; lane: string; sha: string }> = [];
 export function setTestRunExecForTest(fn: ExecFn | null): void {
   testExec = fn;
   cache.clear();
+  settledUntil.clear();
+}
+
+/**
+ * A SHA whose quick and full gates are both green is a settled fact: the gateway is not asked
+ * about it again for six hours (a rerun on the same SHA is rare and the cap bounds the lag).
+ * Both red is answered from the cache for two minutes: a rerun after an infra error may turn
+ * it green. Anything pending or missing stays live (the TTL). On 28 Oct 2026 every open
+ * freeze was read twice per pass by the merge queue, the lane board and the deploy reconcile:
+ * up to four gateway commands a second, each an ssh to the test server.
+ */
+export const SETTLED_GREEN_TTL_MS = 6 * 3600_000;
+export const SETTLED_RED_TTL_MS = 2 * 60_000;
+const settledUntil = new Map<string, number>();
+
+function settledKey(project: string, lane: string, sha: string): string {
+  return `${project}:${lane}:${sha.toLowerCase()}`;
+}
+
+/** How long a settled SHA's cached report may be served; null when the SHA is not settled. */
+export function settledStaleOkMs(project: string, lane: string, sha: string, now = Date.now()): number | null {
+  const until = settledUntil.get(settledKey(project, lane, sha));
+  if (until === undefined) return null;
+  if (now >= until) { settledUntil.delete(settledKey(project, lane, sha)); return null; }
+  return Math.max(SETTLED_GREEN_TTL_MS, SETTLED_RED_TTL_MS);
+}
+
+function noteSettled(project: string, lane: string, sha: string, report: LaneTests, now: number): void {
+  const key = settledKey(project, lane, sha);
+  if (report.errors.length) { settledUntil.delete(key); return; }
+  const checks = shaChecks(report.runs, sha, suiteNames(project));
+  const done = (s: CheckState) => s === 'green' || s === 'red';
+  if (!done(checks.quick) || !done(checks.full)) { settledUntil.delete(key); return; }
+  settledUntil.set(key, now + (checks.quick === 'green' && checks.full === 'green' ? SETTLED_GREEN_TTL_MS : SETTLED_RED_TTL_MS));
 }
 
 export function setTestRunTtlForTest(ms: number): void {
@@ -520,13 +554,18 @@ export interface LaneTests {
 
 /** Status and history merged by id. Status wins when both name the same run. Host errors are kept. */
 export async function readLaneReport(project: string, lane: string, sha: string, opts: ReadOptions = {}): Promise<LaneTests> {
-  const status = await readCommand(project, 'status_command', lane, sha, opts);
-  const history = await readCommand(project, 'history_command', lane, sha, opts);
+  const now = Date.now();
+  const settled = settledStaleOkMs(project, lane, sha, now);
+  const read = settled === null ? opts : { ...opts, staleOkMs: Math.max(opts.staleOkMs ?? 0, settled) };
+  const status = await readCommand(project, 'status_command', lane, sha, read);
+  const history = await readCommand(project, 'history_command', lane, sha, read);
   const byId = new Map<string, TestRun>();
   for (const run of history?.runs ?? []) byId.set(run.id, run);
   for (const run of status?.runs ?? []) byId.set(run.id, run);
   const errors = [...(history?.errors ?? []), ...(status?.errors ?? [])];
-  return { runs: [...byId.values()], errors };
+  const report = { runs: [...byId.values()], errors };
+  if (settled === null) noteSettled(project, lane, sha, report, now);
+  return report;
 }
 
 export async function readLaneTests(project: string, lane: string, sha: string, opts: ReadOptions = {}): Promise<TestRun[]> {
