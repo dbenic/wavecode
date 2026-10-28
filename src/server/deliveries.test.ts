@@ -298,6 +298,11 @@ describe('delivery routes', () => {
     expect((await call(a, '/api/deliveries?status=all')).json).toHaveLength(1);
     const bad = await call(a, '/api/deliveries', 'POST', { lanes: [LANE] });
     expect(bad.status).toBe(400);
+    const codex1 = db.listAgents().find((x) => x.name === 'codex1')!;
+    const withAgent = await call(a, '/api/deliveries', 'POST', { title: 'Payments tabs', project: 'wavepulse', lanes: ['wc-codex6-payables-ready'], agent_ids: [codex1.id] });
+    expect(withAgent.status).toBe(201);
+    expect(withAgent.json).toMatchObject({ stage: 'build', agent_ids: [codex1.id] }); // an agent is on it: build, not spec
+    expect((await call(a, '/api/deliveries', 'POST', { title: 'x', agent_ids: 'codex1' })).status).toBe(400);
     const obs = await app('observer');
     expect((await call(obs, '/api/deliveries', 'POST', { title: 'no' })).status).toBe(403);
     expect((await call(obs, `/api/deliveries/${id}`)).status).toBe(200);
@@ -418,6 +423,11 @@ describe('deliveries keyed by product-desk number', () => {
     expect(open.some((d) => d.lanes.includes('wc-old-forgotten') || d.lanes.includes('x'))).toBe(false);
     // the second sweep adds nothing; a new task on a tracked lane joins that record
     expect(del.adoptWork(work)).toEqual({ created: [], joined: [] });
+    // a record opened by hand with no agent learns the lane's author from the sweep
+    const byHand = del.createDelivery({ title: 'By hand', lanes: ['wc-codex2-by-hand'], since: new Date(T0).toISOString(), created_by: 'denis' });
+    if (!byHand.ok) return;
+    expect(del.adoptWork({ tasks: [], lanes: [{ project: 'wavepulse', lane: 'wc-codex2-by-hand', author_agent_id: codex1.id, started_at: null }] })).toEqual({ created: [], joined: [`${byHand.data.id}:agent:${codex1.id}`] });
+    expect(del.getDelivery(byHand.data.id)!.agent_ids).toEqual([codex1.id]);
     const fix = db.insertTask({ agent_id: codex1.id, prompt: 'Fix the review findings', created_by: null });
     if (!fix.ok) return;
     db.getDb().prepare("UPDATE tasks SET status = 'running' WHERE id = ?").run(fix.data.id);

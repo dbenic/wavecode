@@ -14,7 +14,7 @@
 
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
-import { getAgent, getDb, listTasks, type Result, type Task } from './db.js';
+import { getAgent, getDb, listAgents, listTasks, type Result, type Task } from './db.js';
 import { listFreezes } from './release-freezes.js';
 import { mainSpec } from './lane-main.js';
 import { workspaceMatches } from './project-gate.js';
@@ -350,7 +350,13 @@ export function adoptWork(work: WorkSnapshot, now = Date.now()): { created: stri
 
   for (const l of work.lanes) {
     const lane = normalizeLane(l.lane);
-    if (!BRANCH_RE.test(lane) || lane.length < 6 || laneRecord(lane)) continue;
+    if (!BRANCH_RE.test(lane) || lane.length < 6) continue;
+    const covered = laneRecord(lane);
+    if (covered) {
+      // a record opened by hand knows no agent yet: the lane's author joins it, so a hung agent blocks it
+      if (l.author_agent_id && covered.agent_ids.length === 0) { addAgents(covered.id, [l.author_agent_id]); out.joined.push(`${covered.id}:agent:${l.author_agent_id}`); }
+      continue;
+    }
     const born = l.started_at ? parseStamp(l.started_at) : null;
     if (born !== null && now - born > ADOPT_MAX_AGE_MS) continue;
     const desk = markedDesk({ desk: null, lane });
@@ -412,6 +418,26 @@ async function gatherWork(): Promise<WorkSnapshot> {
       laneSeen.set(key, { sha, lane: entry });
       if (entry) lanes.push(entry);
     }
+  }
+  // Work that exists only in a workspace so far (a prompt, no push yet): a working agent's lane branch counts
+  // from the moment it exists, with the agent as author and the build starting now.
+  const have = new Set(lanes.map((l) => `${l.project}:${l.lane}`));
+  for (const agent of listAgents()) {
+    if (agent.status !== 'working' || !agent.workspace) continue;
+    const project = projectOfWorkspace(agent.workspace);
+    if (!project) continue;
+    const re = globToRe(getConfig().projects?.[project]?.lane_glob || 'wc-*');
+    let lane: string | null = null;
+    try { lane = (await git(agent.workspace, ['branch', '--show-current'])) || null; } catch { continue; }
+    if (!lane || !re.test(lane)) continue;
+    const key = `${project}:${lane}`;
+    const found = lanes.find((l) => `${l.project}:${l.lane}` === key);
+    if (found) { if (!found.author_agent_id) found.author_agent_id = agent.id; continue; }
+    if (have.has(key)) continue;
+    have.add(key);
+    let firstOwn: string | null = null;
+    try { firstOwn = (await git(agent.workspace, ['log', '--reverse', '--format=%cI', `${mainSpec(project).ref}..HEAD`])).split('\n').map((l) => l.trim()).find(Boolean) ?? null; } catch { /* no main ref in the worktree */ }
+    lanes.push({ project, lane, author_agent_id: agent.id, started_at: firstOwn ?? new Date().toISOString() });
   }
   const tasks: WorkSnapshot['tasks'] = [];
   for (const task of listTasks({ status: 'running' })) {

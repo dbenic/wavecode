@@ -33,8 +33,12 @@ export function registerDeliveryRoutes(app: Hono<NodeAppEnv>): void {
     if (!canMutate(user)) return c.json({ error: 'Forbidden: observers cannot create deliveries' }, 403);
     const body = await c.req.json<{
       title?: string; desk?: number | string | null; project?: string | null; lanes?: string[]; goal_id?: string | null; spec_path?: string | null;
-      release_lane?: boolean; since?: string | null;
+      release_lane?: boolean; since?: string | null; task_ids?: string[]; agent_ids?: string[];
     }>().catch(() => ({} as Record<string, never>));
+    for (const key of ['task_ids', 'agent_ids'] as const) {
+      const v = body[key];
+      if (v !== undefined && (!Array.isArray(v) || v.some((x) => typeof x !== 'string'))) return c.json({ error: `${key} must be a list of ids` }, 400);
+    }
     const desk = body.desk === undefined || body.desk === null || body.desk === '' ? null : Number(String(body.desk).replace(/^(PD|desk)[-#\s]*/i, ''));
     if (desk !== null && (!Number.isInteger(desk) || desk <= 0)) return c.json({ error: 'desk must be a product-desk number (134 or PD-134)' }, 400);
     if (typeof body.title !== 'string' && desk === null) return c.json({ error: 'title or desk is required' }, 400);
@@ -44,6 +48,7 @@ export function registerDeliveryRoutes(app: Hono<NodeAppEnv>): void {
     const created = createDelivery({
       title: typeof body.title === 'string' ? body.title : undefined, desk, project: body.project ?? null, lanes: body.lanes ?? [], goal_id: body.goal_id ?? null,
       spec_path: body.spec_path ?? null, release_lane: body.release_lane === true, since: body.since ?? null, created_by: user.name,
+      task_ids: body.task_ids ?? [], agent_ids: body.agent_ids ?? [],
     });
     if (!created.ok) return c.json({ error: created.error }, 400);
     const derived = deriveDelivery(created.data.id);
