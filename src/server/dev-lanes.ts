@@ -217,11 +217,21 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
     const stagingSource = await resolveStagingTip(project).catch(() => ({ state: 'unknown' as const, tip: null }));
     const stagingNow = stagingSource.state === 'unknown' ? null : stagingSource.tip;
     const stagingUnknown = stagingSource.state === 'unknown';
+    // One tip read per lane per pass. The overlap check below asked git for the tip of every
+    // deployed lane again for every lane on the board: 92 lanes x 40 staging releases on
+    // 28 Oct 2026 was 3,500 rev-parse spawns a pass, a third of the daemon's git traffic.
+    const tipCache = new Map<string, Promise<string | null>>();
+    const tipOfLane = (lane: string): Promise<string | null> => {
+      let hit = tipCache.get(lane);
+      if (!hit) { hit = tipOf(repo, spec.remote, lane); tipCache.set(lane, hit); }
+      return hit;
+    };
+    const deployedLanes = [...new Set(deployed.map((r) => r.lane).filter((l): l is string => !!l))];
 
     for (const lane of [...names].sort()) {
       if (laneAutomationDenied(project, null, lane)) continue;
       await yieldTurn();
-      const sha = await tipOf(repo, spec.remote, lane);
+      const sha = await tipOfLane(lane);
       if (!sha || !await ahead(repo, mainSha, sha)) continue;
       const laneFreezes = freezes.filter((f) => f.project === project && f.lane === lane && f.status !== 'merged');
       const current = laneFreezes.find((f) => f.sha === sha && (f.status === 'open' || f.status === 'behind-main'))
@@ -244,13 +254,13 @@ async function loadDevLanesPass(): Promise<DevLane[]> {
       const protectedPath = touches(files, pc.protected_paths ?? []);
       const hasMigration = !!pc.migrations_dir && files.some((f) => f === pc.migrations_dir || f.startsWith(`${pc.migrations_dir}/`));
       let overlap: { lane: string; files: number } | null = null;
-      for (const rel of deployed) {
-        if (!rel.lane || rel.lane === lane) continue;
-        const otherSha = await tipOf(repo, spec.remote, rel.lane);
+      for (const relLane of deployedLanes) {
+        if (relLane === lane) continue;
+        const otherSha = await tipOfLane(relLane);
         if (!otherSha) continue;
-        const otherFiles = new Set(await filesOf(rel.lane, otherSha));
+        const otherFiles = new Set(await filesOf(relLane, otherSha));
         const n = files.filter((f) => otherFiles.has(f)).length;
-        if (n > 0 && (!overlap || n > overlap.files)) overlap = { lane: rel.lane, files: n };
+        if (n > 0 && (!overlap || n > overlap.files)) overlap = { lane: relLane, files: n };
       }
       const cardSha = freeze?.sha ?? sha;
       const onStaging = deployed.some((r) => (r.lane === lane || r.sha === cardSha) && r.sha === cardSha);

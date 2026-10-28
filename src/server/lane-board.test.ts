@@ -18,6 +18,7 @@ const projects: Record<string, { repo?: string; workspace_match?: string; lane_g
 vi.mock('./config.js', () => ({ getConfig: vi.fn(() => ({ projects, paths: {}, artifacts: { storage: '' }, review: {}, releases: {} })) }));
 
 import { setFetchDisabledForTest } from './release-freezes.js';
+import { ensureReleaseTables } from './releases.js';
 import { resetLaneGitCacheForTest } from './lane-main.js';
 import { gitRun, resetGitMemoForTest, setGitExecForTest, type GitResult } from './git-memo.js';
 import { lanesForRequest, refreshLaneBoard, resetLaneBoardForTest } from './dev-lanes.js';
@@ -107,6 +108,22 @@ describe('review lane board', () => {
     const served = await lanesForRequest();
     expect(calls.length).toBe(beforeRequest);
     expect(served.map((lane) => `${lane.lane}:${lane.status_line}`)).toEqual(lines);
+  });
+
+  it('reads each lane tip once per pass, deployed lanes included (the overlap check used to ask per lane x release)', async () => {
+    ensureReleaseTables();
+    const tipA = git(repo, 'rev-parse', 'refs/remotes/origin/wc-a');
+    const tipB = git(repo, 'rev-parse', 'refs/remotes/origin/wc-b');
+    const ins = db.getDb().prepare("INSERT INTO release_requests (id, project, sha, lane, target, origin, status, deployed_sha) VALUES (?, 'demo', ?, ?, 'staging', 'local', 'deployed', ?)");
+    for (let i = 0; i < 6; i++) ins.run(`rel-a-${i}`, tipA, 'wc-a', tipA);
+    for (let i = 0; i < 6; i++) ins.run(`rel-b-${i}`, tipB, 'wc-b', tipB);
+    calls.length = 0;
+    await refreshLaneBoard();
+    const tipReads = calls.filter((args) => args[0] === 'rev-parse' && args.includes('--verify') && /refs\/remotes\/origin\/wc-/.test(args[args.length - 1]));
+    const perLane = new Map<string, number>();
+    for (const args of tipReads) perLane.set(args[args.length - 1], (perLane.get(args[args.length - 1]) ?? 0) + 1);
+    expect([...perLane.values()].every((n) => n === 1)).toBe(true);
+    expect(perLane.size).toBe(2);
   });
 
   it('fetches at most once per refresh and gives up inside the request budget', async () => {

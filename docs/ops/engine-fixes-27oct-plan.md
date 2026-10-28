@@ -159,3 +159,19 @@ refreeze bursts on migration collisions asked a first pass per refreeze (18 of 2
 Operations the same afternoon: profile `denis20x` marked `shared: true` on countix-dev (admins'
 tasks dispatch to the seats again); the 16 stale pending tasks cancelled. Not changed: the gate
 refusal after a supersede (the gateway keeps one queued run per agent; the retry lands in 90 s).
+
+## Hour-four: the stall and the lane-tip storm (28 Oct 2026, 18:00)
+
+Measured after the hour-three restart: 26/26 seats alive, CPU 25–50 %, one 1.3–1.9 s event-loop
+stall a minute at a fixed phase, 28k `git rev-parse` and 18k `git merge-base` spawns per 15 min.
+
+14. **Delivery tick (the stall).** The tick loaded every signal event since the oldest open
+    delivery (16 Oct: 107k rows, 25 MB of JSON) every minute, parsed it, and walked it once per
+    open delivery with `Date.parse` per event (46 deliveries x 107k = 4.9 M parses). Now the
+    signals stay in memory between passes and a pass reads only rows with a higher id
+    (`cachedSignals`); `created_at` is parsed once at load (`at_ms`); the loop yields to the
+    event loop between deliveries; the pass is recorded as the `delivery_tick` job.
+15. **Lane board overlap check.** For every lane on the board the overlap check asked git for
+    the tip of every deployed staging release again (92 lanes x 40 releases = 3,500 `rev-parse`
+    a pass, one lane asked 885 times a minute). Tips are read once per pass and the deployed
+    lanes deduplicated.

@@ -21,6 +21,7 @@ import { workspaceMatches } from './project-gate.js';
 import { emit } from './event-bus.js';
 import logger from './logger.js';
 import { tellDriverSeats } from './wire-lines.js';
+import { recordJob } from './perf-monitor.js';
 
 export const STAGES = ['spec', 'build', 'first_pass', 'gates', 'review', 'land', 'candidate', 'release'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -89,6 +90,8 @@ interface Ev {
   entity_id: string;
   payload: Record<string, unknown>;
   created_at: string;
+  /** created_at as epoch ms, parsed once at load: the tick compares it per delivery. */
+  at_ms: number;
 }
 
 const STAGE_ORDER = new Map<Stage, number>(STAGES.map((s, i) => [s, i]));
@@ -517,18 +520,55 @@ function shasOf(p: Record<string, unknown>, entityId: string): string[] {
   return [...out];
 }
 
+function sqlTime(iso: string): string {
+  return iso.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
+}
+
+function toEv(r: { id: number; type: string; entity_id: string; payload_json: string | null; created_at: string }): Ev {
+  let payload: Record<string, unknown> = {};
+  try { payload = r.payload_json ? JSON.parse(r.payload_json) as Record<string, unknown> : {}; } catch { /* corrupt payload: no signal */ }
+  const created_at = toIso(r.created_at);
+  return { id: r.id, type: r.type, entity_id: r.entity_id, payload, created_at, at_ms: Date.parse(created_at) };
+}
+
 export function loadSignals(since: string): Ev[] {
   const placeholders = SIGNAL_TYPES.map(() => '?').join(', ');
   const rows = getDb().prepare(`SELECT id, type, entity_id, payload_json, created_at FROM events WHERE type IN (${placeholders}) AND created_at >= ? ORDER BY id`)
-    .all(...SIGNAL_TYPES, since.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '')) as { id: number; type: string; entity_id: string; payload_json: string | null; created_at: string }[];
-  const out: Ev[] = [];
-  for (const r of rows) {
-    let payload: Record<string, unknown> = {};
-    try { payload = r.payload_json ? JSON.parse(r.payload_json) as Record<string, unknown> : {}; } catch { /* corrupt payload: no signal */ }
-    out.push({ id: r.id, type: r.type, entity_id: r.entity_id, payload, created_at: toIso(r.created_at) });
-  }
-  return out;
+    .all(...SIGNAL_TYPES, sqlTime(since)) as { id: number; type: string; entity_id: string; payload_json: string | null; created_at: string }[];
+  return rows.map(toEv);
 }
+
+// The tick's signals, kept between passes. Events are append-only, so a pass reads only the
+// rows written since the last one (by id) instead of the whole window: on 28 Oct 2026 the
+// window was 107k rows (25 MB of JSON) parsed every minute, about 0.5 s of the daemon's
+// 1.5 s stall. A fresh database handle (tests) or an older `since` reloads in full.
+let signalCache: { db: unknown; since: string; lastId: number; events: Ev[] } | null = null;
+
+export function cachedSignals(since: string): Ev[] {
+  const db = getDb();
+  const sinceSql = sqlTime(since);
+  if (!signalCache || signalCache.db !== db || sinceSql < signalCache.since) {
+    const events = loadSignals(since);
+    const maxId = (db.prepare('SELECT max(id) AS id FROM events').get() as { id: number | null }).id ?? 0;
+    signalCache = { db, since: sinceSql, lastId: Math.max(maxId, events[events.length - 1]?.id ?? 0), events };
+    return signalCache.events;
+  }
+  const placeholders = SIGNAL_TYPES.map(() => '?').join(', ');
+  const fresh = (db.prepare(`SELECT id, type, entity_id, payload_json, created_at FROM events WHERE id > ? AND type IN (${placeholders}) ORDER BY id`)
+    .all(signalCache.lastId, ...SIGNAL_TYPES) as { id: number; type: string; entity_id: string; payload_json: string | null; created_at: string }[]).map(toEv);
+  const maxId = (db.prepare('SELECT max(id) AS id FROM events').get() as { id: number | null }).id ?? 0;
+  signalCache.lastId = Math.max(signalCache.lastId, maxId);
+  const sinceMs = Date.parse(since);
+  if (sinceSql > signalCache.since) {
+    // the oldest open delivery moved: drop what no delivery can see any more
+    signalCache.since = sinceSql;
+    signalCache.events = signalCache.events.filter((e) => e.at_ms >= sinceMs);
+  }
+  for (const e of fresh) if (e.at_ms >= sinceMs) signalCache.events.push(e);
+  return signalCache.events;
+}
+
+export function resetSignalCacheForTest(): void { signalCache = null; }
 
 /**
  * Walk the signals of a delivery and produce its stage spans. Pure: takes the
@@ -831,7 +871,7 @@ export function deriveDelivery(id: string, signals?: Ev[]): Result<{ delivery: D
   const d = getDelivery(id);
   if (!d) return { ok: false, error: 'delivery not found' };
   const sinceMs = Date.parse(d.since_at);
-  const events = signals ? signals.filter((e) => Date.parse(e.created_at) >= sinceMs) : loadSignals(d.since_at);
+  const events = signals ? signals.filter((e) => e.at_ms >= sinceMs) : loadSignals(d.since_at);
   const { spans, shas } = deriveSpans(d, events, goalTasks(d.goal_id), deriveContext(d));
   const db = getDb();
   const current = currentStage(spans);
@@ -940,9 +980,14 @@ export function resetDeliveryStallMemoryForTest(): void {
 let timer: ReturnType<typeof setInterval> | null = null;
 let ticking = false;
 
+function yieldTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 export async function deliveryTick(now = Date.now()): Promise<void> {
   if (ticking) return;
   ticking = true;
+  const started = Date.now();
   try {
     try { adoptDeskLanes(listFreezes().filter((f) => f.status === 'open' || f.status === 'behind-main'), now); } catch (e) {
       logger.debug({ error: (e as Error).message }, 'Delivery desk adoption skipped'); // no freeze table yet
@@ -954,8 +999,9 @@ export async function deliveryTick(now = Date.now()): Promise<void> {
     // synchronous SQLite on 28 Oct 2026, an 8 s stall of the daemon every minute.
     const open = listDeliveries({ status: 'open', limit: 200 });
     const oldest = open.reduce<string | null>((acc, d) => (!acc || Date.parse(d.since_at) < Date.parse(acc) ? d.since_at : acc), null);
-    const signals = oldest ? loadSignals(oldest) : [];
+    const signals = oldest ? cachedSignals(oldest) : [];
     for (const d of open) {
+      await yieldTurn(); // each delivery's derivation is synchronous; let the loop breathe between them
       const derived = deriveDelivery(d.id, signals);
       if (!derived.ok) continue;
       if (derived.data.delivery.status !== 'open') continue;
@@ -965,6 +1011,7 @@ export async function deliveryTick(now = Date.now()): Promise<void> {
     logger.warn({ error: (e as Error).message }, 'Delivery tick failed');
   } finally {
     ticking = false;
+    recordJob('delivery_tick', Date.now() - started);
   }
 }
 

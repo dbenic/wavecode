@@ -102,6 +102,33 @@ describe('delivery derivation', () => {
     expect(spans.filter((s) => (s.cause ?? '').includes('not on origin'))).toEqual([]);
   });
 
+  it('the tick keeps its signals between passes and reads only the rows written since (by id); an older window reloads', () => {
+    del.resetSignalCacheForTest();
+    const created = del.createDelivery({ title: 'Cache', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
+    if (!created.ok) throw new Error(created.error);
+    ev(1, 'pipeline.frozen', A, { sha: A, project: 'wavepulse', lane: LANE });
+    ev(2, 'agent.output_updated', 'x', {}); // not a signal: never cached
+    const since = new Date(T0).toISOString();
+    const first = del.cachedSignals(since);
+    expect(first.map((e) => e.type)).toEqual(['pipeline.frozen']);
+    expect(first[0].at_ms).toBe(Date.parse(first[0].created_at));
+    ev(3, 'pipeline.quick', `${A}:quick`, { sha: A, lane: LANE, quick: 'QUEUED' });
+    const second = del.cachedSignals(since);
+    expect(second).toBe(first); // same array, appended in place
+    expect(second.map((e) => e.type)).toEqual(['pipeline.frozen', 'pipeline.quick']);
+    expect(del.cachedSignals(since).length).toBe(2); // nothing new: nothing appended twice
+    // the oldest open delivery moved later: older signals leave the cache
+    expect(del.cachedSignals(new Date(T0 + 2 * 60_000).toISOString()).map((e) => e.type)).toEqual(['pipeline.quick']);
+    // an older window than the cache holds reloads from the database
+    expect(del.cachedSignals(since).map((e) => e.type)).toEqual(['pipeline.frozen', 'pipeline.quick']);
+    // same spans whether the tick's cache or a direct load feeds the derivation
+    const viaCache = del.deriveDelivery(created.data.id, del.cachedSignals(since));
+    const direct = del.deriveDelivery(created.data.id);
+    if (!viaCache.ok || !direct.ok) throw new Error('derive failed');
+    const strip = (rows: typeof direct.data.spans) => rows.map(({ id: _id, ...rest }) => rest);
+    expect(strip(viaCache.data.spans)).toEqual(strip(direct.data.spans));
+  });
+
   it('the rolling candidate review rides on the candidate span: reviewer as actor, NEEDS FIXES as its cause; a cancelled run supersedes its gates span', () => {
     const created = del.createDelivery({ title: 'Posting', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
     if (!created.ok) throw new Error(created.error);
