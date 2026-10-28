@@ -188,6 +188,26 @@ export function listDeliveries(opts: { status?: DeliveryStatus | 'all'; limit?: 
   return rows.map(rowToDelivery);
 }
 
+const BRANCH_RE = /^[\w.-]+(?:\/[\w.-]+)*$/;
+const ADOPT_MAX_AGE_MS = 14 * 24 * 3600_000;
+const DESK_MARK_RE = /(?:^|[-_/.])(?:pd|desk)[-_]?(\d{1,6})(?=$|[-_/.])/i;
+
+/**
+ * The desk a lane is MARKED with: in the branch name (`wc-codex7-pd162-reland`, `codex2/pd108-s1-fixes`)
+ * or in the freeze note's file name (`desk91-freeze-<sha>.md`). A desk only mentioned in the note's prose
+ * ("after PD-162 lands") is a reference, not a mark: the first adoption (27 Oct 23:57) swept
+ * four main-sync lanes into PD-162 that way. The freeze's own `desk` must agree when it is set.
+ */
+export function markedDesk(f: { desk: number | null; lane: string | null; freeze_path?: string | null }): number | null {
+  const fromLane = f.lane ? DESK_MARK_RE.exec(normalizeLane(f.lane)) : null;
+  const base = f.freeze_path ? f.freeze_path.split('/').pop() ?? '' : '';
+  const fromFile = base ? DESK_MARK_RE.exec(base) : null;
+  const n = fromLane ? Number(fromLane[1]) : fromFile ? Number(fromFile[1]) : null;
+  if (!n) return null;
+  if (f.desk && f.desk !== n) return null;
+  return n;
+}
+
 /** sqlite `datetime('now')` stamps are UTC without a zone; ISO stamps carry one. */
 function parseStamp(text: string): number | null {
   const t = text.trim();
@@ -206,15 +226,20 @@ export function findOpenByDesk(desk: number): Delivery | null {
  * joins its lane to the open delivery of that desk, or opens one named PD-<n>. Off with
  * `deliveries.auto_desk: false`.
  */
-export function adoptDeskLanes(freezes: Array<{ desk: number | null; lane: string | null; project: string | null; created_at: string }>): { created: string[]; joined: string[] } {
+export function adoptDeskLanes(freezes: Array<{ desk: number | null; lane: string | null; project: string | null; created_at: string; freeze_path?: string | null }>, now = Date.now()): { created: string[]; joined: string[] } {
   const out = { created: [] as string[], joined: [] as string[] };
   if (getConfig().deliveries?.auto_desk === false) return out;
   const byDesk = new Map<number, Array<{ lane: string; project: string | null; created_at: string }>>();
   for (const f of freezes) {
-    if (!f.desk || !f.lane) continue;
-    const list = byDesk.get(f.desk) ?? [];
-    list.push({ lane: normalizeLane(f.lane), project: f.project, created_at: f.created_at });
-    byDesk.set(f.desk, list);
+    const desk = markedDesk(f);
+    if (!desk || !f.lane) continue;
+    const lane = normalizeLane(f.lane);
+    if (!BRANCH_RE.test(lane) || lane.length < 6) continue; // a word parsed out of prose is not a lane
+    const born = parseStamp(f.created_at);
+    if (born === null || now - born > ADOPT_MAX_AGE_MS) continue;
+    const list = byDesk.get(desk) ?? [];
+    list.push({ lane, project: f.project, created_at: f.created_at });
+    byDesk.set(desk, list);
   }
   for (const [desk, list] of byDesk) {
     const lanes = [...new Set(list.map((l) => l.lane))];
@@ -635,7 +660,7 @@ export async function deliveryTick(now = Date.now()): Promise<void> {
   if (ticking) return;
   ticking = true;
   try {
-    try { adoptDeskLanes(listFreezes().filter((f) => f.status === 'open' || f.status === 'behind-main')); } catch (e) {
+    try { adoptDeskLanes(listFreezes().filter((f) => f.status === 'open' || f.status === 'behind-main'), now); } catch (e) {
       logger.debug({ error: (e as Error).message }, 'Delivery desk adoption skipped'); // no freeze table yet
     }
     for (const d of listDeliveries({ status: 'open', limit: 200 })) {
@@ -663,14 +688,20 @@ export function stopDeliveryTimer(): void {
 }
 
 /** Time in the current stage and the stall, for lists and cards. */
-export function summarize(d: Delivery, spans: StageSpan[], now = Date.now()): Delivery & { stage_minutes: number | null; open_stages: Stage[]; stalls: Stall[] } {
+function minutesSince(stamp: string | null | undefined, now: number): number | null {
+  if (!stamp) return null;
+  const ms = parseStamp(stamp);
+  return ms === null ? null : Math.max(0, Math.floor((now - ms) / 60_000));
+}
+
+export function summarize(d: Delivery, spans: StageSpan[], now = Date.now()): Delivery & { stage_minutes: number | null; open_stages: Stage[]; stalls: Array<Stall & { minutes: number }> } {
   const cur = currentStage(spans);
   return {
     ...d,
     stage: cur?.stage ?? d.stage,
     stage_started_at: cur?.started_at ?? d.stage_started_at,
-    stage_minutes: cur ? Math.floor((now - new Date(cur.started_at).getTime()) / 60_000) : null,
+    stage_minutes: minutesSince(cur?.started_at ?? d.stage_started_at ?? d.last_progress_at, now),
     open_stages: [...new Set(spans.filter((s) => !s.finished_at).map((s) => s.stage))],
-    stalls: findStalls(d, spans, now),
+    stalls: findStalls(d, spans, now).map((st) => ({ ...st, minutes: minutesSince(st.since, now) ?? 0 })),
   };
 }

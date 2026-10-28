@@ -1356,7 +1356,7 @@ Plan and status: `docs/ops/engine-fixes-27oct-plan.md`.
 
 ## Delivery tracker (27 Oct 2026)
 
-Deliveries by product-desk number (schema v30): `desk` on the record. A freeze that carries a desk number joins its lane to the open `PD-<n>` delivery or opens one (created_by `tracker`); one open record per desk; `deliveries.auto_desk: false` turns it off. `POST /api/deliveries` accepts `desk` (134 or `PD-134`; title defaults to `PD-<n>`); `GET /api/deliveries?desk=134`.
+Deliveries by product-desk number (schema v30): `desk` on the record. A lane MARKED with a desk number — in the branch name (`wc-codex7-pd162-reland`, `codex2/pd108-s1-fixes`, `wc-claude5-desk138`) or in the freeze note's file name (`desk91-freeze-<sha>.md`) — joins the open `PD-<n>` delivery or opens one (created_by `tracker`) when its freeze is open and under 14 days old. A desk only mentioned in the note's prose is a reference and does not count. One open record per desk; `deliveries.auto_desk: false` turns it off. `POST /api/deliveries` accepts `desk` (134 or `PD-134`; title defaults to `PD-<n>`); `GET /api/deliveries?desk=134`.
 
 A feature from spec to production as one record (`docs/ops/delivery-tracker-plan.md`: Temporal's
 model, not its server). Stage spans are derived from the events table by lane and SHA, never
