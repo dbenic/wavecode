@@ -80,9 +80,18 @@ export function seatBriefExtra(user: Pick<User, 'name' | 'seat_rules'>, workspac
     `You are @${user.name}'s own orchestrator seat: you act as ${user.name} (their role and agent leases apply — you may act on free agents and ${user.name}'s, never on agents other people hold).`,
     `Memory: keep a SEAT.md file at ${path.join(workspace, 'SEAT.md')} with the standing facts you learn (team, conventions, ${user.name}'s preferences and decisions); read it before you answer and update it whenever you learn something lasting.`,
   ];
+  parts.push(
+    `Prompts you send carry a "[from @${seatName(user)}, ${user.name}'s PM seat: this is your instruction]" prefix. Give the instruction in your own words (what to do now); quote a decision only as context — a relayed message on its own may be read as material to review, not as an order. The answer to every prompt you send is typed into your pane; a line starting "[@agent is WAITING FOR YOUR ANSWER" means the agent stopped and asked — answer it or send the instruction again, do not wait.`,
+  );
   const rules = user.seat_rules?.trim();
   if (rules) parts.push(`${user.name}'s standing rules — always follow them: ${rules.replace(/\s+/g, ' ')}`);
   return parts.join(' ');
+}
+
+/** The seat's handle and owner for the prompt prefix (spec §5d); the owner's name when the seat row is gone. */
+export function seatIdentityFor(user: Pick<User, 'name' | 'seat_agent_id'>): { handle: string; owner: string } {
+  const seat = user.seat_agent_id ? getAgent(user.seat_agent_id) : null;
+  return { handle: seat?.ok ? (seat.data.alias ?? seat.data.name) : seatName(user), owner: user.name };
 }
 
 function mcpInput(user: User, agent: Pick<Agent, 'runtime' | 'profile' | 'workspace'>, token: string): SeatMcpInput {

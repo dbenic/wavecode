@@ -29,7 +29,7 @@ import * as terminalStream from '../terminal-stream.js';
 import * as runtimeLiveness from '../runtime-liveness.js';
 import { promptAgent } from '../prompting.js';
 import { briefOrchestratorSeat, parseAgentRole } from '../orchestrator.js';
-import { defaultSeatFor } from '../seats.js';
+import { defaultSeatFor, seatIdentityFor } from '../seats.js';
 import { validateAlias, validatePersona, validateTag } from '../agent-identity.js';
 import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
 import { agentAllowedFor, isRestrictedUser } from '../users.js';
@@ -124,7 +124,8 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     }
 
     // Liveness, persona (spec §5c), send-keys, the prompt event and reply capture (spec §5b): prompting.ts.
-    const res = await promptAgent({ agent: agentResult.data, actorId: user.id, text: body.text });
+    // A seat's prompt is marked as its instruction and its answer typed back into the seat's pane (spec §5d).
+    const res = await promptAgent({ agent: agentResult.data, actorId: user.id, text: body.text, seat: user.via_seat ? seatIdentityFor(user) : null });
     if (!res.ok) return c.json({ error: res.error }, res.status);
     // prompt_event_id lets a caller (a peer WaveCode, an MCP seat) match the captured reply to this prompt
     return c.json({ ok: true, prompt_event_id: res.prompt_event_id });

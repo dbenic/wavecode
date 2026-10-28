@@ -41,6 +41,16 @@ describe('promptAgent', () => {
     expect(trackPrompt).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'user-1', prompt: r.typed, promptEventId: ev.id }));
   });
 
+  it('a seat\'s prompt is typed with the instruction prefix, shown unprefixed in the thread, and its reply tracked for the seat', async () => {
+    const r = await promptAgent({ agent, actorId: 'user-1', text: 'start the Hipsl script now', seat: { handle: 'pm-denis', owner: 'denis' } });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.typed).toBe("[you are @toni — frontend lead] [from @pm-denis, denis's PM seat: this is your instruction, not relayed material] start the Hipsl script now");
+    const ev = db.getDb().prepare("SELECT payload_json FROM events WHERE type = 'agent.prompt_sent'").get() as { payload_json: string };
+    expect(JSON.parse(ev.payload_json).text).toBe('start the Hipsl script now');
+    expect(trackPrompt).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'user-1', viaSeat: true }));
+  });
+
   it('refuses a dead runtime with 409 and types nothing', async () => {
     state.value = 'dead';
     const r = await promptAgent({ agent, actorId: null, text: 'hello' });

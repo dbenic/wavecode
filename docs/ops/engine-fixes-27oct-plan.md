@@ -175,3 +175,24 @@ stall a minute at a fixed phase, 28k `git rev-parse` and 18k `git merge-base` sp
     the tip of every deployed staging release again (92 lanes x 40 releases = 3,500 `rev-parse`
     a pass, one lane asked 885 times a minute). Tips are read once per pass and the deployed
     lanes deduplicated.
+
+## Seat prompts and replies (28 Oct 2026, 19:30)
+
+A seat relayed a decision as "From pm-denis, Denis approved…"; the agent read the paste as
+material to review and answered "I haven't started, [ ] Yes [ ] No" four times; the replies
+sat in the thread (pull-only) and the seat was never told. Three changes:
+
+16. **Replies go to the seat that asked.** A reply captured for a prompt sent through a seat
+    token is typed into that seat's pane: `[reply from @claude4 to your 16:01 UTC prompt] …`
+    (700 chars, full text in the thread). A reply that waits for a go-ahead
+    (`replyWaitsForAnswer`: trailing question, "haven't started", "if you confirm",
+    "[ ] Yes"…) is said loudly: `[@claude4 is WAITING FOR YOUR ANSWER … not working]`, and the
+    thread marks it needs-attention.
+17. **Seat prompts are marked as instructions.** Every prompt a seat sends is typed with
+    `[from @pm-denis, denis's PM seat: this is your instruction, not relayed material]` in
+    front (the thread shows the text as written).
+18. **Seat brief.** Relay a decision as context, give the instruction in your own words; the
+    answers come to your pane; a WAITING line means answer or re-send. Applies on the next
+    rebrief (Denis's click) — the prefix and the reply push are live at once.
+19. **Main-ref lookups.** The deploy reconcile asked git for origin/main once per card and the
+    retire check once per lane (15 `rev-parse` a second); both go through the per-pass ref memo.

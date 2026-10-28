@@ -28,7 +28,7 @@ import {
 } from './db.js';
 import { checkAgentAccess, userName } from './leases.js';
 import { canMutate, isAdmin } from './users.js';
-import { parseReplyQuestion } from './reply-capture.js';
+import { parseReplyQuestion, replyWaitsForAnswer } from './reply-capture.js';
 import { feedbackSummary } from './feedback.js';
 
 export const THREAD_KINDS = ['prompt', 'reply', 'command', 'report', 'request', 'run', 'verdict', 'task', 'alert', 'artifact'] as const;
@@ -206,7 +206,8 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         ...(promptEventId ? { prompt_event_id: promptEventId } : {}),
       };
       const question = parseReplyQuestion(item.body ?? '');
-      item.needs_attention = question.asks;
+      const waits = replyWaitsForAnswer(item.body ?? '');
+      item.needs_attention = question.asks || waits;
       item.feedback = { ...feedbackSummary(feedbackForMessages([event.entity_id]), ctx.viewer.id), can_vote: ctx.canMutate };
       if (agentId && ctx.canAct(agentId)) {
         // Quick-reply chips: tapping one types the option back into the same seat.

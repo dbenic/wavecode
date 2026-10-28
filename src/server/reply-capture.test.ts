@@ -10,10 +10,16 @@ import path from 'node:path';
 
 const paneHarness = vi.hoisted(() => ({ text: '', calls: 0 }));
 
+const typed = vi.hoisted(() => ({ calls: [] as Array<{ agentId: string; text: string }> }));
+
 vi.mock('./session-manager.js', () => ({
   capturePane: vi.fn(() => {
     paneHarness.calls++;
     return { ok: true, data: paneHarness.text };
+  }),
+  sendKeys: vi.fn(async (agentId: string, text: string) => {
+    typed.calls.push({ agentId, text });
+    return { ok: true, data: undefined };
   }),
 }));
 
@@ -68,6 +74,51 @@ describe('reply-capture.ts', () => {
     const ev = db.listEvents().find((e) => e.type === 'message.created');
     expect(JSON.parse(ev!.payload_json!)).toMatchObject({ message_type: 'reply', ref_prompt_actor: 'u-ana', ref_prompt_event_id: 42 });
     expect(rc.getPendingReply(pm.id)).toBeUndefined();
+  });
+
+  describe('a prompt sent by a seat (spec §5d)', () => {
+    let seat: import('./db.js').Agent;
+    let userId: string;
+    beforeEach(() => {
+      typed.calls.length = 0;
+      const s = db.insertAgent({ name: 'pm-denis', runtime: 'claude-code', tmux_session: 'wc-pm-denis', workspace: '/w/seat', mode: 'spawned', status: 'idle' });
+      if (!s.ok) throw new Error(s.error);
+      seat = s.data;
+      const u = db.insertUser({ name: 'denis', role: 'admin', color: '#000', token_hash: 'h-denis' });
+      if (!u.ok) throw new Error(u.error);
+      userId = u.data.id;
+      db.updateUserSeat(userId, { seat_agent_id: seat.id });
+    });
+
+    it('gets the answer typed into the seat\'s pane, with the prompt time', async () => {
+      await rc.trackPrompt({ agent: pm, actorId: userId, prompt: 'what is chatgpt-countix doing?', promptEventId: 42, now: Date.UTC(2026, 9, 28, 16, 1) , viaSeat: true });
+      paneHarness.text = ANSWER;
+      expect(await rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true, now: Date.UTC(2026, 9, 28, 16, 2) })).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(typed.calls).toEqual([{ agentId: seat.id, text: '[reply from @pm to your 16:01 UTC prompt] It is running the invoices suite for T12.' }]);
+      const info = db.listAgentMessages({}).find((m) => m.message_type === 'info' && m.to_agent_id === seat.id);
+      expect(info?.message).toContain('[reply from @pm');
+    });
+
+    it('is told loudly when the agent stopped to ask for a yes instead of working', async () => {
+      await rc.trackPrompt({ agent: pm, actorId: userId, prompt: 'start the Hipsl script', promptEventId: 43, now: Date.UTC(2026, 9, 28, 16, 1), viaSeat: true });
+      paneHarness.text = "> start the Hipsl script\n\n● This is pasted content with no instruction of your own, so I haven't started. Shall I start?\n[ ] Yes, start now\n[ ] No\n\n❯ \n  ⏵⏵ bypass permissions on";
+      expect(await rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true, now: Date.UTC(2026, 9, 28, 16, 2) })).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(typed.calls).toHaveLength(1);
+      expect(typed.calls[0].agentId).toBe(seat.id);
+      expect(typed.calls[0].text).toMatch(/^\[@pm is WAITING FOR YOUR ANSWER to your 16:01 UTC prompt, not working — answer it, or send the instruction again in your own words\] /);
+      expect(rc.replyWaitsForAnswer("I haven't started. [ ] Yes [ ] No")).toBe(true);
+      expect(rc.replyWaitsForAnswer('Done: the script is frozen at 1234abcd. RESULT: PASS')).toBe(false);
+    });
+
+    it('a person\'s own prompt (not via the seat) is not typed into the seat', async () => {
+      await rc.trackPrompt({ agent: pm, actorId: userId, prompt: 'what is chatgpt-countix doing?', promptEventId: 44, now: 1000 });
+      paneHarness.text = ANSWER;
+      expect(await rc.onAgentIdle(pm.id, { transitioned: true, outputChanged: true, now: 2000 })).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(typed.calls).toEqual([]);
+    });
   });
 
   it('a pending prompt survives a daemon restart: reloaded from the database, the answer is still captured from the pane', async () => {

@@ -219,10 +219,18 @@ export async function changedFiles(repo: string, ref: string, mainRef: string): 
 async function resolveMainSha(repo: string, project: string | null): Promise<{ ref: string; sha: string } | null> {
   const spec = mainSpec(project);
   for (const ref of [spec.ref, spec.branch]) {
-    const sha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    const sha = await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
     if (sha && /^[0-9a-f]{40}$/i.test(sha)) return { ref, sha };
   }
   return null;
+}
+
+/**
+ * Main's SHA through the per-pass ref memo. 28 Oct 2026: the deploy reconcile asked git for
+ * origin/main once per card (10 spawns a second); inside a pass this is one ask.
+ */
+export async function mainRefSha(repo: string, project: string | null): Promise<string | null> {
+  return (await resolveMainSha(repo, project))?.sha ?? null;
 }
 
 /** Same answer as `commitsBehind`, computed without blocking the event loop. */
@@ -507,7 +515,7 @@ export async function retireIfNothingMainLacks(project: string | null, lane: str
   if (!tip) return false;
   const mainRef = await resolveMainRef(repo, project);
   if (!mainRef) return false;
-  const mainSha = await git(repo, ['rev-parse', `${mainRef}^{commit}`]);
+  const mainSha = await mainTipSha(repo, mainRef);
   const key = `${lane}@${tip}@${mainSha ?? mainRef}`;
   const memo = retiredMemo.get(key);
   if (memo && nowMs() - memo.at < 10 * 60_000) return memo.retired;

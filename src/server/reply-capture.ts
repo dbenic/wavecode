@@ -19,11 +19,14 @@ import {
   getDb,
   getRun,
   getTask,
+  getUser,
   insertAgentMessage,
   updateRunSummary,
   type Agent,
 } from './db.js';
 import { emit } from './event-bus.js';
+import { agentHandle } from './agent-identity.js';
+import { deliverSystemLine } from './wire-lines.js';
 import { isFileRunnerSeat } from './file-runner.js';
 import logger from './logger.js';
 import { extractReply, turnEnded } from './reply-extractors.js';
@@ -40,6 +43,8 @@ export interface PendingReply {
   /** A housekeeping prompt (e.g. the seat brief) — dropped quietly when superseded unanswered. */
   quietIfSuperseded?: boolean;
   actorId: string | null;
+  /** The prompt came through the actor's seat token: the answer is typed back into the seat's pane. */
+  viaSeat?: boolean;
   prompt: string;
   promptEventId: number | null;
   taskId: string | null;
@@ -132,6 +137,8 @@ export async function trackPrompt(opts: {
    * instead of posting a "superseded" placeholder into the user's thread.
    */
   quietIfSuperseded?: boolean;
+  /** Sent by the actor's orchestrator seat (spec §5d): the reply is pushed into that seat's pane. */
+  viaSeat?: boolean;
   now?: number;
 }): Promise<void> {
   const { agent } = opts;
@@ -163,6 +170,7 @@ export async function trackPrompt(opts: {
     sentAt: opts.now ?? Date.now(),
     baselineText: paneNow ? extractReply(agent.runtime, paneNow, null).text : '',
     ...(opts.quietIfSuperseded ? { quietIfSuperseded: true } : {}),
+    ...(opts.viaSeat ? { viaSeat: true } : {}),
   });
 }
 
@@ -216,6 +224,45 @@ function persist(p: PendingReply, agent: Agent, text: string, truncated: boolean
     ref_task_id: p.taskId,
     truncated,
   }, null);
+  if (p.viaSeat && !p.taskId && p.actorId) {
+    void tellSeatAboutReply(p, agent, text, truncated).catch((e) => {
+      logger.warn({ agentId: agent.id, actorId: p.actorId, error: (e as Error).message }, 'Reply not pushed to the seat');
+    });
+  }
+}
+
+/** How many characters of the answer the seat's pane gets; the thread has the whole reply. */
+const SEAT_REPLY_CHARS = 700;
+
+/**
+ * An answer that stops short of the work and asks for a go-ahead. 28 Oct 2026: a seat relayed
+ * a decision as "From pm-denis, Denis approved…"; the agent read it as pasted material,
+ * answered "I haven't started, [ ] Yes [ ] No" four times, and nobody was told for 13 minutes.
+ */
+const WAITING_RE = /\b(?:haven'?t|have not|hadn'?t|didn'?t|did not) started\b|\bif you confirm\b|\bwaiting for (?:your|a) (?:yes|go|confirmation|answer|decision)\b|\b(?:shall|should) i (?:proceed|start|go ahead)\b|\bdo you want me to (?:proceed|start|go ahead)\b|\[\s?\]\s*yes\b|\bone[- ]word yes\b/i;
+
+/** True when the reply waits for the asker instead of doing the work. */
+export function replyWaitsForAnswer(text: string): boolean {
+  return parseReplyQuestion(text).asks || WAITING_RE.test(text);
+}
+
+/**
+ * Spec §5d: a reply to a prompt the seat sent is typed into the seat's own pane, so the seat
+ * reads it without polling the thread. A reply that waits for an answer is said loudly.
+ */
+async function tellSeatAboutReply(p: PendingReply, agent: Agent, text: string, truncated: boolean): Promise<void> {
+  const user = getUser(p.actorId!);
+  if (!user.ok || !user.data.seat_agent_id || user.data.seat_agent_id === agent.id) return;
+  const seat = getAgent(user.data.seat_agent_id);
+  if (!seat.ok) return;
+  const handle = agentHandle(agent);
+  const when = new Date(p.sentAt).toISOString().slice(11, 16) + ' UTC';
+  const head = replyWaitsForAnswer(text)
+    ? `[@${handle} is WAITING FOR YOUR ANSWER to your ${when} prompt, not working — answer it, or send the instruction again in your own words]`
+    : `[reply from @${handle} to your ${when} prompt${truncated ? ', partial' : ''}]`;
+  const body = text.replace(/\s+/g, ' ').trim();
+  const line = body.length > SEAT_REPLY_CHARS ? `${body.slice(0, SEAT_REPLY_CHARS)}… (full reply in the thread)` : body;
+  await deliverSystemLine(seat.data, `${head} ${line}`, { kind: 'info', source: 'reply' });
 }
 
 /**

@@ -26,7 +26,7 @@ import { emit } from './event-bus.js';
 import { gitAncestor, gitRun, gitText } from './git-memo.js';
 import logger from './logger.js';
 import { listQueue, queueSwitch, type MergeQueueRow, type QueueSwitch } from './merge-queue.js';
-import { commitsBehind, laneAutomationDenied, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef, withRefMemoAsync } from './lane-main.js';
+import { commitsBehind, laneAutomationDenied, mainRefSha, mainTip, pingLaneAboutMain, projectRepo, resolveMainRef, withRefMemoAsync } from './lane-main.js';
 import { recordJob } from './perf-monitor.js';
 import { notify } from './notifications.js';
 import { pipelineHooks } from './pipeline-hooks.js';
@@ -412,10 +412,8 @@ async function containedIn(repo: string | null, sha: string, tip: string | null)
 async function mergedToMain(project: string | null, sha: string): Promise<Tri> {
   const repo = projectRepo(project);
   if (!repo || !project) return null;
-  const ref = await resolveMainRef(repo, project);
-  if (!ref) return null;
-  const mainSha = await gitText(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
-  if (!mainSha || !/^[0-9a-f]{40}$/i.test(mainSha)) return null;
+  const mainSha = await mainRefSha(repo, project);
+  if (!mainSha) return null;
   try {
     const ans = await gitAncestor(repo, sha.toLowerCase(), mainSha.toLowerCase());
     if (ans !== null) return ans;
