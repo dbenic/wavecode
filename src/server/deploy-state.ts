@@ -649,6 +649,22 @@ export async function reconcileDeployStates(now = new Date(), opts?: { freshTip?
   }
 }
 
+/**
+ * A card that is in production, with a known state, on a freeze no longer open for review, cannot
+ * change again (prod moves forward only): the pass keeps it as it is. 28 Oct 2026: every pass
+ * recomputed all 6,917 freezes in history with five git calls each, 25 minutes a pass, back to
+ * back, which was most of the daemon's load.
+ */
+function settledCard(freeze: ReleaseFreeze): boolean {
+  if (freeze.status === 'open' || freeze.status === 'behind-main' || freeze.status === 'rejected') return false;
+  const prior = readRow(freeze.sha);
+  return !!prior && prior.in_prod === 1 && prior.state !== 'unknown';
+}
+
+export function countSettledCardsForTest(freezes: ReleaseFreeze[]): number {
+  return freezes.filter(settledCard).length;
+}
+
 async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean }): Promise<number> {
   const freshTip = opts?.freshTip === true;
   ensureDeployStateTable();
@@ -656,6 +672,7 @@ async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean 
   try { freezes = listFreezes(); } catch { freezes = []; }
   const labelsBySha = new Map<string, Awaited<ReturnType<typeof applyNoteLabels>>>();
   for (const freeze of freezes) {
+    if (settledCard(freeze)) continue;
     const text = noteText(freeze);
     if (text && freeze.freeze_path) {
       try { labelsBySha.set(freeze.sha, await applyNoteLabels(freeze.sha, text, freeze.freeze_path)); } catch (e) {
@@ -672,6 +689,7 @@ async function reconcileDeployStatesPass(now: Date, opts?: { freshTip?: boolean 
   const seen = new Set<string>();
   for (const freeze of freezes) {
     seen.add(freeze.sha);
+    if (settledCard(freeze)) continue;
     const project = freeze.project;
     if (project && !tips.has(project)) tips.set(project, await tipsFor(project, freshTip));
     const pair = project ? tips.get(project)! : blankTips();

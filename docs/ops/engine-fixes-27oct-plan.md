@@ -148,6 +148,14 @@ refreeze bursts on migration collisions asked a first pass per refreeze (18 of 2
 12. **No second first pass on a lane refrozen inside 20 minutes** while the previous ask on that
     lane is unanswered (`auto: no first pass asked on … — @seat is still on …`).
 
+13. **The deploy reconcile skips settled cards.** A card in production with a known state on a
+    freeze no longer open for review cannot change (prod moves forward only). The pass recomputed
+    all 6,917 freezes in history, five git calls each, 25 minutes a pass back to back: that was
+    about 90 git spawns a second and most of the daemon's CPU after the orphan storm was gone.
+    Note for SysOps: `/usr/local/bin/tmux` on countix-dev is a wrapper that runs `id -u` and a
+    cgroup grep before each real tmux call; at 20 tmux calls a second that is 40 extra processes
+    a second. Not WaveCode's file.
+
 Operations the same afternoon: profile `denis20x` marked `shared: true` on countix-dev (admins'
 tasks dispatch to the seats again); the 16 stale pending tasks cancelled. Not changed: the gate
 refusal after a supersede (the gateway keeps one queued run per agent; the retry lands in 90 s).

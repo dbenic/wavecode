@@ -21,7 +21,7 @@ vi.mock('./config.js', () => ({
 
 import { Hono } from 'hono';
 import * as db from './db.js';
-import { ensureDeployStateTable, lastReconciledAt, reconcileDeployStates, resetDeployReconcilerForTest, reviewBoard, scheduleReconcile, startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
+import { countSettledCardsForTest, ensureDeployStateTable, lastReconciledAt, reconcileDeployStates, resetDeployReconcilerForTest, reviewBoard, scheduleReconcile, startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import * as gitMemo from './git-memo.js';
 import { behindMainAlert, MAIN_PING } from './lane-main.js';
 import { setPeerFetchForTest } from './peers.js';
@@ -320,6 +320,37 @@ describe('deploy reconciler review status and behind-main pings', () => {
     const old = board.cards.find((card) => card.sha === oldSha);
     expect(tip).toMatchObject({ status: 'On staging', history: true, needs_you: false });
     expect(old).toMatchObject({ status: 'Superseded', history: true, needs_you: false });
+  });
+
+  it('a settled card (in prod, known state, freeze no longer open) is kept as it is and asks git nothing', async () => {
+    ensureDeployStateTable();
+    const settled = 'd'.repeat(40);
+    const live = 'e'.repeat(40);
+    insertFreeze(settled, { verdict: 'pass', status: 'merged', lane: 'wc-old' });
+    insertFreeze(live, { verdict: 'pass', status: 'merged', lane: 'wc-new' });
+    const write = (sha: string, inProd: number, lane: string) => {
+      db.getDb().prepare(
+        `INSERT INTO deploy_card_states (
+           sha, state, merged_main, in_staging, in_prod, behind_main, superseded, verdict, lane, stage_block, last_reconciled_at
+         ) VALUES (?, 'deployed', 1, 1, ?, 0, 0, 'pass', ?, NULL, '2026-10-13T00:00:00.000Z')`,
+      ).run(sha, inProd, lane);
+    };
+    write(settled, 1, 'wc-old');
+    write(live, 0, 'wc-new');
+    expect(countSettledCardsForTest(freezes.listFreezes())).toBe(1);
+    const asked: string[] = [];
+    gitMemo.setGitExecForTest(async (_repo, args) => { asked.push(args.join(' ')); return { stdout: null, status: 128 }; });
+    try {
+      await reconcileDeployStates(new Date('2026-10-28T12:00:00Z'));
+    } finally {
+      gitMemo.resetGitMemoForTest();
+    }
+    // 28 Oct 2026: 6,917 freezes recomputed per pass, five git calls each; the settled ones were most of them.
+    expect(asked.some((a) => a.includes(settled))).toBe(false);
+    expect(asked.some((a) => a.includes(live))).toBe(true);
+    const row = db.getDb().prepare('SELECT state, in_prod, last_reconciled_at FROM deploy_card_states WHERE sha = ?').get(settled) as { state: string; in_prod: number; last_reconciled_at: string };
+    expect(row).toEqual({ state: 'deployed', in_prod: 1, last_reconciled_at: '2026-10-13T00:00:00.000Z' });
+    expect(db.getDb().prepare('SELECT 1 FROM deploy_card_states WHERE sha = ?').get(settled)).toBeTruthy(); // not pruned: still a listed freeze
   });
 
   it('serves the card from the stored item state and does not scan git', async () => {
