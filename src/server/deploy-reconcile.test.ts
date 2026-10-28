@@ -337,7 +337,14 @@ describe('deploy reconciler review status and behind-main pings', () => {
     };
     write(settled, 1, 'wc-old');
     write(live, 0, 'wc-new');
-    expect(countSettledCardsForTest(freezes.listFreezes())).toBe(1);
+    // History is settled too: a superseded card on a merged freeze (2,013 such rows on 28 Oct 2026).
+    const history = 'f'.repeat(40);
+    insertFreeze(history, { verdict: 'pass', status: 'merged', lane: 'wc-older' });
+    db.getDb().prepare(
+      `INSERT INTO deploy_card_states (sha, state, merged_main, in_staging, in_prod, behind_main, superseded, verdict, lane, stage_block, last_reconciled_at)
+       VALUES (?, 'superseded', 1, 0, 0, 0, 1, 'pass', 'wc-older', NULL, '2026-10-13T00:00:00.000Z')`,
+    ).run(history);
+    expect(countSettledCardsForTest(freezes.listFreezes())).toBe(2);
     const asked: string[] = [];
     gitMemo.setGitExecForTest(async (_repo, args) => { asked.push(args.join(' ')); return { stdout: null, status: 128 }; });
     try {
@@ -347,6 +354,7 @@ describe('deploy reconciler review status and behind-main pings', () => {
     }
     // 28 Oct 2026: 6,917 freezes recomputed per pass, five git calls each; the settled ones were most of them.
     expect(asked.some((a) => a.includes(settled))).toBe(false);
+    expect(asked.some((a) => a.includes(history))).toBe(false);
     expect(asked.some((a) => a.includes(live))).toBe(true);
     const row = db.getDb().prepare('SELECT state, in_prod, last_reconciled_at FROM deploy_card_states WHERE sha = ?').get(settled) as { state: string; in_prod: number; last_reconciled_at: string };
     expect(row).toEqual({ state: 'deployed', in_prod: 1, last_reconciled_at: '2026-10-13T00:00:00.000Z' });

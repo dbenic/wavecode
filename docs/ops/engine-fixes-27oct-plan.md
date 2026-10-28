@@ -148,7 +148,7 @@ refreeze bursts on migration collisions asked a first pass per refreeze (18 of 2
 12. **No second first pass on a lane refrozen inside 20 minutes** while the previous ask on that
     lane is unanswered (`auto: no first pass asked on … — @seat is still on …`).
 
-13. **The deploy reconcile skips settled cards.** A card in production with a known state on a
+13. **The deploy reconcile skips settled cards.** A card in production, or history (superseded, stale), with a known state on a
     freeze no longer open for review cannot change (prod moves forward only). The pass recomputed
     all 6,917 freezes in history, five git calls each, 25 minutes a pass back to back: that was
     about 90 git spawns a second and most of the daemon's CPU after the orphan storm was gone.

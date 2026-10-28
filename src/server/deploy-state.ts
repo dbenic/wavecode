@@ -658,7 +658,9 @@ export async function reconcileDeployStates(now = new Date(), opts?: { freshTip?
 function settledCard(freeze: ReleaseFreeze): boolean {
   if (freeze.status === 'open' || freeze.status === 'behind-main' || freeze.status === 'rejected') return false;
   const prior = readRow(freeze.sha);
-  return !!prior && prior.in_prod === 1 && prior.state !== 'unknown';
+  if (!prior || prior.state === 'unknown') return false;
+  // In production, or history (superseded by a newer freeze on the lane, stale): 6,700 of 6,935 cards.
+  return prior.in_prod === 1 || HISTORY_STATES.includes(prior.state);
 }
 
 export function countSettledCardsForTest(freezes: ReleaseFreeze[]): number {
