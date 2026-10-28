@@ -196,3 +196,7 @@ sat in the thread (pull-only) and the seat was never told. Three changes:
     rebrief (Denis's click) — the prefix and the reply push are live at once.
 19. **Main-ref lookups.** The deploy reconcile asked git for origin/main once per card and the
     retire check once per lane (15 `rev-parse` a second); both go through the per-pass ref memo.
+20. **Git memo persisted (schema v34).** Answers about immutable SHAs (merge-base, cherry,
+    rev-list with full SHAs, exit 0/1) are written through to `git_memo` and reloaded at daemon
+    start (`loadGitMemo`), bounded to the memo's 4,000 entries. A restart no longer empties the
+    memo, so the lane board and the deploy reconcile stop re-asking git for half an hour.

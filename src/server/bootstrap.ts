@@ -31,6 +31,7 @@ import { startDeployReconciler, stopDeployReconciler } from './deploy-state.js';
 import { startMergeQueueTimer, stopMergeQueueTimer } from './merge-queue.js';
 import { startDeliveryTimer, stopDeliveryTimer } from './deliveries.js';
 import * as replyCapture from './reply-capture.js';
+import { loadGitMemo } from './git-memo.js';
 import { startSlackBridge, stopSlackBridge } from './slack-bridge.js';
 import { startOpsLanes, stopOpsLanes } from './ops-lanes.js';
 import { closeAllPaneStreams, resetStalePipes } from './terminal-stream.js';
@@ -60,6 +61,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   usageProbe.ensureUsageTable();
   teamManager.ensureTeamTables();
   fileSharing.ensureFileSharingTable();
+  loadGitMemo(); // answers about immutable SHAs from before the stop: the boards do not re-ask git for half an hour
   replyCapture.loadPendingReplies(); // prompts still unanswered at the last stop: their answers are captured after the restart
   teamManager.startAllCommsWatchers();
   notifications.getVapidPublicKey();

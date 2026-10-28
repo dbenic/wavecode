@@ -290,7 +290,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 33;
+export const SCHEMA_VERSION = 34;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -527,6 +527,14 @@ const SCHEMA_SQL = `
   -- index each read walked every row of those types, 130 ms a call on 28 Oct 2026
   CREATE INDEX IF NOT EXISTS idx_events_type_created
     ON events(type, created_at);
+  -- git answers about immutable SHAs (merge-base, cherry, rev-list…) kept across restarts:
+  -- an empty memo cost the boards 20 git spawns a second for half an hour after every restart
+  CREATE TABLE IF NOT EXISTS git_memo (
+    key TEXT PRIMARY KEY,
+    status INTEGER NOT NULL,
+    stdout TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
   CREATE INDEX IF NOT EXISTS idx_tasks_status_agent
     ON tasks(status, agent_id);
   CREATE INDEX IF NOT EXISTS idx_tasks_goal
@@ -1110,6 +1118,15 @@ const MIGRATIONS: Record<number, string> = {
   // v32 → v33: the delivery tracker reads events by type and date each tick (28 Oct 2026).
   32: `
     CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(type, created_at);
+  `,
+  // v33 → v34: the git memo survives a restart (28 Oct 2026).
+  33: `
+    CREATE TABLE IF NOT EXISTS git_memo (
+      key TEXT PRIMARY KEY,
+      status INTEGER NOT NULL,
+      stdout TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `,
 };
 

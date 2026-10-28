@@ -6,6 +6,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import { getDb } from './db.js';
+import logger from './logger.js';
 
 export interface GitResult {
   stdout: string | null;
@@ -23,16 +25,58 @@ export const MEMO_MAX_ENTRIES = 4000;
 export const MEMO_MAX_BYTES = 256 * 1024;
 const memo = new Map<string, GitResult>();
 let custom: GitExec | null = null;
+/** Write-through to the git_memo table (the daemon turns it on after initDb; tests leave it off). */
+let persist = false;
 
 function remember(key: string, result: GitResult): void {
   if ((result.stdout?.length ?? 0) > MEMO_MAX_BYTES) return;
   if (memo.has(key)) memo.delete(key);
   memo.set(key, result);
+  const evicted: string[] = [];
   while (memo.size > MEMO_MAX_ENTRIES) {
     const oldest = memo.keys().next().value;
     if (oldest === undefined) break;
     memo.delete(oldest);
+    evicted.push(oldest);
   }
+  if (!persist) return;
+  try {
+    const db = getDb();
+    db.prepare('INSERT INTO git_memo (key, status, stdout) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET status = excluded.status, stdout = excluded.stdout, created_at = datetime(\'now\')')
+      .run(key, result.status ?? 0, result.stdout);
+    if (evicted.length) {
+      const del = db.prepare('DELETE FROM git_memo WHERE key = ?');
+      for (const k of evicted) del.run(k);
+    }
+  } catch (e) {
+    logger.debug({ error: (e as Error).message }, 'git memo row not written');
+  }
+}
+
+/**
+ * Startup: reload the answers the daemon had before it stopped and keep writing new ones. Every
+ * entry is a fact about immutable SHAs (gitArgsCacheable, exit 0/1), so an old answer is still
+ * right. 28 Oct 2026: with an empty memo the lane board and the deploy reconcile spawned about
+ * 20 merge-base/cherry a second for half an hour after each restart.
+ */
+export function loadGitMemo(): number {
+  persist = true;
+  let rows: Array<{ key: string; status: number; stdout: string | null }> = [];
+  try {
+    const db = getDb();
+    const n = (db.prepare('SELECT count(*) AS n FROM git_memo').get() as { n: number }).n;
+    if (n > MEMO_MAX_ENTRIES) {
+      db.prepare('DELETE FROM git_memo WHERE rowid IN (SELECT rowid FROM git_memo ORDER BY rowid ASC LIMIT ?)').run(n - MEMO_MAX_ENTRIES);
+    }
+    rows = db.prepare('SELECT key, status, stdout FROM git_memo ORDER BY rowid ASC').all() as typeof rows;
+  } catch (e) {
+    logger.warn({ error: (e as Error).message }, 'git memo not loaded');
+    return 0;
+  }
+  memo.clear();
+  for (const r of rows) memo.set(r.key, { stdout: r.stdout, status: r.status });
+  logger.info({ entries: memo.size }, 'git memo restored');
+  return memo.size;
 }
 
 /** Entries held and their text size, for the Health panel. */
@@ -68,6 +112,13 @@ export function resetGitMemoForTest(): void {
   memo.clear();
   negative.clear();
   custom = null;
+  persist = false;
+}
+
+/** Tests: drop what is in memory but keep the rows, as a daemon stop does. */
+export function forgetGitMemoInMemoryForTest(): void {
+  memo.clear();
+  negative.clear();
 }
 
 export function setGitExecForTest(fn: GitExec | null): void {
