@@ -290,7 +290,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 34;
+export const SCHEMA_VERSION = 35;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -533,6 +533,13 @@ const SCHEMA_SQL = `
     key TEXT PRIMARY KEY,
     status INTEGER NOT NULL,
     stdout TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  -- delivery stalls already reported to the driver seats (key delivery:stage:attempt → cause signature):
+  -- kept in memory until 28 Oct 2026, every restart re-sent every open stall (58 lines in one go)
+  CREATE TABLE IF NOT EXISTS delivery_stall_reports (
+    key TEXT PRIMARY KEY,
+    sig TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_tasks_status_agent
@@ -1125,6 +1132,14 @@ const MIGRATIONS: Record<number, string> = {
       key TEXT PRIMARY KEY,
       status INTEGER NOT NULL,
       stdout TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `,
+  // v34 → v35: reported delivery stalls survive a restart (28 Oct 2026).
+  34: `
+    CREATE TABLE IF NOT EXISTS delivery_stall_reports (
+      key TEXT PRIMARY KEY,
+      sig TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `,

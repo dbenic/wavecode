@@ -926,16 +926,42 @@ export function findStalls(delivery: Delivery, spans: StageSpan[], now = Date.no
   for (const s of spans) {
     if (s.finished_at) continue;
     const ageMin = (now - new Date(s.started_at).getTime()) / 60_000;
-    if (s.cause) {
+    if (s.cause && !isQueueing(s.cause)) {
       out.push({ delivery_id: delivery.id, stage: s.stage, attempt: s.attempt, code: 'BLOCKED', cause: s.cause, since: s.started_at, sha: s.sha, lane: s.lane, actor: s.actor });
     } else if (ageMin > budgetMin(s.stage)) {
-      out.push({ delivery_id: delivery.id, stage: s.stage, attempt: s.attempt, code: 'OVERRUN', cause: `${s.stage} open for ${Math.floor(ageMin)} min, budget ${budgetMin(s.stage)} min`, since: s.started_at, sha: s.sha, lane: s.lane, actor: s.actor });
+      const waiting = s.cause ? `; ${s.cause}` : '';
+      out.push({ delivery_id: delivery.id, stage: s.stage, attempt: s.attempt, code: 'OVERRUN', cause: `${s.stage} open for ${Math.floor(ageMin)} min, budget ${budgetMin(s.stage)} min${waiting}`, since: s.started_at, sha: s.sha, lane: s.lane, actor: s.actor });
     }
   }
   return out;
 }
 
-const reported = new Map<string, string>(); // delivery:stage:attempt -> cause already reported
+/**
+ * A pipeline note that says the work is queued, not stopped: the gateway runs one job per
+ * agent and a few at a time, so "waits for a slot" or "waits for @x's other run" is the
+ * normal state of a gate for a while. It stays on the span as its cause (the card shows why
+ * it waits) but is not a stall; past the budget it is an overrun that quotes the wait.
+ * Until 28 Oct 2026 every change in the queue counts read as a new block and messaged the seats.
+ */
+export function isQueueing(cause: string): boolean {
+  return /waits for (a slot|@\S+'?s other run)|waits in the queue|queued behind/i.test(cause);
+}
+
+// delivery:stage:attempt -> cause signature already reported, in the DB so a restart does not
+// re-send every open stall (28 Oct 2026: 42 and 58 lines to the driver seat after two restarts).
+function reportedSig(key: string): string | null {
+  const row = getDb().prepare('SELECT sig FROM delivery_stall_reports WHERE key = ?').get(key) as { sig: string } | undefined;
+  return row?.sig ?? null;
+}
+
+function markReported(key: string, sig: string): void {
+  getDb().prepare('INSERT INTO delivery_stall_reports (key, sig) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET sig = excluded.sig, created_at = datetime(\'now\')').run(key, sig);
+}
+
+/** Forget the stalls of deliveries that are no longer open (a closed record does not come back). */
+function pruneReported(): void {
+  getDb().prepare("DELETE FROM delivery_stall_reports WHERE substr(key, 1, instr(key, ':') - 1) NOT IN (SELECT id FROM deliveries WHERE status = 'open')").run();
+}
 
 /** Report new stalls of one delivery: one event and one message per new cause. */
 export async function reportStalls(delivery: Delivery, spans: StageSpan[], now = Date.now()): Promise<Stall[]> {
@@ -944,8 +970,8 @@ export async function reportStalls(delivery: Delivery, spans: StageSpan[], now =
   for (const st of stalls) {
     const key = `${st.delivery_id}:${st.stage}:${st.attempt}`;
     const sig = st.code === 'OVERRUN' ? st.code : `${st.code}|${st.cause}`;
-    if (reported.get(key) === sig) continue;
-    reported.set(key, sig);
+    if (reportedSig(key) === sig) continue;
+    markReported(key, sig);
     // A span that was already stalled when the record was created is history the creator saw; the record
     // shows it, nobody is messaged.
     if (new Date(st.since).getTime() < new Date(toIso(delivery.created_at)).getTime()) continue;
@@ -972,7 +998,7 @@ async function notifySeats(text: string, actor: string | null): Promise<void> {
 }
 
 export function resetDeliveryStallMemoryForTest(): void {
-  reported.clear();
+  try { getDb().prepare('DELETE FROM delivery_stall_reports').run(); } catch { /* no db open */ }
 }
 
 // --- tick ----------------------------------------------------------------------------------
@@ -1007,6 +1033,7 @@ export async function deliveryTick(now = Date.now()): Promise<void> {
       if (derived.data.delivery.status !== 'open') continue;
       await reportStalls(derived.data.delivery, derived.data.spans, now);
     }
+    pruneReported();
   } catch (e) {
     logger.warn({ error: (e as Error).message }, 'Delivery tick failed');
   } finally {

@@ -221,3 +221,22 @@ capture-pane load:
     the persisted memo answers.
 23. **Memo cap 4,000 → 20,000.** The boards filled the 4,000-entry memo the day it was
     persisted (FIFO eviction, so hot pairs were asked again every pass). About 240 bytes a row.
+
+## Delivery alerts: the restart floods (28 Oct, 23:30 CET)
+
+pm-denis delegated four delivery alerts to codex7; all four lanes were fine. The alerts were
+WaveCode's: the tracker kept "already reported" stalls in memory, so every daemon restart
+re-sent one line per open stall to the driver seat (42 lines after the 21:52 CET restart, 58
+after 00:14; 797 stall events that day), and gateway queueing counted as a block.
+
+24. **Reported stalls persisted (schema v35, `delivery_stall_reports`).** The
+    delivery:stage:attempt → cause signature memory lives in the DB; rows of closed deliveries
+    are pruned each tick. A restart re-sends nothing.
+25. **Queueing is not a stall.** A note that says "waits for a slot" or "waits for @x's other
+    run" (`isQueueing`) stays on the span as its cause (the card shows why it waits) but does
+    not block; past the budget it is one overrun whose text quotes the wait. Before, every
+    change in the queue counts ("2 running, 3 waiting") was a new cause and a new message.
+
+Still open (needs a plan first): records the tracker cannot follow — lanes that never freeze
+(the two `prodcand` lanes), lanes whose SHA is already merged or deployed — stay open with an
+overrun forever.

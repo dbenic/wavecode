@@ -258,19 +258,20 @@ describe('stalls', () => {
     const id = created.data.id;
     ev(10, 'pipeline.frozen', A, { sha: A, lane: LANE });
     ev(11, 'pipeline.quick', `${A}:quick`, { sha: A, lane: LANE, quick: 'QUEUED' });
-    ev(12, 'pipeline.action', `wavepulse:${LANE}`, { action: 'quick', sha: A, lane: LANE, note: "auto: quick check waits for @codex1's other run" });
+    ev(12, 'pipeline.action', `wavepulse:${LANE}`, { action: 'quick', sha: A, lane: LANE, note: 'auto: quick check on aaaaaaaa refused — merge queue switched off' });
     const d = del.deriveDelivery(id);
     if (!d.ok) throw new Error(d.error);
 
     const first = await del.reportStalls(d.data.delivery, d.data.spans, T0 + 15 * 60_000);
     expect(first.map((s) => [s.stage, s.code])).toEqual([['gates', 'BLOCKED']]);
-    expect(first[0].cause).toContain("waits for @codex1's other run");
+    expect(first[0].cause).toContain('merge queue switched off');
     expect(vi.mocked(emit)).toHaveBeenCalledWith('delivery.stalled', 'delivery', id, expect.objectContaining({ stage: 'gates', code: 'BLOCKED' }), null);
     expect(vi.mocked(deliverSystemLine)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(deliverSystemLine).mock.calls[0][1]).toContain('gates is blocked');
     expect(del.getDelivery(id)!.stall_cause).toContain('BLOCKED');
 
-    // same cause again: nothing new
+    // same cause again: nothing new — and the memory is in the DB, so a restart does not re-send it either
+    expect(db.getDb().prepare('SELECT count(*) AS n FROM delivery_stall_reports').get()).toEqual({ n: 1 });
     const again = await del.reportStalls(d.data.delivery, d.data.spans, T0 + 16 * 60_000);
     expect(again).toEqual([]);
     expect(vi.mocked(deliverSystemLine)).toHaveBeenCalledTimes(1);
@@ -284,6 +285,34 @@ describe('stalls', () => {
     const over = await del.reportStalls(d2.data.delivery, d2.data.spans, T0 + 11 * 60_000 + 26 * 60_000);
     expect(over.map((s) => [s.stage, s.code])).toEqual([['gates', 'OVERRUN']]);
     expect(over[0].cause).toMatch(/budget 25 min/);
+  });
+
+  it('gateway queueing is the cause on the card, not a stall; past the budget it is one overrun that quotes the wait', async () => {
+    const created = del.createDelivery({ title: 'Bank', lanes: [LANE], since: new Date(T0).toISOString() });
+    if (!created.ok) throw new Error(created.error);
+    const id = created.data.id;
+    ev(10, 'pipeline.frozen', A, { sha: A, lane: LANE });
+    ev(11, 'pipeline.quick', `${A}:quick`, { sha: A, lane: LANE, quick: 'QUEUED' });
+    ev(12, 'pipeline.action', `wavepulse:${LANE}`, { action: 'quick', sha: A, lane: LANE, note: "auto: quick check on aaaaaaaa waits for @codex1's other run (the gateway keeps one queued run per agent)" });
+    const d = del.deriveDelivery(id);
+    if (!d.ok) throw new Error(d.error);
+    expect(d.data.spans.find((s) => s.stage === 'gates')!.cause).toContain("waits for @codex1's other run");
+    expect(await del.reportStalls(d.data.delivery, d.data.spans, T0 + 15 * 60_000)).toEqual([]);
+    expect(del.getDelivery(id)!.stall_cause).toBeNull();
+    // the queue counts change: still nothing to say
+    ev(14, 'pipeline.action', `wavepulse:${LANE}`, { action: 'quick', sha: A, lane: LANE, note: 'auto: quick check on aaaaaaaa waits for a slot (2 running, 3 waiting)' });
+    const d2 = del.deriveDelivery(id);
+    if (!d2.ok) throw new Error(d2.error);
+    expect(await del.reportStalls(d2.data.delivery, d2.data.spans, T0 + 16 * 60_000)).toEqual([]);
+    expect(vi.mocked(deliverSystemLine)).not.toHaveBeenCalled();
+    // past the gates budget (25 min): one overrun, with the wait in its text
+    const over = await del.reportStalls(d2.data.delivery, d2.data.spans, T0 + 11 * 60_000 + 26 * 60_000);
+    expect(over.map((s) => [s.stage, s.code])).toEqual([['gates', 'OVERRUN']]);
+    expect(over[0].cause).toMatch(/budget 25 min; auto: quick check on aaaaaaaa waits for a slot/);
+    expect(vi.mocked(deliverSystemLine)).toHaveBeenCalledTimes(1);
+    expect(await del.reportStalls(d2.data.delivery, d2.data.spans, T0 + 11 * 60_000 + 27 * 60_000)).toEqual([]);
+    expect(del.isQueueing("waits for @ales-claude2's other run")).toBe(true);
+    expect(del.isQueueing('freeze refused — wc-x is not on origin')).toBe(false);
   });
 
   it('budgets come from config', () => {
