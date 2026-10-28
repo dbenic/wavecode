@@ -127,6 +127,25 @@ describe('prereqs', () => {
     expect((await productionPrereqGate('demo', 'c'.repeat(40), 'denis'))).toEqual({ ok: true, steps: null });
   });
 
+  it('a missing object or a timeout is remembered for a while, not forever and not re-asked every call', async () => {
+    const { gitAncestor, resetGitMemoForTest, setGitExecForTest } = await import('./git-memo.js');
+    resetGitMemoForTest();
+    let calls = 0;
+    setGitExecForTest(async () => { calls++; return { stdout: null, status: 128 }; });
+    try {
+      const a = 'a'.repeat(40); const b = 'b'.repeat(40);
+      expect((await gitAncestor('/repo', a, b))).toBeNull();
+      expect((await gitAncestor('/repo', a, b))).toBeNull();
+      expect(calls).toBe(1); // 28 Oct 2026: six unknown SHAs were asked five times a second
+      resetGitMemoForTest();
+      setGitExecForTest(async () => { calls++; return { stdout: '', status: 0 }; });
+      expect((await gitAncestor('/repo', a, b))).toBe(true); // asked again once the memory is gone
+      expect(calls).toBe(2);
+    } finally {
+      resetGitMemoForTest();
+    }
+  });
+
   it('gitAncestor answers a full-SHA pair from memory after the first call, and never caches a ref', async () => {
     const { gitAncestor, resetGitMemoForTest } = await import('./git-memo.js');
     resetGitMemoForTest();

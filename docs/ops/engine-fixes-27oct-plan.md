@@ -123,3 +123,31 @@ Three leaks were left:
 Still open after this: 76 pending tasks, 58 of them from before 26 Oct or on retired seats
 (cancelled by hand); reviewer load (codex5) to be read after a day under the new rules;
 `deploy_reconcile` over its 90 s ceiling and the test-portal timeout on the deploy box.
+
+### Hour-three measurement: daemon load and five more fixes (28 Oct 2026, 16:00)
+
+Measured again with a wider lens: the daemon ran at 72 % CPU and spawned 52,000 processes per
+15 minutes, 20,700 of them `git merge-base`. Sampling the live processes showed the same two
+ancestry questions five times a second: six freezes from 25 Oct with no lane whose commits were
+never pushed, in a partial clone (blob:none), so every ask went to the remote three times, timed
+out, and was never remembered. Also found: the delivery tick stalled the event loop 8 s a minute
+(one event scan per open delivery), the owner's own tasks never dispatched (profile rule), and
+refreeze bursts on migration collisions asked a first pass per refreeze (18 of 26 timed out).
+
+8. **Delivery tick loads its signals once.** `deriveDelivery(id, signals?)` takes the pass's
+   shared list; `deliveryTick` loads from the oldest open delivery's `since_at` in one query.
+   Schema v33 adds `idx_events_type_created` (type, created_at) for that read.
+9. **Git memo remembers failures for 10 minutes.** `gitRun` kept exit 0/1 forever and nothing
+   else, so a missing object (128) or a timeout was asked again on every call. Ancestry and
+   existence reads (`merge-base`, `cherry`, `rev-list`, `cat-file`, `rev-parse`) run with
+   `GIT_NO_LAZY_FETCH=1`: they never need blob content, and a missing commit is missing.
+10. **A freeze on a commit the repo does not have after a day is closed as stale** (reconcile
+    pass, `freeze.stale`, reason "commit … is not in the repo after a day").
+11. **The migration-collision bounce says what to do**: the latest number on main, the number
+    to start at, and that the renumbering is done once after merging main.
+12. **No second first pass on a lane refrozen inside 20 minutes** while the previous ask on that
+    lane is unanswered (`auto: no first pass asked on … — @seat is still on …`).
+
+Operations the same afternoon: profile `denis20x` marked `shared: true` on countix-dev (admins'
+tasks dispatch to the seats again); the 16 stale pending tasks cancelled. Not changed: the gate
+refusal after a supersede (the gateway keeps one queued run per agent; the retry lands in 90 s).

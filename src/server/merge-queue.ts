@@ -779,7 +779,13 @@ export function migrationCollision(mainFiles: string[], laneAdded: string[]): st
   for (const file of laneAdded) {
     const n = num(file);
     if (n === null) continue;
-    if (n <= mainMax) return `migration ${path.basename(file)} is not numbered after main's latest (${String(mainMax).padStart(4, '0')})`;
+    if (n <= mainMax) {
+      const latest = String(mainMax).padStart(4, '0');
+      const next = String(mainMax + 1).padStart(4, '0');
+      // 28 Oct 2026: seats renumbered one file at a time and refroze after each bounce (7 freezes in
+      // 40 min on one lane), so the message says the number to use and that it is done once.
+      return `migration ${path.basename(file)} is not numbered after main's latest (${latest}): merge main into the lane first, then renumber the lane's migrations once so they start at ${next}`;
+    }
     const dup = seen.get(n);
     if (dup) return `migrations ${path.basename(dup)} and ${path.basename(file)} share a number`;
     seen.set(n, file);

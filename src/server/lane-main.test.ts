@@ -420,6 +420,18 @@ describe('lane retire: nothing main lacks', () => {
     expect(db.listAgentMessages({ limit: 10 }).map((m) => m.message).filter((m) => /closed as stale/.test(m))).toHaveLength(1);
   });
 
+  it('reconcile closes an open freeze whose commit the repo does not have after a day; a fresh one waits for the push', async () => {
+    const ghost = 'f'.repeat(40);
+    const fresh = 'e'.repeat(40);
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, project, lane, author_name, status, created_at) VALUES (?, 'wave', 'wc-ghost', 'ales', 'open', '2026-10-25 09:00:00')`).run(ghost);
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, project, lane, author_name, status, created_at) VALUES (?, 'wave', 'wc-fresh', 'ales', 'open', datetime('now'))`).run(fresh);
+    await reconcileBehindFreezes();
+    const status = (sha: string) => (db.getDb().prepare('SELECT status, decision_reason FROM release_freezes WHERE sha = ?').get(sha) as { status: string; decision_reason: string | null });
+    expect(status(ghost)).toEqual({ status: 'stale', decision_reason: `commit ${ghost.slice(0, 8)} is not in the repo after a day (never pushed, or rewritten)` });
+    expect(status(fresh).status).toBe('open');
+    expect(db.getDb().prepare('SELECT 1 FROM events WHERE type = ?').all(MAIN_PING)).toHaveLength(0);
+  });
+
   it('reconcile does not nudge a lane a seat has checked out while WaveCode syncs main itself; a lane nobody has is nudged once a day', async () => {
     let now = Date.parse('2026-10-28T10:00:00Z');
     setLaneAlertNowForTest(() => now);

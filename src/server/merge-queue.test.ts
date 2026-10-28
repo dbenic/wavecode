@@ -92,6 +92,7 @@ describe('merge queue — pure rules', () => {
     const main = ['migrations/0368_a.sql', 'migrations/0369_b.sql', 'migrations/README.md'];
     expect(migrationCollision(main, ['migrations/0370_c.sql'])).toBeNull();
     expect(migrationCollision(main, ['migrations/0369_c.sql'])).toMatch(/0369_c\.sql is not numbered after main's latest \(0369\)/);
+    expect(migrationCollision(main, ['migrations/0369_c.sql'])).toMatch(/merge main into the lane first, then renumber the lane's migrations once so they start at 0370/);
     expect(migrationCollision(main, ['migrations/0370_c.sql', 'migrations/0370_d.sql'])).toMatch(/share a number/);
     expect(migrationCollision(main, ['migrations/notes.md'])).toBeNull();
   });

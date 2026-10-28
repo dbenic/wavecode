@@ -5,7 +5,7 @@
  */
 
 import { getConfig } from './config.js';
-import { gitAncestor, gitText } from './git-memo.js';
+import { gitAncestor, gitRun, gitText } from './git-memo.js';
 import { execFileAsync } from './proc.js';
 import { getAgent, getDb, listAgents, resolveAgent, type Agent } from './db.js';
 import { emit } from './event-bus.js';
@@ -287,6 +287,8 @@ const REPEAT_MS = 30 * 60 * 1000;
 const FREEZE_NUDGE_REPEAT_MS = 24 * 60 * 60 * 1000;
 /** An open freeze whose lane has not been pushed for this long is closed as stale. */
 const STALE_FREEZE_MS = 48 * 60 * 60 * 1000;
+/** An open freeze whose commit the repo still does not have after this long is closed as stale. */
+const UNKNOWN_SHA_STALE_MS = 24 * 60 * 60 * 1000;
 export const FREEZE_STALE = 'freeze.stale';
 let nowMs = (): number => Date.now();
 
@@ -719,6 +721,12 @@ function freezeAgeMs(createdAt: string): number {
   return Number.isFinite(at) ? at : nowMs();
 }
 
+/** True when the repo has the commit; null answers (git could not say) count as known. */
+async function commitKnown(repo: string, sha: string): Promise<boolean> {
+  const r = await gitRun(repo, ['cat-file', '-e', `${sha}^{commit}`], 5000);
+  return r.status !== 128;
+}
+
 function closeStaleFreeze(f: FreezeRow & { created_at: string }, why: string): void {
   try {
     getDb().prepare(
@@ -792,6 +800,12 @@ export async function reconcileBehindFreezes(): Promise<void> {
     seen.add(key);
     if (laneAutomationDenied(f.project, { name: f.author_name }, f.lane)) continue;
     const repo = projectRepo(f.project);
+    // 28 Oct 2026: six freezes on commits nobody ever pushed sat open for three days; every pass
+    // asked git about them, and the partial clone went to the remote for each ask.
+    if (repo && nowMs() - freezeAgeMs(f.created_at) >= UNKNOWN_SHA_STALE_MS && !(await commitKnown(repo, f.sha))) {
+      closeStaleFreeze(f, `commit ${f.sha.slice(0, 8)} is not in the repo after a day (never pushed, or rewritten)`);
+      continue;
+    }
     const mainRef = repo ? await resolveMainRef(repo, f.project) : null;
     const tip = f.lane ? await laneTipSha(f.project, f.lane) : null;
     if (repo && mainRef && tip && tip !== f.sha && await isMergeOnlyDelta(repo, f.sha, tip, mainRef)) continue;

@@ -93,6 +93,12 @@ describe('delivery derivation', () => {
     expect(spans.find((s) => s.stage === 'gates' && s.sha === X)!.outcome).toBe('ok');
     expect(spans.filter((s) => s.sha === X).every((s) => !(s.cause ?? '').includes('waits for'))).toBe(true);
     expect(spans.find((s) => s.stage === 'gates' && s.sha === Y)!.cause).toContain("waits for @y's other run");
+    // The tick loads the signals once for every open delivery and hands them in: same spans.
+    const shared = del.loadSignals(new Date(T0 - 60 * 60_000).toISOString());
+    const again = del.deriveDelivery(id, shared);
+    if (!again.ok) throw new Error(again.error);
+    const strip = (rows: typeof spans) => rows.map(({ id: _id, ...rest }) => rest);
+    expect(strip(again.data.spans)).toEqual(strip(spans));
     expect(spans.filter((s) => (s.cause ?? '').includes('not on origin'))).toEqual([]);
   });
 

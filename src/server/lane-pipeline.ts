@@ -32,7 +32,7 @@ import { pickReviewer } from './reviewer-ladder.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
 import { assignmentFacts, loadFor, loadMemo, minCapacityPct, projectReassignMs, reviewEvents, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign, type ReviewerLoad } from './reviewer-assign.js';
-import { firstPassFor, firstPassHooks, overdueFirstPasses, requestFirstPass, type FirstPassResult } from './first-pass.js';
+import { FIRST_PASS_REQUESTED, firstPassFor, firstPassHooks, overdueFirstPasses, requestFirstPass, type FirstPassResult } from './first-pass.js';
 import { deliverSystemLine, tellDriverSeats } from './wire-lines.js';
 import { candidateHooks, overdueCandidateReviews, requestCandidateReview, type CandidateResult } from './candidate-review.js';
 
@@ -1796,12 +1796,37 @@ export async function onFreezeRecorded(sha: string): Promise<void> {
   try { await considerAutoStage(sha); } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'Auto-stage skipped'); }
 }
 
+/** A first pass asked on another SHA of the same lane inside this window, still unanswered, is not asked again. */
+const FIRST_PASS_REASK_MS = 20 * 60_000;
+
+function openFirstPassOnLane(project: string, lane: string, sha: string): { sha: string; seat: string; atMs: number } | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT entity_id, payload_json FROM events WHERE type = ? AND entity_id != ? AND json_extract(payload_json, '$.lane') = ? AND json_extract(payload_json, '$.project') = ? ORDER BY id DESC LIMIT 1`,
+    ).get(FIRST_PASS_REQUESTED, sha.toLowerCase(), lane, project) as { entity_id: string; payload_json: string | null } | undefined;
+    if (!row?.payload_json) return null;
+    const p = JSON.parse(row.payload_json) as { seat?: unknown; at_ms?: unknown };
+    if (typeof p.at_ms !== 'number') return null;
+    if (Date.now() - p.at_ms >= FIRST_PASS_REASK_MS || firstPassFor(row.entity_id)) return null;
+    return { sha: row.entity_id, seat: typeof p.seat === 'string' ? p.seat : '?', atMs: p.at_ms };
+  } catch {
+    return null;
+  }
+}
+
 async function requestFirstPassFor(freeze: ReleaseFreeze): Promise<void> {
   if (!freeze.project || !freeze.author_agent_id) return;
   const pipe = pipelineOf(freeze.project);
   if (!pipe.auto_review) return;
   const author = getAgent(freeze.author_agent_id);
   if (!author.ok) return;
+  // 28 Oct 2026: refreeze bursts (7 freezes in 40 min on one lane) asked a first pass each time;
+  // the seat was still on the previous SHA, so 18 of 26 asks in an hour timed out.
+  const open = freeze.lane ? openFirstPassOnLane(freeze.project, freeze.lane, freeze.sha) : null;
+  if (open) {
+    note(freeze.project, freeze.lane, freeze.sha, 'first-pass', `auto: no first pass asked on ${freeze.sha.slice(0, 8)} — @${open.seat} is still on ${open.sha.slice(0, 8)} of this lane, asked ${Math.round((Date.now() - open.atMs) / 60_000)} min ago`);
+    return;
+  }
   const result = await requestFirstPass(freeze, author.data, {
     repo: projectRepo(freeze.project), remote: mainSpec(freeze.project).remote,
     serviceProfiles: pipe.service_profiles, deny: pipe.review_deny,

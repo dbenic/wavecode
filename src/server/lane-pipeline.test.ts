@@ -1312,6 +1312,34 @@ describe('hands-free lane pipeline', () => {
     expect(messages(alesCodex.id).join('\n')).not.toMatch(/Please review/);
   });
 
+  it('a lane refrozen inside 20 minutes does not ask a second first pass while the first is unanswered', async () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    agent('codex3', path.join(tmp, 'codex3'));
+    const codex9 = agent('codex9', path.join(tmp, 'codex9'));
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex3'] };
+    review.first_pass = { enabled: true, seats: ['codex9'], dir: freezeDir, timeout_min: 20 };
+    try {
+      (await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha)));
+      const asks = () => messages(codex9.id).filter((m) => /First pass, one pass only/.test(m));
+      expect(asks()).toHaveLength(1);
+      // 28 Oct 2026: a renumber-push-freeze loop asked codex9 seven times in 40 min on one lane.
+      git(repo, 'checkout', '-q', 'wc-claude1');
+      fs.writeFileSync(path.join(repo, 'lane.txt'), 'renumbered');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-q', '-m', 'renumber');
+      const next = git(repo, 'rev-parse', 'HEAD');
+      git(repo, 'update-ref', 'refs/remotes/origin/wc-claude1', next);
+      (await ingestFreezeFile(openNote('claude1', 'wc-claude1', next)));
+      expect(asks()).toHaveLength(1);
+      const notes = db.getDb().prepare("SELECT json_extract(payload_json, '$.note') n FROM events WHERE type = 'pipeline.action' AND json_extract(payload_json, '$.action') = 'first-pass' ORDER BY id DESC LIMIT 1").get() as { n: string };
+      expect(notes.n).toMatch(new RegExp(`no first pass asked on ${next.slice(0, 8)} — @codex9 is still on ${sha.slice(0, 8)} of this lane`));
+    } finally {
+      delete review.first_pass;
+    }
+  });
+
   it('asks a listed seat for a first pass, announces the file to reviewer and author, and notes a missing one', async () => {
     const sha = branch('wc-claude1', 'lane.txt', 'lane');
     const author = agent('claude1', path.join(tmp, 'claude1'), 'claude-code');

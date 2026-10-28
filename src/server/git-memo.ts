@@ -66,12 +66,14 @@ function memoKey(repo: string, args: string[]): string {
 
 export function resetGitMemoForTest(): void {
   memo.clear();
+  negative.clear();
   custom = null;
 }
 
 export function setGitExecForTest(fn: GitExec | null): void {
   custom = fn;
   memo.clear();
+  negative.clear();
 }
 
 /** execFile reports a non-zero exit on `error.code`, not `error.status`. A timeout leaves both unset. */
@@ -83,12 +85,25 @@ function exitCode(err: Error | null): number | null {
   return typeof status === 'number' ? status : null;
 }
 
+/**
+ * Ancestry and existence reads never need blob content. In a partial clone (blob:none) git would
+ * otherwise try to fetch a missing commit from the remote on every such call: 28 Oct 2026, six
+ * freezes on commits nobody pushed cost three remote round trips each, five times a second.
+ */
+const NO_LAZY_FETCH = new Set(['merge-base', 'cherry', 'rev-list', 'cat-file', 'rev-parse']);
+
+function execEnv(args: string[]): NodeJS.ProcessEnv | undefined {
+  const sub = args.find((a) => !a.startsWith('-'));
+  return sub && NO_LAZY_FETCH.has(sub) ? { ...process.env, GIT_NO_LAZY_FETCH: '1' } : undefined;
+}
+
 function defaultExec(repo: string, args: string[], timeout: number): Promise<GitResult> {
   return new Promise((resolve) => {
     execFile('git', ['-C', repo, ...args], {
       timeout,
       maxBuffer: 8 * 1024 * 1024,
       encoding: 'utf8',
+      ...(execEnv(args) ? { env: execEnv(args) } : {}),
     }, (err, stdout) => {
       const status = exitCode(err);
       const text = String(stdout ?? '').trim();
@@ -97,14 +112,29 @@ function defaultExec(repo: string, args: string[], timeout: number): Promise<Git
   });
 }
 
+/** A failed answer (missing object, timeout) is remembered this long; a later fetch may change it. */
+export const NEGATIVE_TTL_MS = 10 * 60_000;
+const negative = new Map<string, { until: number; result: GitResult }>();
+
 export async function gitRun(repo: string, args: string[], timeout = 8000): Promise<GitResult> {
   const key = memoKey(repo, args);
-  if (gitArgsCacheable(args)) {
+  const cacheable = gitArgsCacheable(args);
+  if (cacheable) {
     const hit = memo.get(key);
     if (hit) return hit;
+    const neg = negative.get(key);
+    if (neg) {
+      if (neg.until > Date.now()) return neg.result;
+      negative.delete(key);
+    }
   }
   const result = await (custom ?? defaultExec)(repo, args, timeout);
-  if (gitArgsCacheable(args) && result.status !== null) remember(key, result);
+  if (cacheable) {
+    // Exit 0 and 1 are answers (is-ancestor yes/no, cherry output) about immutable SHAs: kept.
+    // Anything else (128 missing object, null timeout) is asked again after the TTL.
+    if (result.status === 0 || result.status === 1) remember(key, result);
+    else negative.set(key, { until: Date.now() + NEGATIVE_TTL_MS, result });
+  }
   return result;
 }
 

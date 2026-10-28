@@ -517,7 +517,7 @@ function shasOf(p: Record<string, unknown>, entityId: string): string[] {
   return [...out];
 }
 
-function loadSignals(since: string): Ev[] {
+export function loadSignals(since: string): Ev[] {
   const placeholders = SIGNAL_TYPES.map(() => '?').join(', ');
   const rows = getDb().prepare(`SELECT id, type, entity_id, payload_json, created_at FROM events WHERE type IN (${placeholders}) AND created_at >= ? ORDER BY id`)
     .all(...SIGNAL_TYPES, since.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '')) as { id: number; type: string; entity_id: string; payload_json: string | null; created_at: string }[];
@@ -823,11 +823,15 @@ function deriveContext(d: Delivery): DeriveContext {
   return { taskRuns, agentNames };
 }
 
-/** Rebuild the stage rows of one delivery from events. Idempotent. */
-export function deriveDelivery(id: string): Result<{ delivery: Delivery; spans: StageSpan[] }> {
+/**
+ * Rebuild the stage rows of one delivery from events. Idempotent. The tick passes the signals it
+ * loaded once for every open delivery; a single call loads its own.
+ */
+export function deriveDelivery(id: string, signals?: Ev[]): Result<{ delivery: Delivery; spans: StageSpan[] }> {
   const d = getDelivery(id);
   if (!d) return { ok: false, error: 'delivery not found' };
-  const events = loadSignals(d.since_at);
+  const sinceMs = Date.parse(d.since_at);
+  const events = signals ? signals.filter((e) => Date.parse(e.created_at) >= sinceMs) : loadSignals(d.since_at);
   const { spans, shas } = deriveSpans(d, events, goalTasks(d.goal_id), deriveContext(d));
   const db = getDb();
   const current = currentStage(spans);
@@ -946,8 +950,13 @@ export async function deliveryTick(now = Date.now()): Promise<void> {
     try { adoptWork(await gatherWork(), now); } catch (e) {
       logger.debug({ error: (e as Error).message }, 'Delivery auto-track skipped');
     }
-    for (const d of listDeliveries({ status: 'open', limit: 200 })) {
-      const derived = deriveDelivery(d.id);
+    // One read of the signal events for the whole pass: per delivery it was 41 x 130 ms of
+    // synchronous SQLite on 28 Oct 2026, an 8 s stall of the daemon every minute.
+    const open = listDeliveries({ status: 'open', limit: 200 });
+    const oldest = open.reduce<string | null>((acc, d) => (!acc || Date.parse(d.since_at) < Date.parse(acc) ? d.since_at : acc), null);
+    const signals = oldest ? loadSignals(oldest) : [];
+    for (const d of open) {
+      const derived = deriveDelivery(d.id, signals);
       if (!derived.ok) continue;
       if (derived.data.delivery.status !== 'open') continue;
       await reportStalls(derived.data.delivery, derived.data.spans, now);

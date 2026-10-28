@@ -290,7 +290,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 32;
+export const SCHEMA_VERSION = 33;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -523,6 +523,10 @@ const SCHEMA_SQL = `
   -- the whole table: 331k rows x hundreds of lookups per tick on 26 Oct 2026
   CREATE INDEX IF NOT EXISTS idx_events_type_entity
     ON events(type, entity_id, id);
+  -- time-windowed reads of a few types (the delivery tracker's signals): without a date in the
+  -- index each read walked every row of those types, 130 ms a call on 28 Oct 2026
+  CREATE INDEX IF NOT EXISTS idx_events_type_created
+    ON events(type, created_at);
   CREATE INDEX IF NOT EXISTS idx_tasks_status_agent
     ON tasks(status, agent_id);
   CREATE INDEX IF NOT EXISTS idx_tasks_goal
@@ -1102,6 +1106,10 @@ const MIGRATIONS: Record<number, string> = {
   // v31 → v32: a task says whether the runtime's context is cleared before its prompt (28 Oct 2026).
   31: `
     ALTER TABLE tasks ADD COLUMN context TEXT;
+  `,
+  // v32 → v33: the delivery tracker reads events by type and date each tick (28 Oct 2026).
+  32: `
+    CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(type, created_at);
   `,
 };
 
