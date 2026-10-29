@@ -115,7 +115,11 @@ function sessionFromArgs(args: string[]): string | null {
  * are already exact.
  */
 export function exactTarget(target: string): string {
-  return /^[=%@$]/.test(target) ? target : `=${target}`;
+  if (/^[=%@$]/.test(target)) return target;
+  // A bare `=name` satisfies session commands only; pane and window commands (send-keys, capture-pane,
+  // pipe-pane, set-option -w) answer "can't find pane: =name". `=name:` (exact session, current window)
+  // satisfies every command, has-session and kill-session included (tmux 3.6, verified 29 Oct 2026).
+  return target.includes(':') ? `=${target}` : `=${target}:`;
 }
 
 function withExactTargets(args: string[]): string[] {

@@ -122,7 +122,7 @@ describe('tmux.ts — shell injection prevention', () => {
       // The dangerous session name should be passed as a single array element, not interpolated
       const args = lastCall[1] as string[];
       const sessionArg = args.find(a => a.includes("rm -rf"));
-      expect(sessionArg).toBe("=test'; rm -rf /; echo '"); // exact-match target, still one argument
+      expect(sessionArg).toBe("=test'; rm -rf /; echo ':"); // exact-match target, still one argument
       // The key point: it's a single argument, not parsed as shell code
     });
   });
@@ -131,7 +131,7 @@ describe('tmux.ts — shell injection prevention', () => {
 describe('exact session targets', () => {
   it('prefixes -t targets with = so tmux never prefix-matches a sibling session (wc-fable-analyst vs wc-fable-analyst2)', async () => {
     const { exactTarget, hasSession, capturePane } = await import('./tmux.js');
-    expect(exactTarget('wc-fable-analyst')).toBe('=wc-fable-analyst');
+    expect(exactTarget('wc-fable-analyst')).toBe('=wc-fable-analyst:');
     expect(exactTarget('wc-x:0.0')).toBe('=wc-x:0.0');
     expect(exactTarget('=already')).toBe('=already');
     expect(exactTarget('%12')).toBe('%12');
@@ -139,8 +139,8 @@ describe('exact session targets', () => {
     await hasSession('wc-fable-analyst');
     await capturePane('wc-fable-analyst', 5);
     const lists = vi.mocked(child_process.execFile).mock.calls.map((c) => c[1] as string[]);
-    expect(lists[0]).toEqual(['has-session', '-t', '=wc-fable-analyst']);
-    expect(lists[1].slice(0, 3)).toEqual(['capture-pane', '-t', '=wc-fable-analyst']);
+    expect(lists[0]).toEqual(['has-session', '-t', '=wc-fable-analyst:']);
+    expect(lists[1].slice(0, 3)).toEqual(['capture-pane', '-t', '=wc-fable-analyst:']);
   });
 });
 
@@ -156,7 +156,7 @@ describe('sendLiteralText', () => {
       (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('-l'),
     );
     expect(literalCall).toBeDefined();
-    expect(literalCall![1]).toEqual(['send-keys', '-t', `=${session}`, '-l', '--', chunk]);
+    expect(literalCall![1]).toEqual(['send-keys', '-t', `=${session}:`, '-l', '--', chunk]);
   });
 });
 
@@ -182,16 +182,16 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
       const pending = sendTextAndEnter(session, text);
       await vi.advanceTimersByTimeAsync(0);
       const argLists = () => calls.map((c) => c[1] as string[]);
-      expect(argLists()).toContainEqual(['send-keys', '-t', `=${session}`, 'C-u']);
+      expect(argLists()).toContainEqual(['send-keys', '-t', `=${session}:`, 'C-u']);
       expect(argLists().some((a) => a[0] === 'load-buffer' && a.includes('-'))).toBe(true);
       const loadCall = calls.find((c) => (c[1] as string[])[0] === 'load-buffer')!;
       expect((loadCall[2] as { input?: string }).input).toBe(text);
-      expect(argLists().some((a) => a[0] === 'paste-buffer' && a.includes('-p') && a.includes('-t') && a.includes(`=${session}`))).toBe(true);
+      expect(argLists().some((a) => a[0] === 'paste-buffer' && a.includes('-p') && a.includes('-t') && a.includes(`=${session}:`))).toBe(true);
       expect(argLists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(0); // not yet
       await vi.advanceTimersByTimeAsync(1000);
       expect(argLists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(1);
       const firstEnter = argLists().find((a) => a[0] === 'send-keys' && a.includes('C-m'))!;
-      expect(firstEnter).toEqual(['send-keys', '-t', `=${session}`, 'C-m']); // Enter is not in the paste argv
+      expect(firstEnter).toEqual(['send-keys', '-t', `=${session}:`, 'C-m']); // Enter is not in the paste argv
       await vi.advanceTimersByTimeAsync(900);
       expect(argLists().filter((a) => a[0] === 'send-keys' && a.includes('C-m'))).toHaveLength(2); // swallowed → retry
       await vi.advanceTimersByTimeAsync(900);
@@ -338,14 +338,14 @@ describe('sendTextAndEnter (bracketed paste + confirmed Enter)', () => {
       expect(names).toHaveLength(2);
       expect(names[1]).toMatch(/^wc-wc-other-\d+-[a-z0-9]+$/);
       expect(names[0]).not.toBe(names[1]);
-      expect(lists().some((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(`=${session}`))).toBe(false);
+      expect(lists().some((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(`=${session}:`))).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1900);
       await first;
       await raw;
       const after = lists();
-      const pasteAt = after.findIndex((a) => a.includes('paste-buffer') && a.includes(`=${session}`));
-      const enterAt = after.findIndex((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(`=${session}`));
+      const pasteAt = after.findIndex((a) => a.includes('paste-buffer') && a.includes(`=${session}:`));
+      const enterAt = after.findIndex((a) => a[0] === 'send-keys' && a.includes('Enter') && a.includes(`=${session}:`));
       expect(pasteAt).toBeGreaterThanOrEqual(0);
       expect(enterAt).toBeGreaterThan(pasteAt);
       await vi.advanceTimersByTimeAsync(2000);
