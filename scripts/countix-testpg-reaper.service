@@ -1,0 +1,8 @@
+[Unit]
+Description=Remove idle or orphaned countix-testpg test-Postgres containers
+After=docker.service
+
+[Service]
+Type=oneshot
+# root: the docker socket is root:docker and the wave user is not in that group since 20 Oct 2026
+ExecStart=/usr/local/sbin/countix-testpg-reaper

@@ -21,6 +21,9 @@ SyslogIdentifier=wavecode
 # Baseline hardening
 # Only the daemon dies on stop/restart: agent tmux sessions it spawned live in this cgroup and must survive updates
 KillMode=process
+# An OOM-killed child in an agent pane (a 6 GB vitest worker, say) must not stop the daemon:
+# systemd's default OOMPolicy=stop restarted it 16 times on 29 Oct 2026 while the dev box was out of memory
+OOMPolicy=continue
 NoNewPrivileges=true
 
 # Optional stronger hardening:

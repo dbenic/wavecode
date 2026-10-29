@@ -240,3 +240,27 @@ after 00:14; 797 stall events that day), and gateway queueing counted as a block
 Still open (needs a plan first): records the tracker cannot follow — lanes that never freeze
 (the two `prodcand` lanes), lanes whose SHA is already merged or deployed — stay open with an
 overrun forever.
+
+## 29 Oct: the dev box ran out of memory (not a WaveCode bug)
+
+Found at 12:00 UTC while checking whether the daemon still needed CPU work: 115 of 125 GB used, swap full,
+the daemon crash-restarted 16 times since 09:54 UTC (20 by 12:30), 19 kernel OOM kills.
+
+- The OOM victims were never the daemon (0.6–0.9 GB). They were 4–6 GB vitest workers inside agent panes.
+  Every pane lives in the daemon's systemd cgroup, and systemd's default `OOMPolicy=stop` stops the whole
+  service when any process in the cgroup is OOM-killed. `scripts/wavecode.service` now sets `OOMPolicy=continue`.
+- The memory was held by 331 `countix-testpg-*` containers (84 GB): wavepulse's warm test-Postgres pool
+  (`tests/setup/testPgPool.ts`) labels them ttl=7200 and relies on "a host reaper that removes them after
+  2 idle hours". No reaper existed. 301 belonged to review clones and worktrees already deleted.
+- Who: codex7 (131), codex3 (106), codex8 (69) as candidate reviewers on 28–29 Oct, one or two containers
+  per review clone (`.review-pd*`, `.wavecode/review-cache/<sha>`), plus kimi2/3 on 26 Oct. Why: wavepulse's
+  CLAUDE.md tells every agent to establish a green baseline with `npm run test:accounting` (= unit +
+  conformance + `test:api:strict`, which needs real Postgres) and never to merge on a skipped api job.
+  The devbox-guard docker wrapper (SysOps, 20 Oct) exempts callers inside the wavecode cgroup, which is
+  every agent, so it never applied.
+- Fix shipped here: `scripts/countix-testpg-reaper.sh` + `.service` + `.timer` (every 15 min, root; removes
+  containers past their idle TTL or whose checkout is gone, never one a running vitest holds) and
+  `scripts/install-testpg-reaper.sh`. Dry run on countix-dev at 12:27 UTC: removes 331, keeps 4.
+  Installing and the first sweep are operator actions (mass delete and unit drop-in).
+- Still open: the guard's cgroup exemption (SysOps script) and whether reviewers should run the api suite
+  on the dev box at all when the gateway exists.
