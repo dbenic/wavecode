@@ -102,10 +102,28 @@ function socketPrefix(sessionName: string | null): string[] {
 function sessionFromArgs(args: string[]): string | null {
   for (let i = 0; i < args.length; i++) {
     if ((args[i] === '-t' || args[i] === '-s') && args[i + 1] && !args[i + 1].startsWith('-')) {
-      return args[i + 1].split(':')[0];
+      return args[i + 1].replace(/^=/, '').split(':')[0];
     }
   }
   return null;
+}
+
+/**
+ * tmux resolves `-t name` by prefix when no session is named exactly `name`: once wc-fable-analyst's own
+ * session had died (29 Oct 2026), has-session said it was alive and every command for it reached
+ * wc-fable-analyst2. A leading `=` demands an exact match; pane ids (%), window ids (@) and session ids ($)
+ * are already exact.
+ */
+export function exactTarget(target: string): string {
+  return /^[=%@$]/.test(target) ? target : `=${target}`;
+}
+
+function withExactTargets(args: string[]): string[] {
+  const out = [...args];
+  for (let i = 0; i < out.length - 1; i++) {
+    if (out[i] === '-t' && !out[i + 1].startsWith('-')) out[i + 1] = exactTarget(out[i + 1]);
+  }
+  return out;
 }
 
 // --- Core tmux operations ---
@@ -115,7 +133,7 @@ function sessionFromArgs(args: string[]): string | null {
  * Returns stdout on success.
  */
 export async function tmuxExec(args: string[], timeout = TMUX_TIMEOUT): Promise<string> {
-  const full = [...socketPrefix(sessionFromArgs(args)), ...args];
+  const full = [...socketPrefix(sessionFromArgs(args)), ...withExactTargets(args)];
   return runTmux(full, { timeout });
 }
 
