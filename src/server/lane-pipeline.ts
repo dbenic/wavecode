@@ -786,6 +786,7 @@ type MainGateRow = { sha: string; project: string; state: string; created_at: st
 const MAIN_GATE_LIVE = new Set(['QUEUED', 'RUNNING']);
 
 function ensureMainGateTable(): void {
+  // Same shape as the v36 migration. IF NOT EXISTS leaves a live database's rows in place.
   getDb().exec(`
     CREATE TABLE IF NOT EXISTS main_gate_runs (
       sha TEXT PRIMARY KEY,
@@ -795,6 +796,7 @@ function ensureMainGateTable(): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE INDEX IF NOT EXISTS idx_main_gate_runs_live ON main_gate_runs(state, created_at);
   `);
 }
 
@@ -1359,28 +1361,50 @@ async function reconcileMainGates(now: number): Promise<void> {
     if (looked >= GATE_RECONCILE_PER_TICK) break;
     if (inflightFor(row.project).has(row.sha) || gatePending.includes(row.sha) || gateRecovered.has(row.sha)) continue;
     looked++;
-    gateRecovered.add(row.sha);
+    // A newer tip can cancel this row while the awaits below are in flight. Re-read before
+    // every write so a superseded QUEUED row is not submitted again.
+    const stillLive = (): boolean => {
+      const cur = mainGateRow(row.sha);
+      return !!cur && MAIN_GATE_LIVE.has(cur.state);
+    };
+    if (!stillLive()) continue;
     const pipe = pipelineOf(row.project);
     const pseudo = mainPseudoFreeze(row);
     const api = recordsFor(row.sha).filter((r) => r.suite === 'api' && (r.state === 'GREEN' || r.state === 'RED'));
     const last = api[api.length - 1];
-    if (last) { await settleGate(pseudo, last.state as 'GREEN' | 'RED', null); continue; }
-    if (!pipe.auto_gate || !pipe.gate_command?.length) { closeMainGate(row, 'auto_gate is off'); continue; }
+    if (last) {
+      if (!stillLive()) continue;
+      gateRecovered.add(row.sha);
+      await settleGate(pseudo, last.state as 'GREEN' | 'RED', null);
+      continue;
+    }
+    if (!pipe.auto_gate || !pipe.gate_command?.length) {
+      if (stillLive()) closeMainGate(row, 'auto_gate is off');
+      gateRecovered.add(row.sha);
+      continue;
+    }
     let live: 'green' | 'red' | 'pending' | 'missing' = 'missing';
     if (testsConfigured(row.project)) {
       try { live = shaChecks(await readLaneTests(row.project, '', row.sha), row.sha, suiteNames(row.project)).full; } catch { live = 'missing'; }
     }
-    if (live === 'pending') { gateRecovered.delete(row.sha); continue; }
+    if (!stillLive()) continue;
+    if (live === 'pending') continue; // still on the dispatcher; the next tick looks again
+    gateRecovered.add(row.sha);
     if (live === 'green' || live === 'red') { await settleGate(pseudo, live === 'green' ? 'GREEN' : 'RED', null); continue; }
     const repo = projectRepo(row.project);
     const tip = repo ? await mainTip(repo, row.project).catch(() => null) : null;
-    if (tip && tip.sha !== row.sha) { closeMainGate(row, `superseded by main ${tip.sha.slice(0, 8)}`); continue; }
+    if (!stillLive()) continue;
+    if (tip && tip.sha.toLowerCase() !== row.sha.toLowerCase()) { closeMainGate(row, `superseded by main ${tip.sha.slice(0, 8)}`); continue; }
     const age = now - Date.parse(`${row.created_at.replace(' ', 'T')}Z`);
     if (Number.isFinite(age) && age <= GATE_RECOVER_MAX_AGE_MS) {
       note(row.project, null, row.sha, 'gate', `auto: api run on main ${row.sha.slice(0, 8)} was lost — submitting it again`);
-      if (inflightFor(row.project).size >= pipe.gate_max_inflight) { gatePending.push(row.sha); continue; }
+      // The gateway keeps one queued run per author. `main` is that author for every tip.
+      if (inflightFor(row.project).size >= pipe.gate_max_inflight || authorBusy(pseudo)) {
+        if (!gatePending.includes(row.sha)) gatePending.push(row.sha);
+        continue;
+      }
       void runGate(pseudo).catch((e) => logger.debug({ sha: row.sha, error: (e as Error).message }, 'Main gate recovery failed'));
-    } else {
+    } else if (stillLive()) {
       closeMainGate(row, 'lost at a restart and older than 6 h');
     }
   }
@@ -1721,12 +1745,19 @@ export async function ensureMainGate(project: string, mainSha: string | null): P
   if (!mainSha || !pipe.auto_gate || !pipe.gate_command?.length) return;
   if (acted(mainSha, MAIN_GATE)) return;
   if (recordsFor(mainSha).some((r) => r.suite === 'api')) return;
+  const existing = mainGateRow(mainSha);
+  // Event retention drops pipeline.main-gate after 90 days. A settled row must not be
+  // rewritten to QUEUED and run again just because the event is gone.
+  if (existing && !MAIN_GATE_LIVE.has(existing.state)) return;
   if (laneAutomationDenied(project, { name: 'main' }, null) || acted(`${mainSha}:full`, GATED)) return;
   emit(MAIN_GATE, 'run', mainSha, { sha: mainSha, project }, null);
-  // An older main tip still waiting for a slot is superseded: main is gated once, on its newest tip.
+  // An older main tip still waiting (in memory or only in the store, after a restart) is
+  // superseded. A run already in flight is left to finish; this tip takes the next slot.
   for (const row of mainGateRuns(project)) {
-    if (row.sha === mainSha || !gatePending.includes(row.sha)) continue;
-    gatePending.splice(gatePending.indexOf(row.sha), 1);
+    if (row.sha.toLowerCase() === mainSha.toLowerCase()) continue;
+    if (inflightFor(project).has(row.sha)) continue;
+    const gi = gatePending.indexOf(row.sha);
+    if (gi >= 0) gatePending.splice(gi, 1);
     closeMainGate(row, `superseded by the new main tip ${mainSha.slice(0, 8)}`);
   }
   saveMainGate(mainSha, project, 'QUEUED');

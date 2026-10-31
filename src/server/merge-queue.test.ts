@@ -19,7 +19,7 @@ vi.mock('./config.js', () => ({
 
 import * as db from './db.js';
 import { emit } from './event-bus.js';
-import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
+import { getFreeze, ingestFreezeFile, listVerdicts, recordVerdict } from './release-freezes.js';
 import {
   askPathHit, checkStall, evaluate, getQueueRow, independentPasses, standingNeedsFixes, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
   gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resetQueue, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, laneInRelease, personMustAct, setReleaseMode, type MergeQueueRow } from './merge-queue.js';
@@ -447,6 +447,24 @@ describe('merge queue — on a scratch repository', () => {
     expect((await evaluate(getFreeze(sha)!)).code).not.toBe('NEEDS_FIXES');
     await tick();
     expect(getQueueRow(sha)?.state).toBe('merged');
+  });
+
+  it('a NEEDS FIXES that lands while the merge gate is running is not pushed', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'late.txt': 'late' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    // Main moves after the freeze, so the merge result is not the lane tree and the gate actually runs.
+    lane('wc-shift', { 'shift.txt': 's' });
+    git(repo, 'push', '-q', 'origin', 'wc-shift:main');
+    const before = originMain();
+    gateHook = () => {
+      recordVerdict({ sha, reviewer: null, reviewerName: 'codex8', verdict: 'needs-fixes', path: null });
+      return { code: 0, stdout: '=== RESULT GREEN ===\nGREEN' };
+    };
+    await tick();
+    expect(originMain()).toBe(before);
+    expect(gateSeen.some((g) => g.argv[0] === 'gate-run')).toBe(true);
+    expect(getQueueRow(sha)).toMatchObject({ state: 'waiting', reason: expect.stringMatching(/^NEEDS_FIXES: @codex8 NEEDS FIXES on [0-9a-f]{8} still stands/) });
   });
 
   it('a REJECT on the frozen SHA blocks too, even when the freeze summary reads PASS', async () => {

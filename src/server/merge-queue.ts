@@ -513,6 +513,17 @@ export function standingNeedsFixes(verdicts: FreezeVerdict[]): FreezeVerdict[] {
   return [...latest.values()].filter((v) => v.verdict === 'needs-fixes' || v.verdict === 'reject');
 }
 
+/** Why this freeze must not merge, or null. The summary and the per-reviewer ledger both count. */
+function needsFixesReason(freeze: ReleaseFreeze): string | null {
+  if (freeze.verdict === 'needs-fixes' || freeze.verdict === 'reject') {
+    return `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA`;
+  }
+  const standing = standingNeedsFixes(listVerdicts(freeze.sha));
+  if (standing.length === 0) return null;
+  const who = standing.map((v) => `@${v.reviewer_name} ${v.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}`).join(', ');
+  return `${who} on ${freeze.sha.slice(0, 8)} still stands; a PASS from another reviewer does not clear it. The same reviewer re-verdicts this SHA, or fix, push and freeze a new SHA`;
+}
+
 interface CarriedReview { donor: string; patchId: string; passes: FreezeVerdict[]; full: string }
 
 /**
@@ -891,14 +902,8 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
     return no(base, 'GATE_NOT_GREEN', `quick ${quick}, api ${apiWord} on ${freeze.sha.slice(0, 8)}`);
   }
 
-  if (freeze.verdict === 'needs-fixes' || freeze.verdict === 'reject') {
-    return no(base, 'NEEDS_FIXES', `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA`);
-  }
-  const standing = standingNeedsFixes(listVerdicts(freeze.sha));
-  if (standing.length > 0) {
-    const who = standing.map((v) => `@${v.reviewer_name} ${v.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}`).join(', ');
-    return no(base, 'NEEDS_FIXES', `${who} on ${freeze.sha.slice(0, 8)} still stands; a PASS from another reviewer does not clear it. The same reviewer re-verdicts this SHA, or fix, push and freeze a new SHA`);
-  }
+  const fixes = needsFixesReason(freeze);
+  if (fixes) return no(base, 'NEEDS_FIXES', fixes);
   const author = authorFor(freeze);
   const passed = independentPasses(
     verdictsFor(freeze),
@@ -1041,6 +1046,16 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
   const spec = mainSpec(row.project);
   const sha8 = row.sha.slice(0, 8);
   const author = authorFor(freeze);
+  // Re-read at the door and again before the push. A NEEDS FIXES that lands while this
+  // job is the head, or while the merge gate is running, must not reach origin.
+  const holdForFixes = (): boolean => {
+    const current = getFreeze(row.sha);
+    const why = current ? needsFixesReason(current) : null;
+    if (!why) return false;
+    upsert({ sha: row.sha, project: row.project, lane: row.lane, state: 'waiting', reason: `NEEDS_FIXES: ${why}`, started_at: null });
+    return true;
+  };
+  if (holdForFixes()) return;
   const started = upsert({ sha: row.sha, project: row.project, lane: row.lane, state: 'merging', reason: null, started_at: new Date().toISOString(), enabled_by: kvGet(`merge_queue.${row.project}.by`) });
 
   const fetched = await tryGit(repo, ['fetch', '--quiet', spec.remote, spec.branch, row.lane], 90000);
@@ -1137,6 +1152,7 @@ async function runMerge(row: MergeQueueRow): Promise<void> {
     }
 
     if (!queueEnabled(row.project)) { requeue(freeze, started, 'merge queue switched off before the push'); return; }
+    if (holdForFixes()) return;
 
     // Plain push: never force, never a different ref. A rejected push means main moved; merge again.
     try {

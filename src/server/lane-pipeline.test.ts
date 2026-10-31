@@ -298,6 +298,13 @@ describe('hands-free lane pipeline', () => {
     expect((await ingestReviewRequestFile(request)).ok).toBe(false);
     expect(messages(author.id).join('\n')).toMatch(/review request .* not sent/);
 
+    // codex5 is reserved from automatic assignment; a person naming it still gets that seat
+    const reserved = agent('codex5', path.join(tmp, 'codex5'));
+    fs.writeFileSync(request, `Lane: wc-ales\nSHA: ${sha}\nReviewer: @codex5\n`);
+    expect(await ingestReviewRequestFile(request)).toMatchObject({ ok: true, data: { reviewer: 'codex5', sha } });
+    expect(messages(reserved.id).join('\n')).toMatch(/asks for a review of freeze/);
+    expect(getFreeze(sha)?.reviewer_name).toBe('codex5');
+
     // no SHA and no open freeze on the lane: told, nothing sent
     const other = path.join(freezeDir, 'ales-wc-none-review-request-x.md');
     fs.writeFileSync(other, 'Lane: wc-none\n');
@@ -895,6 +902,29 @@ describe('hands-free lane pipeline', () => {
     db.getDb().prepare("INSERT OR REPLACE INTO main_gate_runs (sha, project, state, created_at) VALUES (?, 'wave', 'QUEUED', datetime('now'))").run(tip);
     await pipelineTick();
     expect(mainGateRunsForTest().find((r) => r.sha === tip)).toMatchObject({ state: 'CANCELLED', note: 'auto_gate is off' });
+    expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === tip)).toHaveLength(0);
+  });
+
+  it('a new main tip closes an older QUEUED run that exists only in the store, and a settled row is not run again', async () => {
+    setPipelineExecForTest((argv) => { calls.push(argv); return { code: 0, stdout: '=== RESULT GREEN sha=x suite=api ===' }; });
+    ensureReleaseFreezeTable();
+    pipe.auto_gate = true;
+    moveMain('m1.txt', 'one');
+    const old = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    moveMain('m2.txt', 'two');
+    const tip = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    mainGateRunsForTest();
+    db.getDb().prepare("INSERT INTO main_gate_runs (sha, project, state, created_at) VALUES (?, 'wave', 'QUEUED', datetime('now', '-1 minute'))").run(old);
+    resetPipelineForTest();
+    await ensureMainGate('wave', tip);
+    expect(mainGateRunsForTest().find((r) => r.sha === old)).toMatchObject({ state: 'CANCELLED', note: expect.stringMatching(/superseded by the new main tip/) });
+    expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === old)).toHaveLength(0);
+    expect(mainGateRunsForTest().find((r) => r.sha === tip)?.state).toBe('GREEN');
+    // The main-gate event is gone (retention). The settled row must not be queued again.
+    db.getDb().prepare("DELETE FROM events WHERE type = 'pipeline.main-gate' AND entity_id = ?").run(tip);
+    calls.length = 0;
+    await ensureMainGate('wave', tip);
+    expect(mainGateRunsForTest().find((r) => r.sha === tip)?.state).toBe('GREEN');
     expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === tip)).toHaveLength(0);
   });
 

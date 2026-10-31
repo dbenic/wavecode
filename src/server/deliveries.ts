@@ -757,10 +757,18 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
       case 'pipeline.candidate_review': {
         // The rolling review of main: it rides on the candidate span of the main SHA the merge produced.
         if (!t.sha) break;
-        const span = open.get(`candidate:${t.sha}`);
-        if (!span) break;
         const kind = str(p.kind) ?? '';
         const seat = str(p.reviewer) ?? str(p.seat) ?? null;
+        let span = open.get(`candidate:${t.sha}`);
+        if (!span) {
+          // A PASS closes the span. A later NEEDS FIXES on that same SHA has to reopen it;
+          // otherwise the closed ok span hides the new answer. The latest span is what counts:
+          // once a newer merge has superseded it, the answer stays closed.
+          const pass = str(p.result) === 'pass';
+          const latest = [...spans].reverse().find((s) => s.stage === 'candidate' && s.sha === t.sha);
+          if (kind !== 'result' || pass || latest?.outcome !== 'ok') break;
+          span = start(`candidate:${t.sha}`, 'candidate', at, ev, { sha: t.sha, lane: t.lane });
+        }
         if (kind === 'assign') { if (seat) span.actor = seat; }
         else if (kind === 'result') {
           if (seat) span.actor = seat;

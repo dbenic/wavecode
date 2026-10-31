@@ -178,6 +178,31 @@ describe('delivery derivation', () => {
     expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 600 * 60_000).filter((s) => s.stage === 'candidate')).toEqual([]);
   });
 
+  it('a NEEDS FIXES after a PASS reopens the candidate span; a superseded one stays closed', () => {
+    const created = del.createDelivery({ title: 'Revise', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
+    if (!created.ok) throw new Error(created.error);
+    const later = 'b7e0a1c2d3e4f5061728394a5b6c7d8e9f0a1b2c';
+    ev(10, 'pipeline.frozen', B, { sha: B, project: 'wavepulse', lane: LANE });
+    ev(50, 'merge_queue.merged', B, { lane: LANE, sha_in: B, sha_out: M, main_before: 'a'.repeat(40), author: 'codex1' });
+    ev(51, 'pipeline.candidate_review', M, { kind: 'assign', project: 'wavepulse', sha: M, reviewer: 'claude4', seat: 'claude4' });
+    ev(70, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'pass', issues: 0, seat: 'claude4', file: '/inbox/wave-candidate-pass.md' });
+    ev(80, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'needs-fixes', issues: 1, seat: 'claude4', file: '/inbox/wave-candidate-fix.md' });
+    let spans = del.deriveDelivery(created.data.id);
+    if (!spans.ok) throw new Error(spans.error);
+    const cand = spans.data.spans.filter((s) => s.stage === 'candidate' && s.sha === M);
+    expect(cand.map((s) => s.outcome)).toEqual(['ok', null]);
+    expect(cand[1]?.cause).toMatch(/NEEDS FIXES by @claude4/);
+    expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 81 * 60_000).some((s) => s.stage === 'candidate' && s.code === 'BLOCKED')).toBe(true);
+
+    ev(90, 'merge_queue.merged', later, { lane: LANE, sha_in: later, sha_out: 'c'.repeat(40), main_before: M, author: 'codex1' });
+    ev(91, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'needs-fixes', issues: 3, seat: 'claude4', file: '/inbox/wave-candidate-old.md' });
+    spans = del.deriveDelivery(created.data.id);
+    if (!spans.ok) throw new Error(spans.error);
+    const old = spans.data.spans.filter((s) => s.stage === 'candidate' && s.sha === M);
+    expect(old.every((s) => s.finished_at)).toBe(true);
+    expect(old.some((s) => s.outcome === 'superseded')).toBe(true);
+  });
+
   it('derives the bank-posting day: freeze, first pass, gates, review, land, candidate, release', () => {
     const created = del.createDelivery({ title: 'Bank simple posting', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
     expect(created.ok).toBe(true);

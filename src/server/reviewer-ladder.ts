@@ -29,7 +29,7 @@ import {
   type Run,
 } from './db.js';
 import { isProfileCompatible, lookupActor } from './profiles.js';
-import { reviewerDenied } from './reviewer-assign.js';
+import { AUTO_REVIEW_RESERVED, reviewerDenied } from './reviewer-assign.js';
 
 export type ReviewerRung = 'explicit' | 'task' | 'default' | 'tag' | 'pool';
 
@@ -71,6 +71,10 @@ export function pickReviewer(
 
   const eligible = (a: Agent): boolean =>
     a.id !== authorId && a.role !== 'orchestrator' && a.mode !== 'file' && !reviewerDenied(a);
+  // codex5 stays available when a person names it. The automatic rungs do not pick it.
+  const reservedNames = new Set<string>(AUTO_REVIEW_RESERVED);
+  const reserved = (a: Agent): boolean =>
+    [a.name, a.alias].some((h) => !!h && reservedNames.has(h.toLowerCase()));
   const free = (a: Agent): boolean =>
     eligible(a) && a.status === 'idle' && !a.owner_id && !hasOpenRun(a.id) && isProfileCompatible(a.profile, actor, cfg);
   const otherVendorFirst = (a: Agent, b: Agent): number =>
@@ -104,9 +108,9 @@ export function pickReviewer(
   // 3. config default (name, then runtime — prefer a free one of that runtime)
   const wanted = cfg.review.default_reviewer;
   if (wanted) {
-    const byName = agents.find((a) => a.name === wanted && a.id !== authorId && !reviewerDenied(a));
+    const byName = agents.find((a) => a.name === wanted && a.id !== authorId && !reviewerDenied(a) && !reserved(a));
     if (byName) return { ok: true, agent: byName, rung: 'default', reason: 'config default_reviewer', alternatives: [] };
-    const byRuntime = agents.filter((a) => a.runtime === wanted && eligible(a));
+    const byRuntime = agents.filter((a) => a.runtime === wanted && eligible(a) && !reserved(a));
     if (byRuntime.length) {
       const agent = byRuntime.find(free) ?? byRuntime[0];
       return { ok: true, agent, rung: 'default', reason: `config default_reviewer (${wanted})`, alternatives: [] };
@@ -117,7 +121,7 @@ export function pickReviewer(
     return { ok: false, reason: 'no reviewer named and auto-pick is off', candidates: candidates() };
   }
 
-  const freeAgents = agents.filter(free).sort(otherVendorFirst);
+  const freeAgents = agents.filter((a) => free(a) && !reserved(a)).sort(otherVendorFirst);
   const tags = safeTags();
 
   // 4. tagged review
