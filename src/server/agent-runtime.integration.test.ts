@@ -289,7 +289,8 @@ describe('agent runtime integration', () => {
     });
 
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    // the dispatcher types the runtime's clear command, settles 1.5s, then the prompt (fresh context, 28 Oct 2026)
+    await vi.advanceTimersByTimeAsync(1500);
 
     expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('Build the shared auth middleware'))).toBe(true);
     expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('RESULT: PASS'))).toBe(true);
@@ -320,7 +321,8 @@ describe('agent runtime integration', () => {
     expect(messages[0]?.message).toContain('completed successfully');
 
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    // the dispatcher types the runtime's clear command, settles 1.5s, then the prompt (fresh context, 28 Oct 2026)
+    await vi.advanceTimersByTimeAsync(1500);
 
     expect(tmuxHarness.getSentTexts('beta-session').some((t) => t.includes('Wire the dashboard to the auth middleware'))).toBe(true);
 
@@ -714,10 +716,12 @@ describe('agent runtime integration', () => {
     });
 
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    // the dispatcher types the runtime's clear command, settles 1.5s, then the prompt (fresh context, 28 Oct 2026)
+    await vi.advanceTimersByTimeAsync(1500);
     await completeAdoptedRun('alpha-session');
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    // the dispatcher types the runtime's clear command, settles 1.5s, then the prompt (fresh context, 28 Oct 2026)
+    await vi.advanceTimersByTimeAsync(1500);
     await completeAdoptedRun('beta-session');
 
     eventBus.unsubscribe(liveWriter);
