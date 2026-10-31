@@ -237,7 +237,7 @@ describe('session-manager.ts', () => {
         created_at: '2026-01-01T00:00:00.000Z',
       },
     });
-    vi.mocked(db.deleteAgent).mockReturnValue({ ok: true, data: undefined });
+    vi.mocked(db.deleteAgent).mockReturnValue({ ok: true, data: { archived: false } });
 
     const result = await sessionManager.kill('agent-9');
 
@@ -281,7 +281,7 @@ describe('session-manager.ts', () => {
         created_at: '2026-01-01T00:00:00.000Z',
       },
     });
-    vi.mocked(db.deleteAgent).mockReturnValue({ ok: true, data: undefined });
+    vi.mocked(db.deleteAgent).mockReturnValue({ ok: true, data: { archived: false } });
 
     const result = sessionManager.detach('agent-d');
 
@@ -309,7 +309,7 @@ describe('session-manager.ts', () => {
 
     vi.mocked(db.listAgents).mockReturnValueOnce([spawned, adopted]);
     vi.mocked(db.getAgent).mockReturnValueOnce({ ok: true, data: spawned });
-    vi.mocked(db.deleteAgent).mockReturnValueOnce({ ok: true, data: undefined });
+    vi.mocked(db.deleteAgent).mockReturnValueOnce({ ok: true, data: { archived: false } });
     vi.mocked(tmux.hasSession).mockReturnValueOnce(true);
 
     const summary = await sessionManager.stopAll();

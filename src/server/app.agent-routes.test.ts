@@ -231,7 +231,7 @@ describe('app agent lifecycle routes', () => {
       ok: true,
       data: makeAgent(),
     });
-    vi.mocked(sessionManager.detach).mockReturnValue({ ok: true, data: makeAgent() });
+    vi.mocked(sessionManager.detach).mockReturnValue({ ok: true, data: { agent: makeAgent(), archived: false } });
 
     const { createApp } = await import('./app.js');
     const app = createApp();
@@ -240,14 +240,49 @@ describe('app agent lifecycle routes', () => {
     }));
 
     expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, archived: false });
     expect(outputWatcher.stopWatching).toHaveBeenCalledWith('agent-1');
     expect(sessionManager.detach).toHaveBeenCalledWith('agent-1');
     expect(events.emit).toHaveBeenCalledWith(
       'agent.detached',
       'agent',
       'agent-1',
-      { name: 'builder' },
+      { name: 'builder', archived: false },
     );
+  });
+
+  it('detaching an agent that history still references reports it as archived', async () => {
+    const db = await import('./db.js');
+    const sessionManager = await import('./session-manager.js');
+    const events = await import('./event-bus.js');
+
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: makeAgent() });
+    vi.mocked(sessionManager.detach).mockReturnValue({ ok: true, data: { agent: makeAgent(), archived: true } });
+
+    const { createApp } = await import('./app.js');
+    const app = createApp();
+    const response = await app.fetch(new Request('http://localhost/api/agents/agent-1', { method: 'DELETE' }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, archived: true });
+    expect(events.emit).toHaveBeenCalledWith('agent.detached', 'agent', 'agent-1', { name: 'builder', archived: true });
+  });
+
+  it('answers 409 with the reason when the record can neither be deleted nor archived', async () => {
+    const db = await import('./db.js');
+    const sessionManager = await import('./session-manager.js');
+    const events = await import('./event-bus.js');
+
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: makeAgent() });
+    vi.mocked(sessionManager.detach).mockReturnValue({ ok: false, error: 'Agent agent-1 is referenced by runs or tasks and could not be archived: disk I/O error' });
+
+    const { createApp } = await import('./app.js');
+    const app = createApp();
+    const response = await app.fetch(new Request('http://localhost/api/agents/agent-1', { method: 'DELETE' }));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: expect.stringContaining('referenced by runs or tasks') });
+    expect(events.emit).not.toHaveBeenCalled();
   });
 
   it('kills spawned agents through the API', async () => {

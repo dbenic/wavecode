@@ -149,8 +149,19 @@ Query:
 `start`, `end`
 
 ### `DELETE /api/agents/:id`
-Detach an agent: stop its runner and remove the record, leaving the tmux
-session running.
+Detach an agent: stop its runner and drop it from the live list, leaving the
+tmux session running. Returns `{ ok: true, archived: boolean }` and emits
+`agent.detached {name, archived}`.
+
+- `archived: false` — nothing referenced the agent; the record was deleted.
+- `archived: true` — runs or tasks still reference the agent, so the record is
+  kept for history with `detached_at` set: it disappears from `GET /api/agents`
+  and from alias/name resolution, its alias, lease, role and tags are released
+  (the name and alias can be reused by a new agent), and `GET /api/agents/:id`
+  answers `404`. Thread, run and task history keep pointing at it. Detaching it
+  again is a no-op.
+- `404` unknown agent; `403` no access; `409 {error}` when the record is
+  referenced and could not even be archived (nothing is changed).
 
 ## System
 

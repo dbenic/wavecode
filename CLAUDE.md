@@ -113,6 +113,7 @@ CREATE TABLE agents (
   role TEXT,                      -- v15 'orchestrator' = the PM seat (spec §5b)
   alias TEXT UNIQUE,              -- v16 short handle (@toni); resolution: alias → name → id (spec §5c)
   persona TEXT,                   -- v16 one line, prepended to prompts as [you are @alias — persona]
+  detached_at TEXT,               -- v30 set when detached but runs/tasks still reference it: hidden from live lists, kept for history
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

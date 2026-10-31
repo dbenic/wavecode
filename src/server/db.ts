@@ -40,6 +40,12 @@ export interface Agent {
   persona?: string | null;
   /** tmux server socket (`-L`). Null uses the default server. */
   tmux_socket?: string | null;
+  /**
+   * Set when the agent was detached but runs/tasks still reference it (v30):
+   * the row stays for history, is hidden from every live list and lookup,
+   * and its alias/lease/role/tags are released. Null = live.
+   */
+  detached_at?: string | null;
   created_at: string;
 }
 
@@ -284,7 +290,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 29;
+export const SCHEMA_VERSION = 30;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -308,6 +314,7 @@ const SCHEMA_SQL = `
     alias TEXT,
     persona TEXT,
     tmux_socket TEXT,
+    detached_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_alias ON agents(alias) WHERE alias IS NOT NULL;
@@ -1078,6 +1085,10 @@ const MIGRATIONS: Record<number, string> = {
   );
   CREATE INDEX IF NOT EXISTS idx_delivery_stages_delivery ON delivery_stages(delivery_id, started_at);
   `,
+  // v29 → v30: detaching an agent that runs/tasks still reference archives the row instead of deleting it.
+  29: `
+    ALTER TABLE agents ADD COLUMN detached_at TEXT;
+  `,
 };
 
 let db: Database.Database;
@@ -1159,13 +1170,13 @@ export function getAgent(id: string): Result<Agent> {
 }
 
 export function getAgentByName(name: string): Result<Agent> {
-  const row = getDb().prepare('SELECT * FROM agents WHERE name = ?').get(name) as Agent | undefined;
+  const row = getDb().prepare('SELECT * FROM agents WHERE name = ? AND detached_at IS NULL').get(name) as Agent | undefined;
   if (!row) return { ok: false, error: `Agent '${name}' not found` };
   return { ok: true, data: row };
 }
 
 export function getAgentByAlias(alias: string): Result<Agent> {
-  const row = getDb().prepare('SELECT * FROM agents WHERE alias = ?').get(alias) as Agent | undefined;
+  const row = getDb().prepare('SELECT * FROM agents WHERE alias = ? AND detached_at IS NULL').get(alias) as Agent | undefined;
   if (!row) return { ok: false, error: `Agent '@${alias}' not found` };
   return { ok: true, data: row };
 }
@@ -1184,14 +1195,14 @@ export function resolveAgent(ref: string): Result<Agent> {
   // by an agent whose *name* happens to look like someone else's ULID.
   if (ULID_RE.test(key)) {
     const byId = getAgent(key);
-    if (byId.ok) return byId;
+    if (byId.ok && !byId.data.detached_at) return byId;
   }
   const byAlias = getAgentByAlias(key);
   if (byAlias.ok) return byAlias;
   const byName = getAgentByName(key);
   if (byName.ok) return byName;
   const byId = getAgent(key);
-  if (byId.ok) return byId;
+  if (byId.ok && !byId.data.detached_at) return byId;
   return { ok: false, error: `Agent '${ref}' not found` };
 }
 
@@ -1246,12 +1257,13 @@ export function removeAgentTag(agentId: string, tag: string): boolean {
 
 export function listAgentsByTag(tag: string): Agent[] {
   return getDb().prepare(`
-    SELECT a.* FROM agents a JOIN agent_tags t ON t.agent_id = a.id WHERE t.tag = ? ORDER BY a.name
+    SELECT a.* FROM agents a JOIN agent_tags t ON t.agent_id = a.id WHERE t.tag = ? AND a.detached_at IS NULL ORDER BY a.name
   `).all(tag) as Agent[];
 }
 
+/** Live agents only: a detached-but-referenced (archived) row is excluded; `getAgent(id)` still finds it for history. */
 export function listAgents(): Agent[] {
-  return getDb().prepare('SELECT * FROM agents ORDER BY created_at DESC').all() as Agent[];
+  return getDb().prepare('SELECT * FROM agents WHERE detached_at IS NULL ORDER BY created_at DESC').all() as Agent[];
 }
 
 export function updateAgentStatus(id: string, status: Agent['status']): Result<Agent> {
@@ -1292,11 +1304,58 @@ export function updateAgentWorkspace(id: string, workspace: string): Result<Agen
   return getAgent(id);
 }
 
-export function deleteAgent(id: string): Result<void> {
-  getDb().prepare('DELETE FROM agent_tags WHERE agent_id = ?').run(id);
-  const result = getDb().prepare('DELETE FROM agents WHERE id = ?').run(id);
-  if (result.changes === 0) return { ok: false, error: `Agent ${id} not found` };
-  return { ok: true, data: undefined };
+/** What removing an agent record did: a hard delete, or an archive because history still points at the row. */
+export interface AgentRemoval {
+  /** True when runs/tasks reference the agent: the row was kept with `detached_at` set instead of deleted. */
+  archived: boolean;
+}
+
+function isForeignKeyError(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return code === 'SQLITE_CONSTRAINT_FOREIGNKEY'
+    || (e instanceof Error && /FOREIGN KEY constraint failed/i.test(e.message));
+}
+
+/**
+ * Remove an agent record. Rows nothing references are deleted. A row that
+ * runs or tasks still point at (the FKs carry no ON DELETE) is archived
+ * instead: `detached_at` is set, alias/lease/role/tags are released so the
+ * handle can be reused, and the row disappears from `listAgents()` and
+ * `resolveAgent()` while `getAgent(id)` keeps serving it for history.
+ * Never throws.
+ */
+export function deleteAgent(id: string): Result<AgentRemoval> {
+  const db = getDb();
+  const exists = db.prepare('SELECT id FROM agents WHERE id = ?').get(id);
+  if (!exists) return { ok: false, error: `Agent ${id} not found` };
+
+  try {
+    db.transaction(() => {
+      db.prepare('DELETE FROM agent_tags WHERE agent_id = ?').run(id);
+      db.prepare('DELETE FROM agents WHERE id = ?').run(id);
+    })();
+    return { ok: true, data: { archived: false } };
+  } catch (e) {
+    if (!isForeignKeyError(e)) {
+      return { ok: false, error: `Agent ${id} could not be removed: ${(e as Error).message}` };
+    }
+  }
+
+  try {
+    db.transaction(() => {
+      db.prepare('DELETE FROM agent_tags WHERE agent_id = ?').run(id);
+      db.prepare(`
+        UPDATE agents
+        SET detached_at = COALESCE(detached_at, datetime('now')),
+            alias = NULL, owner_id = NULL, lease_expires_at = NULL, lease_reason = NULL,
+            role = NULL, status = 'idle'
+        WHERE id = ?
+      `).run(id);
+    })();
+    return { ok: true, data: { archived: true } };
+  } catch (e) {
+    return { ok: false, error: `Agent ${id} is referenced by runs or tasks and could not be archived: ${(e as Error).message}` };
+  }
 }
 
 // --- Task helpers ---
@@ -1728,7 +1787,7 @@ export function clearAgentLease(id: string): Result<Agent> {
 }
 
 export function listAgentsOwnedBy(userId: string): Agent[] {
-  return getDb().prepare('SELECT * FROM agents WHERE owner_id = ?').all(userId) as Agent[];
+  return getDb().prepare('SELECT * FROM agents WHERE owner_id = ? AND detached_at IS NULL').all(userId) as Agent[];
 }
 
 // --- User helpers ---
@@ -2457,7 +2516,7 @@ export function getRecentRunsForWorkspace(workspace: string, limit = 10): Array<
  */
 export function getAgentsByWorkspace(workspace: string): Agent[] {
   return getDb().prepare(
-    'SELECT * FROM agents WHERE workspace = ? ORDER BY created_at ASC'
+    'SELECT * FROM agents WHERE workspace = ? AND detached_at IS NULL ORDER BY created_at ASC'
   ).all(workspace) as Agent[];
 }
 

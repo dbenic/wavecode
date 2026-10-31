@@ -215,12 +215,18 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (!access.ok) return c.json({ error: access.error }, 403);
 
     outputWatcher.stopWatching(agentId);
-    sessionManager.detach(agentId);
+    const detached = sessionManager.detach(agentId);
+    if (!detached.ok) {
+      // The record is still referenced and could not even be archived: nothing was changed.
+      logger.warn({ agentId, error: detached.error }, 'Agent detach refused');
+      return c.json({ error: detached.error }, 409);
+    }
 
-    emit('agent.detached', 'agent', agentId, { name: agentResult.data.name });
-    logger.info({ agentId }, 'Agent detached');
+    const { archived } = detached.data;
+    emit('agent.detached', 'agent', agentId, { name: agentResult.data.name, archived });
+    logger.info({ agentId, archived }, archived ? 'Agent detached (archived: history references it)' : 'Agent detached');
 
-    return c.json({ ok: true });
+    return c.json({ ok: true, archived });
   });
 
   app.post('/api/agents/:id/kill', async (c) => {

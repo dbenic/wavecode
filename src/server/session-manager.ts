@@ -426,7 +426,7 @@ export async function kill(agentId: string): Promise<Result<void>> {
 
   if (isFileRunnerSeat(agent)) {
     stopFileRunsForAgent(agentId, 'File-runner seat killed');
-    return deleteAgent(agentId);
+    return removeRecord(agentId);
   }
 
   // Stop runner if active
@@ -436,15 +436,29 @@ export async function kill(agentId: string): Promise<Result<void>> {
   bindAgent(agent);
   await tmux.killSession(agent.tmux_session);
 
-  return deleteAgent(agentId);
+  return removeRecord(agentId);
+}
+
+/** Drop the record; a row that runs/tasks still reference is archived (db.deleteAgent). */
+function removeRecord(agentId: string): Result<void> {
+  const removed = deleteAgent(agentId);
+  return removed.ok ? { ok: true, data: undefined } : removed;
+}
+
+export interface DetachOutcome {
+  agent: Agent;
+  /** True when the record was kept (archived) because runs/tasks still reference it. */
+  archived: boolean;
 }
 
 /**
  * Detach an agent: stop its runner and remove the record, leaving the tmux
  * session running. This is the right teardown for adopted sessions; for
- * spawned agents kill() also terminates the session.
+ * spawned agents kill() also terminates the session. An agent that runs or
+ * tasks still reference keeps its row, archived: hidden from the live list,
+ * alias freed, history intact (`archived: true`).
  */
-export function detach(agentId: string): Result<Agent> {
+export function detach(agentId: string): Result<DetachOutcome> {
   const agentResult = getAgent(agentId);
   if (!agentResult.ok) return agentResult;
 
@@ -453,10 +467,10 @@ export function detach(agentId: string): Result<Agent> {
     stopFileRunsForAgent(agentId, 'File-runner seat detached');
   }
 
-  const deleted = deleteAgent(agentId);
-  if (!deleted.ok) return { ok: false, error: deleted.error };
+  const removed = deleteAgent(agentId);
+  if (!removed.ok) return { ok: false, error: removed.error };
 
-  return agentResult;
+  return { ok: true, data: { agent: agentResult.data, archived: removed.data.archived } };
 }
 
 export interface StopAllSummary {
