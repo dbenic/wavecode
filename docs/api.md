@@ -1315,6 +1315,13 @@ Maestro's brief, approved by Denis: eligibility by evidence, not by branch name.
   profile** than the builder (`independentPasses`). Ask tier adds the `github.ok_label`
   (default `ask-tier-approved`) on the open pull request. A `github.hold_labels` label
   parks the lane (`MIGRATION_HOLD`). No `TIER:` line means `show`.
+- Any `NEEDS FIXES` or `REJECT` on the exact SHA by a non-author blocks the merge
+  (`NEEDS_FIXES`, naming the reviewers: `@codex8 and @codex7 said NEEDS FIXES on 75f1d4fe; fix,
+  push and freeze a new SHA`) until a newer SHA is frozen, whatever the PASSes say
+  (`blockingVerdicts`); only that reviewer's own later PASS on the same SHA withdraws it. On
+  31 Oct 2026 the queue merged wc-claude3-ledger-p2-i 75f1d4fe as b8ea54a5 on kimi4's PASS
+  while codex8 and codex7 had filed NEEDS FIXES, because the freeze row keeps only the latest
+  verdict. A donor SHA with such a verdict lends no PASS by patch-id either.
 - `merge_queue.github { repo, token_file, ok_label, hold_labels }`: `gh auth status` before
   every pass with the token from `token_file` as `GH_TOKEN` (never logged), then one
   `gh pr list --json number,headRefName,headRefOid,labels` per pass. Failure: every lane

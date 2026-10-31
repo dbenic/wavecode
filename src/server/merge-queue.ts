@@ -463,7 +463,7 @@ export function independentPasses(
   author: { id: string | null; name: string | null; alias?: string | null; profile: string | null },
   serviceProfiles: string[] = [],
 ): { ok: boolean; passes: FreezeVerdict[]; why: string | null } {
-  const own = (v: FreezeVerdict) => sameName(v.reviewer_name, author.name) || (!!author.id && v.reviewer_agent_id === author.id);
+  const own = ownVerdict(author);
   const allPasses = verdicts.filter((v) => v.verdict === 'pass' && !own(v));
   const builder = { name: author.name ?? '', alias: author.alias ?? null, profile: author.profile ?? 'home' };
   const passes = allPasses.filter((v) => !samePerson(builder, { name: v.reviewer_name, profile: v.profile ?? 'home' }, serviceProfiles));
@@ -473,6 +473,52 @@ export function independentPasses(
     ? `needs one PASS from a reviewer who is not the builder's own person or profile (${same}: same as @${author.name ?? '?'}${author.profile ? ` on ${author.profile}` : ''})`
     : 'needs one PASS verdict on this exact SHA from a reviewer who is not the author';
   return { ok: false, passes, why };
+}
+
+type VerdictAuthor = { id: string | null; name: string | null };
+
+/** A verdict by the author (by name or by seat id) is nobody's review: it neither passes nor blocks. */
+function ownVerdict(author: VerdictAuthor): (v: FreezeVerdict) => boolean {
+  return (v) => sameName(v.reviewer_name, author.name) || (!!author.id && v.reviewer_agent_id === author.id);
+}
+
+function sameReviewer(a: FreezeVerdict, b: FreezeVerdict): boolean {
+  return sameName(a.reviewer_name, b.reviewer_name) || (!!a.reviewer_agent_id && a.reviewer_agent_id === b.reviewer_agent_id);
+}
+
+function verdictTime(v: FreezeVerdict): number {
+  const raw = v.created_at ?? '';
+  const t = Date.parse(/[tT]/.test(raw) ? raw : `${raw.replace(' ', 'T')}Z`);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Every NEEDS FIXES or REJECT on the exact SHA by a reviewer who is not the author. Any one of
+ * them blocks the merge until a newer SHA is frozen, whatever the PASSes say: on 31 Oct 2026
+ * codex8 and codex7 said NEEDS FIXES on 75f1d4fe, kimi4 said PASS last, and the queue, which
+ * read only the freeze's latest verdict and the PASS rows, merged it as b8ea54a5 (28 Oct 2026,
+ * 27a2fe61: the same on one PASS over two NEEDS FIXES). A later PASS by the *same* reviewer on
+ * the same SHA withdraws that reviewer's NEEDS FIXES; a PASS by anyone else does not.
+ */
+export function blockingVerdicts(verdicts: FreezeVerdict[], author: VerdictAuthor): FreezeVerdict[] {
+  const own = ownVerdict(author);
+  return verdicts.filter((v) =>
+    (v.verdict === 'needs-fixes' || v.verdict === 'reject') && !own(v)
+    && !verdicts.some((p) => p !== v && p.verdict === 'pass' && sameReviewer(p, v) && verdictTime(p) >= verdictTime(v)));
+}
+
+/** `@codex8 and @codex7 said NEEDS FIXES on 75f1d4fe; fix, push and freeze a new SHA` */
+function blockedWhy(blocking: FreezeVerdict[], sha: string): string {
+  const word = (v: FreezeVerdict) => (v.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES');
+  const names = (rows: FreezeVerdict[]) => {
+    const list = rows.map((v) => `@${v.reviewer_name}`);
+    return list.length <= 2 ? list.join(' and ') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+  };
+  const words = [...new Set(blocking.map(word))];
+  const said = words.length === 1
+    ? `${names(blocking)} said ${words[0]}`
+    : words.map((w) => `${names(blocking.filter((v) => word(v) === w))} said ${w}`).join(', ');
+  return `${said} on ${sha.slice(0, 8)}; fix, push and freeze a new SHA`;
 }
 
 /**
@@ -517,7 +563,10 @@ async function reviewCarriedOver(repo: string, mainRef: string, freeze: ReleaseF
     const at = Date.parse(`${other.created_at.replace(' ', 'T')}Z`);
     if (Number.isFinite(at) && Number.isFinite(mineAt) && at > mineAt) continue;
     if (other.verdict === 'needs-fixes' || other.verdict === 'reject') continue;
-    const passed = independentPasses(verdictsFor(other), who, service);
+    // A donor another reviewer sent back cannot lend its PASS: the NEEDS FIXES travels with the patch.
+    const otherVerdicts = verdictsFor(other);
+    if (blockingVerdicts(otherVerdicts, who).length > 0) continue;
+    const passed = independentPasses(otherVerdicts, who, service);
     if (!passed.ok) continue;
     if ((await patchIdOf(repo, mainRef, other.sha)) !== mine) continue;
     const gates = await gateWords(other).catch(() => ({ quick: 'missing', full: 'missing' }));
@@ -878,11 +927,13 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
     return no(base, 'NEEDS_FIXES', `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA`);
   }
   const author = authorFor(freeze);
-  const passed = independentPasses(
-    verdictsFor(freeze),
-    { id: freeze.author_agent_id ?? author?.id ?? null, name: freeze.author_name ?? author?.name ?? null, alias: author?.alias ?? null, profile: author?.profile ?? null },
-    getConfig().projects?.[project]?.pipeline?.service_profiles ?? [],
-  );
+  const who = { id: freeze.author_agent_id ?? author?.id ?? null, name: freeze.author_name ?? author?.name ?? null, alias: author?.alias ?? null, profile: author?.profile ?? null };
+  const verdicts = verdictsFor(freeze);
+  // Denis's rule: any NEEDS FIXES or REJECT on the exact SHA blocks until a newer SHA is frozen. The
+  // freeze row keeps only the latest reviewer, so a PASS filed after two NEEDS FIXES hid them (31 Oct 2026).
+  const blocking = blockingVerdicts(verdicts, who);
+  if (blocking.length > 0) return no(base, 'NEEDS_FIXES', blockedWhy(blocking, freeze.sha));
+  const passed = independentPasses(verdicts, who, getConfig().projects?.[project]?.pipeline?.service_profiles ?? []);
   if (!passed.ok && carried) {
     if (!reusedNoted(freeze.sha)) {
       emit(MERGE_QUEUE_EVENT.reused, 'run', freeze.sha, { sha: freeze.sha, project, lane: freeze.lane, donor: carried.donor, patch_id: carried.patchId, reviewers: carried.passes.map((p) => p.reviewer_name), api: carried.full === 'green' && gates.full !== 'green' ? 'carried' : 'own' }, null);

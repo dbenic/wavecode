@@ -21,7 +21,7 @@ import * as db from './db.js';
 import { emit } from './event-bus.js';
 import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
 import {
-  askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
+  askPathHit, blockingVerdicts, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
   gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resetQueue, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, laneInRelease, personMustAct, setReleaseMode, type MergeQueueRow } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -73,6 +73,26 @@ describe('merge queue — pure rules', () => {
     // the home-dir login is a profile too: two home seats are the same profile
     expect(independentPasses([v('codex3', null)], { id: null, name: 'ales', profile: null }).ok).toBe(false);
     expect(independentPasses([v('codex3', 'pool')], { id: null, name: 'ales', profile: null }).ok).toBe(true);
+  });
+
+  it('any NEEDS FIXES or REJECT by a non-author blocks; only that reviewer\'s own later PASS withdraws it', () => {
+    const v = (reviewer_name: string, verdict: 'pass' | 'needs-fixes' | 'reject', created_at: string, reviewer_agent_id: string | null = null) => ({
+      sha: 'x', reviewer_agent_id, reviewer_name, profile: 'pool', verdict, path: `/inbox/${reviewer_name}.md`, created_at,
+    });
+    const author = { id: 'A1', name: 'claude3' };
+    // 31 Oct 2026, 75f1d4fe: two NEEDS FIXES, then a PASS by a third reviewer — both still block.
+    const oct31 = [v('codex8', 'needs-fixes', '2026-10-31 11:39:00'), v('codex7', 'needs-fixes', '2026-10-31 11:42:00'), v('kimi4', 'pass', '2026-10-31 11:50:00')];
+    expect(blockingVerdicts(oct31, author).map((b) => b.reviewer_name)).toEqual(['codex8', 'codex7']);
+    expect(independentPasses(oct31, { ...author, profile: 'denis20x' }).ok).toBe(true); // which is why the PASS alone used to merge it
+    // the same reviewer's later PASS supersedes their NEEDS FIXES; an earlier PASS does not
+    expect(blockingVerdicts([v('codex8', 'needs-fixes', '2026-10-31 11:39:00'), v('codex8', 'pass', '2026-10-31 12:00:00')], author)).toEqual([]);
+    expect(blockingVerdicts([v('codex8', 'pass', '2026-10-31 11:00:00'), v('codex8', 'needs-fixes', '2026-10-31 11:39:00')], author)).toHaveLength(1);
+    // the same seat under another spelling of the name is the same reviewer
+    expect(blockingVerdicts([v('Codex8', 'needs-fixes', '2026-10-31 11:39:00', 'S8'), v('codex8', 'pass', '2026-10-31T12:00:00Z', 'S8')], author)).toEqual([]);
+    // REJECT blocks like NEEDS FIXES; the author's own verdicts never count
+    expect(blockingVerdicts([v('codex8', 'reject', '2026-10-31 11:39:00')], author).map((b) => b.verdict)).toEqual(['reject']);
+    expect(blockingVerdicts([v('claude3', 'needs-fixes', '2026-10-31 11:39:00'), v('seat', 'needs-fixes', '2026-10-31 11:39:00', 'A1')], author)).toEqual([]);
+    expect(blockingVerdicts([v('codex8', 'pass', '2026-10-31 11:39:00')], author)).toEqual([]);
   });
 
   it('denies main, release and prod branches and nothing else: there is no allowlist', () => {
@@ -337,6 +357,65 @@ describe('merge queue — on a scratch repository', () => {
     gateGreen(sha3);
     expect(await evaluate(getFreeze(sha3)!)).toMatchObject({ code: 'NO_PASS_ON_SHA' });
     expect(messages(author.id).length).toBeGreaterThanOrEqual(0);
+  });
+
+  it('one PASS over a NEEDS FIXES by another reviewer is NEEDS_FIXES naming the reviewers (31 Oct 2026, 75f1d4fe); the same reviewer\'s later PASS clears it', async () => {
+    agent('claude3', 'denis20x');
+    agent('codex7', 'pool');
+    agent('codex8', 'pool');
+    agent('kimi4', 'kimi');
+    const sha = lane('wc-claude3-ledger', { 'src/ledger.ts': 'l' });
+    await freeze('claude3', 'wc-claude3-ledger', sha, 'ship');
+    gateGreen(sha);
+    await verdict('codex7', 'claude3', sha, 'NEEDS FIXES');
+    await verdict('codex8', 'claude3', sha, 'NEEDS FIXES');
+    await verdict('kimi4', 'claude3', sha); // last, so the freeze row's own verdict says pass
+    expect(getFreeze(sha)).toMatchObject({ verdict: 'pass', reviewer_name: 'kimi4' });
+    let state = await evaluate(getFreeze(sha)!);
+    expect(state).toMatchObject({ state: 'waiting', code: 'NEEDS_FIXES', reason: `NEEDS_FIXES: @codex7 and @codex8 said NEEDS FIXES on ${sha.slice(0, 8)}; fix, push and freeze a new SHA` });
+    expect(personMustAct(state)).toBe(true);
+    // codex8 re-reviews and passes: only codex7 still blocks
+    await verdict('codex8', 'claude3', sha);
+    state = await evaluate(getFreeze(sha)!);
+    expect(state).toMatchObject({ code: 'NEEDS_FIXES', reason: `NEEDS_FIXES: @codex7 said NEEDS FIXES on ${sha.slice(0, 8)}; fix, push and freeze a new SHA` });
+    // a REJECT reads as such (as the latest verdict it is the freeze row's own branch that answers)
+    await verdict('codex7', 'claude3', sha, 'REJECT');
+    expect((await evaluate(getFreeze(sha)!)).reason).toMatch(/^NEEDS_FIXES: .*@codex7 said REJECT; fix, push and freeze a new SHA$/);
+    await verdict('codex7', 'claude3', sha);
+    expect(await evaluate(getFreeze(sha)!)).toMatchObject({ state: 'queued', code: null, reason: null });
+  });
+
+  it('a NEEDS FIXES on the donor SHA stops the review carrying over by patch-id', async () => {
+    agent('ales');
+    agent('codex3', 'pool');
+    agent('codex5', 'pool');
+    agent('toni');
+    const sha1 = lane('wc-ales', { 'src/x.ts': 'x1' });
+    await freeze('ales', 'wc-ales', sha1, 'ask');
+    gateGreen(sha1);
+    await verdict('codex5', 'ales', sha1, 'NEEDS FIXES');
+    await verdict('codex3', 'ales', sha1); // last: the freeze row says pass, the ledger still holds codex5's NEEDS FIXES
+    expect(await evaluate(getFreeze(sha1)!)).toMatchObject({ code: 'NEEDS_FIXES', reason: expect.stringMatching(/^NEEDS_FIXES: @codex5 said NEEDS FIXES/) });
+    // main moves; wc-ales merges main: same patch-id, new SHA, quick GREEN from the note, no api run and no verdict.
+    const other = lane('wc-toni', { 'src/y.ts': 'y' });
+    await reviewed('toni', 'wc-toni', other, 'ship');
+    await tick();
+    expect(getQueueRow(other)).toMatchObject({ state: 'merged' });
+    git(repo, 'checkout', '-q', 'wc-ales');
+    git(repo, 'fetch', '-q', 'origin');
+    git(repo, 'merge', '-q', '--no-edit', 'origin/main');
+    const sha2 = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'push', '-q', 'origin', 'wc-ales');
+    await freeze('ales', 'wc-ales', sha2, 'ask');
+    mq.ask_tier = 'auto';
+    // No carry-over: the api gate and the review are the new SHA's own to earn.
+    expect(await evaluate(getFreeze(sha2)!)).toMatchObject({ code: 'GATE_NOT_GREEN', reason: `GATE_NOT_GREEN: quick green, api missing on ${sha2.slice(0, 8)}` });
+    gateGreen(sha2);
+    expect(await evaluate(getFreeze(sha2)!)).toMatchObject({ code: 'NO_PASS_ON_SHA' });
+    expect(db.getDb().prepare("SELECT count(*) AS n FROM events WHERE type = 'merge_queue.review_reused' AND entity_id = ?").get(sha2)).toEqual({ n: 0 });
+    // codex5 passes the donor after all: the carry-over works again.
+    await verdict('codex5', 'ales', sha1);
+    expect(await evaluate(getFreeze(sha2)!)).toMatchObject({ state: 'queued', code: null, reason: null });
   });
 
   it('without the GitHub credential every lane is GH_AUTH_MISSING and the stall file goes out at once', async () => {
