@@ -776,6 +776,84 @@ const gateRecovered = new Set<string>();
 const GATE_RECOVER_MAX_AGE_MS = 6 * 60 * 60_000;
 const GATE_RECONCILE_PER_TICK = 10;
 
+/*
+ * Main-tip api runs have no freeze row. Without a record of their own, a run that waited for a
+ * slot was dropped by drainGatePending (getFreeze = null) and a restart could not see it, so its
+ * last word (QUEUED) read as RUNNING forever. Each one is persisted in main_gate_runs: the drain
+ * and the restart reconcile resolve it like a freeze, and a stale QUEUED/RUNNING row is closed.
+ */
+type MainGateRow = { sha: string; project: string; state: string; created_at: string; updated_at: string; note: string | null };
+const MAIN_GATE_LIVE = new Set(['QUEUED', 'RUNNING']);
+
+function ensureMainGateTable(): void {
+  // Same shape as the v36 migration. IF NOT EXISTS leaves a live database's rows in place.
+  getDb().exec(`
+    CREATE TABLE IF NOT EXISTS main_gate_runs (
+      sha TEXT PRIMARY KEY,
+      project TEXT NOT NULL,
+      state TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_main_gate_runs_live ON main_gate_runs(state, created_at);
+  `);
+}
+
+function mainGateRow(sha: string): MainGateRow | null {
+  try {
+    ensureMainGateTable();
+    return (getDb().prepare('SELECT sha, project, state, note, created_at, updated_at FROM main_gate_runs WHERE sha = ?').get(sha) as MainGateRow | undefined) ?? null;
+  } catch { return null; }
+}
+
+function saveMainGate(sha: string, project: string, state: string, createdAt?: string): void {
+  ensureMainGateTable();
+  getDb().prepare(
+    `INSERT INTO main_gate_runs (sha, project, state, created_at) VALUES (?, ?, ?, COALESCE(?, datetime('now')))
+     ON CONFLICT(sha) DO UPDATE SET state = excluded.state, updated_at = datetime('now')`,
+  ).run(sha, project, state, createdAt ?? null);
+}
+
+function setMainGateState(sha: string, state: string, why: string | null = null): void {
+  try {
+    ensureMainGateTable();
+    getDb().prepare(`UPDATE main_gate_runs SET state = ?, note = COALESCE(?, note), updated_at = datetime('now') WHERE sha = ?`).run(state, why, sha);
+  } catch (e) { logger.debug({ sha, error: (e as Error).message }, 'main gate state not stored'); }
+}
+
+function mainPseudoFreeze(row: Pick<MainGateRow, 'sha' | 'project' | 'created_at'>): ReleaseFreeze {
+  return {
+    sha: row.sha, project: row.project, lane: null, author_name: 'main', author_agent_id: null, status: 'open', created_at: row.created_at,
+  } as unknown as ReleaseFreeze;
+}
+
+/** The open freeze behind a gate SHA, or the persisted main-tip run still waiting or running. */
+function gateSubject(sha: string): ReleaseFreeze | null {
+  const freeze = getFreeze(sha);
+  if (freeze) return freeze.project && (freeze.status === 'open' || freeze.status === 'behind-main') ? freeze : null;
+  const row = mainGateRow(sha);
+  return row && MAIN_GATE_LIVE.has(row.state) ? mainPseudoFreeze(row) : null;
+}
+
+/** Store a gate word on the freeze, or on the main-tip run when the SHA is one. */
+function setGate(sha: string, word: string): void {
+  setFreezeGate(sha, word);
+  if (mainGateRow(sha)) setMainGateState(sha, word.toUpperCase());
+}
+
+/** Close a main-tip run that will not run (or was lost), so its last word is no longer RUNNING. */
+function closeMainGate(row: Pick<MainGateRow, 'sha' | 'project'>, reason: string): void {
+  setMainGateState(row.sha, 'CANCELLED', reason);
+  emit(GATED, 'run', `${row.sha}:full`, { sha: row.sha, project: row.project, lane: null, gate: 'CANCELLED', reason }, null);
+  note(row.project, null, row.sha, 'gate', `auto: api run on main ${row.sha.slice(0, 8)} closed — ${reason}`);
+}
+
+export function mainGateRunsForTest(): Array<Pick<MainGateRow, 'sha' | 'project' | 'state' | 'note'>> {
+  ensureMainGateTable();
+  return getDb().prepare('SELECT sha, project, state, note FROM main_gate_runs ORDER BY created_at, sha').all() as Array<Pick<MainGateRow, 'sha' | 'project' | 'state' | 'note'>>;
+}
+
 function inflightFor(project: string): Set<string> {
   let set = gateInflight.get(project);
   if (!set) { set = new Set(); gateInflight.set(project, set); }
@@ -840,7 +918,7 @@ export function cancelRunsFor(sha: string, reason: string, opts: { project?: str
   const gi = gatePending.indexOf(sha);
   if (gi >= 0) {
     gatePending.splice(gi, 1); n++;
-    setFreezeGate(sha, 'CANCELLED');
+    setGate(sha, 'CANCELLED');
     emit(GATED, 'run', `${sha}:full`, { sha, project, lane, gate: 'CANCELLED', reason }, null);
   }
   gateAfterQuick.delete(sha); // a gate still waiting for its quick never ran: nothing to stop
@@ -1078,7 +1156,7 @@ async function queueFullGate(freeze: ReleaseFreeze): Promise<void> {
   if (!pipe.auto_gate || !pipe.gate_command?.length) return;
   if (acted(`${freeze.sha}:full`, GATED)) return;
   const sha8 = freeze.sha.slice(0, 8);
-  setFreezeGate(freeze.sha, 'QUEUED');
+  setGate(freeze.sha, 'QUEUED');
   emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: 'QUEUED' }, null);
   if (inflightFor(freeze.project).size >= pipe.gate_max_inflight || authorBusy(freeze)) {
     if (!gatePending.includes(freeze.sha)) gatePending.push(freeze.sha);
@@ -1093,10 +1171,14 @@ function drainGatePending(): void {
   sortByQueuePriority(gatePending);
   for (let i = 0; i < gatePending.length;) {
     const sha = gatePending[i];
-    const freeze = getFreeze(sha);
-    if (!freeze?.project || (freeze.status !== 'open' && freeze.status !== 'behind-main')) { gatePending.splice(i, 1); continue; }
+    const freeze = gateSubject(sha);
+    if (!freeze?.project) { gatePending.splice(i, 1); continue; }
     const pipe = pipelineOf(freeze.project);
-    if (!pipe.auto_gate || !pipe.gate_command?.length) { gatePending.splice(i, 1); continue; }
+    if (!pipe.auto_gate || !pipe.gate_command?.length) {
+      gatePending.splice(i, 1);
+      if (freeze.author_name === 'main' && !freeze.lane) closeMainGate({ sha, project: freeze.project }, 'auto_gate is off');
+      continue;
+    }
     if (inflightFor(freeze.project).size >= pipe.gate_max_inflight || refusedWait(sha, 'full') || authorBusy(freeze)) { i++; continue; }
     gatePending.splice(i, 1);
     void runGate(freeze).catch((e) => logger.debug({ sha, error: (e as Error).message }, 'Pending gate failed'));
@@ -1149,7 +1231,7 @@ async function runGateBody(freeze: ReleaseFreeze, pipe: PipelineSwitches, spec: 
   const cancelled = takeCancelled(freeze.sha, 'full');
   if (cancelled) {
     await recordGateResult({ project: freeze.project, sha: freeze.sha, argv, stdout: `${result.stdout}\nCANCELLED by WaveCode: ${cancelled}`, exit_code: result.code, started_at: started, finished_at: new Date(), dispatch_failure: `cancelled: ${cancelled}` });
-    setFreezeGate(freeze.sha, 'CANCELLED');
+    setGate(freeze.sha, 'CANCELLED');
     emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: 'CANCELLED', reason: cancelled }, null);
     note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate on ${sha8} stopped — ${cancelled}`);
     return;
@@ -1173,7 +1255,7 @@ async function runGateBody(freeze: ReleaseFreeze, pipe: PipelineSwitches, spec: 
 async function settleGate(freeze: ReleaseFreeze, word: 'QUEUED' | 'RUNNING' | 'GREEN' | 'RED', exitCode: number | null): Promise<void> {
   if (!freeze.project) return;
   const sha8 = freeze.sha.slice(0, 8);
-  setFreezeGate(freeze.sha, word);
+  setGate(freeze.sha, word);
   emit(GATED, 'run', `${freeze.sha}:full`, { sha: freeze.sha, project: freeze.project, lane: freeze.lane, gate: word, ...(exitCode === null ? {} : { exit_code: exitCode }) }, null);
   note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: full gate ${word} on ${sha8}`);
   if (word === 'RED') {
@@ -1225,6 +1307,105 @@ async function reconcileLostGates(now: number): Promise<void> {
       void runGate(freeze).catch((e) => logger.debug({ sha: freeze.sha, error: (e as Error).message }, 'Gate recovery failed'));
     } else {
       note(freeze.project, freeze.lane, freeze.sha, 'gate', `auto: gate run on ${freeze.sha.slice(0, 8)} was lost at a restart and the freeze is older than 6 h — refreeze to run it again`);
+    }
+  }
+}
+
+/** Main-tip runs still QUEUED or RUNNING in the store, oldest first. */
+function mainGateRuns(project?: string): MainGateRow[] {
+  try {
+    ensureMainGateTable();
+    const rows = getDb().prepare(`SELECT sha, project, state, note, created_at, updated_at FROM main_gate_runs WHERE state IN ('QUEUED', 'RUNNING') ORDER BY created_at, sha`).all() as MainGateRow[];
+    return project ? rows.filter((r) => r.project === project) : rows;
+  } catch { return []; }
+}
+
+/**
+ * Main-tip runs recorded before main_gate_runs existed (a pipeline.main-gate event, no freeze and
+ * a last gate word of QUEUED or RUNNING) are adopted into the store, so the reconcile below closes them.
+ */
+function adoptLegacyMainGates(): void {
+  let rows: Array<{ entity_id: string; payload_json: string | null; created_at: string }>;
+  try {
+    rows = getDb().prepare(`SELECT entity_id, payload_json, created_at FROM events WHERE type = ? ORDER BY id DESC LIMIT 200`).all(MAIN_GATE) as typeof rows;
+  } catch { return; }
+  for (const ev of rows) {
+    const sha = ev.entity_id;
+    if (mainGateRow(sha) || getFreeze(sha)) continue;
+    let project: string | null = null;
+    try { project = (JSON.parse(ev.payload_json ?? '{}') as { project?: string }).project ?? null; } catch { /* none */ }
+    if (!project) continue;
+    let last: string | null = null;
+    try {
+      const gate = getDb().prepare(`SELECT payload_json FROM events WHERE type = ? AND entity_id = ? ORDER BY id DESC LIMIT 1`).get(GATED, `${sha}:full`) as { payload_json: string | null } | undefined;
+      last = gate ? ((JSON.parse(gate.payload_json ?? '{}') as { gate?: string }).gate ?? null) : null;
+    } catch { /* none */ }
+    if (!last) {
+      const api = recordsFor(sha).filter((r) => r.suite === 'api');
+      if (api.length) continue; // it ran and recorded; nothing stale
+      last = 'QUEUED';
+    }
+    saveMainGate(sha, project, MAIN_GATE_LIVE.has(last.toUpperCase()) ? 'QUEUED' : last.toUpperCase(), ev.created_at);
+  }
+}
+
+/**
+ * A main-tip run left QUEUED or RUNNING with nothing running or waiting here (a restart, or a
+ * run dropped before this fix): settled from its recorded api result, resubmitted once while
+ * fresh, otherwise closed. With auto_gate off it is closed, never submitted.
+ */
+async function reconcileMainGates(now: number): Promise<void> {
+  adoptLegacyMainGates();
+  let looked = 0;
+  for (const row of mainGateRuns()) {
+    if (looked >= GATE_RECONCILE_PER_TICK) break;
+    if (inflightFor(row.project).has(row.sha) || gatePending.includes(row.sha) || gateRecovered.has(row.sha)) continue;
+    looked++;
+    // A newer tip can cancel this row while the awaits below are in flight. Re-read before
+    // every write so a superseded QUEUED row is not submitted again.
+    const stillLive = (): boolean => {
+      const cur = mainGateRow(row.sha);
+      return !!cur && MAIN_GATE_LIVE.has(cur.state);
+    };
+    if (!stillLive()) continue;
+    const pipe = pipelineOf(row.project);
+    const pseudo = mainPseudoFreeze(row);
+    const api = recordsFor(row.sha).filter((r) => r.suite === 'api' && (r.state === 'GREEN' || r.state === 'RED'));
+    const last = api[api.length - 1];
+    if (last) {
+      if (!stillLive()) continue;
+      gateRecovered.add(row.sha);
+      await settleGate(pseudo, last.state as 'GREEN' | 'RED', null);
+      continue;
+    }
+    if (!pipe.auto_gate || !pipe.gate_command?.length) {
+      if (stillLive()) closeMainGate(row, 'auto_gate is off');
+      gateRecovered.add(row.sha);
+      continue;
+    }
+    let live: 'green' | 'red' | 'pending' | 'missing' = 'missing';
+    if (testsConfigured(row.project)) {
+      try { live = shaChecks(await readLaneTests(row.project, '', row.sha), row.sha, suiteNames(row.project)).full; } catch { live = 'missing'; }
+    }
+    if (!stillLive()) continue;
+    if (live === 'pending') continue; // still on the dispatcher; the next tick looks again
+    gateRecovered.add(row.sha);
+    if (live === 'green' || live === 'red') { await settleGate(pseudo, live === 'green' ? 'GREEN' : 'RED', null); continue; }
+    const repo = projectRepo(row.project);
+    const tip = repo ? await mainTip(repo, row.project).catch(() => null) : null;
+    if (!stillLive()) continue;
+    if (tip && tip.sha.toLowerCase() !== row.sha.toLowerCase()) { closeMainGate(row, `superseded by main ${tip.sha.slice(0, 8)}`); continue; }
+    const age = now - Date.parse(`${row.created_at.replace(' ', 'T')}Z`);
+    if (Number.isFinite(age) && age <= GATE_RECOVER_MAX_AGE_MS) {
+      note(row.project, null, row.sha, 'gate', `auto: api run on main ${row.sha.slice(0, 8)} was lost — submitting it again`);
+      // The gateway keeps one queued run per author. `main` is that author for every tip.
+      if (inflightFor(row.project).size >= pipe.gate_max_inflight || authorBusy(pseudo)) {
+        if (!gatePending.includes(row.sha)) gatePending.push(row.sha);
+        continue;
+      }
+      void runGate(pseudo).catch((e) => logger.debug({ sha: row.sha, error: (e as Error).message }, 'Main gate recovery failed'));
+    } else if (stillLive()) {
+      closeMainGate(row, 'lost at a restart and older than 6 h');
     }
   }
 }
@@ -1564,10 +1745,24 @@ export async function ensureMainGate(project: string, mainSha: string | null): P
   if (!mainSha || !pipe.auto_gate || !pipe.gate_command?.length) return;
   if (acted(mainSha, MAIN_GATE)) return;
   if (recordsFor(mainSha).some((r) => r.suite === 'api')) return;
+  const existing = mainGateRow(mainSha);
+  // Event retention drops pipeline.main-gate after 90 days. A settled row must not be
+  // rewritten to QUEUED and run again just because the event is gone.
+  if (existing && !MAIN_GATE_LIVE.has(existing.state)) return;
+  if (laneAutomationDenied(project, { name: 'main' }, null) || acted(`${mainSha}:full`, GATED)) return;
   emit(MAIN_GATE, 'run', mainSha, { sha: mainSha, project }, null);
-  const pseudo = {
-    sha: mainSha, project, lane: null, author_name: 'main', author_agent_id: null, status: 'open', created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
-  } as unknown as ReleaseFreeze;
+  // An older main tip still waiting (in memory or only in the store, after a restart) is
+  // superseded. A run already in flight is left to finish; this tip takes the next slot.
+  for (const row of mainGateRuns(project)) {
+    if (row.sha.toLowerCase() === mainSha.toLowerCase()) continue;
+    if (inflightFor(project).has(row.sha)) continue;
+    const gi = gatePending.indexOf(row.sha);
+    if (gi >= 0) gatePending.splice(gi, 1);
+    closeMainGate(row, `superseded by the new main tip ${mainSha.slice(0, 8)}`);
+  }
+  saveMainGate(mainSha, project, 'QUEUED');
+  const row = mainGateRow(mainSha);
+  const pseudo = mainPseudoFreeze({ sha: mainSha, project, created_at: row?.created_at ?? new Date().toISOString().replace('T', ' ').slice(0, 19) });
   note(project, null, mainSha, 'gate', `auto: api suite on the new main tip ${mainSha.slice(0, 8)}`);
   await queueFullGate(pseudo);
 }
@@ -1868,6 +2063,7 @@ export async function pipelineTick(now = Date.now()): Promise<void> {
     try { await ensureProdSyncLane(project); } catch (e) { logger.debug({ project, error: (e as Error).message }, 'Prod sync skipped'); }
   }
   try { await reconcileLostGates(now); } catch (e) { logger.debug({ error: (e as Error).message }, 'Gate reconcile skipped'); }
+  try { await reconcileMainGates(now); } catch (e) { logger.debug({ error: (e as Error).message }, 'Main gate reconcile skipped'); }
   await settleGatesWaitingOnQuick();
   for (const [sha, at] of [...refusedFreezes.entries()]) {
     if (now - at > REFUSED_TTL_MS) { refusedFreezes.delete(sha); continue; }

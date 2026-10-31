@@ -142,6 +142,18 @@ describe('pickReviewer', () => {
     expect((off as { reason: string }).reason).toMatch(/auto-pick is off/);
   });
 
+  it('auto rungs skip codex5; an explicit ask can still name it', () => {
+    const author = agent('claude2', { runtime: 'claude-code' });
+    agent('codex5');
+    const other = agent('codex3');
+    const run = runBy(author);
+    review.default_reviewer = 'codex5';
+    expect(pickReviewer(run)).toMatchObject({ ok: true, agent: { id: other.id } });
+    review.default_reviewer = '';
+    expect(pickReviewer(run)).toMatchObject({ ok: true, agent: { id: other.id } });
+    expect(pickReviewer(run, { explicit: 'codex5' })).toMatchObject({ ok: true, rung: 'explicit', agent: { name: 'codex5' } });
+  });
+
   it('drops review_deny and agent_deny from the ladder and the reviewer list', () => {
     projects.wave = { pipeline: { review_deny: ['codex1'], agent_deny: ['chatgpt-countix'] } };
     const author = agent('claude2', { runtime: 'claude-code' });

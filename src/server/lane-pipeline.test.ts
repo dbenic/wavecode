@@ -31,7 +31,7 @@ import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } fr
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
   setPublishRefusalQuietMsForTest,
-  authorLoadForTest, cancelStateForTest, ensureMainGate, ensureProdSyncLane, mainApiState, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+  authorLoadForTest, cancelStateForTest, ensureMainGate, ensureProdSyncLane, mainApiState, mainGateRunsForTest, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { recordCandidateReviewFile } from './candidate-review.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
@@ -297,6 +297,13 @@ describe('hands-free lane pipeline', () => {
     fs.writeFileSync(request, `Lane: wc-ales\nSHA: ${sha}\nReviewer: @ales\n`);
     expect((await ingestReviewRequestFile(request)).ok).toBe(false);
     expect(messages(author.id).join('\n')).toMatch(/review request .* not sent/);
+
+    // codex5 is reserved from automatic assignment; a person naming it still gets that seat
+    const reserved = agent('codex5', path.join(tmp, 'codex5'));
+    fs.writeFileSync(request, `Lane: wc-ales\nSHA: ${sha}\nReviewer: @codex5\n`);
+    expect(await ingestReviewRequestFile(request)).toMatchObject({ ok: true, data: { reviewer: 'codex5', sha } });
+    expect(messages(reserved.id).join('\n')).toMatch(/asks for a review of freeze/);
+    expect(getFreeze(sha)?.reviewer_name).toBe('codex5');
 
     // no SHA and no open freeze on the lane: told, nothing sent
     const other = path.join(freezeDir, 'ales-wc-none-review-request-x.md');
@@ -833,6 +840,92 @@ describe('hands-free lane pipeline', () => {
     resolvers.shift()!({ code: 0, stdout: 'GREEN' });
     await vi.waitFor(() => expect(getFreeze(shas[2])?.gate).toBe('GREEN'), { timeout: 10_000 });
     expect(gateLoadForTest()).toEqual({ inflight: { wave: [] }, pending: [] });
+  });
+
+  it('a main-tip api run that waits for a slot is persisted, starts when the slot frees, and is recovered after a restart (3644c780, 31 Oct 2026)', { timeout: 30_000 }, async () => {
+    const resolvers: Array<(r: { code: number; stdout: string }) => void> = [];
+    setPipelineExecForTest((argv) => {
+      calls.push(argv);
+      if (argv[0] === 'gate-run') return new Promise<{ code: number; stdout: string }>((resolve) => { resolvers.push(resolve); });
+      return { code: 0, stdout: 'ok' };
+    });
+    pipe.auto_gate = true;
+    pipe.gate_max_inflight = 1;
+    ensureReleaseFreezeTable();
+    agent('deva', path.join(tmp, 'wc-a'));
+    const laneSha = branch('wc-a', 'wc-a.txt', 'a');
+    await ingestFreezeFile(openNote('deva', 'wc-a', laneSha));
+    const gates = () => calls.filter((a) => a[0] === 'gate-run');
+    await vi.waitFor(() => expect(gates()).toHaveLength(1), { timeout: 10_000 });
+    moveMain('main.txt', 'tip');
+    const main = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    await ensureMainGate('wave', main);
+    expect(gateLoadForTest().pending).toEqual([main]);
+    expect(mainGateRunsForTest().find((r) => r.sha === main)?.state).toBe('QUEUED');
+    // Restart: everything in memory is gone, the persisted row is not.
+    resetPipelineForTest();
+    pipe.auto_gate = true;
+    pipe.gate_max_inflight = 1;
+    expect(gateLoadForTest().pending).toEqual([]);
+    // The lane gate lost at the restart may be resubmitted first; it holds the one slot until it settles.
+    for (let i = 0; i < 20 && !gates().some((g) => g[2] === main); i++) {
+      await pipelineTick();
+      await new Promise((r) => setTimeout(r, 100));
+      if (!gates().some((g) => g[2] === main)) while (resolvers.length) resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    }
+    expect(gates().filter((a) => a[2] === main)).toHaveLength(1);
+    while (resolvers.length) resolvers.shift()!({ code: 0, stdout: '=== RESULT GREEN sha=x suite=api ===' });
+    await vi.waitFor(() => expect(mainGateRunsForTest().find((r) => r.sha === main)?.state).toBe('GREEN'), { timeout: 10_000 });
+    await pipelineTick();
+    expect(gates().filter((a) => a[2] === main)).toHaveLength(1); // settled: not submitted again
+    while (resolvers.length) resolvers.shift()!({ code: 0, stdout: 'GREEN' });
+    await vi.waitFor(() => expect(gateLoadForTest().inflight.wave ?? []).toEqual([]), { timeout: 10_000 });
+  });
+
+  it('a stale main-tip run (legacy QUEUED event, older main tip, or auto_gate off) is closed, never left RUNNING', async () => {
+    setPipelineExecForTest((argv) => { calls.push(argv); return { code: 0, stdout: 'ok' }; });
+    ensureReleaseFreezeTable();
+    moveMain('m1.txt', 'one');
+    const old = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    // Legacy: a main-gate event and a QUEUED gate word, recorded before the store existed.
+    emit('pipeline.main-gate', 'run', old, { sha: old, project: 'wave' }, null);
+    emit('pipeline.gate', 'run', `${old}:full`, { sha: old, gate: 'QUEUED' }, null);
+    moveMain('m2.txt', 'two');
+    const tip = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    pipe.auto_gate = true;
+    await pipelineTick();
+    await vi.waitFor(() => expect(mainGateRunsForTest().find((r) => r.sha === old)).toMatchObject({ state: 'CANCELLED', note: expect.stringMatching(/superseded by main/) }), { timeout: 10_000 });
+    expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === old)).toHaveLength(0);
+    // auto_gate off: a waiting main row is closed, not submitted.
+    pipe.auto_gate = false;
+    resetPipelineForTest();
+    db.getDb().prepare("INSERT OR REPLACE INTO main_gate_runs (sha, project, state, created_at) VALUES (?, 'wave', 'QUEUED', datetime('now'))").run(tip);
+    await pipelineTick();
+    expect(mainGateRunsForTest().find((r) => r.sha === tip)).toMatchObject({ state: 'CANCELLED', note: 'auto_gate is off' });
+    expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === tip)).toHaveLength(0);
+  });
+
+  it('a new main tip closes an older QUEUED run that exists only in the store, and a settled row is not run again', async () => {
+    setPipelineExecForTest((argv) => { calls.push(argv); return { code: 0, stdout: '=== RESULT GREEN sha=x suite=api ===' }; });
+    ensureReleaseFreezeTable();
+    pipe.auto_gate = true;
+    moveMain('m1.txt', 'one');
+    const old = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    moveMain('m2.txt', 'two');
+    const tip = git(repo, 'rev-parse', 'refs/remotes/origin/main');
+    mainGateRunsForTest();
+    db.getDb().prepare("INSERT INTO main_gate_runs (sha, project, state, created_at) VALUES (?, 'wave', 'QUEUED', datetime('now', '-1 minute'))").run(old);
+    resetPipelineForTest();
+    await ensureMainGate('wave', tip);
+    expect(mainGateRunsForTest().find((r) => r.sha === old)).toMatchObject({ state: 'CANCELLED', note: expect.stringMatching(/superseded by the new main tip/) });
+    expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === old)).toHaveLength(0);
+    expect(mainGateRunsForTest().find((r) => r.sha === tip)?.state).toBe('GREEN');
+    // The main-gate event is gone (retention). The settled row must not be queued again.
+    db.getDb().prepare("DELETE FROM events WHERE type = 'pipeline.main-gate' AND entity_id = ?").run(tip);
+    calls.length = 0;
+    await ensureMainGate('wave', tip);
+    expect(mainGateRunsForTest().find((r) => r.sha === tip)?.state).toBe('GREEN');
+    expect(calls.filter((a) => a[0] === 'gate-run' && a[2] === tip)).toHaveLength(0);
   });
 
   it('a lane with a merge-queue priority takes the next free gate slot ahead of older waiting gates', async () => {

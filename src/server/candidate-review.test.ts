@@ -55,6 +55,13 @@ describe('candidate review files', () => {
     });
     expect(parseCandidateReview('nothing yet\nCANDIDATE REVIEW: PASS or CANDIDATE REVIEW: NEEDS FIXES', 'wave-candidate-a9d705d1-20261028.md')).toBeNull();
     expect(parseCandidateReview('CANDIDATE REVIEW: PASS', 'notes.md')).toBeNull();
+    // an answer whose remark contains "or" is still an answer; the instruction offering one or the other is not
+    const f = 'wave-candidate-8c564ada-20261031.md';
+    expect(parseCandidateReview('Seat: @claude4\nCANDIDATE REVIEW: PASS — no blocking or risky changes', f)?.result).toBe('pass');
+    expect(parseCandidateReview('CANDIDATE REVIEW: **PASS** (nothing major or minor)', f)?.result).toBe('pass');
+    expect(parseCandidateReview('> CANDIDATE REVIEW: PASS', f)?.result).toBe('pass');
+    expect(parseCandidateReview('CANDIDATE REVIEW: PASS, or NEEDS FIXES', f)).toBeNull();
+    expect(parseCandidateReview('CANDIDATE REVIEW: PASS or NEEDS FIXES', f)).toBeNull();
   });
 });
 

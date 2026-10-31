@@ -290,7 +290,7 @@ export interface ResearchRun {
   finished_at: string | null;
 }
 
-export const SCHEMA_VERSION = 35;
+export const SCHEMA_VERSION = 36;
 
 /**
  * Base schema — applied via CREATE IF NOT EXISTS (safe for existing DBs).
@@ -722,6 +722,18 @@ const SCHEMA_SQL = `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_jobs_open_stage
     ON ops_jobs(kind, stage_sha)
     WHERE kind = 'stage' AND status IN ('queued', 'claimed');
+
+  -- Main-tip api runs have no freeze row. The pipeline also creates this on first use
+  -- (a daemon upgraded in place already has the table from the lazy ensure).
+  CREATE TABLE IF NOT EXISTS main_gate_runs (
+    sha TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    state TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_main_gate_runs_live ON main_gate_runs(state, created_at);
 `;
 
 /**
@@ -1142,6 +1154,19 @@ const MIGRATIONS: Record<number, string> = {
       sig TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+  `,
+  // v35 → v36: main-tip api runs persisted so a restart can reconcile them (31 Oct 2026).
+  // CREATE IF NOT EXISTS: a process that already ran the lazy ensure keeps its rows.
+  35: `
+    CREATE TABLE IF NOT EXISTS main_gate_runs (
+      sha TEXT PRIMARY KEY,
+      project TEXT NOT NULL,
+      state TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_main_gate_runs_live ON main_gate_runs(state, created_at);
   `,
 };
 

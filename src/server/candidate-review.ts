@@ -102,7 +102,10 @@ export function parseCandidateReview(text: string, filename: string): CandidateR
     if (!m) continue;
     const rest = line.replace(/CANDIDATE[ _-]?REVIEW\s*[:：]/i, '');
     const both = /\bPASS\b/i.test(rest) && /\bNEEDS[ -]FIXES\b/i.test(rest);
-    if (both || /\bor\b/i.test(rest)) continue;
+    // The instruction line names both answers, or offers one "or" the other right after the colon
+    // ("PASS, or NEEDS FIXES"). An answer whose remark happens to contain "or" is still an answer.
+    const offer = /^\s*\**\s*(?:PASS|NEEDS[ -]FIXES)\b\**\s*[,;]?\s*or\b/i.test(rest);
+    if (both || offer) continue;
     result = m[1].toUpperCase() === 'PASS' ? 'pass' : 'needs-fixes';
   }
   if (!result) return null;
