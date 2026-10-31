@@ -60,7 +60,8 @@ describe('project rooms (spec §5e)', () => {
     return a.data;
   }
 
-  const typedInto = (name: string) => tmuxHarness.typed.filter((t) => t.session === `wc-${name}`).map((t) => t.text);
+  // The prompts typed into a seat — without the runtime's clear command the dispatcher types first (fresh context, 28 Oct 2026).
+  const typedInto = (name: string) => tmuxHarness.typed.filter((t) => t.session === `wc-${name}` && t.text !== '/clear' && t.text !== '/new').map((t) => t.text);
 
   beforeEach(async () => {
     tmuxHarness.sessions.clear();
