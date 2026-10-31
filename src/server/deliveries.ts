@@ -764,7 +764,10 @@ export function deriveSpans(delivery: Delivery, events: Ev[], goalTaskIds: Set<s
         if (kind === 'assign') { if (seat) span.actor = seat; }
         else if (kind === 'result') {
           if (seat) span.actor = seat;
-          span.cause = str(p.result) === 'pass' ? null : `candidate review NEEDS FIXES by @${seat ?? '?'} (${Number(p.issues ?? 0)} issue${Number(p.issues ?? 0) === 1 ? '' : 's'}), see ${str(p.file) ?? 'the file'}`;
+          // A PASS answers the candidate review: the span closes ok. Left open, it ran past its budget and
+          // raised a false over-budget alarm until the next merge or the release (8c564ada, cb5ce667, 2f3d118d, 77d64b60).
+          if (str(p.result) === 'pass') { span.cause = null; finish(`candidate:${t.sha}`, 'ok', at, 'candidate review PASS', seat); break; }
+          span.cause = `candidate review NEEDS FIXES by @${seat ?? '?'} (${Number(p.issues ?? 0)} issue${Number(p.issues ?? 0) === 1 ? '' : 's'}), see ${str(p.file) ?? 'the file'}`;
         }
         break;
       }

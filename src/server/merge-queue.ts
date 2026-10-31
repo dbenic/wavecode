@@ -497,6 +497,22 @@ async function patchIdOf(repo: string, mainRef: string, sha: string): Promise<st
   return id;
 }
 
+/**
+ * The NEEDS FIXES / REJECT verdicts still standing on this exact SHA. The ledger keeps one row per
+ * (SHA, reviewer), so a reviewer's later verdict on the same SHA replaces their earlier one; a PASS
+ * from someone else does not. Any standing NEEDS FIXES blocks the merge (31 Oct 2026: 75f1d4fe was
+ * merged on one PASS while codex8's NEEDS FIXES on that frozen SHA was on file).
+ */
+export function standingNeedsFixes(verdicts: FreezeVerdict[]): FreezeVerdict[] {
+  const latest = new Map<string, FreezeVerdict>();
+  for (const v of verdicts) {
+    const key = v.reviewer_name.toLowerCase();
+    const prev = latest.get(key);
+    if (!prev || Date.parse(`${v.created_at.replace(' ', 'T')}Z`) >= Date.parse(`${prev.created_at.replace(' ', 'T')}Z`)) latest.set(key, v);
+  }
+  return [...latest.values()].filter((v) => v.verdict === 'needs-fixes' || v.verdict === 'reject');
+}
+
 interface CarriedReview { donor: string; patchId: string; passes: FreezeVerdict[]; full: string }
 
 /**
@@ -517,6 +533,7 @@ async function reviewCarriedOver(repo: string, mainRef: string, freeze: ReleaseF
     const at = Date.parse(`${other.created_at.replace(' ', 'T')}Z`);
     if (Number.isFinite(at) && Number.isFinite(mineAt) && at > mineAt) continue;
     if (other.verdict === 'needs-fixes' || other.verdict === 'reject') continue;
+    if (standingNeedsFixes(listVerdicts(other.sha)).length > 0) continue;
     const passed = independentPasses(verdictsFor(other), who, service);
     if (!passed.ok) continue;
     if ((await patchIdOf(repo, mainRef, other.sha)) !== mine) continue;
@@ -876,6 +893,11 @@ export async function evaluate(freeze: ReleaseFreeze): Promise<Eligibility> {
 
   if (freeze.verdict === 'needs-fixes' || freeze.verdict === 'reject') {
     return no(base, 'NEEDS_FIXES', `reviewer @${freeze.reviewer_name ?? '?'} said ${freeze.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}; fix, push and freeze a new SHA`);
+  }
+  const standing = standingNeedsFixes(listVerdicts(freeze.sha));
+  if (standing.length > 0) {
+    const who = standing.map((v) => `@${v.reviewer_name} ${v.verdict === 'reject' ? 'REJECT' : 'NEEDS FIXES'}`).join(', ');
+    return no(base, 'NEEDS_FIXES', `${who} on ${freeze.sha.slice(0, 8)} still stands; a PASS from another reviewer does not clear it. The same reviewer re-verdicts this SHA, or fix, push and freeze a new SHA`);
   }
   const author = authorFor(freeze);
   const passed = independentPasses(

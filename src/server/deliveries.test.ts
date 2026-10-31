@@ -160,6 +160,24 @@ describe('delivery derivation', () => {
     expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 71 * 60_000).map((s) => `${s.stage}:${s.code}`)).toContain('candidate:BLOCKED');
   });
 
+  it('a CANDIDATE REVIEW: PASS closes the candidate span ok, so it never raises an over-budget alarm (8c564ada, 31 Oct 2026)', () => {
+    const created = del.createDelivery({ title: 'Pass', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
+    if (!created.ok) throw new Error(created.error);
+    ev(10, 'pipeline.frozen', B, { sha: B, project: 'wavepulse', lane: LANE });
+    ev(40, 'gate.result', B, { sha: B, suite: 'full', state: 'GREEN' });
+    ev(41, 'merge_queue.queued', B, { sha: B, lane: LANE, tier: 'ship' });
+    ev(50, 'merge_queue.merged', B, { lane: LANE, sha_in: B, sha_out: M, main_before: 'a'.repeat(40), author: 'codex1' });
+    ev(51, 'pipeline.candidate_review', M, { kind: 'assign', project: 'wavepulse', sha: M, base: 'a'.repeat(40), lane: LANE, reviewer: 'claude4', reviewer_id: 'x' });
+    ev(70, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'pass', issues: 0, seat: 'claude4', file: '/inbox/wave-candidate-43bca6d9-20261031.md' });
+    const spans = del.deriveDelivery(created.data.id);
+    if (!spans.ok) throw new Error(spans.error);
+    const cand = spans.data.spans.find((s) => s.stage === 'candidate' && s.sha === M)!;
+    expect(cand).toMatchObject({ outcome: 'ok', actor: 'claude4', cause: 'candidate review PASS' });
+    expect(cand.finished_at).toBeTruthy();
+    // hours later, past the 60 min candidate budget: no OVERRUN on the answered review
+    expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 600 * 60_000).filter((s) => s.stage === 'candidate')).toEqual([]);
+  });
+
   it('derives the bank-posting day: freeze, first pass, gates, review, land, candidate, release', () => {
     const created = del.createDelivery({ title: 'Bank simple posting', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
     expect(created.ok).toBe(true);
