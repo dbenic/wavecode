@@ -149,6 +149,8 @@ export interface Task {
   run_phase?: FileRunnerPhase | null;
   result?: 'PASS' | 'FAIL' | null;
   result_reason?: string | null;
+  /** Pending and pinned to an agent that cannot take it: another subscription, someone's lease, under the quota floor. */
+  wait_reason?: 'profile' | 'owner' | 'quota' | null;
 }
 
 export interface GoalRollup {

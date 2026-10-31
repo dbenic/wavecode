@@ -716,6 +716,7 @@ export default function TaskBoard() {
                           key={task.id}
                           task={task}
                           agentName={task.agent_id ? agentMap.get(task.agent_id)?.name : undefined}
+                          agent={task.agent_id ? agentMap.get(task.agent_id) : undefined}
                           index={i}
                           onRefresh={refreshTasks}
                         />

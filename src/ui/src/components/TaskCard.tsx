@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { Task } from '../types';
+import type { Agent, Task } from '../types';
 import { apiPost, apiPut, apiDelete } from '../hooks/useApi';
 
 const STATUS_CONFIG: Record<
@@ -65,17 +65,38 @@ const STATUS_CONFIG: Record<
   },
 };
 
+/** One line on a pending card: why the dispatcher is not running it on the agent it was pinned to. */
+export function waitLine(task: Task, agent?: Pick<Agent, 'name' | 'profile' | 'owner'>): string | null {
+  const name = agent?.name ?? 'the agent';
+  switch (task.wait_reason) {
+    case 'profile': {
+      const profile = agent?.profile ?? 'another profile';
+      const person = profile.charAt(0).toUpperCase() + profile.slice(1);
+      return `waiting: profile — ${profile} is ${person}'s subscription`;
+    }
+    case 'owner':
+      return `waiting: owner — ${agent?.owner ?? 'someone else'} holds ${name}`;
+    case 'quota':
+      return `waiting: quota — ${name} is under its plan floor`;
+    default:
+      return null;
+  }
+}
+
 export default function TaskCard({
   task,
   agentName,
+  agent,
   index,
   onRefresh,
 }: {
   task: Task;
   agentName?: string;
+  agent?: Pick<Agent, 'name' | 'profile' | 'owner'>;
   index: number;
   onRefresh?: () => void;
 }) {
+  const waiting = task.status === 'pending' ? waitLine(task, agent) : null;
   const navigate = useNavigate();
   const phaseOrStatus = task.run_phase ?? task.status;
   const cfg = STATUS_CONFIG[phaseOrStatus] ?? STATUS_CONFIG[task.status] ?? STATUS_CONFIG.pending;
@@ -215,6 +236,12 @@ export default function TaskCard({
         ) : (
           <p className={`text-[11px] text-slate-300 leading-snug font-mono ${expanded ? '' : 'line-clamp-2'}`}>
             {task.prompt}
+          </p>
+        )}
+
+        {waiting && (
+          <p className="text-[9px] text-amber-500/80 leading-snug truncate" title={waiting}>
+            {waiting}
           </p>
         )}
 

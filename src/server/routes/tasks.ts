@@ -17,6 +17,9 @@ import {
   updateTaskReviewer,
   listRuns,
   findGoal,
+  listAgents,
+  type Agent,
+  type User,
 } from '../db.js';
 import * as codeReview from '../code-review.js';
 import { canMutate } from '../users.js';
@@ -31,6 +34,7 @@ import { getActingUser, type NodeAppEnv } from '../auth.js';
 import { reviewerDenied } from '../reviewer-assign.js';
 import * as leases from '../leases.js';
 import { isTemplateKind, resolveTaskRoom, TEMPLATE_KINDS } from '../rooms.js';
+import { isProfileCompatible } from '../profiles.js';
 
 function presentTaskRun(run: { id: string; result_path?: string | null }) {
   return presentFileRun(run);
@@ -53,6 +57,56 @@ function canCancelTask(status: string): boolean {
 export const TASK_BOARD_PAGE = 25;
 
 /**
+ * Why `POST /api/tasks` refuses the agent the caller named, with who is free
+ * instead (409 `{ error, free_agents }`), or null when the agent may take it.
+ *
+ * - Profile (spec §5): the agent runs on another person's subscription, so
+ *   the dispatcher would never run the task there and it would sit pending
+ *   with no signal. On 31 Oct 2026 pm-denis queued payroll work on
+ *   @ales-codex1 and @ales-claude1 (profile `ales`) this way and waited for a
+ *   reply that could not come. `hold` does not bypass this: holding a task
+ *   nobody may run is still a mistake.
+ * - Quota (27 Oct 2026 retro, cause 1): the agent is under its plan floor;
+ *   `hold: true` bypasses, the task is for later.
+ *
+ * `free_agents` lists only agents the caller may use.
+ */
+function agentRefusal(
+  agent: Agent,
+  actor: Pick<User, 'name' | 'role' | 'profile'>,
+  hold: boolean,
+): { error: string; free_agents: string[] } | null {
+  if (!isProfileCompatible(agent.profile, actor)) {
+    return {
+      error: `@${agent.name} runs on ${agent.profile}, a subscription ${actor.name} may not use; pick another agent`,
+      free_agents: taskDispatcher.freeAgentNames(agent.id, actor),
+    };
+  }
+  const unfit = taskDispatcher.agentUnfit(agent);
+  if (unfit?.code === 'quota' && !hold) {
+    return { error: `${unfit.why}; pick another agent`, free_agents: taskDispatcher.freeAgentNames(agent.id, actor) };
+  }
+  return null;
+}
+
+/**
+ * `wait_reason` for pending rows pinned to an agent: the dispatcher's own
+ * answer (`taskWaitReason`), looked up once per response. Null on every other
+ * row, so a card can show "waiting: profile" without a second request.
+ */
+function waitReasons(tasks: Task[]): Map<string, taskDispatcher.TaskWaitReason> {
+  const reasons = new Map<string, taskDispatcher.TaskWaitReason>();
+  const pinned = tasks.filter((t) => t.status === 'pending' && t.agent_id);
+  if (pinned.length === 0) return reasons;
+  const agents = new Map(listAgents().map((a) => [a.id, a]));
+  for (const task of pinned) {
+    const agent = agents.get(task.agent_id!);
+    if (agent) reasons.set(task.id, taskDispatcher.taskWaitReason(task, agent));
+  }
+  return reasons;
+}
+
+/**
  * The list shape of a task: dependencies and the newest run slimmed to what a
  * card or `wavecode status` needs (phase, verdict, last line — no summary, no
  * log paths). Bulk lookups: two queries for the whole page and one small
@@ -62,6 +116,7 @@ export function presentTaskList(tasks: Task[]) {
   const ids = tasks.map((t) => t.id);
   const latest = latestRunsByTask(ids);
   const edges = dependencyEdgesForTasks(ids);
+  const waiting = waitReasons(tasks);
   return tasks.map((task) => {
     const run = latest.get(task.id) ?? null;
     const result = run ? presentRunResult(run.result_path) : null;
@@ -70,6 +125,7 @@ export function presentTaskList(tasks: Task[]) {
       ...task,
       dependencies: edges.dependsOn.get(task.id) ?? [],
       dependents: edges.dependents.get(task.id) ?? [],
+      wait_reason: waiting.get(task.id) ?? null,
       run_phase: status?.phase ?? null,
       result: result?.result ?? null,
       result_reason: result?.result_reason ?? null,
@@ -127,10 +183,12 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
     if (!result.ok) return c.json({ error: result.error }, 404);
 
     const task = result.data;
+    const agent = task.status === 'pending' && task.agent_id ? getAgent(task.agent_id) : null;
     return c.json({
       ...task,
       dependencies: taskDispatcher.getDependencies(task.id),
       dependents: taskDispatcher.getDependents(task.id),
+      wait_reason: agent?.ok ? taskDispatcher.taskWaitReason(task, agent.data) : null,
       runs: listRuns({ task_id: task.id }).map(presentTaskRun),
     });
   });
@@ -168,19 +226,19 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       const agentResult = resolveAgent(body.agent_id);
       if (agentResult.ok) resolvedAgent = agentResult.data;
       if (!agentResult.ok) return c.json({ error: agentResult.error }, 400);
+      const actor = getActingUser(c);
       // Queuing for an agent someone else owns is allowed (spec §6): the
       // dispatcher never runs it there until the lease ends and emits
       // task.waiting_for_agent meanwhile. Tell the caller up front.
-      const access = leases.checkAgentAccess(agentResult.data, getActingUser(c));
+      const access = leases.checkAgentAccess(agentResult.data, actor);
       if (!access.ok) waitingFor = leases.userName(agentResult.data.owner_id!);
       resolvedAgentId = agentResult.data.id;
-      // 27 Oct 2026 retro, cause 1: nobody checked quota and current work before handing out a task.
-      // Out of plan: refused, with who is free. Busy: accepted (it queues behind), but said in the answer.
+      // Another person's subscription (31 Oct 2026) or under the quota floor (27 Oct 2026 retro,
+      // cause 1): refused, with who is free. Busy: accepted (it queues behind), but said in the answer.
+      const refusal = agentRefusal(agentResult.data, actor, body.hold === true);
+      if (refusal) return c.json(refusal, 409);
       const unfit = taskDispatcher.agentUnfit(agentResult.data);
-      if (unfit?.code === 'quota' && body.hold !== true) {
-        return c.json({ error: `${unfit.why}; pick another agent`, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) }, 409);
-      }
-      if (unfit?.code === 'busy') busyNote = { why: unfit.why, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) };
+      if (unfit?.code === 'busy') busyNote = { why: unfit.why, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id, actor) };
     }
 
     let resolvedReviewerId: string | null = null;

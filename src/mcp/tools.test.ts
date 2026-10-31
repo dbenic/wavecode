@@ -324,6 +324,16 @@ describe('mcp tools', () => {
     );
   });
 
+  it('create_task surfaces the 409 for an agent on another subscription unchanged', async () => {
+    const { client } = makeClient({
+      error: '@ales-codex1 runs on ales, a subscription denis may not use; pick another agent',
+      free_agents: ['@assist', 'claude-t1'],
+    }, 409);
+
+    await expect(tool('create_task').handler(client, { prompt: 'review payroll', agent_id: 'ales-codex1' }))
+      .rejects.toThrow('@ales-codex1 runs on ales, a subscription denis may not use; pick another agent');
+  });
+
   it('surfaces daemon errors with the server-provided message', async () => {
     const { client } = makeClient({ error: 'Promotion blocked: no completed review exists for this run.' }, 400);
 
@@ -389,6 +399,8 @@ describe('mcp tools — acting as the token\'s user (end to end)', () => {
   let db: typeof import('../server/db.js');
   let seats: Record<'admin' | 'ana' | 'bob' | 'watcher', WaveCodeClient>;
   let ids: Record<'ana' | 'bob', string>;
+  let tokens: Record<'ana' | 'bob', string>;
+  let app: Hono<import('../server/auth.js').NodeAppEnv>;
 
   async function call(seat: WaveCodeClient, name: string, args: Record<string, unknown> = {}) {
     return tool(name).handler(seat, args) as Promise<any>;
@@ -413,7 +425,7 @@ describe('mcp tools — acting as the token\'s user (end to end)', () => {
     const { registerReviewRoutes } = await import('../server/routes/reviews.js');
     const { registerTaskRoutes } = await import('../server/routes/tasks.js');
     const { registerUserRoutes } = await import('../server/routes/users.js');
-    const app = new Hono<import('../server/auth.js').NodeAppEnv>();
+    app = new Hono<import('../server/auth.js').NodeAppEnv>();
     app.use('/api/*', createAuthMiddleware());
     registerSystemRoutes(app);
     registerAgentRoutes(app);
@@ -431,6 +443,7 @@ describe('mcp tools — acting as the token\'s user (end to end)', () => {
     const bob = mk('bob', 'developer');
     const watcher = mk('watcher', 'observer');
     ids = { ana: ana.user.id, bob: bob.user.id };
+    tokens = { ana: ana.token, bob: bob.token };
 
     const fetchImpl = ((input: string, init?: RequestInit) => app.request(input, init)) as unknown as typeof fetch;
     const seat = (token: string) => new WaveCodeClient({ baseUrl: 'http://daemon.test', token, fetchImpl });
@@ -440,6 +453,52 @@ describe('mcp tools — acting as the token\'s user (end to end)', () => {
   afterEach(() => {
     db.resetDbForTest();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // 31 Oct 2026: pm-denis's tasks on @ales-codex1 (profile `ales`) sat pending with no signal.
+  it('create_task refuses an agent on another subscription with the free agents the caller may use; a queued one shows wait_reason', async () => {
+    const seat = (name: string, profile: string) => {
+      const r = db.insertAgent({ name, runtime: 'codex', tmux_session: `wc-${name}`, workspace: '/tmp/ws', mode: 'spawned', status: 'idle', profile });
+      if (!r.ok) throw new Error(r.error);
+      return r.data;
+    };
+    const bobCodex = seat('bob-codex', 'bob');
+    seat('ana-codex', 'ana');
+    seat('bob-claude', 'bob');
+
+    await expect(call(seats.ana, 'create_task', { prompt: 'review payroll', agent_id: 'bob-codex' }))
+      .rejects.toThrow('@bob-codex runs on bob, a subscription ana may not use; pick another agent');
+    await expect(call(seats.ana, 'create_task', { prompt: 'review payroll', agent_id: 'bob-codex', hold: true }))
+      .rejects.toThrow(/may not use/);
+    // The owner token has no profile: a personal profile is nobody else's, admins included
+    await expect(call(seats.admin, 'create_task', { prompt: 'review payroll', agent_id: 'bob-codex' }))
+      .rejects.toThrow('@bob-codex runs on bob, a subscription owner may not use; pick another agent');
+    expect(await call(seats.ana, 'list_tasks')).toEqual([]);
+
+    // The 409 body names only agents on a subscription the caller may use
+    const res = await app.request('/api/tasks', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokens.ana}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'review payroll', agent_id: 'bob-codex' }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: '@bob-codex runs on bob, a subscription ana may not use; pick another agent',
+      free_agents: ['ana-codex'],
+    });
+
+    // Bob's own seat takes it
+    const own = await call(seats.bob, 'create_task', { prompt: 'review payroll', agent_id: 'bob-codex' });
+    expect(own).toMatchObject({ agent_id: bobCodex.id, status: 'pending' });
+    expect(own).not.toHaveProperty('free_agents');
+
+    // A task that reached the queue anyway (an older daemon, a direct insert) says why it waits
+    const stuck = db.insertTask({ prompt: 'build payroll', agent_id: bobCodex.id, created_by: ids.ana });
+    if (!stuck.ok) throw new Error(stuck.error);
+    const listed = await call(seats.ana, 'list_tasks') as Array<Record<string, unknown>>;
+    expect(listed.find((t) => t.id === stuck.data.id)?.wait_reason).toBe('profile');
+    expect(listed.find((t) => t.id === own.id)?.wait_reason).toBeNull();
+    expect((await call(seats.ana, 'get_task', { task_id: stuck.data.id })).wait_reason).toBe('profile');
   });
 
   it('whoami reports the token\'s user', async () => {

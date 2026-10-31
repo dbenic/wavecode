@@ -23,6 +23,7 @@ import {
   type Agent,
   type Result,
   type Run,
+  type User,
 } from './db.js';
 import { getConfig } from './config.js';
 import { emit } from './event-bus.js';
@@ -43,6 +44,7 @@ import {
   shouldAutoRetryFailedRun,
 } from './run-result.js';
 import * as leases from './leases.js';
+import { isProfileCompatible } from './profiles.js';
 import { ensureRuntimeAlive } from './runtime-liveness.js';
 import { isLoginSeat } from './login-seats.js';
 import { captureRunSummary } from './reply-capture.js';
@@ -418,11 +420,32 @@ export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profi
   return null;
 }
 
-/** Free agents a caller could use instead, by name. */
-export function freeAgentNames(except: string | null = null): string[] {
+/**
+ * Free agents a caller could use instead, by name. With `actor` (the caller),
+ * only agents on a subscription that person may use (spec §5): naming an
+ * agent on someone else's profile as "free" is what sent pm-denis's tasks to
+ * @ales-codex1 on 31 Oct 2026, where they could never run.
+ */
+export function freeAgentNames(except: string | null = null, actor?: Pick<User, 'role' | 'profile'> | null): string[] {
   return listAgents()
     .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && !a.owner_id && quotaOk(a))
+    .filter((a) => actor === undefined || isProfileCompatible(a.profile, actor))
     .map((a) => a.alias ? `@${a.alias}` : a.name);
+}
+
+export type TaskWaitReason = 'profile' | 'owner' | 'quota' | null;
+
+/**
+ * Why a pending task pinned to `agent` is not running there: the lease
+ * reasons the dispatcher reports as `task.waiting_for_agent` (profile, owner),
+ * then the quota floor it skips agents under. The API shows this as
+ * `wait_reason` on pending rows so the creator sees it instead of silence.
+ */
+export function taskWaitReason(task: Task, agent: Agent): TaskWaitReason {
+  if (task.status !== 'pending') return null;
+  const lease = leases.waitReason(task, agent);
+  if (lease) return lease;
+  return agentUnfit(agent)?.code === 'quota' ? 'quota' : null;
 }
 
 const DEFAULT_MIN_QUOTA_PCT = 10;

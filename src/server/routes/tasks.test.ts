@@ -19,6 +19,8 @@ vi.mock('../db.js', () => {
   getTask: vi.fn(),
   getRun: vi.fn(),
   getRunArtifacts: vi.fn(() => []),
+  getUser: vi.fn(() => ({ ok: false, error: 'not found' })),
+  listAgents: vi.fn(() => []),
   insertTask: vi.fn(),
   findGoal: vi.fn(),
   listRuns: vi.fn(() => []),
@@ -50,6 +52,7 @@ vi.mock('../task-dispatcher.js', () => ({
   addDependency: vi.fn(),
   agentUnfit: vi.fn(() => null),
   freeAgentNames: vi.fn(() => []),
+  taskWaitReason: vi.fn(() => null),
   dispatchNext: vi.fn(),
   finalizeRun: vi.fn(),
   getDependencies: vi.fn(() => []),
@@ -162,6 +165,113 @@ describe('task routes', () => {
       goal_id: null,
     });
     expect(response.json).toMatchObject({ id: 'task-named', agent_id: existing.id });
+  });
+
+  // 31 Oct 2026: pm-denis queued payroll work on @ales-codex1 / @ales-claude1 (profile `ales`); the
+  // dispatcher could never run it there and the seat waited for a reply. Refuse at creation instead.
+  describe('POST /api/tasks on an agent of another subscription (spec §5)', () => {
+    const bobAgent = {
+      id: '01M0B9AGENTULID00000000BOB', name: 'bob-codex', runtime: 'codex', tmux_session: 'wc-bob-codex',
+      workspace: '/tmp/bob', mode: 'spawned', status: 'idle', profile: 'bob', owner_id: null,
+    };
+    const ana = { id: 'u-ana', name: 'ana', role: 'developer', color: '#000000', profile: 'ana', created_at: '2026-10-31 00:00:00' };
+
+    beforeEach(async () => {
+      const db = await import('../db.js');
+      vi.mocked(db.getAgentByName).mockImplementation(((ref: string) =>
+        ref === bobAgent.name ? { ok: true, data: bobAgent } : { ok: false, error: `Agent '${ref}' not found` }) as never);
+      vi.mocked(db.getAgent).mockReturnValue({ ok: false, error: 'not found' } as never);
+      vi.mocked(db.insertTask).mockReturnValue({
+        ok: true,
+        data: { id: 'task-shared', agent_id: bobAgent.id, prompt: 'review payroll', status: 'pending', priority: 0, created_at: '2026-10-31T00:00:00Z', goal_id: null },
+      } as never);
+      const dispatcher = await import('../task-dispatcher.js');
+      // The free list is per caller: only agents on a subscription the caller may use.
+      vi.mocked(dispatcher.freeAgentNames).mockImplementation(((except: string, actor?: { profile: string | null }) =>
+        actor?.profile === 'ana' ? ['@ana-codex'] : ['@ana-codex', 'bob-claude']) as never);
+    });
+
+    it('a developer on profile ana → 409 with free_agents of her own, even with hold', async () => {
+      const db = await import('../db.js');
+      const dispatcher = await import('../task-dispatcher.js');
+      const app = await createTaskApp(ana);
+      const response = await requestJson(app, '/api/tasks', 'POST', { prompt: 'review payroll', agent_id: 'bob-codex', hold: true });
+
+      expect(response.status).toBe(409);
+      expect(response.json).toEqual({
+        error: '@bob-codex runs on bob, a subscription ana may not use; pick another agent',
+        free_agents: ['@ana-codex'],
+      });
+      expect(dispatcher.freeAgentNames).toHaveBeenCalledWith(bobAgent.id, expect.objectContaining({ name: 'ana', profile: 'ana' }));
+      expect(db.insertTask).not.toHaveBeenCalled();
+    });
+
+    it('the owner token (no profile) → 409 on a personal-profile agent', async () => {
+      const db = await import('../db.js');
+      const app = await createTaskApp(); // no auth middleware: the synthetic owner (admin, profile null)
+      const response = await requestJson(app, '/api/tasks', 'POST', { prompt: 'review payroll', agent_id: 'bob-codex' });
+
+      expect(response.status).toBe(409);
+      expect(response.json.error).toBe('@bob-codex runs on bob, a subscription owner may not use; pick another agent');
+      expect(response.json.free_agents).toEqual(['@ana-codex', 'bob-claude']);
+      expect(db.insertTask).not.toHaveBeenCalled();
+    });
+
+    it('an admin on a shared-profile agent → 201', async () => {
+      const db = await import('../db.js');
+      const config = await import('../config.js');
+      vi.mocked(config.getConfig).mockReturnValue({
+        autonomy: { auto_dispatch: false },
+        profiles: { pool: { shared: true } },
+      } as never);
+      vi.mocked(db.getAgentByName).mockReturnValue({ ok: true, data: { ...bobAgent, name: 'pool-codex', profile: 'pool' } } as never);
+      const app = await createTaskApp();
+      const response = await requestJson(app, '/api/tasks', 'POST', { prompt: 'review payroll', agent_id: 'pool-codex' });
+
+      expect(response.status).toBe(201);
+      expect(response.json).not.toHaveProperty('free_agents');
+      expect(db.insertTask).toHaveBeenCalledTimes(1);
+    });
+
+    it('a developer on the same profile → 201 (the quota floor still applies)', async () => {
+      const dispatcher = await import('../task-dispatcher.js');
+      const app = await createTaskApp({ ...ana, id: 'u-bob', name: 'bob', profile: 'bob' });
+      expect((await requestJson(app, '/api/tasks', 'POST', { prompt: 'review payroll', agent_id: 'bob-codex' })).status).toBe(201);
+
+      vi.mocked(dispatcher.agentUnfit).mockReturnValue({ code: 'quota', why: '@bob-codex has 4% of its plan left (floor 10%)' });
+      const low = await requestJson(app, '/api/tasks', 'POST', { prompt: 'review payroll', agent_id: 'bob-codex' });
+      expect(low.status).toBe(409);
+      expect(low.json.error).toBe('@bob-codex has 4% of its plan left (floor 10%); pick another agent');
+      // hold bypasses the quota floor (the task is for later), never the profile check
+      expect((await requestJson(app, '/api/tasks', 'POST', { prompt: 'review payroll', agent_id: 'bob-codex', hold: true })).status).toBe(201);
+    });
+  });
+
+  it('pending rows pinned to an agent carry wait_reason on the list, the board and the task', async () => {
+    const db = await import('../db.js');
+    const dispatcher = await import('../task-dispatcher.js');
+    const agent = { id: 'a-bob', name: 'bob-codex', runtime: 'codex', status: 'idle', profile: 'bob' };
+    const pinned = { ...makeTask('pending'), id: 't-pinned', agent_id: 'a-bob', created_by: 'u-ana' };
+    const free = { ...makeTask('pending'), id: 't-free' };
+    const running = { ...makeTask('running'), id: 't-run', agent_id: 'a-bob' };
+    vi.mocked(db.listTasks).mockReturnValue([pinned, free, running] as never);
+    vi.mocked(db.listAgents).mockReturnValue([agent] as never);
+    vi.mocked(db.getTask).mockReturnValue({ ok: true, data: pinned } as never);
+    vi.mocked(db.getAgent).mockReturnValue({ ok: true, data: agent } as never);
+    vi.mocked(dispatcher.taskWaitReason).mockReturnValue('profile');
+
+    const app = await createTaskApp();
+    const list = await requestJson(app, '/api/tasks', 'GET');
+    expect(list.json.map((t: { id: string; wait_reason: string | null }) => [t.id, t.wait_reason]))
+      .toEqual([['t-pinned', 'profile'], ['t-free', null], ['t-run', null]]);
+    expect(dispatcher.taskWaitReason).toHaveBeenCalledTimes(1);
+    expect(dispatcher.taskWaitReason).toHaveBeenCalledWith(pinned, agent);
+
+    const board = await requestJson(app, '/api/tasks/board', 'GET');
+    expect(board.json.active.find((t: { id: string }) => t.id === 't-pinned').wait_reason).toBe('profile');
+
+    const one = await requestJson(app, '/api/tasks/t-pinned', 'GET');
+    expect(one.json.wait_reason).toBe('profile');
   });
 
   it('rejects create_task when the agent name does not match an existing seat', async () => {
@@ -516,11 +626,13 @@ describe('task routes', () => {
   });
 });
 
-async function createTaskApp() {
+/** With `user`, every request acts as that user (as the auth middleware would set it); without, as the synthetic owner. */
+async function createTaskApp(user?: Record<string, unknown>) {
   const { registerTaskRoutes } = await import('./tasks.js');
-  const app = new Hono();
+  const app = new Hono<import('../auth.js').NodeAppEnv>();
+  if (user) app.use('*', async (c, next) => { c.set('user', user as never); await next(); });
   registerTaskRoutes(app);
-  return app;
+  return app as unknown as Hono;
 }
 
 async function requestJson(app: Hono, url: string, method: string, body?: unknown) {
