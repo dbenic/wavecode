@@ -137,6 +137,7 @@ describe('queueTask', () => {
     expect(resolveDaemonConnection()).toEqual({
       url: 'http://127.0.0.1:3777',
       token: 'test-token',
+      tokenSource: 'config',
     });
 
     process.env.WAVECODE_URL = 'http://example.test:9999/';
@@ -144,6 +145,7 @@ describe('queueTask', () => {
     expect(resolveDaemonConnection()).toEqual({
       url: 'http://example.test:9999/',
       token: 'env-token',
+      tokenSource: 'env',
     });
   });
 });
