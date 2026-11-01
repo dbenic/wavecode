@@ -10,8 +10,12 @@
  *     plan) and `.claude.json` (whether the profile approved or rejected a
  *     custom API key);
  *   - Codex: `$CODEX_HOME/auth.json` (ChatGPT tokens vs an OpenAI API key);
- *   - any subscription CLI (one with a `login_command`): the environment of the
- *     process running in its pane, for a provider key (provider-keys.ts).
+ *   - any subscription CLI (one with a `login_command`): its credential files,
+ *     and the environment of the process running in its pane for a provider
+ *     key (provider-keys.ts). Only a key the CLI itself bills counts as
+ *     `api-key` (xAI for grok); a stale foreign key (the daemon's Anthropic key
+ *     inherited by a Kimi pane before the 1 Nov 2026 scrub) is `env_key` on
+ *     a logged-in seat, never a reason to park.
  * Only field presence, plan names and variable NAMES leave this module; a
  * key value is compared in memory against the CLI's own rejected/approved
  * list and never stored, logged or emitted.
@@ -204,6 +208,16 @@ function paneKeys(pane: Record<string, string> | null): ProviderKeyVar[] {
   return PROVIDER_KEY_VARS.filter((v) => typeof pane[v] === 'string' && pane[v].length > 0);
 }
 
+/** The provider key variables a runtime's own CLI would bill, by runtime name (none known → none). */
+export function ownKeyVars(runtime: string): ProviderKeyVar[] {
+  const r = runtime.toLowerCase();
+  if (r.includes('claude') || r.includes('anthropic')) return ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+  if (r.includes('codex') || r.includes('openai')) return ['OPENAI_API_KEY'];
+  if (r.includes('gemini') || r.includes('google')) return ['GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+  if (r.includes('grok') || r.includes('xai')) return ['XAI_API_KEY'];
+  return [];
+}
+
 /**
  * How a seat is authenticated right now (pure apart from `deps`). Runtimes
  * without a `login_command` are key-based by design (aider) → `unknown`.
@@ -230,16 +244,21 @@ export async function inspectSeatAuth(
       found = codexAuth(agent.runtime, agent.profile ?? null, env, pane, cfg, deps);
       break;
     default: {
-      // A subscription CLI we only know by its credential files (grok): logged in when one exists;
-      // a provider key in its pane is a key in use.
+      // A subscription CLI we only know by its credential files (grok, kimi): logged in when one exists.
+      // Only a key its own CLI would bill is a key in use; a foreign key in the pane (a Kimi pane that
+      // inherited the daemon's Anthropic key) cannot be spent by this CLI: reported as env_key, not parked.
       const keys = paneKeys(pane);
-      if (keys.length) { found = { mode: 'api-key', plan: null, detail: `${keys[0]} in the pane environment`, env_key: keys[0] }; break; }
+      const own = ownKeyVars(agent.runtime);
+      const billed = keys.find((k) => own.includes(k));
+      if (billed) { found = { mode: 'api-key', plan: null, detail: `${billed} in the pane environment`, env_key: billed }; break; }
+      const stray = keys[0] ?? null;
+      const strayNote = stray ? `; ${stray} sits in the pane environment but this CLI cannot use it (a pane restart clears it)` : '';
       const dir = cfg.profiles_root && agent.profile ? path.join(cfg.profiles_root, agent.profile) : null;
       const files = (rc.credential_files ?? []).map((f) => (dir ? f.replaceAll('{profile_dir}', dir) : f));
-      if (!files.length) { found = { mode: 'unknown', plan: null, detail: 'no credential files configured', env_key: null }; break; }
+      if (!files.length) { found = { mode: 'unknown', plan: null, detail: `no credential files configured${strayNote}`, env_key: stray }; break; }
       found = files.some((f) => deps.fileExists(f))
-        ? { mode: 'subscription', plan: subscriptionFor(agent.runtime, agent.profile ?? null, cfg).plan, detail: null, env_key: null }
-        : { mode: 'logged-out', plan: null, detail: 'no credential file on the profile', env_key: null };
+        ? { mode: 'subscription', plan: subscriptionFor(agent.runtime, agent.profile ?? null, cfg).plan, detail: stray ? strayNote.slice(2) : null, env_key: stray }
+        : { mode: 'logged-out', plan: null, detail: `no credential file on the profile${strayNote}`, env_key: stray };
     }
   }
   return { ...found, checked_at };

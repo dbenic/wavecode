@@ -34,6 +34,7 @@ vi.mock('./config.js', () => ({
       'claude-code': { command: 'claude', idle_pattern: '>', login_command: 'claude /login', env: { CLAUDE_CONFIG_DIR: '{profile_dir}/claude' }, credential_files: ['{profile_dir}/claude/.credentials.json'] },
       codex: { command: 'codex', idle_pattern: '>', login_command: 'codex login', env: { CODEX_HOME: '{profile_dir}/codex' }, credential_files: ['{profile_dir}/codex/auth.json'] },
       grok: { command: 'grok', idle_pattern: '>', login_command: 'grok', env: { HOME: '{profile_dir}/grok-home' }, credential_files: ['{profile_dir}/grok-home/.grok/auth.json'] },
+      kimi: { command: 'kimi', idle_pattern: '>', login_command: 'kimi login', env: { KIMI_CODE_HOME: '{profile_dir}/kimi-code' }, credential_files: ['{profile_dir}/kimi-code/credentials'] },
       aider: { command: 'aider --yes', idle_pattern: '>' },
     },
   })),
@@ -44,7 +45,8 @@ vi.mock('./profiles.js', () => ({
     const dir = path.join(harness.root, profile);
     const env: Record<string, string> = runtime === 'claude-code' ? { CLAUDE_CONFIG_DIR: path.join(dir, 'claude') }
       : runtime === 'codex' ? { CODEX_HOME: path.join(dir, 'codex') }
-        : runtime === 'grok' ? { HOME: path.join(dir, 'grok-home') } : {};
+        : runtime === 'grok' ? { HOME: path.join(dir, 'grok-home') }
+          : runtime === 'kimi' ? { KIMI_CODE_HOME: path.join(dir, 'kimi-code') } : {};
     return { ok: true, data: env };
   }),
 }));
@@ -158,6 +160,21 @@ describe('seat credentials', () => {
       write(path.join(harness.root, 'ana/grok-home/.grok/auth.json'), { user: { email: 'a@b' } });
       expect((await inspectSeatAuth(a, undefined, deps(null))).mode).toBe('subscription');
       expect((await inspectSeatAuth(a, undefined, deps({ XAI_API_KEY: 'xai-1' }))).mode).toBe('api-key');
+    });
+
+    it('a foreign provider key in the pane of a logged-in Kimi seat is env_key, not api-key (the 1 Nov 2026 false positive: five Kimi panes inherited the daemon key and were killed)', async () => {
+      const a = agent({ runtime: 'kimi', profile: 'ana', tmux_session: 'wc-kimi1' });
+      write(path.join(harness.root, 'ana/kimi-code/credentials'), { token: 'x' });
+      const auth = await inspectSeatAuth(a, undefined, deps({ ANTHROPIC_API_KEY: KEY }));
+      expect(auth).toMatchObject({ mode: 'subscription', env_key: 'ANTHROPIC_API_KEY' });
+      expect(auth.detail).toMatch(/cannot use it/);
+      expect(JSON.stringify(auth)).not.toContain(KEY.slice(0, 12));
+      // not logged in: still not an API key seat, the stray key is only noted
+      fs.rmSync(path.join(harness.root, 'ana/kimi-code/credentials'));
+      expect(await inspectSeatAuth(a, undefined, deps({ ANTHROPIC_API_KEY: KEY }))).toMatchObject({ mode: 'logged-out', env_key: 'ANTHROPIC_API_KEY' });
+      // a logged-in seat with no stray key: clean
+      write(path.join(harness.root, 'ana/kimi-code/credentials'), { token: 'x' });
+      expect(await inspectSeatAuth(a, undefined, deps({}))).toMatchObject({ mode: 'subscription', env_key: null, detail: null });
     });
 
     it('a key-based runtime (aider) is unknown and never parked', async () => {

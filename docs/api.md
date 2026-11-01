@@ -1456,7 +1456,9 @@ Plan: `docs/ops/seat-credentials-policy-2026-11-01.md`. Module: `src/server/seat
   parked, `agent.api_key` + `agent.killed_for_key` + a notification. `login` → parked, `agent.logged_out`
   + a notification. `quota` → parked under `autonomy.min_quota_pct` (default now **5**, was 10),
   `agent.quota_low`. Out seats repeat their event once an hour; a return emits `agent.auth_restored`.
-  Runtimes without a `login_command` (aider) are key-based by design: `unknown`, never parked.
+  Runtimes without a `login_command` (aider) are key-based by design: `unknown`, never parked. For a
+  subscription CLI known only by its credential files (grok, kimi) only a key its own CLI would bill counts
+  (`ownKeyVars`: xAI for grok); a foreign key in its pane is `env_key` on a logged-in seat and parks nothing.
 - **Tasks.** `POST /api/tasks` with `agent_id` answers **409** `{ error, reason, free_agents }` for `key`
   always, and for `login` / `quota` unless `hold: true`. A pending task addressed to an out seat emits
   `task.waiting_for_agent { reason: 'key' | 'login' | 'quota', detail }` once per state.

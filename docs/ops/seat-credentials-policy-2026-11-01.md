@@ -11,7 +11,7 @@ daemon key reaches every process through the tmux server environment, and a prod
 
 | Situation | What WaveCode does | Shown as |
 |---|---|---|
-| A provider key (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENAI_API_KEY, GEMINI_API_KEY, …) in a pane's environment, or a profile that approved an API key | Kill the pane, park the seat, notify. Never dispatch. | `API KEY` red badge, attention row, push notification |
+| A provider key the seat's own CLI would bill (ANTHROPIC_API_KEY for Claude unless the CLI rejected it, OPENAI_API_KEY for Codex, XAI_API_KEY for grok) in a pane's environment, or a profile that approved an API key | Kill the pane, park the seat, notify. Never dispatch. A foreign key (the daemon's Anthropic key inherited by a Kimi pane) is only shown as `KEY IN ENV` | `API KEY` red badge, attention row, push notification |
 | Plan window (5-hour or weekly) under 5 % left | Park: no new dispatch, by-name tasks wait with reason `quota` | `OUT · 3 % left · resets 14:00` red badge |
 | Profile logged out (no OAuth credentials, or token expired) | Park: no dispatch, by-name tasks wait with reason `login` | `LOGGED OUT` badge, one-tap "Open login seat" |
 | Never probed yet, or a key-based runtime (aider) | Dispatched normally; nothing is parked on a guess | grey `auth ?` badge |
