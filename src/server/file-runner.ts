@@ -24,6 +24,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { execFileAsync } from './proc.js';
+import { scrubEnv } from './provider-keys.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -699,11 +700,8 @@ function writePromptFile(runId: string, prompt: string): void {
 }
 
 function buildClaudeEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  // Use the CLI subscription on PATH. Never inject WaveCode's LLM API key.
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
-  return env;
+  // Use the CLI subscription on PATH. Never inject any provider API key (provider-keys.ts).
+  return scrubEnv({ ...process.env });
 }
 
 function lastLogLine(runId: string): string | undefined {

@@ -11,6 +11,7 @@ import * as tmux from './tmux.js';
 import { execFileAsync } from './proc.js';
 import { isSafeEnvKey, isSafeEnvValue } from './profile-validation.js';
 import { resolveProfileEnv } from './profiles.js';
+import { scrubPrefix } from './provider-keys.js';
 
 /**
  * Model names end up embedded in a shell command sent to tmux, so the
@@ -69,9 +70,14 @@ export function buildRuntimeCommand(runtimeConfig: RuntimeConfig, pin: RuntimePi
   }
 
   const envPairs = Object.entries(pin.env ?? {}).filter(([k, v]) => isSafeEnvKey(k) && isSafeEnvValue(v));
+  // No seat uses any API key (provider-keys.ts): when the daemon's own environment carries one, every
+  // pane it launches drops it (`env -u KEY …`), so the CLI can only run on the profile's login.
+  const scrub = scrubPrefix();
   if (envPairs.length > 0) {
     // `env` scopes the vars to this process only and keeps PATH (grok's HOME override relies on it)
-    command = `env ${envPairs.map(([k, v]) => `${k}=${v}`).join(' ')} ${command}`;
+    command = `${scrub || 'env'} ${envPairs.map(([k, v]) => `${k}=${v}`).join(' ')} ${command}`;
+  } else if (scrub) {
+    command = `${scrub} ${command}`;
   }
 
   return command;

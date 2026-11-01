@@ -16,8 +16,8 @@ const RESPONSE: OverviewResponse = {
   board: {
     at: '2026-10-10T15:00:00Z', host: 'countix-dev',
     agents: [
-      { id: 'a1', name: 'claude2', alias: null, runtime: 'claude-code', model: 'opus', status: 'working', status_since: null, for_min: 12, current: { task_id: 't', num: 41, prompt: 'Desk #91 credit notes', run_id: 'r1', started_at: '' }, last_reply: { at: '', text: 'Frozen 2431f684' }, blocked_on: null, usage: '83% left', budget: { weekly_left: 83, five_h_left: 60, resets: '14 Oct' }, open_freezes: 1 },
-      { id: 'a2', name: 'codex3', alias: null, runtime: 'codex', model: null, status: 'idle', status_since: null, for_min: 90, current: null, last_reply: null, blocked_on: 'awaiting peer answer (deploy/fable)', usage: null, budget: { weekly_left: 8, five_h_left: null, resets: null }, open_freezes: 0 },
+      { id: 'a1', name: 'claude2', alias: null, runtime: 'claude-code', model: 'opus', status: 'working', status_since: null, for_min: 12, current: { task_id: 't', num: 41, prompt: 'Desk #91 credit notes', run_id: 'r1', started_at: '' }, last_reply: { at: '', text: 'Frozen 2431f684' }, blocked_on: null, usage: '83% left', budget: { weekly_left: 83, five_h_left: 60, resets: '14 Oct' }, open_freezes: 1, auth: { mode: 'subscription', plan: 'Max', detail: null, env_key: null }, out: null },
+      { id: 'a2', name: 'codex3', alias: null, runtime: 'codex', model: null, status: 'idle', status_since: null, for_min: 90, current: null, last_reply: null, blocked_on: 'awaiting peer answer (deploy/fable)', usage: null, budget: { weekly_left: 8, five_h_left: null, resets: null }, open_freezes: 0, auth: { mode: 'subscription', plan: 'ChatGPT Pro', detail: null, env_key: null }, out: { reason: 'quota', detail: '4% of the plan left (floor 5%)', since: '' } },
     ],
     lanes: [{ sha: SHA, run_id: 'r1', project: 'wavepulse', desk: 91, lane: 'wc-claude2', author: 'claude2', reviewer: 'codex3', verdict: 'pass', gate: 'GREEN', status: 'open', superseded_by: null, promotable: true, candidate: null, summary: 'Desk #91 issued credit notes', staging: null, production: null, next: 'reviewed — stage it, then promote', updated_at: '' }],
     candidates: [],
@@ -49,6 +49,13 @@ describe('Overview', () => {
     vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p.startsWith('/overview/chat')
       ? [{ id: 'c1', created_at: '', role: 'user', user_id: 'u', user_name: 'denis', text: 'what ships today?', actions: [] }, { id: 'c2', created_at: '', role: 'assistant', user_id: null, user_name: 'overlord', text: 'Desk #91 alone; stage first.', actions: [{ kind: 'send', agent: 'codex1', agent_id: 'a3', text: 'Discovery only, no code …', label: 'Send to @codex1' }, { kind: 'assign_fix', agent: 'codex2', agent_id: 'a2', run_id: 'r2', label: 'Assign fix → @codex2' }] }]
       : RESPONSE));
+  });
+
+  it('an out-of-rotation seat shows OUT with the reason in the blocked column', async () => {
+    render(<MemoryRouter><Overview /></MemoryRouter>);
+    const cell = await screen.findByTestId('seat-out-cell');
+    expect(cell.textContent).toMatch(/OUT/);
+    expect(cell.textContent).toMatch(/4% of the plan left/);
   });
 
   it('pane output ticks never reload the board; a burst of board events reloads it once', async () => {

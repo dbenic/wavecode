@@ -29,6 +29,7 @@ import {
 import * as tmux from './tmux.js';
 import { execFileAsync } from './proc.js';
 import { emit } from './event-bus.js';
+import { forgetSeatAuth, refreshSeatAuthSoon } from './seat-credentials.js';
 
 export interface TmuxSession {
   name: string;
@@ -302,6 +303,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<Result<Agent>> {
 
   // Start the runner for this agent
   startRunner(agent.id, sessionName, opts.runtime);
+  // 1 Nov 2026 policy: read how the new seat is authenticated once its runtime is up.
+  refreshSeatAuthSoon(agent);
 
   return { ok: true, data: agent };
 }
@@ -436,6 +439,7 @@ export async function kill(agentId: string): Promise<Result<void>> {
   bindAgent(agent);
   await tmux.killSession(agent.tmux_session);
 
+  forgetSeatAuth(agentId);
   return deleteAgent(agentId);
 }
 

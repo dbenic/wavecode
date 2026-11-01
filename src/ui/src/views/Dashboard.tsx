@@ -277,6 +277,8 @@ export default function Dashboard() {
 
   const workingCount = agents.filter((a) => a.status === 'working').length;
   const errorCount = agents.filter((a) => a.status === 'error').length;
+  // 1 Nov 2026 policy: seats out of rotation (API key, logged out, plan under the floor) are said up front
+  const outSeats = agents.filter((a) => a.out);
 
   const handleStopAll = async () => {
     if (!window.confirm('EMERGENCY STOP: kill all spawned agents, interrupt adopted ones, and disable auto-dispatch?')) {
@@ -335,6 +337,9 @@ export default function Dashboard() {
                 )}
                 {errorCount > 0 && (
                   <span className="text-red-400">{errorCount} ERROR</span>
+                )}
+                {outSeats.length > 0 && (
+                  <span className="text-red-400" data-testid="out-count">{outSeats.length} OUT</span>
                 )}
               </div>
             )}

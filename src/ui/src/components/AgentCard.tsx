@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import type { Agent } from '../types';
 import StatusBadge from './StatusBadge';
+import SeatAuthBadge from './SeatAuthBadge';
 
 const RUNTIME_ICONS: Record<string, string> = {
   'claude-code': 'C',
@@ -126,7 +127,11 @@ export default function AgentCard({
               </p>
             </div>
           </div>
-          <StatusBadge status={agent.status} />
+          <div className="flex flex-col items-end gap-1 flex-shrink-0">
+            <StatusBadge status={agent.status} />
+            {/* 1 Nov 2026 policy: who pays, and whether the seat is in rotation */}
+            <SeatAuthBadge agent={agent} size="xs" />
+          </div>
         </div>
 
         {/* Last output line */}

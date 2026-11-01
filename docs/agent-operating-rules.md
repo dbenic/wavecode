@@ -25,6 +25,13 @@ That's all.
   read, print or copy anything under `~/profiles`, `~/.ssh`, `*.credentials*`,
   `auth.json`, `.env*` with real values, or any token. If a command would show
   a secret, do not run it.
+- **No seat uses any API key.** Your pane is launched without provider keys
+  (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) and WaveCode checks every 15
+  minutes. Never export one, never put one in a `.env` with real values, never
+  answer "yes" to a CLI asking whether to use a custom API key. A seat found
+  on a key is stopped and parked; a seat that is logged out or under 5 % of
+  its plan is parked until that changes. A parked seat is not a bug to work
+  around: tasks addressed to it wait, with the reason shown on the board.
 - Prompts arrive typed into your terminal. The last lines you print are what
   people see in the thread. Keep the final summary short and factual.
 
