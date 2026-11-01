@@ -478,7 +478,15 @@ export default function Overview() {
                           <td className="px-3 py-2 max-w-[22rem]">
                             {a.last_reply ? <div className="text-slate-400 line-clamp-2" title={a.last_reply.text}>{a.last_reply.text}</div> : <span className="text-slate-600">—</span>}
                           </td>
-                          <td className="px-3 py-2">{a.blocked_on ? <span className="text-amber-300">{a.blocked_on}</span> : <span className="text-slate-600">—</span>}</td>
+                          <td className="px-3 py-2">
+                            {a.out && (
+                              <div className="text-red-300 font-semibold" title={a.out.detail} data-testid="seat-out-cell">
+                                OUT · {a.out.reason === 'key' ? 'API key' : a.out.reason === 'login' ? 'logged out' : a.out.detail}
+                              </div>
+                            )}
+                            {a.blocked_on ? <span className="text-amber-300">{a.blocked_on}</span> : !a.out && <span className="text-slate-600">—</span>}
+                            {!a.out && a.auth?.env_key && <div className="text-[9px] text-amber-400/80" title={a.auth.detail ?? undefined}>key in pane env (rejected)</div>}
+                          </td>
                           <td className="px-3 py-2">
                             {a.budget.weekly_left !== null ? (
                               <>

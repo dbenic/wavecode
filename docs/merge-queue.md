@@ -107,8 +107,8 @@ The same ask over HTTP: `POST /api/reviews/lanes/request-review { project, lane 
 Who gets picked: idle **reviewer seats** first (`agents.role = 'reviewer'`, admin-set; they take
 no lane or fix tasks, so they are free when asked), on another credential profile than the
 author and another vendor where possible, then the project's `reviewer_prefer` tier, then the
-pool. A seat under the capacity floor or one that left its last three reviews unanswered is
-skipped. A named seat (`Reviewer: @x` in the freeze note or the request) is honoured through
+pool. A seat out of rotation (API key, logged out, plan under the floor) or one that left its
+last three reviews unanswered is skipped. A named seat (`Reviewer: @x` in the freeze note or the request) is honoured through
 the same checks, then held to the same clock as a picked one: no verdict inside
 `review_reassign_minutes` (default 10), busy or idle, and the review moves to the next
 seat with the lane note `reassigned @x → @y (no verdict in N min)`.
@@ -175,11 +175,37 @@ may raise a lane's priority (an agent seat is a developer and must not jump the 
    Never `--force`, never a squash, never a different ref. A rejected push (main moved
    during the gate) merges again on the next pass;
 7. records the audit row, tells the author's pane, appends one line to `maestro_log`,
-   fires the `auto_merge_main` pings for the other lanes, and removes the checkout.
+   fires the `auto_merge_main` pings for the other lanes, queues the new main tip for staging
+   when `pipeline.auto_stage_main` is on (below), and removes the checkout.
 
 A bounced SHA stays bounced; the author fixes, pushes and freezes a new SHA, which starts
 over. A daemon restart in the middle of a merge resets that row to queued; the checkout
 is recreated from scratch.
+
+## Staging follows main (1 Nov 2026)
+
+Decided with the development model plan (`docs/ops/development-model-plan-2026-11-01.md`):
+main is the only long-lived branch, **staging is a mirror of main**, and a lane is looked at on
+its own preview, not on staging. With `projects.<p>.pipeline.auto_stage_main: true`, every
+merge the queue lands is followed by a staging release of the new main tip
+(`src/server/main-staging.ts`):
+
+- The request is an ordinary `requestRelease` for staging in the name `wavecode`, with the note
+  `main after queue merge of <lane> <sha8>`: forwarded to the release peer or run by
+  `releases.staging_command` on the deploy box, recorded in `release_requests`, shown on the
+  Release page like a Stage press. The same eligibility checks apply (not behind main, forward of
+  the current staging tip). Production is never touched.
+- One pending tip per project: a newer merge replaces it, so a burst of merges becomes one deploy
+  of the newest main. At most one request per `auto_stage_main_min_minutes` (default 10; `0`
+  stages every merge). Nothing is requested while a staging release is `requested` or `sent`,
+  when staging already shows that SHA, or while the deploy box cannot be asked for its tip (the
+  tip waits for the next minute's tick).
+- Events: `staging.main_requested { project, sha, lane, lane_sha, note }` on the release id, and
+  `staging.main_skipped { project, sha, lane, error }` when the request was refused (the next
+  merge brings a new tip; the refused one is not retried).
+- With this on, leave `pipeline.auto_stage` (stage every reviewed PASS lane) off: the two would
+  fight over the one staging. The per-seat staging lock on the deploy box is no longer needed
+  for agents; a second screen (`staging-b`) is the one that can be held for a demo.
 
 ## One checker: is this SHA green?
 
@@ -309,6 +335,8 @@ projects:
       full_suites: [api, full-tuned, full]
     pipeline:
       gate_command: [countix-remote-test, --suite, api]
+      auto_stage_main: true          # staging mirrors main: stage the new main tip after every queue merge (1 Nov 2026)
+      auto_stage_main_min_minutes: 10
       merge_queue:
         enabled: true
         ask_paths: ['**/booking/**', '**/vat/**', '**/payroll/**', '**/payments/**', '**/billing/**', '**/rls/**', '**/auth/**', 'migrations/**']

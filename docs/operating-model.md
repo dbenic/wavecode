@@ -121,8 +121,9 @@ The review pipeline, in order:
    a free agent: idle, no lease, no open run, profile-compatible with the
    task's creator, not a PM seat — and never the author. The other vendor
    than the author is preferred (different blind spots). Two seats are
-   skipped on every rung the system picks: one **out of rotation** (plan
-   under `review.min_capacity_pct`) and one **silent** (its last three
+   skipped on every rung the system picks: one **out of rotation** (on an
+   API key, logged out, or plan under the floor — `seatOut`, plus
+   `review.min_capacity_pct`) and one **silent** (its last three
    assigned reviews got no verdict inside `review_reassign_minutes`).
 
    **Reviewer seats** (`agents.role = 'reviewer'`, set by an admin with

@@ -139,6 +139,14 @@ export interface ProjectConfig {
     auto_stage?: boolean;
     /** When main advances, clean-merge it into open lanes and refreeze. */
     auto_merge_main?: boolean;
+    /**
+     * Staging follows main (1 Nov 2026): after every queue merge, request a staging release of
+     * the new main tip (coalesced, paced, never while a staging deploy is open). Staging becomes
+     * a mirror of main; lanes are looked at on previews, not on staging. Leave `auto_stage` off
+     * with it. `auto_stage_main_min_minutes` paces the requests (default 10; 0 = every merge).
+     */
+    auto_stage_main?: boolean;
+    auto_stage_main_min_minutes?: number;
     quick_check_command?: string[];
     push_command?: string[];
     gate_command?: string[];
@@ -717,11 +725,15 @@ const AGENT_HANDLE = /^[A-Za-z][\w.-]{0,63}$/;
 
 function validatePipeline(name: string, pipeline: ProjectConfig['pipeline']): void {
   if (pipeline === undefined) return;
-  const flags = ['auto_freeze', 'auto_gate', 'auto_review', 'auto_stage', 'auto_merge_main'] as const;
+  const flags = ['auto_freeze', 'auto_gate', 'auto_review', 'auto_stage', 'auto_merge_main', 'auto_stage_main'] as const;
   for (const flag of flags) {
     if (pipeline[flag] !== undefined && typeof pipeline[flag] !== 'boolean') {
       throw new Error(`projects.${name}.pipeline.${flag} must be a boolean`);
     }
+  }
+  const pace = pipeline.auto_stage_main_min_minutes;
+  if (pace !== undefined && (typeof pace !== 'number' || !Number.isFinite(pace) || pace < 0)) {
+    throw new Error(`projects.${name}.pipeline.auto_stage_main_min_minutes must be a number of minutes, 0 or more`);
   }
   // Quick check and gate run in a checkout of the exact SHA (the author's worktree, or a
   // detached checkout WaveCode makes), with WAVECODE_SHA / WAVECODE_LANE / COUNTIX_REMOTE_TEST_WHO

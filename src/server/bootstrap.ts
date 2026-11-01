@@ -7,9 +7,12 @@ import * as inboxWatch from './inbox-watch.js';
 import * as releaseFreezes from './release-freezes.js';
 import * as fixtures from './fixtures.js';
 import * as releases from './releases.js';
+import * as mainStaging from './main-staging.js';
 import * as overlord from './overlord.js';
 import * as productDesk from './product-desk.js';
 import * as usageProbe from './usage-probe.js';
+import * as seatCredentials from './seat-credentials.js';
+import { PROVIDER_KEY_VARS, providerKeysInEnv } from './provider-keys.js';
 import * as teamManager from './team-manager.js';
 import * as fileSharing from './file-sharing.js';
 import * as notifications from './notifications.js';
@@ -59,6 +62,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   releases.ensureReleaseTables();
   overlord.ensureOverlordTable();
   usageProbe.ensureUsageTable();
+  seatCredentials.ensureAgentAuthTable();
   teamManager.ensureTeamTables();
   fileSharing.ensureFileSharingTable();
   loadGitMemo(); // answers about immutable SHAs from before the stop: the boards do not re-ask git for half an hour
@@ -67,6 +71,11 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   notifications.getVapidPublicKey();
 
   await tmux.applyAgentPaneDefaults();
+  // No seat uses any API key: panes created from now on never inherit one from the tmux server, and a
+  // daemon that still carries one says so (its own launch commands drop it per pane as well).
+  await tmux.scrubGlobalEnvironment(PROVIDER_KEY_VARS);
+  const leaked = providerKeysInEnv();
+  if (leaked.length) logger.warn({ vars: leaked }, 'Provider API key(s) in the daemon environment: panes are launched without them; remove them from the unit env file');
   await resetStalePipes(); // a pipe-pane left by an earlier daemon has no reader
   await rebindAgentSockets();
   startEventLoopMonitor();
@@ -90,9 +99,11 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   fixtures.startFixtureWatchers();
   releases.startReleasePollers();
   releases.startStagingTipLog();
+  mainStaging.startMainStaging(); // staging follows main (pipeline.auto_stage_main)
   overlord.startOverlord();
   productDesk.startDeskRefresh();
   usageProbe.startUsageProbe();
+  seatCredentials.startSeatAuthProbe();
   startSlackBridge();
 
   return {
@@ -110,9 +121,11 @@ export function shutdownApplication(): void {
   fixtures.stopFixtureWatchers();
   releases.stopReleasePollers();
   releases.stopStagingTipLog();
+  mainStaging.stopMainStaging();
   overlord.stopOverlord();
   productDesk.stopDeskRefresh();
   usageProbe.stopUsageProbe();
+  seatCredentials.stopSeatAuthProbe();
   stopLaneBoard();
   stopDeployReconciler();
   stopMergeQueueTimer();

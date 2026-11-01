@@ -71,6 +71,13 @@ export const SSE_EVENT_TYPES = [
   'agent.released',
   'agent.lease_expired',
   'agent.runtime_relaunched',
+  // Seat credentials (1 Nov 2026 policy): the badge and the out-of-rotation notice follow these
+  'agent.api_key',
+  'agent.logged_out',
+  'agent.auth_restored',
+  'agent.auth_checked',
+  'agent.killed_for_key',
+  'agent.quota_low',
   'task.waiting_for_agent',
   'user.created',
   'user.revoked',

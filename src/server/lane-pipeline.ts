@@ -519,7 +519,7 @@ function namedReviewerProblem(named: Agent, author: Agent, project: string, load
   if (named.id === author.id) return 'is the author';
   if (named.mode === 'file' || named.role === 'orchestrator') return 'is not a review seat';
   if (reviewerDenied(named) || laneAutomationDenied(project, named)) return 'is denied';
-  const out = seatOutOfRotation(load(named), minCapacityPct());
+  const out = seatOutOfRotation(named, load(named), minCapacityPct());
   if (out) return `is out of rotation (${out})`;
   if (silent.has(named.id)) return 'left its last reviews unanswered';
   return null;

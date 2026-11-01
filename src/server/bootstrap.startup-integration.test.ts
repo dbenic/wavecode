@@ -5,6 +5,8 @@ vi.mock('./command-chat.js', () => ({
 }));
 
 vi.mock('./usage-probe.js', () => ({ ensureUsageTable: vi.fn(), startUsageProbe: vi.fn(), stopUsageProbe: vi.fn() }));
+vi.mock('./seat-credentials.js', () => ({ ensureAgentAuthTable: vi.fn(), startSeatAuthProbe: vi.fn(), stopSeatAuthProbe: vi.fn() }));
+vi.mock('./main-staging.js', () => ({ startMainStaging: vi.fn(), stopMainStaging: vi.fn() }));
 vi.mock('./inbox-watch.js', () => ({ startInboxWatchers: vi.fn(), stopInboxWatchers: vi.fn() }));
 vi.mock('./release-freezes.js', () => ({ ensureReleaseFreezeTable: vi.fn(), startFreezeWatchers: vi.fn(), stopFreezeWatchers: vi.fn() }));
 vi.mock('./fixtures.js', () => ({ startFixtureWatchers: vi.fn(), stopFixtureWatchers: vi.fn() }));
@@ -83,6 +85,7 @@ vi.mock('./deploy-state.js', () => ({
 
 vi.mock('./tmux.js', () => ({
   applyAgentPaneDefaults: vi.fn(async () => undefined),
+  scrubGlobalEnvironment: vi.fn(async () => undefined),
   hasSession: vi.fn(),
   tmuxExecSafe: vi.fn(async () => null), // resetStalePipes at startup
 }));

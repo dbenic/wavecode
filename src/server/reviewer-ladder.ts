@@ -14,7 +14,7 @@
  * Rungs 1–3 use the agent even if it is busy (it was chosen on purpose; the
  * prompt queues in its pane). Rungs 4–6 need a free agent: idle, no lease, no
  * open run, profile-compatible with the task's creator, not a PM seat, in
- * rotation (plan above the capacity floor), not silent on its last three
+ * rotation (no API key, logged in, plan above the floor), not silent on its last three
  * reviews, and never the author. Other vendor than the author is preferred
  * everywhere (different models have different blind spots), same vendor is
  * the fallback.
@@ -74,7 +74,7 @@ export function pickReviewer(
 
   const silent = safeSilent();
   const floor = minCapacityPct();
-  const inRotation = (a: Agent): boolean => !seatOutOfRotation({ leftPct: capacityLeftPct(a) }, floor) && !silent.has(a.id);
+  const inRotation = (a: Agent): boolean => !seatOutOfRotation(a, { leftPct: capacityLeftPct(a) }, floor) && !silent.has(a.id);
   const eligible = (a: Agent): boolean =>
     a.id !== authorId && a.role !== 'orchestrator' && a.mode !== 'file' && !reviewerDenied(a);
   const free = (a: Agent): boolean =>

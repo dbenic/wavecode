@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { quotaLeftPct } from './usage-probe.js';
+import { seatOut, type OutReason } from './seat-credentials.js';
 import {
   getDb,
   listTasks,
@@ -389,23 +389,28 @@ function noteWaitingTasks(tasks: Task[], agents: Agent[]): void {
   const byId = new Map(agents.map((a) => [a.id, a]));
   for (const task of tasks) {
     const agent = task.agent_id ? byId.get(task.agent_id) : undefined;
-    const reason = agent ? leases.waitReason(task, agent) : null;
+    // A task addressed to a seat that is out of rotation (no key, no login, under the floor) waits
+    // visibly too — before 1 Nov 2026 it sat pending with no reason anywhere.
+    const out = agent ? seatOut(agent) : null;
+    const reason: 'profile' | 'owner' | OutReason | null = agent ? (leases.waitReason(task, agent) ?? out?.reason ?? null) : null;
     if (!agent || !reason) {
       waitingNotified.delete(task.id);
       continue;
     }
-    const key = reason === 'profile' ? `profile:${agent.profile}` : `owner:${agent.owner_id}`;
+    const key = reason === 'profile' ? `profile:${agent.profile}` : reason === 'owner' ? `owner:${agent.owner_id}` : `${reason}:${out?.detail ?? ''}`;
     if (waitingNotified.get(task.id) === key) continue;
     waitingNotified.set(task.id, key);
     emit('task.waiting_for_agent', 'task', task.id, reason === 'profile'
       ? { agent_id: agent.id, agent_name: agent.name, reason, profile: agent.profile }
-      : {
-        agent_id: agent.id,
-        agent_name: agent.name,
-        reason,
-        owner: leases.userName(agent.owner_id!),
-        owner_id: agent.owner_id,
-      }, null);
+      : reason === 'owner'
+        ? {
+          agent_id: agent.id,
+          agent_name: agent.name,
+          reason,
+          owner: leases.userName(agent.owner_id!),
+          owner_id: agent.owner_id,
+        }
+        : { agent_id: agent.id, agent_name: agent.name, reason, detail: out?.detail ?? null }, null);
   }
 }
 
@@ -418,12 +423,23 @@ export function reviewerSeatMayTake(agent: Pick<Agent, 'role'>, task: Pick<Task,
   return agent.role !== 'reviewer' || task.template === 'review';
 }
 
-/** Why an agent cannot take new work right now, for callers that chose it by name; null = fine. */
-export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile' | 'status' | 'role'>, task: Pick<Task, 'template'> = { template: null }): { code: 'busy' | 'quota' | 'role'; why: string } | null {
+/**
+ * Why an agent cannot take new work right now, for callers that chose it by name; null = fine.
+ * `role` = a reviewer seat given anything but a review request. `key` (runs on an API key) and
+ * `login` (logged out) come from the credential probe, `quota` from the usage probe
+ * (seat-credentials.ts holds the one rule every surface uses).
+ */
+export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile' | 'status' | 'role'>, task: Pick<Task, 'template'> = { template: null }): { code: 'busy' | 'role' | OutReason; why: string } | null {
   if (!reviewerSeatMayTake(agent, task)) return { code: 'role', why: `@${agent.name} is a reviewer seat; it takes review requests only` };
-  const floor = getConfig().autonomy.min_quota_pct ?? DEFAULT_MIN_QUOTA_PCT;
-  const left = quotaLeftPct(agent.runtime, agent.profile);
-  if (left !== null && left < floor) return { code: 'quota', why: `@${agent.name} has ${left}% of its plan left (floor ${floor}%)` };
+  const out = seatOut(agent);
+  if (out) {
+    const why = out.reason === 'quota'
+      ? `@${agent.name} has ${out.detail}`
+      : out.reason === 'login'
+        ? `@${agent.name} is logged out (${out.detail})`
+        : `@${agent.name} runs on an API key (${out.detail})`;
+    return { code: out.reason, why };
+  }
   if (agent.status === 'working' || hasOpenRun(agent.id)) return { code: 'busy', why: `@${agent.name} is busy with another run` };
   return null;
 }
@@ -431,21 +447,23 @@ export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profi
 /** Free agents a caller could use instead, by name. */
 export function freeAgentNames(except: string | null = null): string[] {
   return listAgents()
-    .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && a.role !== 'reviewer' && !a.owner_id && quotaOk(a))
+    .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && a.role !== 'reviewer' && !a.owner_id && fitForWork(a))
     .map((a) => a.alias ? `@${a.alias}` : a.name);
 }
 
-const DEFAULT_MIN_QUOTA_PCT = 10;
-const quotaNoted = new Map<string, number>();
-function quotaOk(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile'>): boolean {
-  const floor = getConfig().autonomy.min_quota_pct ?? DEFAULT_MIN_QUOTA_PCT;
-  const left = quotaLeftPct(agent.runtime, agent.profile);
-  if (left === null || left >= floor) return true;
-  const last = quotaNoted.get(agent.id) ?? 0;
+const outNoted = new Map<string, number>();
+/** In rotation: not on a key, logged in, plan above the floor. Out seats are noted once an hour. */
+function fitForWork(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile'>): boolean {
+  const out = seatOut(agent);
+  if (!out) return true;
+  const last = outNoted.get(agent.id) ?? 0;
   if (Date.now() - last > 3600_000) {
-    quotaNoted.set(agent.id, Date.now());
-    logger.info({ agentId: agent.id, agent: agent.name, left, floor }, 'Dispatch skips an agent under its quota floor');
-    emit('agent.quota_low', 'agent', agent.id, { name: agent.name, left_pct: left, floor_pct: floor });
+    outNoted.set(agent.id, Date.now());
+    logger.info({ agentId: agent.id, agent: agent.name, reason: out.reason, detail: out.detail }, 'Dispatch skips a seat that is out of rotation');
+    if (out.reason === 'quota') {
+      const m = /^(\d+)% of the plan left \(floor (\d+)%\)/.exec(out.detail);
+      emit('agent.quota_low', 'agent', agent.id, { name: agent.name, left_pct: m ? Number(m[1]) : null, floor_pct: m ? Number(m[2]) : null });
+    }
   }
   return false;
 }
@@ -456,7 +474,7 @@ async function dispatchNextInner(): Promise<void> {
   const allAgents = listAgents();
   // Login seats (spec §5) are OAuth terminals, never work seats.
   const idleAgents = allAgents.filter(
-    (a) => a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && quotaOk(a),
+    (a) => a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && fitForWork(a),
   );
 
   if (idleAgents.length === 0) return;

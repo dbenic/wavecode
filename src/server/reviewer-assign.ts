@@ -18,13 +18,15 @@
  * loaded: pane idle before busy, then fewer open reviews, then fewer running
  * tasks, then least recent assignment.
  *
- * Never chosen: a seat out of rotation (`seatOutOfRotation`: plan under the
- * capacity floor) and a silent seat (`silentReviewerIds`: its last three
- * assigned reviews got no verdict inside `review_reassign_minutes`).
+ * Never chosen: a seat out of rotation (`seatOutOfRotation`: on an API key,
+ * logged out, or plan under the capacity floor) and a silent seat
+ * (`silentReviewerIds`: its last three assigned reviews got no verdict inside
+ * `review_reassign_minutes`).
  */
 
 import { getConfig } from './config.js';
 import { getDb, listAgents, type Agent } from './db.js';
+import { seatOut } from './seat-credentials.js';
 import { usageFor } from './usage-probe.js';
 
 /** Lowercased `review_deny` and `agent_deny` across every project. */
@@ -95,12 +97,16 @@ export function belowCapacity(load: Pick<ReviewerLoad, 'leftPct'>, floor: number
 }
 
 /**
- * Why a seat is out of the reviewer rotation, or null when it may review.
- * Today: its plan is under the capacity floor (the review would stall at the
- * usage-limit screen). The seat-credentials branch's `seatOut()` (API key,
- * logged out, parked) belongs here once it is on main.
+ * Why a seat is out of the reviewer rotation, or null when it may review:
+ * the seat-credentials rule every surface uses (`seatOut`: runs on an API
+ * key, logged out, plan under the dispatch floor), then the review's own
+ * capacity floor (`review.min_capacity_pct`: the review would stall at the
+ * usage-limit screen).
  */
-export function seatOutOfRotation(load: Pick<ReviewerLoad, 'leftPct'>, floor: number): string | null {
+export function seatOutOfRotation(agent: Pick<Agent, 'id' | 'runtime' | 'profile'>, load: Pick<ReviewerLoad, 'leftPct'>, floor: number): string | null {
+  let out: ReturnType<typeof seatOut> = null;
+  try { out = seatOut(agent); } catch { out = null; } // config not loaded (tests, embedded use)
+  if (out) return out.reason === 'key' ? `runs on an API key (${out.detail})` : out.reason === 'login' ? `logged out (${out.detail})` : out.detail;
   if (belowCapacity(load, floor)) return `plan at ${load.leftPct}% (floor ${floor}%)`;
   return null;
 }
@@ -308,7 +314,7 @@ export function selectReviewer(input: AssignInput): Agent | null {
     if (handles(agent).some((h) => deny.has(h))) return true;
     if (isSamePerson(agent) && !listed(agent, pool)) return true;
     // A seat whose plan is nearly spent would stall the review at the usage-limit screen.
-    if (seatOutOfRotation(input.load(agent), floor)) return true;
+    if (seatOutOfRotation(agent, input.load(agent), floor)) return true;
     // A seat that left its last reviews unanswered would hold this one too.
     if (input.silent?.has(agent.id)) return true;
     return false;

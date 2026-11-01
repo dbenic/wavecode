@@ -175,7 +175,7 @@ describe('task routes', () => {
     const app = await createTaskApp();
     const response = await requestJson(app, '/api/tasks', 'POST', { prompt: 'build the thing', agent_id: 'codex7' });
     expect(response.status).toBe(409);
-    expect(response.json).toEqual({ error: '@codex7 is a reviewer seat; it takes review requests only; pick another agent', free_agents: ['codex2'] });
+    expect(response.json).toEqual({ error: '@codex7 is a reviewer seat; it takes review requests only; pick another agent', reason: 'role', free_agents: ['codex2'] });
     expect(vi.mocked(dispatcher.agentUnfit)).toHaveBeenCalledWith(seat, { template: null });
     expect(db.insertTask).not.toHaveBeenCalled();
   });
