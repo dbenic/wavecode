@@ -108,10 +108,15 @@ Who gets picked: idle **reviewer seats** first (`agents.role = 'reviewer'`, admi
 no lane or fix tasks, so they are free when asked), on another credential profile than the
 author and another vendor where possible, then the project's `reviewer_prefer` tier, then the
 pool. A seat out of rotation (API key, logged out, plan under the floor) or one that left its
-last three reviews unanswered is skipped. A named seat (`Reviewer: @x` in the freeze note or the request) is honoured through
-the same checks, then held to the same clock as a picked one: no verdict inside
-`review_reassign_minutes` (default 10), busy or idle, and the review moves to the next
-seat with the lane note `reassigned @x → @y (no verdict in N min)`.
+last three reviews unanswered is skipped (any verdict, late or not, counts as an answer; a freeze
+that closed first counts for nothing; the silence expires after six windows, at most two hours,
+and the board shows `SILENT · no reviews` meanwhile). A named seat (`Reviewer: @x` in the freeze
+note or the request) is honoured through the same checks — the author's own other seat is refused
+like the author is, unless `reviewer_pool_by_author_glob` names it — then held to the same clock as
+a picked one: no verdict inside `review_reassign_minutes` (default 10), busy or idle, and the
+review moves to the next seat with the lane note `reassigned @x → @y (no verdict in N min)`. At
+most two moves, never back to a seat that held it; then one note on the lane and in the author's
+pane: `review of <sha> unanswered … needs a person`.
 
 ## Cleaning the list
 

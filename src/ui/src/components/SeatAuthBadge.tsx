@@ -9,6 +9,7 @@ import type { Agent } from '../types';
  *   `OUT · 3%`     red     under the floor: parked until the window resets
  *   `LOGGED OUT`   red     no login on the profile: parked until someone logs it in
  *   `API KEY`      red     a provider key was found: pane killed, seat parked
+ *   `SILENT`       amber   the reviewer picker skips it: its last reviews went unanswered (expires, or a verdict ends it)
  *   `KEY IN ENV`   amber   a key sits in the pane environment but the CLI rejected it (a restart clears it)
  *   `auth ?`       grey    not probed yet, or a key-based runtime
  */
@@ -24,6 +25,7 @@ export function seatAuthLabel(agent: SeatAuthInfo): { label: string; tone: 'gree
   const left = [weekly, fiveH].filter((v): v is number => typeof v === 'number');
   const min = left.length ? Math.min(...left) : null;
   if (out?.reason === 'quota') return { label: `OUT · ${min ?? '?'}%`, tone: 'red', title: `Out of rotation: ${out.detail}. Back when the window resets.` };
+  if (out?.reason === 'silent') return { label: 'SILENT', tone: 'amber', title: `No reviews for this seat: ${out.detail}.` };
   const plan = shortPlan(auth?.plan ?? agent.subscription?.plan ?? null);
   if (auth?.env_key) return { label: `KEY IN ENV`, tone: 'amber', title: `${auth.detail ?? `${auth.env_key} in the pane environment`}. The CLI rejected it; a pane restart removes it.` };
   if (auth?.mode === 'subscription' || (!auth && plan)) {

@@ -480,8 +480,8 @@ export default function Overview() {
                           </td>
                           <td className="px-3 py-2">
                             {a.out && (
-                              <div className="text-red-300 font-semibold" title={a.out.detail} data-testid="seat-out-cell">
-                                OUT · {a.out.reason === 'key' ? 'API key' : a.out.reason === 'login' ? 'logged out' : a.out.detail}
+                              <div className={`${a.out.reason === 'silent' ? 'text-amber-300' : 'text-red-300'} font-semibold`} title={a.out.detail} data-testid="seat-out-cell">
+                                {a.out.reason === 'silent' ? 'SILENT · no reviews' : `OUT · ${a.out.reason === 'key' ? 'API key' : a.out.reason === 'login' ? 'logged out' : a.out.detail}`}
                               </div>
                             )}
                             {a.blocked_on ? <span className="text-amber-300">{a.blocked_on}</span> : !a.out && <span className="text-slate-600">—</span>}

@@ -123,8 +123,15 @@ The review pipeline, in order:
    than the author is preferred (different blind spots). Two seats are
    skipped on every rung the system picks: one **out of rotation** (on an
    API key, logged out, or plan under the floor — `seatOut`, plus
-   `review.min_capacity_pct`) and one **silent** (its last three
-   assigned reviews got no verdict inside `review_reassign_minutes`).
+   `review.min_capacity_pct`) and one **silent**. Silent means its last
+   three assigned reviews went unanswered: no verdict from the seat while
+   the freeze stayed open past its project's `review_reassign_minutes`, or
+   the review was moved away from it unanswered. Any verdict, late or not,
+   is an answer; a freeze that closed first (superseded, promoted, rejected)
+   counts for nothing. Silence expires six windows after the newest
+   unanswered one (at most two hours) so the seat gets a review again that
+   can end the streak; the overview row shows it as `SILENT · no reviews`
+   with the time it is tried again.
 
    **Reviewer seats** (`agents.role = 'reviewer'`, set by an admin with
    `PATCH /api/agents/:id {"role":"reviewer"}`, cleared with `null`) are a
@@ -135,10 +142,18 @@ The review pipeline, in order:
    and vendor than the author, then other profile, then any), then the
    `reviewer_prefer` tier, then the pool as before. A **named** reviewer
    (`Reviewer: @x` in the freeze note, or on a review request) is honoured
-   through the same checks and held to the same window: a review with no
-   verdict after `review_reassign_minutes` (default 10) moves to the next
+   through the same checks (one list, `reviewerExclusion`: the author, the
+   author's other seat unless `reviewer_pool_by_author_glob` names it, deny
+   lists, out of rotation, silent) and held to the same window: a review with
+   no verdict after `review_reassign_minutes` (default 10) moves to the next
    seat whether the seat is busy or idle, with the thread note
-   `reassigned @x → @y (no verdict in N min)`. Every automatic
+   `reassigned @x → @y (no verdict in N min)`. A review moves at most twice,
+   never back to a seat that already held it; after that (or with no other
+   eligible seat) the lane gets one note, `review of <sha> unanswered … needs
+   a person`, and the author's pane the same. A reviewer seat given anything
+   but a review request keeps it pending with `task.waiting_for_agent`
+   (reason `role`) — `POST /api/tasks` refuses it up front (409), other
+   surfaces show the wait. Every automatic
    choice is posted in the thread ("Review of #12 → @opus · picked: free,
    other vendor") with "→ @alt" chips to move it; `#review #12 @x` or
    `POST /api/ai-reviews/:id/reassign` does the same.
@@ -227,7 +242,7 @@ projects:
         codex: [claude1, claude2]          # Codex-authored work
       reviewer_pool_by_author_glob:
         'ales-*': [ales-codex1]            # fallback only, after every independent reviewer
-      review_reassign_minutes: 10          # no verdict in this long, picked or named, busy or idle; 0 disables. Once, unless the next seat is idle
+      review_reassign_minutes: 10          # no verdict in this long, picked or named, busy or idle; 0 disables. At most two moves per freeze, then a note for a person
       freeze_dir: /home/wave/inbox/freezes
       # Reviewer seats are a role on the agent row, not config: an admin sets
       #   PATCH /api/agents/<id> {"role":"reviewer"}  (null clears it)

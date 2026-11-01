@@ -31,7 +31,7 @@ import { alertBehind, alertLanesPastStaging, alertMerged, pingLaneAboutMain } fr
 import {
   considerAutoStage, drainStagingQueue, gateLoadForTest, gateOutcome, latestPipelineNote, mergeMainClean, onAuthorDone, onMainAdvanced, pipelineTick, pushedShaError,
   setPublishRefusalQuietMsForTest,
-  authorLoadForTest, cancelStateForTest, ensureMainGate, ensureProdSyncLane, mainApiState, quickLoadForTest, reassignWaitingReviews, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
+  authorLoadForTest, cancelStateForTest, ensureMainGate, ensureProdSyncLane, mainApiState, quickLoadForTest, reassignWaitingReviews, requestReviewFor, resetPipelineForTest, runRefusal, setPipelineExecForTest, setRefusedRetryMsForTest, type ExecOptions, ingestReviewRequestFile } from './lane-pipeline.js';
 import { recordCandidateReviewFile } from './candidate-review.js';
 import { emit } from './event-bus.js';
 import { backfillFreezes, setFreezeGate } from './release-freezes.js';
@@ -1159,6 +1159,7 @@ describe('hands-free lane pipeline', () => {
     const ownSeat = agent('claude1-codex', path.join(tmp, 'claude1-codex'));
     const claude2 = agent('claude2', path.join(tmp, 'claude2'), 'claude-code');
     db.updateAgentStatus(codex2.id, 'working');
+    for (const a of db.listAgents()) if (a.name === 'fable') db.updateAgentStatus(a.id, 'working'); // the fixture's deploy seat stays out of this
     pipe.auto_review = true;
     pipe.reviewer_prefer = { claude: ['codex2', 'codex3', 'codex1', 'claude1-codex'] };
     const ingested = (await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha)));
@@ -1180,18 +1181,66 @@ describe('hands-free lane pipeline', () => {
     expect(messages(codex2.id).join('\n')).toMatch(/Please review freeze/);
     expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex3 → @codex2 \(no verdict in 16 min\)/);
 
+    // After the first move only an idle next seat takes it.
     db.updateAgentStatus(codex2.id, 'working');
     db.updateAgentStatus(codex3.id, 'working');
+    db.updateAgentStatus(claude2.id, 'working');
     expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(0);
     expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex2.id);
 
+    // Never back to a seat that held it: codex3 is idle again, but the second move goes on to the
+    // open ladder (claude2, once idle), not back to codex3.
     db.updateAgentStatus(codex3.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(0);
+    db.updateAgentStatus(claude2.id, 'idle');
     expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(1);
-    expect(getFreeze(sha)?.reviewer_name).toBe('codex3');
-    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex2 → @codex3 \(no verdict in 16 min\)/);
+    expect(getFreeze(sha)?.reviewer_name).toBe('claude2');
+    expect(messages(claude2.id).join('\n')).toMatch(/Please review freeze/);
+    expect(messages(codex3.id).filter((m) => /Please review/.test(m))).toHaveLength(1);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex2 → @claude2 \(no verdict in 16 min\)/);
+
+    // Two moves is the cap: the review now waits for a person, said once on the lane and in the author's pane.
+    const unansweredNotes = () => (db.getDb().prepare('SELECT COUNT(*) AS n FROM events WHERE entity_id = ?').get(`${sha}:unanswered`) as { n: number }).n;
+    db.updateAgentStatus(codex2.id, 'idle');
+    expect(reassignWaitingReviews(Date.now() + 32 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_name).toBe('claude2');
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/review of [0-9a-f]{8} unanswered for \d+ min after 2 moves \(@codex3 → @codex2 → @claude2\), the last allowed; needs a person/);
+    expect(messages(author.id).join('\n')).toMatch(/unanswered for \d+ min .* needs a person/);
+    expect(unansweredNotes()).toBe(1);
+    expect(reassignWaitingReviews(Date.now() + 48 * 60 * 1000)).toBe(0);
+    expect(unansweredNotes()).toBe(1);
     expect(messages(ownSeat.id).join('\n')).not.toMatch(/Please review/);
-    expect(messages(claude2.id).join('\n')).not.toMatch(/Please review/);
     expect(messages(codex1.id).join('\n')).not.toMatch(/Please review/);
+  });
+
+  it("a named seat that is the author's own other seat is refused like the author; the picker chooses and the note says why", async () => {
+    const sha = branch('wc-ales-claude1', 'lane.txt', 'lane');
+    agent('ales-claude1', path.join(tmp, 'ales-claude1'), 'claude-code');
+    const ownSeat = agent('ales-codex2', path.join(tmp, 'ales-codex2'));
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex3'] };
+    const file = openNote('ales-claude1', 'wc-ales-claude1', sha);
+    fs.appendFileSync(file, '- Reviewer: @ales-codex2\n');
+    expect((await ingestFreezeFile(file)).ok).toBe(true);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    expect(messages(ownSeat.id)).toEqual([]);
+    expect(latestPipelineNote('wave', 'wc-ales-claude1')).toMatch(/pinged @codex3 \(@ales-codex2 is the author's own seat\)/);
+
+    // Named on a review request: the same list, the same fallback.
+    expect(await requestReviewFor(sha, { reviewer: 'ales-codex2', by: 'ales-claude1' })).toMatchObject({ ok: true, data: { reviewer: 'codex3' } });
+    expect(latestPipelineNote('wave', 'wc-ales-claude1')).toMatch(/review asked by @ales-claude1 — pinged @codex3 \(@ales-codex2 is the author's own seat\)/);
+    expect(messages(ownSeat.id)).toEqual([]);
+
+    // The author-glob pool makes the own seat a legitimate last-resort reviewer, so naming it is honoured.
+    pipe.reviewer_pool_by_author_glob = { 'ales-*': ['ales-codex2'] };
+    const sha2 = branch('wc-ales-claude1', 'lane2.txt', 'more');
+    const file2 = openNote('ales-claude1', 'wc-ales-claude1', sha2);
+    fs.appendFileSync(file2, '- Reviewer: @ales-codex2\n');
+    expect((await ingestFreezeFile(file2)).ok).toBe(true);
+    expect(getFreeze(sha2)?.reviewer_agent_id).toBe(ownSeat.id);
+    expect(messages(ownSeat.id).join('\n')).toMatch(/Please review freeze/);
+    expect(latestPipelineNote('wave', 'wc-ales-claude1')).toMatch(/pinged @ales-codex2 \(named in the freeze note\) — same-owner reviewer via pool/);
   });
 
   it('honours a reviewer named in the freeze note, then moves the review after the window even though the seat is idle', async () => {

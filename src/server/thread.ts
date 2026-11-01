@@ -530,6 +530,8 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         ? `Task ${verb}`
         : p.reason === 'profile'
           ? `Task waiting for ${str(p.agent_name) ?? 'agent'} (runs on profile ${str(p.profile) ?? '?'})`
+          : p.reason === 'role'
+            ? `Task waiting for ${str(p.agent_name) ?? 'agent'} (reviewer seat: review requests only — move it to another agent)`
           : p.reason === 'login'
             ? `Task waiting for ${str(p.agent_name) ?? 'agent'} (logged out)`
             : p.reason === 'key'

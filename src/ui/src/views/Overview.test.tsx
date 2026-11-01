@@ -51,11 +51,17 @@ describe('Overview', () => {
       : RESPONSE));
   });
 
-  it('an out-of-rotation seat shows OUT with the reason in the blocked column', async () => {
+  it('an out-of-rotation seat shows OUT with the reason in the blocked column; a silent reviewer shows SILENT', async () => {
+    const silent = { ...RESPONSE.board.agents[1], id: 'a4', name: 'kimi2', out: { reason: 'silent' as const, detail: 'left its last 3 reviews unanswered; no reviews until 14:10 UTC or a verdict', since: '' } };
+    const api = await import('../hooks/useApi');
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p.startsWith('/overview/chat') ? [] : { ...RESPONSE, board: { ...RESPONSE.board, agents: [...RESPONSE.board.agents, silent] } }));
     render(<MemoryRouter><Overview /></MemoryRouter>);
-    const cell = await screen.findByTestId('seat-out-cell');
-    expect(cell.textContent).toMatch(/OUT/);
-    expect(cell.textContent).toMatch(/4% of the plan left/);
+    const cells = await screen.findAllByTestId('seat-out-cell');
+    expect(cells.map((c) => c.textContent)).toEqual([
+      expect.stringMatching(/OUT · 4% of the plan left/),
+      'SILENT · no reviews',
+    ]);
+    expect(cells[1].getAttribute('title')).toMatch(/left its last 3 reviews unanswered/);
   });
 
   it('pane output ticks never reload the board; a burst of board events reloads it once', async () => {

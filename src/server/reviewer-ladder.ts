@@ -15,7 +15,8 @@
  * prompt queues in its pane). Rungs 4–6 need a free agent: idle, no lease, no
  * open run, profile-compatible with the task's creator, not a PM seat, in
  * rotation (no API key, logged in, plan above the floor), not silent on its last three
- * reviews, and never the author. Other vendor than the author is preferred
+ * reviews (each judged by its own project's `review_reassign_minutes`; 0 turns
+ * the rule off there), and never the author. Other vendor than the author is preferred
  * everywhere (different models have different blind spots), same vendor is
  * the fallback.
  */
@@ -32,7 +33,7 @@ import {
   type Run,
 } from './db.js';
 import { isProfileCompatible, lookupActor } from './profiles.js';
-import { capacityLeftPct, minCapacityPct, reviewerDenied, seatOutOfRotation, silentReviewerIds } from './reviewer-assign.js';
+import { capacityLeftPct, minCapacityPct, reviewerDenied, seatOutOfRotation, silentReviewerIds, type ReviewPass } from './reviewer-assign.js';
 
 export type ReviewerRung = 'explicit' | 'task' | 'default' | 'reviewer' | 'tag' | 'pool';
 
@@ -63,7 +64,7 @@ export function summarizeAgent(a: Agent): { id: string; name: string; alias: str
 
 export function pickReviewer(
   run: Pick<Run, 'agent_id' | 'task_id'>,
-  opts: { explicit?: string | null } = {},
+  opts: { explicit?: string | null; pass?: ReviewPass } = {},
 ): ReviewerPick | ReviewerNone {
   const cfg = getConfig();
   const authorId = run.agent_id;
@@ -72,7 +73,7 @@ export function pickReviewer(
   const task = getTask(run.task_id);
   const actor = lookupActor(task.ok ? task.data.created_by : null);
 
-  const silent = safeSilent();
+  const silent = opts.pass?.silent ?? safeSilent();
   const floor = minCapacityPct();
   const inRotation = (a: Agent): boolean => !seatOutOfRotation(a, { leftPct: capacityLeftPct(a) }, floor) && !silent.has(a.id);
   const eligible = (a: Agent): boolean =>
@@ -165,7 +166,8 @@ function safeTags(): Map<string, string[]> {
   }
 }
 
-function safeSilent(): Set<string> {
+/** Silent seats under each review's own project window (`silentReviewers`). */
+function safeSilent(): ReadonlySet<string> {
   try {
     return silentReviewerIds();
   } catch {

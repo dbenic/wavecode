@@ -18,10 +18,11 @@
  * loaded: pane idle before busy, then fewer open reviews, then fewer running
  * tasks, then least recent assignment.
  *
- * Never chosen: a seat out of rotation (`seatOutOfRotation`: on an API key,
- * logged out, or plan under the capacity floor) and a silent seat
- * (`silentReviewerIds`: its last three assigned reviews got no verdict inside
- * `review_reassign_minutes`).
+ * Never chosen (`reviewerExclusion`, one list for the picker and for a seat the
+ * author names): a seat out of rotation (`seatOutOfRotation`: on an API key,
+ * logged out, or plan under the capacity floor), a silent seat
+ * (`silentReviewers`: its last three assigned reviews went unanswered, until
+ * the silence expires), and a seat that already held the review being moved.
  */
 
 import { getConfig } from './config.js';
@@ -111,23 +112,79 @@ export function seatOutOfRotation(agent: Pick<Agent, 'id' | 'runtime' | 'profile
   return null;
 }
 
-/** A seat whose last reviews this many in a row got no verdict in the window is skipped by the picker. */
+/** A seat whose last reviews this many in a row went unanswered is skipped by the picker. */
 export const SILENT_REVIEW_STREAK = 3;
+/** Silence lasts this many windows past the newest unanswered one, at most `SILENCE_MAX_MS`; then the seat is tried again. */
+export const SILENCE_WINDOWS = 6;
+export const SILENCE_MAX_MS = 2 * 60 * 60 * 1000;
+
+export interface SilentSeat {
+  /** Unanswered reviews in a row, newest first (counting stops at the streak). */
+  streak: number;
+  /** Epoch ms when the newest counted review's window ran out. */
+  since: number;
+  /** Epoch ms when the seat is eligible again, unless it answers earlier. */
+  until: number;
+}
+
+/** What the silence rule reads besides the review events; one read per pass. */
+export interface SilenceFacts {
+  /** `sha:reviewerId` for every verdict a seat wrote on a SHA, whenever it came. */
+  answered: Set<string>;
+  /** Status and project of every freeze, by SHA. */
+  freezes: Map<string, { status: string; project: string | null }>;
+}
+
+export function silenceFacts(): SilenceFacts {
+  const answered = new Set<string>();
+  const freezes = new Map<string, { status: string; project: string | null }>();
+  try {
+    const rows = getDb().prepare('SELECT sha, reviewer_agent_id FROM freeze_verdicts WHERE reviewer_agent_id IS NOT NULL')
+      .all() as { sha: string; reviewer_agent_id: string }[];
+    for (const row of rows) answered.add(`${row.sha}:${row.reviewer_agent_id}`);
+  } catch { /* table not there yet */ }
+  try {
+    const rows = getDb().prepare('SELECT sha, status, project, reviewer_agent_id, verdict FROM release_freezes')
+      .all() as { sha: string; status: string; project: string | null; reviewer_agent_id: string | null; verdict: string | null }[];
+    for (const row of rows) {
+      freezes.set(row.sha, { status: row.status, project: row.project });
+      if (row.verdict && row.reviewer_agent_id) answered.add(`${row.sha}:${row.reviewer_agent_id}`);
+    }
+  } catch { /* table not there yet */ }
+  return { answered, freezes };
+}
 
 /**
- * Seats whose last `SILENT_REVIEW_STREAK` assigned reviews each got no verdict
- * from them inside `limitMs` of the assignment. An assignment still inside the
- * window is neither answered nor silent and is left out of the count; the first
- * answered review (newest first) ends the streak. Read from the `pipeline.review`
- * events and the verdict ledger. A seat with fewer assignments than the streak
- * is never silent.
+ * Seats silent on their reviews, with when the silence started and when it ends.
+ *
+ * A review (one `pipeline.review` assignment of a SHA to a seat, newest per SHA)
+ * is **answered** when the seat wrote any verdict on that SHA, late or not. It is
+ * **unanswered** when the seat wrote none and either the freeze is still open
+ * (`open` / `behind-main`) with the window run out, or the review was moved away
+ * from the seat. A review still inside its window, or on a freeze that closed
+ * before the seat answered (superseded, promoted, rejected), is neither and is
+ * skipped. The window is the review's own project's `review_reassign_minutes`
+ * (`limit` as a function of the project; a number applies to all; 0 turns the
+ * rule off; a freeze with no project is skipped).
+ *
+ * Newest first, the first answered review ends the streak. `SILENT_REVIEW_STREAK`
+ * unanswered in a row make the seat silent until `SILENCE_WINDOWS` windows past
+ * the newest one (at most `SILENCE_MAX_MS`): a silent seat gets no review, so
+ * without that expiry nothing could ever end its streak.
  */
-export function silentReviewerIds(events: ReviewEvent[] = reviewEvents(), limitMs = projectReassignMs(null), now = Date.now()): Set<string> {
-  const silent = new Set<string>();
-  if (!(limitMs > 0) || events.length === 0) return silent;
-  const verdictAt = verdictTimes();
+export function silentReviewers(
+  events: ReviewEvent[] = reviewEvents(),
+  limit: number | ((project: string | null) => number) = projectReassignMs,
+  now = Date.now(),
+  facts: SilenceFacts = silenceFacts(),
+): Map<string, SilentSeat> {
+  const silent = new Map<string, SilentSeat>();
+  if (events.length === 0) return silent;
+  const limitFor = (project: string | null): number => (typeof limit === 'number' ? limit : project ? limit(project) : 0);
+  const holder = new Map<string, string>(); // sha → the seat holding the review now (latest assignment wins)
   const bySeat = new Map<string, ReviewEvent[]>();
-  for (const row of events) {
+  for (const row of [...events].sort((a, b) => a.at - b.at)) { // by assignment time; a stable sort keeps the event order on ties
+    holder.set(row.sha, row.reviewerId);
     const list = bySeat.get(row.reviewerId) ?? [];
     list.push(row);
     bySeat.set(row.reviewerId, list);
@@ -135,43 +192,46 @@ export function silentReviewerIds(events: ReviewEvent[] = reviewEvents(), limitM
   for (const [seat, rows] of bySeat) {
     const seen = new Set<string>();
     let streak = 0;
+    let since = 0;
+    let until = 0;
     for (let i = rows.length - 1; i >= 0 && streak < SILENT_REVIEW_STREAK; i--) {
       const row = rows[i];
       if (seen.has(row.sha)) continue;
       seen.add(row.sha);
-      const answered = verdictAt.get(`${row.sha}:${seat}`);
-      if (answered !== undefined && (answered === null || answered <= row.at + limitMs)) break;
-      if (now - row.at < limitMs) continue; // still inside the window: not silent yet
+      const freeze = facts.freezes.get(row.sha);
+      const limitMs = limitFor(freeze?.project ?? null);
+      if (!(limitMs > 0)) continue; // the rule is off for this review's project
+      if (facts.answered.has(`${row.sha}:${seat}`)) break; // any verdict is an answer
+      if (holder.get(row.sha) === seat) {
+        const open = freeze?.status === 'open' || freeze?.status === 'behind-main';
+        if (!open) continue; // closed before the seat answered: not its silence
+        if (now - row.at < limitMs) continue; // still inside the window
+      }
       streak += 1;
+      if (streak === 1) {
+        since = Math.min(row.at + limitMs, now);
+        until = row.at + limitMs + Math.min(SILENCE_WINDOWS * limitMs, SILENCE_MAX_MS);
+      }
     }
-    if (streak >= SILENT_REVIEW_STREAK) silent.add(seat);
+    if (streak >= SILENT_REVIEW_STREAK && now < until) silent.set(seat, { streak, since, until });
   }
   return silent;
 }
 
-/** `sha:reviewerId` → verdict time (epoch ms; null when the row has no parseable time). */
-function verdictTimes(): Map<string, number | null> {
-  const out = new Map<string, number | null>();
-  const put = (sha: string | null, id: string | null, at: string | null) => {
-    if (!sha || !id) return;
-    const key = `${sha}:${id}`;
-    const ms = at ? Date.parse(at.includes('T') ? at : `${at.replace(' ', 'T')}Z`) : NaN;
-    const prev = out.get(key);
-    const next = Number.isFinite(ms) ? ms : null;
-    if (prev === undefined || prev === null || (next !== null && next < prev)) out.set(key, next);
-  };
-  try {
-    const rows = getDb().prepare(
-      'SELECT sha, reviewer_agent_id, created_at FROM freeze_verdicts WHERE reviewer_agent_id IS NOT NULL',
-    ).all() as { sha: string; reviewer_agent_id: string; created_at: string | null }[];
-    for (const row of rows) put(row.sha, row.reviewer_agent_id, row.created_at);
-  } catch { /* table not there yet */ }
-  try {
-    const rows = getDb().prepare(
-      'SELECT sha, reviewer_agent_id, updated_at FROM release_freezes WHERE verdict IS NOT NULL AND reviewer_agent_id IS NOT NULL',
-    ).all() as { sha: string; reviewer_agent_id: string; updated_at: string | null }[];
-    for (const row of rows) put(row.sha, row.reviewer_agent_id, row.updated_at);
-  } catch { /* table not there yet */ }
+/** The ids from `silentReviewers`. */
+export function silentReviewerIds(
+  events: ReviewEvent[] = reviewEvents(),
+  limit: number | ((project: string | null) => number) = projectReassignMs,
+  now = Date.now(),
+  facts: SilenceFacts = silenceFacts(),
+): Set<string> {
+  return new Set(silentReviewers(events, limit, now, facts).keys());
+}
+
+/** Seats that held this SHA's review at some point (the review events have the history). */
+export function pastHolders(sha: string, events: ReviewEvent[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of events) if (row.sha === sha) out.add(row.reviewerId);
   return out;
 }
 
@@ -279,10 +339,45 @@ export interface AssignInput {
   serviceProfiles?: string[];
   /** Agent ids the picker skips because their last reviews went unanswered (`silentReviewerIds`). */
   silent?: ReadonlySet<string>;
+  /** Agent ids that already held this review (`pastHolders`): a moved review never goes back to one. */
+  exclude?: ReadonlySet<string>;
 }
 
 function listed(agent: Agent, names: Set<string>): boolean {
   return handles(agent).some((h) => names.has(h));
+}
+
+function poolFor(input: Pick<AssignInput, 'author' | 'pools'>): Set<string> {
+  const pool = poolNamesFor(input.author.name, input.pools);
+  if (input.author.alias) {
+    for (const name of poolNamesFor(input.author.alias, input.pools)) pool.add(name);
+  }
+  return pool;
+}
+
+/**
+ * Why this seat may not review the author's work, or null when it may. The one
+ * exclusion list: the picker drops such seats, and a seat the author names
+ * (`Reviewer: @x`) is refused with this reason in the lane note. The phrase
+ * follows "@x ": `is the author`, `is the author's own seat`, `is denied`,
+ * `is not a review seat`, `is out of rotation (…)`, `left its last reviews
+ * unanswered`, `already held this review`.
+ */
+export function reviewerExclusion(input: AssignInput, agent: Agent): string | null {
+  if (agent.id === input.author.id) return 'is the author';
+  if (handles(agent).some((h) => handles(input.author).includes(h))) return 'is the author';
+  if (agent.mode === 'file' || agent.role === 'orchestrator') return 'is not a review seat';
+  const deny = new Set(input.deny.map((s) => s.toLowerCase()));
+  if (handles(agent).some((h) => deny.has(h))) return 'is denied';
+  // The author's other seat (same profile or person stem) unless the author-glob pool names it.
+  if (samePerson(input.author, agent, input.serviceProfiles ?? []) && !listed(agent, poolFor(input))) return "is the author's own seat";
+  // A seat whose plan is nearly spent would stall the review at the usage-limit screen.
+  const out = seatOutOfRotation(agent, input.load(agent), input.minCapacityPct ?? DEFAULT_MIN_CAPACITY_PCT);
+  if (out) return `is out of rotation (${out})`;
+  // A seat that left its last reviews unanswered would hold this one too.
+  if (input.silent?.has(agent.id)) return 'left its last reviews unanswered';
+  if (input.exclude?.has(agent.id)) return 'already held this review';
+  return null;
 }
 
 /**
@@ -290,11 +385,7 @@ function listed(agent: Agent, names: Set<string>): boolean {
  * The route target is not chosen ahead of a non-empty prefer tier.
  */
 export function selectReviewer(input: AssignInput): Agent | null {
-  const deny = new Set(input.deny.map((s) => s.toLowerCase()));
-  const pool = poolNamesFor(input.author.name, input.pools);
-  if (input.author.alias) {
-    for (const name of poolNamesFor(input.author.alias, input.pools)) pool.add(name);
-  }
+  const pool = poolFor(input);
   const routeNames = new Set(input.routeReviewers.map((s) => s.toLowerCase()));
   if (input.routeTarget) routeNames.add(input.routeTarget.toLowerCase());
   const preferKey = vendorOf(input.author.runtime);
@@ -303,22 +394,11 @@ export function selectReviewer(input: AssignInput): Agent | null {
       .map((s) => s.toLowerCase()),
   );
   const wanted = input.defaultReviewer?.toLowerCase() ?? '';
-  const floor = input.minCapacityPct ?? DEFAULT_MIN_CAPACITY_PCT;
   const allow = new Set((input.allow ?? []).map((s) => s.toLowerCase()));
   const service = input.serviceProfiles ?? [];
   const isSamePerson = (agent: Agent): boolean => samePerson(input.author, agent, service);
 
-  const excluded = (agent: Agent): boolean => {
-    if (agent.id === input.author.id) return true;
-    if (handles(agent).some((h) => handles(input.author).includes(h))) return true;
-    if (handles(agent).some((h) => deny.has(h))) return true;
-    if (isSamePerson(agent) && !listed(agent, pool)) return true;
-    // A seat whose plan is nearly spent would stall the review at the usage-limit screen.
-    if (seatOutOfRotation(agent, input.load(agent), floor)) return true;
-    // A seat that left its last reviews unanswered would hold this one too.
-    if (input.silent?.has(agent.id)) return true;
-    return false;
-  };
+  const excluded = (agent: Agent): boolean => reviewerExclusion(input, agent) !== null;
   const isDefault = (agent: Agent): boolean =>
     !!wanted && (handles(agent).includes(wanted) || agent.runtime.toLowerCase() === wanted);
   // The open ladder (anyone, then the tagged subset) needs auto-pick, and is
@@ -330,7 +410,6 @@ export function selectReviewer(input: AssignInput): Agent | null {
   // A reviewer seat is a reviewer by role: eligible whatever the allowlist and auto-pick say.
   const reviewerSeat = (agent: Agent): boolean => agent.role === 'reviewer';
   const eligible = input.agents.filter((agent) => {
-    if (agent.mode === 'file' || agent.role === 'orchestrator') return false;
     if (excluded(agent)) return false;
     return reviewerSeat(agent) || fromLadder(agent) || listed(agent, routeNames) || listed(agent, prefer) || listed(agent, pool);
   });
@@ -384,11 +463,16 @@ export function pickLeastLoaded(agents: Agent[], load: (agent: Agent) => Reviewe
   })[0];
 }
 
+/** A freeze's review moves at most this many times; then it waits for a person. */
+export const MAX_REVIEW_REASSIGNS = 2;
+
 /**
  * Move a review with no verdict after the window, whether the seat is busy or
  * idle (an idle seat that has not started the review it was sent is silent
  * too: on 1 Nov 2026 five freezes waited 19 hours on a named idle seat), and
- * whether it was picked or named. Once per freeze, unless the next seat is idle.
+ * whether it was picked or named. At most `MAX_REVIEW_REASSIGNS` times per
+ * freeze (a review nobody answers must not bounce between idle seats every
+ * window), and after the first move only when the next seat is idle.
  */
 export function shouldReassign(opts: {
   hasVerdict: boolean;
@@ -401,6 +485,7 @@ export function shouldReassign(opts: {
 }): boolean {
   if (opts.hasVerdict) return false;
   if (!(opts.limitMs > 0) || opts.waitedMs < opts.limitMs) return false;
+  if (opts.reassignCount >= MAX_REVIEW_REASSIGNS) return false;
   if (!opts.nextId || opts.nextId === opts.currentId) return false;
   if (opts.reassignCount >= 1 && !opts.nextIdle) return false;
   return true;
@@ -486,6 +571,31 @@ export function loadMemo(events = reviewEvents()): (agent: Agent) => ReviewerLoa
     const load = loadFor(agent, events);
     memo.set(agent.id, load);
     return load;
+  };
+}
+
+/**
+ * One reconcile pass's shared view of the review history: the events read once,
+ * each seat's load once, and the silent set once (on first use). Before this
+ * every freeze in a pass re-read the events and re-derived the silent seats, the
+ * same shape as the 26 Oct 2026 freeze (`loadMemo`).
+ */
+export interface ReviewPass {
+  events: ReviewEvent[];
+  load: (agent: Agent) => ReviewerLoad;
+  /** Seats silent under their own reviews' project windows. */
+  readonly silent: ReadonlySet<string>;
+}
+
+export function reviewPass(now = Date.now(), events: ReviewEvent[] = reviewEvents()): ReviewPass {
+  let silent: Set<string> | null = null;
+  return {
+    events,
+    load: loadMemo(events),
+    get silent(): ReadonlySet<string> {
+      silent ??= silentReviewerIds(events, projectReassignMs, now);
+      return silent;
+    },
   };
 }
 

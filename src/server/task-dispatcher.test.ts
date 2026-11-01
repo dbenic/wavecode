@@ -212,6 +212,31 @@ describe('task-dispatcher.ts', () => {
     expect(dispatcher.agentUnfit({ ...seat, role: null })).toBeNull();
   });
 
+  it('a lane task queued on a reviewer seat by id waits visibly: task.waiting_for_agent with reason role', async () => {
+    await setupBaseMocks(true);
+    const db = await import('./db.js');
+    const events = await import('./event-bus.js');
+    const runner = await import('./runner.js');
+    vi.mocked(db.listAgents).mockReturnValue([{
+      id: 'agent-1', name: 'codex7', runtime: 'codex', tmux_session: 'wc-agent-1', workspace: null,
+      mode: 'spawned', status: 'idle', role: 'reviewer', created_at: '2026-04-03T00:00:00Z',
+    } as never]);
+    vi.mocked(db.listTasks).mockReturnValue([{
+      id: 'task-1', agent_id: 'agent-1', prompt: 'Fix the lane', status: 'pending', priority: 0,
+      created_at: '2026-04-03T00:00:00Z', goal_id: null, template: null,
+    } as never]);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.resetDispatcherForTest();
+    await dispatcher.dispatchNext({ manual: true });
+    await vi.runAllTimersAsync();
+    expect(vi.mocked(runner.executeRun)).not.toHaveBeenCalled();
+    expect(vi.mocked(events.emit)).toHaveBeenCalledWith(
+      'task.waiting_for_agent', 'task', 'task-1',
+      expect.objectContaining({ reason: 'role', agent_name: 'codex7', detail: expect.stringMatching(/reviewer seat/) }), null,
+    );
+  });
+
   it('fails the dispatch with runtime not running when the TUI cannot be brought back (T0)', async () => {
     await setupBaseMocks(false);
     const db = await import('./db.js');

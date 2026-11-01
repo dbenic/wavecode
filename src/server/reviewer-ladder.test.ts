@@ -124,13 +124,21 @@ describe('pickReviewer', () => {
       ok: true, rung: 'reviewer', agent: { id: sameProfileReviewer.id }, reason: 'free reviewer seat, same profile, same vendor',
     });
 
-    // Silent: three assigned reviews with no verdict past the window, so the seat is skipped and the tag rung is next.
+    // Silent: three open freezes assigned to the seat with no verdict past their project's window
+    // (the default, 10 min), so the seat is skipped and the tag rung is next.
+    const { ensureReleaseFreezeTable } = await import('./release-freezes.js');
+    ensureReleaseFreezeTable();
     const insert = db.getDb().prepare(`INSERT INTO events (type, entity_type, entity_id, payload_json) VALUES ('pipeline.review', 'run', ?, ?)`);
+    const freeze = db.getDb().prepare(`INSERT INTO release_freezes (sha, status, project) VALUES (?, 'open', 'wave')`);
     for (const ch of ['a', 'b', 'c']) {
       const sha = ch.repeat(40);
-      insert.run(`${sha}:assign`, JSON.stringify({ sha, reviewer_id: sameProfileReviewer.id, assigned_at_ms: Date.now() - 3_600_000, reassigned: false }));
+      freeze.run(sha);
+      insert.run(`${sha}:assign`, JSON.stringify({ sha, reviewer_id: sameProfileReviewer.id, assigned_at_ms: Date.now() - 20 * 60_000, reassigned: false }));
     }
     expect(pickReviewer(run)).toMatchObject({ ok: true, rung: 'tag', agent: { id: tagged.id } });
+    // The rule is off for that project: the seat is back.
+    projects.wave = { pipeline: { review_reassign_minutes: 0 } as never };
+    expect(pickReviewer(run)).toMatchObject({ ok: true, rung: 'reviewer', agent: { id: sameProfileReviewer.id } });
   });
 
   it('rung 5: any free agent, other vendor preferred, same vendor as fallback', () => {

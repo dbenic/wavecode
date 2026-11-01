@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Agent } from './db.js';
 import * as db from './db.js';
 import { emit } from './event-bus.js';
@@ -11,12 +11,14 @@ import {
   personStem,
   pickLeastLoaded,
   poolNamesFor,
+  reviewerExclusion,
   reviewerLoads,
   sameOwnerPoolReviewer,
   samePerson,
   selectReviewer,
   shouldReassign,
   silentReviewerIds,
+  silentReviewers,
   vendorOf,
   assignmentFacts,
   reviewStatusForVerdict,
@@ -64,6 +66,7 @@ function choose(
     allow: extra.allow,
     serviceProfiles: extra.serviceProfiles,
     silent: extra.silent,
+    exclude: extra.exclude,
     load: (agent) => ({
       busy: agent.status === 'working' || agent.status === 'error',
       openReviews: 0,
@@ -251,10 +254,11 @@ describe('shouldReassign', () => {
     nextIdle: false,
   };
 
-  it('moves once off a silent seat (busy or idle), then only when the next seat is idle', () => {
+  it('moves once off a silent seat (busy or idle), then only when the next seat is idle, at most twice', () => {
     expect(shouldReassign(base)).toBe(true);
     expect(shouldReassign({ ...base, reassignCount: 1, nextIdle: false })).toBe(false);
     expect(shouldReassign({ ...base, reassignCount: 1, nextIdle: true })).toBe(true);
+    expect(shouldReassign({ ...base, reassignCount: 2, nextIdle: true })).toBe(false);
     expect(shouldReassign({ ...base, hasVerdict: true })).toBe(false);
     expect(shouldReassign({ ...base, waitedMs: 14 * 60 * 1000 })).toBe(false);
     expect(shouldReassign({ ...base, limitMs: 0 })).toBe(false);
@@ -421,57 +425,167 @@ describe('reviewer seats (role reviewer)', () => {
 describe('silent seats', () => {
   let tmp: string;
   const LIMIT = 10 * 60 * 1000;
+  const HOUR = 3_600_000;
   const T0 = 1_700_000_000_000;
+  const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((ch) => ch.repeat(40));
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-silent-'));
+    db.initDb(path.join(tmp, 't.db'));
+    ensureReleaseFreezeTable();
+    for (const sha of [a, b, c, d]) freeze(sha, 'open', 'wave');
+  });
 
   afterEach(() => {
     db.resetDbForTest();
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
+  function freeze(sha: string, status: string, project: string | null): void {
+    db.getDb().prepare('INSERT OR REPLACE INTO release_freezes (sha, status, project) VALUES (?, ?, ?)').run(sha, status, project);
+  }
+
+  function setStatus(sha: string, status: string): void {
+    db.getDb().prepare('UPDATE release_freezes SET status = ? WHERE sha = ?').run(status, sha);
+  }
+
   function assign(sha: string, reviewerId: string, at: number): void {
     emit('pipeline.review', 'run', `${sha}:assign`, { sha, reviewer_id: reviewerId, assigned_at_ms: at, reassigned: false }, null);
   }
 
-  function verdict(sha: string, reviewerId: string, atMs: number): void {
+  function verdict(sha: string, reviewerId: string): void {
     db.getDb().prepare(
-      `INSERT INTO freeze_verdicts (sha, reviewer_agent_id, reviewer_name, verdict, created_at) VALUES (?, ?, ?, 'pass', ?)`,
-    ).run(sha, reviewerId, reviewerId, new Date(atMs).toISOString().replace('T', ' ').slice(0, 19));
+      `INSERT INTO freeze_verdicts (sha, reviewer_agent_id, reviewer_name, verdict) VALUES (?, ?, ?, 'pass')`,
+    ).run(sha, reviewerId, reviewerId);
   }
 
-  it('a seat whose last three assigned reviews got no verdict in the window is silent; one answer ends the streak', () => {
-    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-silent-'));
-    db.initDb(path.join(tmp, 't.db'));
-    ensureReleaseFreezeTable();
-    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((ch) => ch.repeat(40));
+  const silent = (now: number, limit: number | ((project: string | null) => number) = LIMIT) => silentReviewerIds(undefined, limit, now);
+
+  it('three unanswered reviews in a row on open freezes make a seat silent; any verdict from the seat ends the streak', () => {
     assign(a, 'codex1', T0);
-    assign(b, 'codex1', T0 + 3_600_000);
-    assign(c, 'codex1', T0 + 7_200_000);
+    assign(b, 'codex1', T0 + HOUR);
+    assign(c, 'codex1', T0 + 2 * HOUR);
     assign(a, 'codex3', T0);
-    assign(b, 'codex3', T0 + 3_600_000);
-    const now = T0 + 3 * 3_600_000;
+    assign(b, 'codex3', T0 + HOUR);
+    const now = T0 + 2 * HOUR + 30 * 60_000;
     // codex3 has only two unanswered reviews: not silent yet.
-    expect(silentReviewerIds(undefined, LIMIT, now)).toEqual(new Set(['codex1']));
+    expect(silent(now)).toEqual(new Set(['codex1']));
 
     // A fresh assignment inside the window is neither answered nor silent: the three older ones still count.
     assign(d, 'codex1', now - 60_000);
-    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(true);
+    expect(silent(now).has('codex1')).toBe(true);
 
-    // A verdict on the newest decided one, inside the window, ends the streak.
-    verdict(c, 'codex1', T0 + 7_200_000 + 5 * 60_000);
-    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(false);
-
-    // A verdict that came after the window does not count as an answer.
-    db.getDb().prepare('DELETE FROM freeze_verdicts').run();
-    verdict(c, 'codex1', T0 + 7_200_000 + 40 * 60_000);
-    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(true);
+    // A verdict on the newest decided one ends the streak. When it came is not read: a late verdict
+    // (the review had already moved on) is an answer too, and so is one on a freeze that closed since.
+    verdict(c, 'codex1');
+    expect(silent(now).has('codex1')).toBe(false);
+    setStatus(c, 'stale');
+    expect(silent(now).has('codex1')).toBe(false);
+    setStatus(c, 'open');
 
     // The freeze row's own verdict counts too.
     db.getDb().prepare('DELETE FROM freeze_verdicts').run();
-    db.getDb().prepare(`INSERT INTO release_freezes (sha, reviewer_agent_id, verdict, status, updated_at) VALUES (?, 'codex1', 'needs-fixes', 'open', ?)`)
-      .run(b, new Date(T0 + 3_600_000 + 60_000).toISOString().replace('T', ' ').slice(0, 19));
-    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(false);
+    db.getDb().prepare(`UPDATE release_freezes SET reviewer_agent_id = 'codex1', verdict = 'needs-fixes' WHERE sha = ?`).run(b);
+    expect(silent(now).has('codex1')).toBe(false);
+    db.getDb().prepare('UPDATE release_freezes SET reviewer_agent_id = NULL, verdict = NULL WHERE sha = ?').run(b);
+    expect(silent(now).has('codex1')).toBe(true);
 
     // A window of 0 disables the rule.
-    expect(silentReviewerIds(undefined, 0, now).size).toBe(0);
+    expect(silent(now, 0).size).toBe(0);
+  });
+
+  it('a freeze that closed before the seat answered counts for nothing; a review moved away unanswered counts', () => {
+    assign(a, 'codex1', T0);
+    assign(b, 'codex1', T0 + HOUR);
+    assign(c, 'codex1', T0 + 2 * HOUR);
+    const now = T0 + 2 * HOUR + 30 * 60_000;
+    expect(silent(now).has('codex1')).toBe(true);
+
+    // c was superseded (stale) before codex1 answered: not codex1's silence.
+    setStatus(c, 'stale');
+    expect(silent(now).has('codex1')).toBe(false);
+    for (const closed of ['promoted', 'rejected', 'merged']) {
+      setStatus(c, closed);
+      expect(silent(now).has('codex1')).toBe(false);
+    }
+
+    // Moved away from codex1 with no verdict: counts against codex1 whatever the freeze did since.
+    assign(c, 'codex3', T0 + 2 * HOUR + 60_000);
+    expect(silent(now).has('codex1')).toBe(true);
+
+    // codex3 holds c on a closed freeze (skipped) and had a and b open and unanswered: two, not silent.
+    assign(a, 'codex3', T0);
+    assign(b, 'codex3', T0 + HOUR);
+    expect(silent(now).has('codex3')).toBe(false);
+    setStatus(c, 'open');
+    expect(silent(now).has('codex3')).toBe(true);
+  });
+
+  it('silence expires six windows after the newest unanswered one (at most two hours), so the seat is tried again', () => {
+    assign(a, 'codex1', T0);
+    assign(b, 'codex1', T0 + HOUR);
+    assign(c, 'codex1', T0 + 2 * HOUR);
+    const ranOut = T0 + 2 * HOUR + LIMIT;
+    expect(silentReviewers(undefined, LIMIT, ranOut + 1).get('codex1')).toEqual({ streak: 3, since: ranOut, until: ranOut + 6 * LIMIT });
+    expect(silent(ranOut + 6 * LIMIT - 1).has('codex1')).toBe(true);
+    expect(silent(ranOut + 6 * LIMIT).has('codex1')).toBe(false);
+
+    // A new unanswered review after that starts the clock again.
+    const again = ranOut + 6 * LIMIT;
+    assign(d, 'codex1', again);
+    expect(silent(again + LIMIT - 1).has('codex1')).toBe(false);
+    expect(silent(again + LIMIT + 1).has('codex1')).toBe(true);
+    expect(silent(again + 7 * LIMIT).has('codex1')).toBe(false);
+
+    // A long window is capped: two hours of silence, not six windows.
+    const LONG = HOUR;
+    expect(silentReviewers(undefined, LONG, again + LONG + 1).get('codex1')?.until).toBe(again + LONG + 2 * HOUR);
+  });
+
+  it('each review is judged by its own project window; a freeze with no project is skipped', () => {
+    freeze(a, 'open', 'p1');
+    freeze(b, 'open', 'p2');
+    freeze(c, 'open', 'p2');
+    freeze(d, 'open', null);
+    assign(a, 'codex1', T0);
+    assign(b, 'codex1', T0 + HOUR);
+    assign(c, 'codex1', T0 + 2 * HOUR);
+    assign(d, 'codex1', T0 + 3 * HOUR);
+    const now = T0 + 3 * HOUR + 5 * 60_000;
+    const windows = (project: string | null): number => (project === 'p1' ? 0 : LIMIT); // p1 has the rule off
+    // Only b and c count: d names no project, a's project has the rule off.
+    expect(silent(now, windows).has('codex1')).toBe(false);
+    // A number applies to every review (d is inside its window, a, b and c count).
+    expect(silent(now).has('codex1')).toBe(true);
+    freeze(a, 'open', 'p2');
+    expect(silent(now, windows).has('codex1')).toBe(true);
+  });
+});
+
+describe('reviewerExclusion: one list for the picker and for a named seat', () => {
+  const author = seat('ales-claude1', { runtime: 'claude-code', profile: 'ales' });
+  const idle: ReviewerLoad = { busy: false, openReviews: 0, runningTasks: 0, lastAssignedAt: 0 };
+  function input(extra: Partial<AssignInput> = {}): AssignInput {
+    return {
+      author, agents: [], deny: ['codex1'], prefer: {}, pools: {}, routeReviewers: [], routeTarget: null, defaultReviewer: null,
+      autoPick: true, reviewTagIds: new Set<string>(), load: () => idle, ...extra,
+    };
+  }
+
+  it('names the reason a seat may not review the author, in the words the lane note uses', () => {
+    expect(reviewerExclusion(input(), author)).toBe('is the author');
+    expect(reviewerExclusion(input(), seat('ales-codex2', { profile: 'ales2' }))).toBe("is the author's own seat");
+    expect(reviewerExclusion(input({ pools: { 'ales-*': ['ales-codex2'] } }), seat('ales-codex2', { profile: 'ales2' }))).toBeNull();
+    expect(reviewerExclusion(input(), seat('codex1'))).toBe('is denied');
+    expect(reviewerExclusion(input(), seat('pm', { role: 'orchestrator' }))).toBe('is not a review seat');
+    expect(reviewerExclusion(input({ load: () => ({ ...idle, leftPct: 3 }), minCapacityPct: 10 }), seat('codex2'))).toBe('is out of rotation (plan at 3% (floor 10%))');
+    expect(reviewerExclusion(input({ silent: new Set(['codex2']) }), seat('codex2'))).toBe('left its last reviews unanswered');
+    expect(reviewerExclusion(input({ exclude: new Set(['codex2']) }), seat('codex2'))).toBe('already held this review');
+    expect(reviewerExclusion(input(), seat('codex2'))).toBeNull();
+  });
+
+  it('a moved review never goes back to a seat that held it', () => {
+    expect(choose(author, [seat('codex2'), seat('codex3')], { exclude: new Set(['codex2']) })?.name).toBe('codex3');
+    expect(choose(author, [seat('codex2'), seat('codex3')], { exclude: new Set(['codex2', 'codex3']) })).toBeNull();
   });
 });
