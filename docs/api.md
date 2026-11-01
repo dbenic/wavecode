@@ -1225,6 +1225,16 @@ event contract).
   announced; `-to-` names go to the recipient, never the author; logs, receipts, freeze and
   verdict files are left to the freeze watcher; `wave-firstpass-*` files are recorded.
 
+## Staging follows main (1 Nov 2026)
+
+`projects.<p>.pipeline.auto_stage_main: true` makes staging a mirror of main: after every queue
+merge the new main tip is requested for staging through the normal release path (`POST`-less,
+in the name `wavecode`, note `main after queue merge of <lane> <sha8>`), coalesced to the newest
+tip, paced by `auto_stage_main_min_minutes` (default 10), never while a staging release is open
+or when staging already shows the SHA. Events `staging.main_requested` (on the release id) and
+`staging.main_skipped` (on the SHA, with `error`). Details in `docs/merge-queue.md`
+("Staging follows main"); the model in `docs/ops/development-model-plan-2026-11-01.md`.
+
 ## Merge queue for main (25 Oct 2026)
 
 Approved for Wavepulse main only; see `docs/merge-queue.md` for the rules. WaveCode

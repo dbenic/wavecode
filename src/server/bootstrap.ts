@@ -7,6 +7,7 @@ import * as inboxWatch from './inbox-watch.js';
 import * as releaseFreezes from './release-freezes.js';
 import * as fixtures from './fixtures.js';
 import * as releases from './releases.js';
+import * as mainStaging from './main-staging.js';
 import * as overlord from './overlord.js';
 import * as productDesk from './product-desk.js';
 import * as usageProbe from './usage-probe.js';
@@ -98,6 +99,7 @@ export async function bootstrapApplication(): Promise<BootstrapResult> {
   fixtures.startFixtureWatchers();
   releases.startReleasePollers();
   releases.startStagingTipLog();
+  mainStaging.startMainStaging(); // staging follows main (pipeline.auto_stage_main)
   overlord.startOverlord();
   productDesk.startDeskRefresh();
   usageProbe.startUsageProbe();
@@ -119,6 +121,7 @@ export function shutdownApplication(): void {
   fixtures.stopFixtureWatchers();
   releases.stopReleasePollers();
   releases.stopStagingTipLog();
+  mainStaging.stopMainStaging();
   overlord.stopOverlord();
   productDesk.stopDeskRefresh();
   usageProbe.stopUsageProbe();
