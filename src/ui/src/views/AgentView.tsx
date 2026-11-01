@@ -11,6 +11,7 @@ import { sanitizeHtml } from '../utils/sanitize';
 import { internalLinkClickHandler, linkWrappedPathLines, linkifyPathsHtml } from '../utils/paths';
 import { createAgentDocSlug } from '../utils/docs';
 import StatusBadge from '../components/StatusBadge';
+import SeatAuthBadge, { seatOutSentence } from '../components/SeatAuthBadge';
 import { extractMdPaths } from '../components/MdFileActions';
 import AgentGuidesBar from '../components/AgentGuidesBar';
 import DecisionsBar from '../components/DecisionsBar';
@@ -612,9 +613,36 @@ export default function AgentView() {
               </div>
             )}
             <StatusBadge status={agent.status} />
+            <SeatAuthBadge agent={agent} />
           </div>
         </div>
       </header>
+
+      {/* 1 Nov 2026 policy: a seat out of rotation says why, and what brings it back */}
+      {agent.out && (
+        <div className="border-b border-red-500/30 bg-red-950/30" data-testid="seat-out">
+          <div className="max-w-3xl lg:max-w-6xl 2xl:max-w-[1700px] mx-auto px-4 py-2 flex items-center justify-between gap-3 text-[11px] text-red-100">
+            <span>{seatOutSentence(agent)}</span>
+            {agent.out.reason === 'login' && agent.profile && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const r = await apiPost<{ agent: { id: string } }>(`/profiles/${encodeURIComponent(agent.profile!)}/login`, { runtime: agent.runtime });
+                    navigate(`/agent/${r.agent.id}`);
+                  } catch {
+                    navigate('/settings');
+                  }
+                }}
+                className="flex-shrink-0 rounded border border-emerald-500/40 bg-emerald-950/40 px-2 py-1 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-900/50"
+                data-testid="open-login-seat"
+              >
+                Open login seat
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Agent info bar */}
       <div className="border-b border-slate-800/30 bg-slate-900/30">

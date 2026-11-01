@@ -34,6 +34,7 @@ import { validateAlias, validatePersona, validateTag } from '../agent-identity.j
 import { isProfileCompatible, requireProfileLogin, resolveSpawnProfile } from '../profiles.js';
 import { agentAllowedFor, isRestrictedUser } from '../users.js';
 import { runtimeDefaultsFor, subscriptionFor } from '../subscription-info.js';
+import { seatAuthFor, seatOut } from '../seat-credentials.js';
 import { usageFor } from '../usage-probe.js';
 import { bindSessionSocket } from '../tmux.js';
 
@@ -532,6 +533,17 @@ function safeUsage(agent: Agent) {
   try { return usageFor(agent.runtime, agent.profile ?? null); } catch { return null; }
 }
 
+function safeAuth(agent: Agent) {
+  try {
+    const a = seatAuthFor(agent.id);
+    return a ? { mode: a.mode, plan: a.plan, detail: a.detail, env_key: a.env_key, checked_at: a.checked_at } : null;
+  } catch { return null; }
+}
+
+function safeOut(agent: Agent) {
+  try { return seatOut(agent); } catch { return null; }
+}
+
 function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null, tags?: string[]) {
   const owner = agent.owner_id ? leases.userName(agent.owner_id) : null;
   const live = outputWatcher.getLiveModel(agent.id);
@@ -564,6 +576,9 @@ function enrichAgent(agent: Agent, viewer: User, orchestratorId?: string | null,
     runtime_defaults: runtimeDefaultsFor(agent.runtime, agent.profile ?? null),
     // Plan usage read from the CLI's own status screen (usage-probe.ts); null until the first probe
     usage: safeUsage(agent),
+    // 1 Nov 2026 policy (seat-credentials.ts): how the seat is authenticated, and why it is out of rotation.
+    auth: safeAuth(agent),
+    out: safeOut(agent),
     lastOutputLine: outputWatcher.getLastOutputLine(agent.id),
     outputVersion: outputWatcher.getOutputVersion(agent.id),
     watching: outputWatcher.isWatching(agent.id),

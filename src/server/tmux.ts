@@ -217,6 +217,22 @@ export async function killSession(sessionName: string): Promise<void> {
   await tmuxExecSafe(['kill-session', '-t', sessionName]);
 }
 
+/** Pid of the shell in the session's current pane (its children are the runtime), or null. */
+export async function panePid(sessionName: string): Promise<number | null> {
+  const out = await tmuxExecSafe(['list-panes', '-t', sessionName, '-F', '#{pane_pid}']);
+  const pid = Number(out?.split('\n')[0]?.trim());
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * Remove variables from the default tmux server's global environment, so panes created from now on
+ * never inherit them (the server process keeps its own copy; this edits the table new panes get).
+ * No server running is not an error.
+ */
+export async function scrubGlobalEnvironment(vars: readonly string[]): Promise<void> {
+  for (const v of vars) await tmuxExecSafe(['set-environment', '-g', '-u', v]);
+}
+
 /**
  * Send literal text to a tmux pane using -l flag (safe, no key interpretation).
  * Text is chunked to avoid tmux's command length limits.

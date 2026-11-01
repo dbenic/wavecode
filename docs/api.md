@@ -1432,3 +1432,38 @@ characters) and says GO, push, promote, deploy, ship or release together with "p
 seat, or older than the window is refused with 403 and the reason; the seat is told to answer
 that nothing ran. No model holds a deploy credential: the dev box forwards, the deploy box
 checks main-only and migrations again and runs the command.
+
+## Seat credentials (1 Nov 2026): no API keys, out under the floor, out when logged out
+
+Plan: `docs/ops/seat-credentials-policy-2026-11-01.md`. Module: `src/server/seat-credentials.ts`,
+`src/server/provider-keys.ts`.
+
+- **Launch hygiene.** When the daemon's own environment carries a provider key
+  (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+  `XAI_API_KEY`), every pane it launches drops it (`env -u … <command>`), the tmux global environment is
+  scrubbed at start, and the log says which variables to remove from the unit's env file. `claude -p`
+  (file runner) drops the same list.
+- **Credential probe.** Every `usage.probe_interval_min` (default 15) and 20 s after a spawn, each seat is
+  read without typing into its pane: Claude Code's `.credentials.json` / `.claude.json`
+  (`customApiKeyResponses`), Codex's `auth.json`, and the environment of the process in the pane
+  (`/proc`, Linux). Stored in `agent_auth`; exposed as `auth: { mode, plan, detail, env_key, checked_at }`
+  on `GET /api/agents` and the board, with `mode ∈ subscription | api-key | logged-out | unknown`. Only
+  names and plan labels leave the module; a key value is compared in memory against the CLI's own
+  rejected list and never kept. `env_key` names a key the CLI rejected that still sits in the pane
+  environment (a pane restart clears it; nothing is parked for it).
+- **The rule** (`seatOut`, used by the dispatcher, `POST /api/tasks`, the board and the UI): `out: { reason:
+  'key' | 'login' | 'quota', detail, since }`. `key` → the pane is killed once (spawned seats), the seat is
+  parked, `agent.api_key` + `agent.killed_for_key` + a notification. `login` → parked, `agent.logged_out`
+  + a notification. `quota` → parked under `autonomy.min_quota_pct` (default now **5**, was 10),
+  `agent.quota_low`. Out seats repeat their event once an hour; a return emits `agent.auth_restored`.
+  Runtimes without a `login_command` (aider) are key-based by design: `unknown`, never parked. For a
+  subscription CLI known only by its credential files (grok, kimi) only a key its own CLI would bill counts
+  (`ownKeyVars`: xAI for grok); a foreign key in its pane is `env_key` on a logged-in seat and parks nothing.
+- **Tasks.** `POST /api/tasks` with `agent_id` answers **409** `{ error, reason, free_agents }` for `key`
+  always, and for `login` / `quota` unless `hold: true`. A pending task addressed to an out seat emits
+  `task.waiting_for_agent { reason: 'key' | 'login' | 'quota', detail }` once per state.
+- **UI.** Agent cards and the agent page carry a seat badge (`Max 62%`, `OUT · 3%`, `LOGGED OUT`,
+  `API KEY`, `KEY IN ENV`); the agent page shows one sentence on why the seat is out and, for `login`,
+  an **Open login seat** button (`POST /api/profiles/:name/login`); the dashboard header counts seats
+  `OUT`; the board's blocked column reads `OUT · …` and its attention list has `api_key`,
+  `logged_out`, `quota_out` rows.

@@ -530,7 +530,13 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
         ? `Task ${verb}`
         : p.reason === 'profile'
           ? `Task waiting for ${str(p.agent_name) ?? 'agent'} (runs on profile ${str(p.profile) ?? '?'})`
-          : `Task waiting for ${str(p.agent_name) ?? 'agent'} (owned by ${str(p.owner) ?? 'someone'})`,
+          : p.reason === 'login'
+            ? `Task waiting for ${str(p.agent_name) ?? 'agent'} (logged out)`
+            : p.reason === 'key'
+              ? `Task waiting for ${str(p.agent_name) ?? 'agent'} (out: runs on an API key)`
+              : p.reason === 'quota'
+                ? `Task waiting for ${str(p.agent_name) ?? 'agent'} (out: ${str(p.detail) ?? 'plan under the floor'})`
+                : `Task waiting for ${str(p.agent_name) ?? 'agent'} (owned by ${str(p.owner) ?? 'someone'})`,
     );
     item.body = str(p.prompt) ?? str(p.error) ?? str(p.reason);
     item.refs = { task_id: event.entity_id, ...(str(p.run_id) ? { run_id: str(p.run_id)! } : {}) };

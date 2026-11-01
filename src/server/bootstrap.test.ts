@@ -5,6 +5,7 @@ vi.mock('./command-chat.js', () => ({
 }));
 
 vi.mock('./usage-probe.js', () => ({ ensureUsageTable: vi.fn(), startUsageProbe: vi.fn(), stopUsageProbe: vi.fn() }));
+vi.mock('./seat-credentials.js', () => ({ ensureAgentAuthTable: vi.fn(), startSeatAuthProbe: vi.fn(), stopSeatAuthProbe: vi.fn() }));
 vi.mock('./inbox-watch.js', () => ({ startInboxWatchers: vi.fn(), stopInboxWatchers: vi.fn() }));
 vi.mock('./release-freezes.js', () => ({ ensureReleaseFreezeTable: vi.fn(), startFreezeWatchers: vi.fn(), stopFreezeWatchers: vi.fn() }));
 vi.mock('./fixtures.js', () => ({ startFixtureWatchers: vi.fn(), stopFixtureWatchers: vi.fn() }));
