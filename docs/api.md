@@ -1443,7 +1443,7 @@ Plan: `docs/ops/seat-credentials-policy-2026-11-01.md`. Module: `src/server/seat
   `XAI_API_KEY`), every pane it launches drops it (`env -u … <command>`), the tmux global environment is
   scrubbed at start, and the log says which variables to remove from the unit's env file. `claude -p`
   (file runner) drops the same list.
-- **Credential probe.** Every `usage.probe_interval_min` (default 15) and 20 s after a spawn, each seat is
+- **Credential probe.** Every `usage.probe_interval_min` (default 15), every 2 min while a seat is parked, and 20 s after a spawn, each seat is
   read without typing into its pane: Claude Code's `.credentials.json` / `.claude.json`
   (`customApiKeyResponses`), Codex's `auth.json`, and the environment of the process in the pane
   (`/proc`, Linux). Stored in `agent_auth`; exposed as `auth: { mode, plan, detail, env_key, checked_at }`
@@ -1458,7 +1458,8 @@ Plan: `docs/ops/seat-credentials-policy-2026-11-01.md`. Module: `src/server/seat
   `agent.quota_low`. Out seats repeat their event once an hour; a return emits `agent.auth_restored`.
   Runtimes without a `login_command` (aider) are key-based by design: `unknown`, never parked. For a
   subscription CLI known only by its credential files (grok, kimi) only a key its own CLI would bill counts
-  (`ownKeyVars`: xAI for grok); a foreign key in its pane is `env_key` on a logged-in seat and parks nothing.
+  (`ownKeyVars`: xAI for grok); a foreign key in its pane is `env_key` on a logged-in seat and parks nothing. A
+  `credential_files` entry may be a directory (Kimi's `kimi-code/credentials/`): present when it holds a file.
 - **Tasks.** `POST /api/tasks` with `agent_id` answers **409** `{ error, reason, free_agents }` for `key`
   always, and for `login` / `quota` unless `hold: true`. A pending task addressed to an out seat emits
   `task.waiting_for_agent { reason: 'key' | 'login' | 'quota', detail }` once per state.

@@ -59,6 +59,8 @@ import {
   defaultDeps,
   ensureAgentAuthTable,
   inspectSeatAuth,
+  isSeatAuthDue,
+  PARKED_RECHECK_MS,
   refreshSeatAuth,
   resetSeatAuthForTest,
   seatAuthFor,
@@ -177,10 +179,38 @@ describe('seat credentials', () => {
       expect(await inspectSeatAuth(a, undefined, deps({}))).toMatchObject({ mode: 'subscription', env_key: null, detail: null });
     });
 
+    it('a credential path that is a directory counts when it holds a file (Kimi: kimi-code/credentials/<env>.json); an empty one does not', async () => {
+      const a = agent({ runtime: 'kimi', profile: 'bob', tmux_session: 'wc-kimi2' });
+      const dir = path.join(harness.root, 'bob/kimi-code/credentials');
+      fs.mkdirSync(dir, { recursive: true });
+      expect((await inspectSeatAuth(a, undefined, deps({}))).mode).toBe('logged-out');
+      write(path.join(dir, 'kimi-code-env-0e4f.json'), { token: 'x' });
+      expect((await inspectSeatAuth(a, undefined, deps({}))).mode).toBe('subscription');
+    });
+
     it('a key-based runtime (aider) is unknown and never parked', async () => {
       const a = agent({ runtime: 'aider', profile: null, tmux_session: 'wc-aider1' });
       const auth = await inspectSeatAuth(a, undefined, deps({ OPENAI_API_KEY: 'sk-live' }));
       expect(auth.mode).toBe('unknown');
+    });
+  });
+
+  describe('isSeatAuthDue', () => {
+    it('a parked seat is re-read every PARKED_RECHECK_MS, a fit one every probe interval', async () => {
+      const t0 = Date.parse('2026-11-01T12:00:00Z');
+      const interval = 15 * 60_000;
+      const parked = agent({ id: 'due-1', runtime: 'kimi', profile: 'ana', tmux_session: 'wc-kimi1' });
+      await refreshSeatAuth(parked, deps({})); // no credential file on ana/kimi-code → logged-out
+      expect(seatAuthFor('due-1')?.mode).toBe('logged-out');
+      expect(isSeatAuthDue(parked, interval, t0 + 60_000)).toBe(false);
+      expect(isSeatAuthDue(parked, interval, t0 + PARKED_RECHECK_MS)).toBe(true);
+      const fit = agent({ id: 'due-2', runtime: 'codex', profile: 'bob', tmux_session: 'wc-codex1' });
+      write(path.join(harness.root, 'bob/codex/auth.json'), { tokens: { access_token: 'x' } });
+      await refreshSeatAuth(fit, deps({}));
+      expect(seatAuthFor('due-2')?.mode).toBe('subscription');
+      expect(isSeatAuthDue(fit, interval, t0 + PARKED_RECHECK_MS)).toBe(false);
+      expect(isSeatAuthDue(fit, interval, t0 + interval)).toBe(true);
+      expect(isSeatAuthDue(agent({ id: 'never' }), interval, t0)).toBe(true);
     });
   });
 
