@@ -90,8 +90,13 @@ function readJson(file: string): Record<string, unknown> | null {
   }
 }
 
+/** A credential path is present when it is a file, or a directory with at least one entry (Kimi keeps a `credentials/` dir). */
 function fileExists(file: string): boolean {
-  try { return fs.statSync(file).isFile(); } catch { return false; }
+  try {
+    const st = fs.statSync(file);
+    if (st.isFile()) return true;
+    return st.isDirectory() && fs.readdirSync(file).length > 0;
+  } catch { return false; }
 }
 
 /**
@@ -269,6 +274,8 @@ export async function inspectSeatAuth(
 const SOON_MS = 20_000;
 const TICK_MS = 60_000;
 const REMIND_MS = 3600_000;
+/** A parked seat (key / logged out) is re-read this often, so a login or a clean relaunch returns it within minutes. */
+export const PARKED_RECHECK_MS = 120_000;
 let timer: ReturnType<typeof setInterval> | null = null;
 /** agent id → epoch ms of the last `agent.logged_out` / `agent.api_key` reminder. */
 const reminded = new Map<string, number>();
@@ -330,17 +337,19 @@ export function refreshSeatAuthSoon(agent: Agent): void {
   setTimeout(() => { void refreshSeatAuth(agent).catch((e) => logger.warn({ agentId: agent.id, error: (e as Error).message }, 'Seat auth probe failed')); }, SOON_MS).unref?.();
 }
 
-function due(agent: Agent, intervalMs: number, now: number): boolean {
+export function isSeatAuthDue(agent: Agent, intervalMs: number, now: number): boolean {
   if (agent.mode === 'file' || agent.tmux_session.startsWith('wc-login-')) return false;
-  const last = seatAuthFor(agent.id)?.checked_at;
-  return !last || now - Date.parse(last) >= intervalMs;
+  const last = seatAuthFor(agent.id);
+  if (!last) return true;
+  const parked = last.mode === 'api-key' || last.mode === 'logged-out';
+  return now - Date.parse(last.checked_at) >= (parked ? Math.min(PARKED_RECHECK_MS, intervalMs) : intervalMs);
 }
 
 export async function probeSeatAuthDue(now = Date.now()): Promise<void> {
   const minutes = getConfig().usage?.probe_interval_min ?? 15;
   if (!minutes || minutes <= 0) return;
   for (const agent of listAgents()) {
-    if (!due(agent, minutes * 60_000, now)) continue;
+    if (!isSeatAuthDue(agent, minutes * 60_000, now)) continue;
     try {
       await refreshSeatAuth(agent);
     } catch (e) {
