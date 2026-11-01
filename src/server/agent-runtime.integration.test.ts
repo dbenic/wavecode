@@ -289,8 +289,11 @@ describe('agent runtime integration', () => {
     });
 
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    // The dispatcher first clears the runtime's conversation (/new for Codex, since fcdc1b8) and
+    // waits CONTEXT_CLEAR_SETTLE_MS before typing the prompt; fake timers must cover that wait.
+    await vi.advanceTimersByTimeAsync(taskDispatcher.CONTEXT_CLEAR_SETTLE_MS);
 
+    expect(tmuxHarness.getSentTexts('alpha-session')[0]).toBe(taskDispatcher.contextClearCommand('codex'));
     expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('Build the shared auth middleware'))).toBe(true);
     expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('RESULT: PASS'))).toBe(true);
     expect(tmuxHarness.getSentTexts('beta-session').some((t) => t.includes('Wire the dashboard to the auth middleware'))).toBe(false);
@@ -320,8 +323,9 @@ describe('agent runtime integration', () => {
     expect(messages[0]?.message).toContain('completed successfully');
 
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(taskDispatcher.CONTEXT_CLEAR_SETTLE_MS);
 
+    expect(tmuxHarness.getSentTexts('beta-session')[0]).toBe(taskDispatcher.contextClearCommand('codex'));
     expect(tmuxHarness.getSentTexts('beta-session').some((t) => t.includes('Wire the dashboard to the auth middleware'))).toBe(true);
 
     await completeAdoptedRun('beta-session');

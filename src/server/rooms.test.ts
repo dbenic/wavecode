@@ -60,7 +60,11 @@ describe('project rooms (spec §5e)', () => {
     return a.data;
   }
 
-  const typedInto = (name: string) => tmuxHarness.typed.filter((t) => t.session === `wc-${name}`).map((t) => t.text);
+  // Everything typed into the agent's pane, minus the context-clear command (/clear) the
+  // dispatcher types before every fresh task's prompt (fcdc1b8): the tests here read prompts.
+  const typedInto = (name: string) => tmuxHarness.typed
+    .filter((t) => t.session === `wc-${name}` && t.text !== '/clear')
+    .map((t) => t.text);
 
   beforeEach(async () => {
     tmuxHarness.sessions.clear();
@@ -355,8 +359,9 @@ describe('project rooms (spec §5e)', () => {
       const dispatcher = await import('./task-dispatcher.js');
       dispatcher.resetDispatcherForTest();
       await dispatcher.dispatchNext({ manual: true });
-      // the dispatcher staggers seats by 1.5s
+      // the dispatcher staggers seats by 1.5s and settles 1.5s after each /clear before the prompt
       await vi.waitFor(() => expect(typedInto('shop-dev').length + typedInto('shop-qa').length).toBe(2), { timeout: 5000 });
+      expect(tmuxHarness.typed.filter((t) => t.text === '/clear').map((t) => t.session).sort()).toEqual(['wc-shop-dev', 'wc-shop-qa']);
 
       const devPrompt = typedInto('shop-dev')[0];
       expect(devPrompt).toContain('## PROJECT ROOM: shop');

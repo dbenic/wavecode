@@ -687,7 +687,7 @@ export function wantsFreshContext(task: Pick<Task, 'context' | 'fix_sha'>): bool
 }
 
 /** Settle time for the TUI after its clear command, before the prompt is typed. */
-const CONTEXT_CLEAR_SETTLE_MS = 1_500;
+export const CONTEXT_CLEAR_SETTLE_MS = 1_500;
 
 async function clearContextForTask(agent: Agent, task: Task): Promise<void> {
   if (!wantsFreshContext(task)) return;
