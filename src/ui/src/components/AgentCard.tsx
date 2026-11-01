@@ -103,6 +103,15 @@ export default function AgentCard({
               </h3>
               <p className="text-[10px] text-slate-500 tracking-wide uppercase flex items-center gap-1">
                 {agent.runtime} &middot; {agent.mode}
+                {agent.role && (
+                  <span
+                    className={`px-1 py-px rounded border text-[8px] font-bold ${agent.role === 'reviewer' ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300' : 'bg-violet-950/50 border-violet-500/30 text-violet-300'}`}
+                    title={agent.role === 'reviewer' ? 'Reviewer seat: takes review requests only; the picker prefers it' : 'Orchestrator (PM) seat'}
+                    data-testid="agent-role"
+                  >
+                    {agent.role === 'reviewer' ? 'REVIEWER' : 'PM'}
+                  </span>
+                )}
                 {agent.live_model ? (
                   <span
                     className={`px-1 py-px rounded border text-[8px] font-bold normal-case ${agent.model_mismatch ? 'bg-amber-900/50 border-amber-500/40 text-amber-200' : 'bg-indigo-900/50 border-indigo-500/30 text-indigo-300'}`}

@@ -16,6 +16,7 @@ import {
   samePerson,
   selectReviewer,
   shouldReassign,
+  silentReviewerIds,
   vendorOf,
   assignmentFacts,
   reviewStatusForVerdict,
@@ -62,6 +63,7 @@ function choose(
     minCapacityPct: extra.minCapacityPct,
     allow: extra.allow,
     serviceProfiles: extra.serviceProfiles,
+    silent: extra.silent,
     load: (agent) => ({
       busy: agent.status === 'working' || agent.status === 'error',
       openReviews: 0,
@@ -243,19 +245,17 @@ describe('shouldReassign', () => {
     hasVerdict: false,
     waitedMs: 16 * 60 * 1000,
     limitMs: 15 * 60 * 1000,
-    currentBusy: true,
     reassignCount: 0,
     nextId: 'codex2',
     currentId: 'codex3',
     nextIdle: false,
   };
 
-  it('moves once off a busy seat, then only when the next seat is idle', () => {
+  it('moves once off a silent seat (busy or idle), then only when the next seat is idle', () => {
     expect(shouldReassign(base)).toBe(true);
     expect(shouldReassign({ ...base, reassignCount: 1, nextIdle: false })).toBe(false);
     expect(shouldReassign({ ...base, reassignCount: 1, nextIdle: true })).toBe(true);
     expect(shouldReassign({ ...base, hasVerdict: true })).toBe(false);
-    expect(shouldReassign({ ...base, currentBusy: false })).toBe(false);
     expect(shouldReassign({ ...base, waitedMs: 14 * 60 * 1000 })).toBe(false);
     expect(shouldReassign({ ...base, limitMs: 0 })).toBe(false);
     expect(shouldReassign({ ...base, nextId: 'codex3' })).toBe(false);
@@ -376,5 +376,102 @@ describe('loadMemo', () => {
     const first = load(agent);
     expect(load(agent)).toBe(first);
     expect(first).toMatchObject({ busy: false, openReviews: 0, runningTasks: 0, lastAssignedAt: 0 });
+  });
+});
+
+describe('reviewer seats (role reviewer)', () => {
+  const author = seat('claude1', { runtime: 'claude-code', profile: 'denis' });
+  const revCodex = seat('codex7', { runtime: 'codex', role: 'reviewer', profile: 'revpool' });
+  const revClaude = seat('claude2', { runtime: 'claude-code', role: 'reviewer', profile: 'revpool' });
+  const prefer = { claude: ['codex2', 'codex3'] };
+
+  it('prefers an idle reviewer seat on another profile and vendor over the prefer tier', () => {
+    const picked = choose(author, [seat('codex2'), seat('codex3'), revClaude, revCodex], { prefer });
+    expect(picked?.name).toBe('codex7');
+  });
+
+  it('then an idle reviewer seat on another profile of the same vendor, then any idle reviewer seat', () => {
+    expect(choose(author, [seat('codex2'), revClaude], { prefer })?.name).toBe('claude2');
+    const sameProfileReviewer = seat('codex8', { runtime: 'codex', role: 'reviewer', profile: 'denis' });
+    // Same profile as the author is the author's own seat unless the profile is a service pool.
+    expect(choose(author, [seat('codex2'), sameProfileReviewer], { prefer })?.name).toBe('codex2');
+    expect(choose(author, [seat('codex2'), sameProfileReviewer], { prefer, serviceProfiles: ['denis'] })?.name).toBe('codex8');
+  });
+
+  it('a busy reviewer seat falls behind the prefer tier; an idle one is eligible whatever the allowlist and auto-pick say', () => {
+    const busy = seat('codex7', { runtime: 'codex', role: 'reviewer', profile: 'revpool', status: 'working' });
+    expect(choose(author, [seat('codex2'), busy], { prefer })?.name).toBe('codex2');
+    expect(choose(author, [seat('codex2'), revCodex], { prefer: {}, allow: ['codex2'] })?.name).toBe('codex7');
+    expect(choose(author, [seat('codex2'), revCodex], { prefer: {}, autoPick: false })?.name).toBe('codex7');
+  });
+
+  it('skips a reviewer seat that is out of rotation (plan under the floor) or silent on its last reviews', () => {
+    expect(choose(author, [seat('codex2'), revClaude, revCodex], { prefer, minCapacityPct: 10 }, { codex7: { leftPct: 4 } })?.name).toBe('claude2');
+    expect(choose(author, [seat('codex2'), revClaude, revCodex], { prefer, silent: new Set(['codex7']) })?.name).toBe('claude2');
+    expect(choose(author, [seat('codex2'), revClaude, revCodex], { prefer, silent: new Set(['codex7', 'claude2']) })?.name).toBe('codex2');
+  });
+
+  it('never picks the author, a denied name or a PM seat even with the reviewer role', () => {
+    const deniedReviewer = seat('codex1', { role: 'reviewer', profile: 'revpool' });
+    const pmReviewer = seat('pm', { role: 'orchestrator', profile: 'revpool' });
+    expect(choose(author, [deniedReviewer, pmReviewer, seat('codex2')], { prefer })?.name).toBe('codex2');
+  });
+});
+
+describe('silent seats', () => {
+  let tmp: string;
+  const LIMIT = 10 * 60 * 1000;
+  const T0 = 1_700_000_000_000;
+
+  afterEach(() => {
+    db.resetDbForTest();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function assign(sha: string, reviewerId: string, at: number): void {
+    emit('pipeline.review', 'run', `${sha}:assign`, { sha, reviewer_id: reviewerId, assigned_at_ms: at, reassigned: false }, null);
+  }
+
+  function verdict(sha: string, reviewerId: string, atMs: number): void {
+    db.getDb().prepare(
+      `INSERT INTO freeze_verdicts (sha, reviewer_agent_id, reviewer_name, verdict, created_at) VALUES (?, ?, ?, 'pass', ?)`,
+    ).run(sha, reviewerId, reviewerId, new Date(atMs).toISOString().replace('T', ' ').slice(0, 19));
+  }
+
+  it('a seat whose last three assigned reviews got no verdict in the window is silent; one answer ends the streak', () => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-silent-'));
+    db.initDb(path.join(tmp, 't.db'));
+    ensureReleaseFreezeTable();
+    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((ch) => ch.repeat(40));
+    assign(a, 'codex1', T0);
+    assign(b, 'codex1', T0 + 3_600_000);
+    assign(c, 'codex1', T0 + 7_200_000);
+    assign(a, 'codex3', T0);
+    assign(b, 'codex3', T0 + 3_600_000);
+    const now = T0 + 3 * 3_600_000;
+    // codex3 has only two unanswered reviews: not silent yet.
+    expect(silentReviewerIds(undefined, LIMIT, now)).toEqual(new Set(['codex1']));
+
+    // A fresh assignment inside the window is neither answered nor silent: the three older ones still count.
+    assign(d, 'codex1', now - 60_000);
+    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(true);
+
+    // A verdict on the newest decided one, inside the window, ends the streak.
+    verdict(c, 'codex1', T0 + 7_200_000 + 5 * 60_000);
+    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(false);
+
+    // A verdict that came after the window does not count as an answer.
+    db.getDb().prepare('DELETE FROM freeze_verdicts').run();
+    verdict(c, 'codex1', T0 + 7_200_000 + 40 * 60_000);
+    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(true);
+
+    // The freeze row's own verdict counts too.
+    db.getDb().prepare('DELETE FROM freeze_verdicts').run();
+    db.getDb().prepare(`INSERT INTO release_freezes (sha, reviewer_agent_id, verdict, status, updated_at) VALUES (?, 'codex1', 'needs-fixes', 'open', ?)`)
+      .run(b, new Date(T0 + 3_600_000 + 60_000).toISOString().replace('T', ' ').slice(0, 19));
+    expect(silentReviewerIds(undefined, LIMIT, now).has('codex1')).toBe(false);
+
+    // A window of 0 disables the rule.
+    expect(silentReviewerIds(undefined, 0, now).size).toBe(0);
   });
 });

@@ -32,7 +32,11 @@ export interface Agent {
   lease_reason?: LeaseReason | null;
   /** Credential profile the runtime runs on (spec §5); null = the service user's home-dir login. */
   profile?: string | null;
-  /** 'orchestrator' = the PM seat that gets the standing operating prompt (spec §5b). */
+  /**
+   * 'orchestrator' = the PM seat that gets the standing operating prompt (spec §5b).
+   * 'reviewer' = a dedicated review seat: the dispatcher gives it no lane or fix task, only
+   * review requests, so it is idle when a freeze needs a reviewer and the picker prefers it.
+   */
   role?: AgentRole | null;
   /** Short unique handle (`@toni`); resolution everywhere is alias → name → id (spec §5c). */
   alias?: string | null;
@@ -43,7 +47,7 @@ export interface Agent {
   created_at: string;
 }
 
-export const AGENT_ROLES = ['orchestrator'] as const;
+export const AGENT_ROLES = ['orchestrator', 'reviewer'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
 /** 'seat' = a user's own orchestrator seat (spec §5d): never expires, never released by hand. */

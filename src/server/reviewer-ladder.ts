@@ -6,15 +6,18 @@
  *   1. explicit — the caller named one (`#review #12 @opus`, API body)
  *   2. task     — `tasks.reviewer` set when the task was created
  *   3. default  — config `review.default_reviewer` (name, then runtime)
- *   4. tag      — a FREE agent tagged `review`          (needs review.auto_pick)
- *   5. pool     — any FREE agent                         (needs review.auto_pick)
+ *   4. reviewer — a FREE seat with role `reviewer`, other profile + vendor first
+ *   5. tag      — a FREE agent tagged `review`          (needs review.auto_pick)
+ *   6. pool     — any FREE agent                         (needs review.auto_pick)
  *   —  none     — the run waits with a "needs a reviewer" item + candidates
  *
  * Rungs 1–3 use the agent even if it is busy (it was chosen on purpose; the
- * prompt queues in its pane). Rungs 4–5 need a free agent: idle, no lease, no
- * open run, profile-compatible with the task's creator, not a PM seat, and
- * never the author. Other vendor than the author is preferred everywhere
- * (different models have different blind spots), same vendor is the fallback.
+ * prompt queues in its pane). Rungs 4–6 need a free agent: idle, no lease, no
+ * open run, profile-compatible with the task's creator, not a PM seat, in
+ * rotation (plan above the capacity floor), not silent on its last three
+ * reviews, and never the author. Other vendor than the author is preferred
+ * everywhere (different models have different blind spots), same vendor is
+ * the fallback.
  */
 
 import { getConfig } from './config.js';
@@ -29,9 +32,9 @@ import {
   type Run,
 } from './db.js';
 import { isProfileCompatible, lookupActor } from './profiles.js';
-import { reviewerDenied } from './reviewer-assign.js';
+import { capacityLeftPct, minCapacityPct, reviewerDenied, seatOutOfRotation, silentReviewerIds } from './reviewer-assign.js';
 
-export type ReviewerRung = 'explicit' | 'task' | 'default' | 'tag' | 'pool';
+export type ReviewerRung = 'explicit' | 'task' | 'default' | 'reviewer' | 'tag' | 'pool';
 
 export interface ReviewerPick {
   ok: true;
@@ -69,12 +72,19 @@ export function pickReviewer(
   const task = getTask(run.task_id);
   const actor = lookupActor(task.ok ? task.data.created_by : null);
 
+  const silent = safeSilent();
+  const floor = minCapacityPct();
+  const inRotation = (a: Agent): boolean => !seatOutOfRotation({ leftPct: capacityLeftPct(a) }, floor) && !silent.has(a.id);
   const eligible = (a: Agent): boolean =>
     a.id !== authorId && a.role !== 'orchestrator' && a.mode !== 'file' && !reviewerDenied(a);
   const free = (a: Agent): boolean =>
-    eligible(a) && a.status === 'idle' && !a.owner_id && !hasOpenRun(a.id) && isProfileCompatible(a.profile, actor, cfg);
+    eligible(a) && a.status === 'idle' && !a.owner_id && !hasOpenRun(a.id) && isProfileCompatible(a.profile, actor, cfg) && inRotation(a);
+  const authorProfile = author.ok ? author.data.profile ?? 'home' : 'home';
   const otherVendorFirst = (a: Agent, b: Agent): number =>
     Number(a.runtime === authorRuntime) - Number(b.runtime === authorRuntime) || a.name.localeCompare(b.name);
+  // Reviewer seats: another credential profile than the author first, then another vendor.
+  const otherProfileAndVendorFirst = (a: Agent, b: Agent): number =>
+    Number((a.profile ?? 'home') === authorProfile) - Number((b.profile ?? 'home') === authorProfile) || otherVendorFirst(a, b);
   const vendorNote = (a: Agent): string => (authorRuntime && a.runtime === authorRuntime ? 'same vendor' : 'other vendor');
 
   const agents = listAgents();
@@ -120,7 +130,16 @@ export function pickReviewer(
   const freeAgents = agents.filter(free).sort(otherVendorFirst);
   const tags = safeTags();
 
-  // 4. tagged review
+  // 4. reviewer seat (role), other profile and vendor than the author first
+  const reviewers = freeAgents.filter((a) => a.role === 'reviewer').sort(otherProfileAndVendorFirst);
+  if (reviewers.length) {
+    const agent = reviewers[0];
+    const alternatives = freeAgents.filter((a) => a.id !== agent.id).slice(0, MAX_ALTERNATIVES);
+    const profileNote = (agent.profile ?? 'home') === authorProfile ? 'same profile' : 'other profile';
+    return { ok: true, agent, rung: 'reviewer', reason: `free reviewer seat, ${profileNote}, ${vendorNote(agent)}`, alternatives };
+  }
+
+  // 5. tagged review
   const tagged = freeAgents.filter((a) => tags.get(a.id)?.includes(REVIEW_TAG));
   if (tagged.length) {
     const agent = tagged[0];
@@ -128,7 +147,7 @@ export function pickReviewer(
     return { ok: true, agent, rung: 'tag', reason: `free, tagged ${REVIEW_TAG}, ${vendorNote(agent)}`, alternatives };
   }
 
-  // 5. pool
+  // 6. pool
   if (freeAgents.length) {
     const agent = freeAgents[0];
     const alternatives = freeAgents.slice(1, 1 + MAX_ALTERNATIVES);
@@ -143,5 +162,13 @@ function safeTags(): Map<string, string[]> {
     return listAllAgentTags();
   } catch {
     return new Map();
+  }
+}
+
+function safeSilent(): Set<string> {
+  try {
+    return silentReviewerIds();
+  } catch {
+    return new Set();
   }
 }

@@ -139,7 +139,7 @@ export const WAVECODE_TOOLS: WaveCodeToolDef[] = [
       runner: z.enum(['tmux', 'file']).optional().describe("file = Claude file-runner (claude -p, result.txt wins, cli.log RESULT counts, incomplete if neither). Default tmux."),
       reserve_hours: z.number().positive().max(24).optional().describe(`The new agent is reserved for you (default ${SPAWN_RESERVE_HOURS}h) so teammates cannot grab it`),
       profile: z.string().nullable().optional().describe("Credential profile (whose CLI subscription runs it). Default: your own. Admin only; null = the service user's home login"),
-      role: z.enum(['orchestrator']).optional().describe('orchestrator = the PM seat: it receives docs/orchestrator-seat.md once up and becomes the Command Center default target'),
+      role: z.enum(['orchestrator', 'reviewer']).optional().describe('orchestrator = the PM seat: it receives docs/orchestrator-seat.md once up and becomes the Command Center default target. reviewer = review-only seat: no lane or fix tasks, preferred by the reviewer picker'),
     },
     handler: (client, args) =>
       client.post('/agents/spawn', { ...args, reserve_hours: args.reserve_hours ?? SPAWN_RESERVE_HOURS }),

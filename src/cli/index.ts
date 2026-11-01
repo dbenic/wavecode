@@ -121,6 +121,7 @@ program
       console.log(`    Mode:     ${a.mode}`);
       console.log(`    Status:   ${a.status}`);
       console.log(`    Session:  ${a.tmux_session}`);
+      if (a.role) console.log(`    Role:     ${a.role}`);
       if (a.workspace) console.log(`    Workspace: ${a.workspace}`);
       console.log(`    Created:  ${a.created_at}`);
     }

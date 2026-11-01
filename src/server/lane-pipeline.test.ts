@@ -1172,13 +1172,13 @@ describe('hands-free lane pipeline', () => {
 
     db.updateAgentStatus(codex3.id, 'working');
     db.updateAgentStatus(codex2.id, 'idle');
-    expect(reassignWaitingReviews(Date.now() + 14 * 60 * 1000)).toBe(0);
+    expect(reassignWaitingReviews(Date.now() + 9 * 60 * 1000)).toBe(0); // default window: 10 minutes
     expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
 
     expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(1);
     expect(getFreeze(sha)?.reviewer_name).toBe('codex2');
     expect(messages(codex2.id).join('\n')).toMatch(/Please review freeze/);
-    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex3 → @codex2 \(busy, no verdict\)/);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex3 → @codex2 \(no verdict in 16 min\)/);
 
     db.updateAgentStatus(codex2.id, 'working');
     db.updateAgentStatus(codex3.id, 'working');
@@ -1188,10 +1188,63 @@ describe('hands-free lane pipeline', () => {
     db.updateAgentStatus(codex3.id, 'idle');
     expect(reassignWaitingReviews(Date.now() + 16 * 60 * 1000)).toBe(1);
     expect(getFreeze(sha)?.reviewer_name).toBe('codex3');
-    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex2 → @codex3 \(busy, no verdict\)/);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex2 → @codex3 \(no verdict in 16 min\)/);
     expect(messages(ownSeat.id).join('\n')).not.toMatch(/Please review/);
     expect(messages(claude2.id).join('\n')).not.toMatch(/Please review/);
     expect(messages(codex1.id).join('\n')).not.toMatch(/Please review/);
+  });
+
+  it('honours a reviewer named in the freeze note, then moves the review after the window even though the seat is idle', async () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex2 = agent('codex2', path.join(tmp, 'codex2'));
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex3'] }; // the picker alone would choose codex3
+    const file = openNote('claude1', 'wc-claude1', sha);
+    fs.appendFileSync(file, '- Reviewer: @codex2\n');
+    expect((await ingestFreezeFile(file)).ok).toBe(true);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex2.id);
+    expect(messages(codex2.id).join('\n')).toMatch(/Please review freeze/);
+    expect(messages(codex3.id).join('\n')).not.toMatch(/Please review/);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/pinged @codex2 \(named in the freeze note\)/);
+
+    // codex2 stays idle and silent: the ping went nowhere. Named or picked, the window is the same.
+    expect(reassignWaitingReviews(Date.now() + 9 * 60 * 1000)).toBe(0);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex2.id);
+    expect(reassignWaitingReviews(Date.now() + 11 * 60 * 1000)).toBe(1);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    expect(messages(codex3.id).join('\n')).toMatch(/Please review freeze/);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/reassigned @codex2 → @codex3 \(no verdict in 11 min\)/);
+  });
+
+  it('a named seat the ladder refuses (denied) falls back to the picker, and the note says why', async () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex1 = agent('codex1', path.join(tmp, 'codex1')); // review_deny in this fixture
+    const codex3 = agent('codex3', path.join(tmp, 'codex3'));
+    pipe.auto_review = true;
+    const file = openNote('claude1', 'wc-claude1', sha);
+    fs.appendFileSync(file, '- Reviewer: @codex1\n');
+    expect((await ingestFreezeFile(file)).ok).toBe(true);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(codex3.id);
+    expect(messages(codex1.id).join('\n')).not.toMatch(/Please review/);
+    expect(latestPipelineNote('wave', 'wc-claude1')).toMatch(/pinged @codex3 \(@codex1 is denied\)/);
+  });
+
+  it('an idle reviewer seat on another profile is picked ahead of the prefer tier', async () => {
+    const sha = branch('wc-claude1', 'lane.txt', 'lane');
+    agent('claude1', path.join(tmp, 'claude1'), 'claude-code');
+    const codex2 = agent('codex2', path.join(tmp, 'codex2'));
+    const seat = agent('codex7', path.join(tmp, 'codex7'));
+    db.updateAgentRole(seat.id, 'reviewer');
+    db.getDb().prepare('UPDATE agents SET profile = ? WHERE id = ?').run('revpool', seat.id);
+    pipe.auto_review = true;
+    pipe.reviewer_prefer = { claude: ['codex2'] };
+    expect((await ingestFreezeFile(openNote('claude1', 'wc-claude1', sha))).ok).toBe(true);
+    expect(getFreeze(sha)?.reviewer_agent_id).toBe(seat.id);
+    expect(messages(seat.id).join('\n')).toMatch(/Please review freeze/);
+    expect(messages(codex2.id).join('\n')).not.toMatch(/Please review/);
   });
 
   it('does not reassign when review_reassign_minutes is 0', async () => {

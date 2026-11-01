@@ -27,6 +27,8 @@ export interface AgentBoardRow {
   alias: string | null;
   runtime: string;
   model: string | null;
+  /** 'orchestrator' = the PM seat, 'reviewer' = review-only seat, null = developer */
+  role: Agent['role'] | null;
   status: Agent['status'];
   /** when the status last changed (ISO, UTC) */
   status_since: string | null;
@@ -637,6 +639,7 @@ async function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Pr
     }
     return {
       id: a.id, name: a.name, alias: a.alias ?? null, runtime: a.runtime, model: (a as { model?: string | null }).model ?? null,
+      role: a.role ?? null,
       status: a.status, status_since: statusSince, for_min: forMin, current,
       last_reply: fact.reply ? { at: iso(fact.reply.created_at)!, text: fact.reply.message.slice(0, 240) } : null,
       blocked_on: blocked, usage: usage?.summary ?? null,

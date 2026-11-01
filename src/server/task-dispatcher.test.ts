@@ -175,6 +175,43 @@ describe('task-dispatcher.ts', () => {
     );
   });
 
+  it('a reviewer seat gets no lane task; a review request dispatches to it', async () => {
+    await setupBaseMocks(true);
+    const db = await import('./db.js');
+    const runner = await import('./runner.js');
+    vi.mocked(runner.executeRun).mockResolvedValue({ ok: true, data: { id: 'run-1' } } as never);
+    vi.mocked(db.listAgents).mockReturnValue([{
+      id: 'agent-1', name: 'agent-1', runtime: 'codex', tmux_session: 'wc-agent-1', workspace: null,
+      mode: 'spawned', status: 'idle', role: 'reviewer', created_at: '2026-04-03T00:00:00Z',
+    } as never]);
+
+    const dispatcher = await import('./task-dispatcher.js');
+    dispatcher.resetDispatcherForTest();
+    await dispatcher.dispatchNext({ manual: true });
+    await vi.runAllTimersAsync();
+    expect(vi.mocked(runner.executeRun)).not.toHaveBeenCalled();
+
+    vi.mocked(db.listTasks).mockReturnValue([{
+      id: 'task-2', agent_id: null, prompt: 'Review freeze abc12345', status: 'pending', priority: 1,
+      created_at: '2026-04-03T00:00:00Z', goal_id: null, template: 'review',
+    } as never]);
+    await dispatcher.dispatchNext({ manual: true });
+    await vi.runAllTimersAsync();
+    expect(vi.mocked(runner.executeRun)).toHaveBeenCalledWith('agent-1', 'task-2', 'Review freeze abc12345');
+  });
+
+  it('agentUnfit names the role for a reviewer seat given anything but a review request', async () => {
+    await setupBaseMocks(true);
+    const dispatcher = await import('./task-dispatcher.js');
+    const seat = { id: 'r1', name: 'codex7', runtime: 'codex', profile: null, status: 'idle' as const, role: 'reviewer' as const };
+    expect(dispatcher.reviewerSeatMayTake(seat, { template: null })).toBe(false);
+    expect(dispatcher.reviewerSeatMayTake(seat, { template: 'review' })).toBe(true);
+    expect(dispatcher.reviewerSeatMayTake({ role: null }, { template: null })).toBe(true);
+    expect(dispatcher.agentUnfit(seat)).toEqual({ code: 'role', why: '@codex7 is a reviewer seat; it takes review requests only' });
+    expect(dispatcher.agentUnfit(seat, { template: 'review' })).toBeNull();
+    expect(dispatcher.agentUnfit({ ...seat, role: null })).toBeNull();
+  });
+
   it('fails the dispatch with runtime not running when the TUI cannot be brought back (T0)', async () => {
     await setupBaseMocks(false);
     const db = await import('./db.js');

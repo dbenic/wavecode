@@ -176,7 +176,11 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       resolvedAgentId = agentResult.data.id;
       // 27 Oct 2026 retro, cause 1: nobody checked quota and current work before handing out a task.
       // Out of plan: refused, with who is free. Busy: accepted (it queues behind), but said in the answer.
-      const unfit = taskDispatcher.agentUnfit(agentResult.data);
+      const unfit = taskDispatcher.agentUnfit(agentResult.data, { template: body.template ?? null });
+      // A reviewer seat takes review requests only; a lane or fix task queued on it would wait forever.
+      if (unfit?.code === 'role') {
+        return c.json({ error: `${unfit.why}; pick another agent`, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) }, 409);
+      }
       if (unfit?.code === 'quota' && body.hold !== true) {
         return c.json({ error: `${unfit.why}; pick another agent`, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) }, 409);
       }

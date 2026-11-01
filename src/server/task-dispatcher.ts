@@ -409,8 +409,18 @@ function noteWaitingTasks(tasks: Task[], agents: Agent[]): void {
   }
 }
 
+/**
+ * A reviewer seat (`agents.role = 'reviewer'`) takes review requests only: no lane, no fix task,
+ * no chore. It stays idle so a freeze that needs a reviewer is picked up within a minute
+ * (1 Nov 2026 speed review §6.3). A task is a review request when its dispatch template is 'review'.
+ */
+export function reviewerSeatMayTake(agent: Pick<Agent, 'role'>, task: Pick<Task, 'template'>): boolean {
+  return agent.role !== 'reviewer' || task.template === 'review';
+}
+
 /** Why an agent cannot take new work right now, for callers that chose it by name; null = fine. */
-export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile' | 'status'>): { code: 'busy' | 'quota'; why: string } | null {
+export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile' | 'status' | 'role'>, task: Pick<Task, 'template'> = { template: null }): { code: 'busy' | 'quota' | 'role'; why: string } | null {
+  if (!reviewerSeatMayTake(agent, task)) return { code: 'role', why: `@${agent.name} is a reviewer seat; it takes review requests only` };
   const floor = getConfig().autonomy.min_quota_pct ?? DEFAULT_MIN_QUOTA_PCT;
   const left = quotaLeftPct(agent.runtime, agent.profile);
   if (left !== null && left < floor) return { code: 'quota', why: `@${agent.name} has ${left}% of its plan left (floor ${floor}%)` };
@@ -421,7 +431,7 @@ export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profi
 /** Free agents a caller could use instead, by name. */
 export function freeAgentNames(except: string | null = null): string[] {
   return listAgents()
-    .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && !a.owner_id && quotaOk(a))
+    .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && a.role !== 'reviewer' && !a.owner_id && quotaOk(a))
     .map((a) => a.alias ? `@${a.alias}` : a.name);
 }
 
@@ -739,8 +749,8 @@ function isDependencySatisfied(depTaskId: string): boolean {
  * Prefers tasks assigned to this agent, then unassigned tasks.
  */
 function findTaskForAgent(tasks: Task[], agent: Agent): Task | null {
-  // Rule 6: only free agents, or ones owned by the task's creator
-  const eligible = (t: Task) => leases.canDispatchTaskToAgent(t, agent);
+  // Rule 6: only free agents, or ones owned by the task's creator. A reviewer seat takes review requests only.
+  const eligible = (t: Task) => reviewerSeatMayTake(agent, t) && leases.canDispatchTaskToAgent(t, agent);
 
   // First: tasks explicitly assigned to this agent
   const assigned = tasks.find((t) => t.agent_id === agent.id && eligible(t));

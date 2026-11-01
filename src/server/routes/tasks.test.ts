@@ -164,6 +164,22 @@ describe('task routes', () => {
     expect(response.json).toMatchObject({ id: 'task-named', agent_id: existing.id });
   });
 
+  it('refuses a lane task named for a reviewer seat with 409 and the free agents', async () => {
+    const db = await import('../db.js');
+    const dispatcher = await import('../task-dispatcher.js');
+    const seat = { id: '01M0B9AGENTULID00000000007', name: 'codex7', runtime: 'codex', tmux_session: 'wc-codex7', workspace: null, mode: 'spawned', status: 'idle', role: 'reviewer' };
+    vi.mocked(db.getAgentByName).mockReturnValue({ ok: true, data: seat } as never);
+    vi.mocked(dispatcher.agentUnfit).mockReturnValueOnce({ code: 'role', why: '@codex7 is a reviewer seat; it takes review requests only' } as never);
+    vi.mocked(dispatcher.freeAgentNames).mockReturnValueOnce(['codex2']);
+
+    const app = await createTaskApp();
+    const response = await requestJson(app, '/api/tasks', 'POST', { prompt: 'build the thing', agent_id: 'codex7' });
+    expect(response.status).toBe(409);
+    expect(response.json).toEqual({ error: '@codex7 is a reviewer seat; it takes review requests only; pick another agent', free_agents: ['codex2'] });
+    expect(vi.mocked(dispatcher.agentUnfit)).toHaveBeenCalledWith(seat, { template: null });
+    expect(db.insertTask).not.toHaveBeenCalled();
+  });
+
   it('rejects create_task when the agent name does not match an existing seat', async () => {
     const db = await import('../db.js');
     vi.mocked(db.getAgent).mockReturnValue({

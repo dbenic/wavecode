@@ -945,9 +945,13 @@ export async function ingestFreezeText(text: string, filePath: string, opts: Ing
 
   if (!verdict || sameVerdict) {
     if (!existing) {
-      getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, freeze_path, verdict_path, gate, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
+      // `Reviewer: @x` in the freeze note names the seat the author wants; the pipeline honours it
+      // through the ladder's checks and holds it to the same window as a picked one.
+      const namedReviewer = reviewer && reviewer.id !== author?.id ? reviewer : null;
+      getDb().prepare(`INSERT INTO release_freezes (sha, project, desk, lane, author_agent_id, author_name, reviewer_agent_id, reviewer_name, freeze_path, verdict_path, gate, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`)
         .run(sha, project, parsed.desk, lane, author?.id ?? null, author?.name ?? parsed.authorCandidates[0] ?? null,
+          namedReviewer?.id ?? null, namedReviewer?.name ?? null,
           parsed.kind === 'freeze' ? filePath : null, parsed.kind === 'verdict' ? filePath : parsed.verdictPath, gateToStore);
       supersedeOlder(sha, project, lane, parsed.desk);
       await settleBehind(sha, project);

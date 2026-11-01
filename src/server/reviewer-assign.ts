@@ -9,12 +9,18 @@
  * `claude1-codex`). A name listed in `reviewer_pool_by_author_glob` may still
  * review that author (`ales-*` may use `ales-codex1`).
  *
- * Tiers, first non-empty wins: the preferred independent seats, then any
- * other independent eligible reviewer (route, default, tagged, then the
- * rest), and only then a same-person seat named in `reviewer_pool_by_author_glob`.
- * A same-person seat is never chosen unless that pool names it. Inside a
- * tier, least loaded: pane idle before busy, then fewer open reviews, then
- * fewer running tasks, then least recent assignment.
+ * Tiers, first non-empty wins: idle reviewer seats (`agents.role = 'reviewer'`,
+ * other profile and other vendor than the author first, then other profile,
+ * then any), the preferred independent seats, then any other independent
+ * eligible reviewer (route, default, tagged, then the rest), and only then a
+ * same-person seat named in `reviewer_pool_by_author_glob`. A same-person
+ * seat is never chosen unless that pool names it. Inside a tier, least
+ * loaded: pane idle before busy, then fewer open reviews, then fewer running
+ * tasks, then least recent assignment.
+ *
+ * Never chosen: a seat out of rotation (`seatOutOfRotation`: plan under the
+ * capacity floor) and a silent seat (`silentReviewerIds`: its last three
+ * assigned reviews got no verdict inside `review_reassign_minutes`).
  */
 
 import { getConfig } from './config.js';
@@ -86,6 +92,81 @@ export function minCapacityPct(): number {
 /** True when the seat's plan is below the floor. An unprobed profile is not excluded. */
 export function belowCapacity(load: Pick<ReviewerLoad, 'leftPct'>, floor: number): boolean {
   return typeof load.leftPct === 'number' && load.leftPct < floor;
+}
+
+/**
+ * Why a seat is out of the reviewer rotation, or null when it may review.
+ * Today: its plan is under the capacity floor (the review would stall at the
+ * usage-limit screen). The seat-credentials branch's `seatOut()` (API key,
+ * logged out, parked) belongs here once it is on main.
+ */
+export function seatOutOfRotation(load: Pick<ReviewerLoad, 'leftPct'>, floor: number): string | null {
+  if (belowCapacity(load, floor)) return `plan at ${load.leftPct}% (floor ${floor}%)`;
+  return null;
+}
+
+/** A seat whose last reviews this many in a row got no verdict in the window is skipped by the picker. */
+export const SILENT_REVIEW_STREAK = 3;
+
+/**
+ * Seats whose last `SILENT_REVIEW_STREAK` assigned reviews each got no verdict
+ * from them inside `limitMs` of the assignment. An assignment still inside the
+ * window is neither answered nor silent and is left out of the count; the first
+ * answered review (newest first) ends the streak. Read from the `pipeline.review`
+ * events and the verdict ledger. A seat with fewer assignments than the streak
+ * is never silent.
+ */
+export function silentReviewerIds(events: ReviewEvent[] = reviewEvents(), limitMs = projectReassignMs(null), now = Date.now()): Set<string> {
+  const silent = new Set<string>();
+  if (!(limitMs > 0) || events.length === 0) return silent;
+  const verdictAt = verdictTimes();
+  const bySeat = new Map<string, ReviewEvent[]>();
+  for (const row of events) {
+    const list = bySeat.get(row.reviewerId) ?? [];
+    list.push(row);
+    bySeat.set(row.reviewerId, list);
+  }
+  for (const [seat, rows] of bySeat) {
+    const seen = new Set<string>();
+    let streak = 0;
+    for (let i = rows.length - 1; i >= 0 && streak < SILENT_REVIEW_STREAK; i--) {
+      const row = rows[i];
+      if (seen.has(row.sha)) continue;
+      seen.add(row.sha);
+      const answered = verdictAt.get(`${row.sha}:${seat}`);
+      if (answered !== undefined && (answered === null || answered <= row.at + limitMs)) break;
+      if (now - row.at < limitMs) continue; // still inside the window: not silent yet
+      streak += 1;
+    }
+    if (streak >= SILENT_REVIEW_STREAK) silent.add(seat);
+  }
+  return silent;
+}
+
+/** `sha:reviewerId` → verdict time (epoch ms; null when the row has no parseable time). */
+function verdictTimes(): Map<string, number | null> {
+  const out = new Map<string, number | null>();
+  const put = (sha: string | null, id: string | null, at: string | null) => {
+    if (!sha || !id) return;
+    const key = `${sha}:${id}`;
+    const ms = at ? Date.parse(at.includes('T') ? at : `${at.replace(' ', 'T')}Z`) : NaN;
+    const prev = out.get(key);
+    const next = Number.isFinite(ms) ? ms : null;
+    if (prev === undefined || prev === null || (next !== null && next < prev)) out.set(key, next);
+  };
+  try {
+    const rows = getDb().prepare(
+      'SELECT sha, reviewer_agent_id, created_at FROM freeze_verdicts WHERE reviewer_agent_id IS NOT NULL',
+    ).all() as { sha: string; reviewer_agent_id: string; created_at: string | null }[];
+    for (const row of rows) put(row.sha, row.reviewer_agent_id, row.created_at);
+  } catch { /* table not there yet */ }
+  try {
+    const rows = getDb().prepare(
+      'SELECT sha, reviewer_agent_id, updated_at FROM release_freezes WHERE verdict IS NOT NULL AND reviewer_agent_id IS NOT NULL',
+    ).all() as { sha: string; reviewer_agent_id: string; updated_at: string | null }[];
+    for (const row of rows) put(row.sha, row.reviewer_agent_id, row.updated_at);
+  } catch { /* table not there yet */ }
+  return out;
 }
 
 export interface ReviewerLoadView {
@@ -190,6 +271,8 @@ export interface AssignInput {
   allow?: string[];
   /** Profiles whose seats are independent of each other (`pipeline.service_profiles`). */
   serviceProfiles?: string[];
+  /** Agent ids the picker skips because their last reviews went unanswered (`silentReviewerIds`). */
+  silent?: ReadonlySet<string>;
 }
 
 function listed(agent: Agent, names: Set<string>): boolean {
@@ -225,7 +308,9 @@ export function selectReviewer(input: AssignInput): Agent | null {
     if (handles(agent).some((h) => deny.has(h))) return true;
     if (isSamePerson(agent) && !listed(agent, pool)) return true;
     // A seat whose plan is nearly spent would stall the review at the usage-limit screen.
-    if (belowCapacity(input.load(agent), floor)) return true;
+    if (seatOutOfRotation(input.load(agent), floor)) return true;
+    // A seat that left its last reviews unanswered would hold this one too.
+    if (input.silent?.has(agent.id)) return true;
     return false;
   };
   const isDefault = (agent: Agent): boolean =>
@@ -236,15 +321,24 @@ export function selectReviewer(input: AssignInput): Agent | null {
   const fromLadder = (agent: Agent): boolean =>
     (input.autoPick && (allow.size === 0 || listed(agent, allow))) || isDefault(agent);
 
+  // A reviewer seat is a reviewer by role: eligible whatever the allowlist and auto-pick say.
+  const reviewerSeat = (agent: Agent): boolean => agent.role === 'reviewer';
   const eligible = input.agents.filter((agent) => {
     if (agent.mode === 'file' || agent.role === 'orchestrator') return false;
     if (excluded(agent)) return false;
-    return fromLadder(agent) || listed(agent, routeNames) || listed(agent, prefer) || listed(agent, pool);
+    return reviewerSeat(agent) || fromLadder(agent) || listed(agent, routeNames) || listed(agent, prefer) || listed(agent, pool);
   });
 
   const independent = (agent: Agent): boolean => !isSamePerson(agent);
+  const idle = (agent: Agent): boolean => !input.load(agent).busy;
+  const otherProfile = (agent: Agent): boolean => (agent.profile ?? 'home') !== (input.author.profile ?? 'home');
+  const otherVendor = (agent: Agent): boolean => vendorOf(agent.runtime) !== preferKey;
+  const idleReviewer = (agent: Agent): boolean => independent(agent) && reviewerSeat(agent) && idle(agent);
   const routeTarget = input.routeTarget?.toLowerCase() ?? '';
   const tiers = [
+    eligible.filter((agent) => idleReviewer(agent) && otherProfile(agent) && otherVendor(agent)),
+    eligible.filter((agent) => idleReviewer(agent) && otherProfile(agent)),
+    eligible.filter(idleReviewer),
     eligible.filter((agent) => independent(agent) && listed(agent, prefer)),
     eligible.filter((agent) => independent(agent) && !!routeTarget && listed(agent, new Set([routeTarget]))),
     eligible.filter((agent) => independent(agent) && isDefault(agent)),
@@ -284,17 +378,22 @@ export function pickLeastLoaded(agents: Agent[], load: (agent: Agent) => Reviewe
   })[0];
 }
 
+/**
+ * Move a review with no verdict after the window, whether the seat is busy or
+ * idle (an idle seat that has not started the review it was sent is silent
+ * too: on 1 Nov 2026 five freezes waited 19 hours on a named idle seat), and
+ * whether it was picked or named. Once per freeze, unless the next seat is idle.
+ */
 export function shouldReassign(opts: {
   hasVerdict: boolean;
   waitedMs: number;
   limitMs: number;
-  currentBusy: boolean;
   reassignCount: number;
   nextId: string | null;
   currentId: string;
   nextIdle: boolean;
 }): boolean {
-  if (opts.hasVerdict || !opts.currentBusy) return false;
+  if (opts.hasVerdict) return false;
   if (!(opts.limitMs > 0) || opts.waitedMs < opts.limitMs) return false;
   if (!opts.nextId || opts.nextId === opts.currentId) return false;
   if (opts.reassignCount >= 1 && !opts.nextIdle) return false;
@@ -359,7 +458,7 @@ function runningTasks(agentId: string): number {
   }
 }
 
-interface ReviewEvent {
+export interface ReviewEvent {
   sha: string;
   reviewerId: string;
   at: number;
@@ -440,8 +539,12 @@ export function reviewerLoads(): ReviewerLoadView[] {
     .sort((a, b) => b.queue - a.queue || a.name.localeCompare(b.name));
 }
 
+/** Default for `pipeline.review_reassign_minutes`. */
+export const DEFAULT_REVIEW_REASSIGN_MINUTES = 10;
+
 export function projectReassignMs(project: string | null): number {
-  const raw = project ? getConfig().projects?.[project]?.pipeline?.review_reassign_minutes : undefined;
-  const minutes = typeof raw === 'number' && Number.isFinite(raw) ? raw : 15;
+  let raw: number | undefined;
+  try { raw = project ? getConfig().projects?.[project]?.pipeline?.review_reassign_minutes : undefined; } catch { raw = undefined; }
+  const minutes = typeof raw === 'number' && Number.isFinite(raw) ? raw : DEFAULT_REVIEW_REASSIGN_MINUTES;
   return Math.max(0, minutes) * 60 * 1000;
 }

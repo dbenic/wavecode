@@ -31,7 +31,7 @@ import { gateWordsFor, recordGateResult } from './gate-status.js';
 import { pickReviewer } from './reviewer-ladder.js';
 import { readLaneTests, shaChecks, suiteNames, testsConfigured } from './test-runs.js';
 import { getRelease, listReleases, requestRelease, type ReleaseRequest } from './releases.js';
-import { assignmentFacts, loadFor, loadMemo, minCapacityPct, projectReassignMs, reviewEvents, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, selectReviewer, shouldReassign, type ReviewerLoad } from './reviewer-assign.js';
+import { assignmentFacts, DEFAULT_REVIEW_REASSIGN_MINUTES, loadFor, loadMemo, minCapacityPct, projectReassignMs, reviewerDenied, reviewEvents, SAME_OWNER_POOL_NOTE, sameOwnerPoolReviewer, seatOutOfRotation, selectReviewer, shouldReassign, silentReviewerIds, type ReviewerLoad, type ReviewEvent } from './reviewer-assign.js';
 import { FIRST_PASS_REQUESTED, firstPassFor, firstPassHooks, overdueFirstPasses, requestFirstPass, type FirstPassResult } from './first-pass.js';
 import { deliverSystemLine, tellDriverSeats } from './wire-lines.js';
 import { candidateHooks, overdueCandidateReviews, requestCandidateReview, type CandidateResult } from './candidate-review.js';
@@ -148,7 +148,7 @@ function lowerMap(raw: Record<string, string[]> | undefined): Record<string, str
 }
 
 function reassignMinutes(raw: number | undefined): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 15;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_REVIEW_REASSIGN_MINUTES;
   return Math.min(1440, Math.max(0, raw));
 }
 
@@ -482,12 +482,14 @@ function reviewTagIds(): Set<string> {
 }
 
 /**
- * Least-loaded eligible reviewer. Independent seats come first: the prefer
- * tier, then the route, the default, tagged reviewers, and the rest of the
- * ladder. A same-person seat is last, and only when the author-glob pool
- * names it.
+ * Least-loaded eligible reviewer. Idle reviewer seats (role `reviewer`, other
+ * profile and vendor than the author first) come first, then the independent
+ * seats: the prefer tier, then the route, the default, tagged reviewers, and
+ * the rest of the ladder. A same-person seat is last, and only when the
+ * author-glob pool names it. Seats out of rotation or silent on their last
+ * reviews are skipped. `events` lets one pass share the review history.
  */
-export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: string | null, load: (agent: Agent) => ReviewerLoad = loadFor): Agent | null {
+export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: string | null, load: (agent: Agent) => ReviewerLoad = loadFor, events?: ReviewEvent[]): Agent | null {
   const review = getConfig().review;
   return selectReviewer({
     author,
@@ -504,7 +506,23 @@ export function chooseReviewer(author: Agent, pipe: PipelineSwitches, _taskId: s
     minCapacityPct: minCapacityPct(),
     allow: pipe.reviewer_allow,
     serviceProfiles: pipe.service_profiles,
+    silent: silentReviewerIds(events ?? reviewEvents(), pipe.review_reassign_minutes * 60_000),
   });
+}
+
+/**
+ * Why a seat the freeze note names (`Reviewer: @x`) cannot take the review, or null when it
+ * can: the ladder's checks, so a named seat is no way around deny lists, the capacity floor
+ * or the silent-seat rule. The picker chooses instead and the note says why.
+ */
+function namedReviewerProblem(named: Agent, author: Agent, project: string, load: (agent: Agent) => ReviewerLoad, silent: ReadonlySet<string>): string | null {
+  if (named.id === author.id) return 'is the author';
+  if (named.mode === 'file' || named.role === 'orchestrator') return 'is not a review seat';
+  if (reviewerDenied(named) || laneAutomationDenied(project, named)) return 'is denied';
+  const out = seatOutOfRotation(load(named), minCapacityPct());
+  if (out) return `is out of rotation (${out})`;
+  if (silent.has(named.id)) return 'left its last reviews unanswered';
+  return null;
 }
 
 /** One sentence about a first pass already on file, for the reviewer's ping. */
@@ -565,7 +583,17 @@ async function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 
   const author = getAgent(freeze.author_agent_id);
   if (!author.ok) return;
   const run = freeze.run_id ? getRun(freeze.run_id) : null;
-  const reviewer = chooseReviewer(author.data, pipe, run?.ok ? run.data.task_id : 'none');
+  const events = reviewEvents();
+  // A seat the freeze note names is honoured through the ladder's checks; it is then held to
+  // the same window as a picked one (reassignWaitingReviews).
+  let named: Agent | null = null;
+  let namedProblem: string | null = null;
+  const noteNamed = kind === 'assign' && freeze.reviewer_agent_id && !assignmentFacts(freeze.sha, events) ? getAgent(freeze.reviewer_agent_id) : null;
+  if (noteNamed?.ok) {
+    namedProblem = namedReviewerProblem(noteNamed.data, author.data, freeze.project, loadFor, silentReviewerIds(events, pipe.review_reassign_minutes * 60_000));
+    if (!namedProblem) named = noteNamed.data;
+  }
+  const reviewer = named ?? chooseReviewer(author.data, pipe, run?.ok ? run.data.task_id : 'none', loadFor, events);
   if (!reviewer) {
     const text = `auto: no reviewer for ${freeze.sha.slice(0, 8)} — the route was the author or a denied name, and the ladder had no one else`;
     note(freeze.project, freeze.lane, freeze.sha, 'review', text);
@@ -581,15 +609,18 @@ async function assignReviewer(freeze: ReleaseFreeze, kind: 'assign' | 'green' = 
     : `[from WaveCode] Please review freeze ${sha8} on ${freeze.lane ?? 'the lane'} by @${author.data.name}. Read ${freeze.freeze_path ?? 'the freeze note'}. If the code is OK and the gate is still running, write VERDICT: PASS (gate pending).${tail}`;
   deliverSystemLine(reviewer, text, { kind: 'info', source: 'review' });
   emit('pipeline.review', 'run', `${freeze.sha}:${kind}`, {
-    sha: freeze.sha, reviewer_id: reviewer.id, kind, assigned_at_ms: Date.now(), reassigned: false,
+    sha: freeze.sha, reviewer_id: reviewer.id, kind, assigned_at_ms: Date.now(), reassigned: false, named: !!named,
   }, null);
   if (!freeze.verdict) setFreezeReviewer(freeze.sha, { id: reviewer.id, name: reviewer.name });
   const own = sameOwnerPoolReviewer(author.data, reviewer, pipe.reviewer_pool_by_author_glob, pipe.service_profiles)
     ? ` — ${SAME_OWNER_POOL_NOTE}`
     : '';
+  const why = named
+    ? ' (named in the freeze note)'
+    : noteNamed?.ok && namedProblem ? ` (@${noteNamed.data.alias ?? noteNamed.data.name} ${namedProblem})` : '';
   const shown = kind === 'green'
     ? `auto: GREEN landed — re-pinged @${reviewer.alias ?? reviewer.name}${own}`
-    : `auto: review requested — pinged @${reviewer.alias ?? reviewer.name}${own}`;
+    : `auto: review requested — pinged @${reviewer.alias ?? reviewer.name}${why}${own}`;
   note(freeze.project, freeze.lane, freeze.sha, 'review', shown);
 }
 
@@ -677,8 +708,9 @@ export async function ingestReviewRequestFile(file: string): Promise<Result<{ re
 }
 
 /**
- * A review with no verdict that has sat on a busy seat longer than
- * `review_reassign_minutes` moves to the least-loaded eligible seat.
+ * A review with no verdict that has waited longer than `review_reassign_minutes`
+ * moves to the least-loaded eligible seat, whether the seat is busy or idle and
+ * whether it was picked or named (a named seat used to hold a freeze for a day).
  * The next seat is chosen with the same tier order as the first assignment.
  * Once per freeze, unless the new seat is idle. Returns how many moved.
  */
@@ -701,14 +733,12 @@ export function reassignWaitingReviews(now = Date.now()): number {
     const current = getAgent(freeze.reviewer_agent_id);
     const author = freeze.author_agent_id ? getAgent(freeze.author_agent_id) : null;
     if (!current.ok || !author?.ok) continue;
-    if (!load(current.data).busy) continue; // the reviewer is free: it stays theirs
-    const next = chooseReviewer(author.data, pipe, null, load);
+    const next = chooseReviewer(author.data, pipe, null, load, events);
     const nextLoad = next ? load(next) : null;
     if (!shouldReassign({
       hasVerdict: false,
       waitedMs: now - facts.at,
       limitMs,
-      currentBusy: true,
       reassignCount: facts.reassigns,
       nextId: next?.id ?? null,
       currentId: current.data.id,
@@ -723,7 +753,8 @@ export function reassignWaitingReviews(now = Date.now()): number {
     const own = sameOwnerPoolReviewer(author.data, next, pipe.reviewer_pool_by_author_glob, pipe.service_profiles)
       ? ` — ${SAME_OWNER_POOL_NOTE}`
       : '';
-    const text = `reassigned @${from} → @${to} (busy, no verdict)${own}`;
+    const waitedMin = Math.round((now - facts.at) / 60_000);
+    const text = `reassigned @${from} → @${to} (no verdict in ${waitedMin} min)${own}`;
     note(freeze.project, freeze.lane, freeze.sha, 'review', text);
     emit('pipeline.review', 'run', `${freeze.sha}:reassign`, {
       sha: freeze.sha, reviewer_id: next.id, kind: 'reassign', assigned_at_ms: Date.now(), reassigned: true,

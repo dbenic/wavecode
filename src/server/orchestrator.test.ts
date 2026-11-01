@@ -123,6 +123,7 @@ describe('orchestrator seat', () => {
     expect(orch.parseAgentRole(undefined)).toEqual({ ok: true, role: undefined });
     expect(orch.parseAgentRole(null)).toEqual({ ok: true, role: null });
     expect(orch.parseAgentRole('orchestrator')).toEqual({ ok: true, role: 'orchestrator' });
+    expect(orch.parseAgentRole('reviewer')).toEqual({ ok: true, role: 'reviewer' });
     expect(orch.parseAgentRole('boss').ok).toBe(false);
   });
 

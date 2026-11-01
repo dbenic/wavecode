@@ -37,8 +37,8 @@ export interface Agent {
   terminal_live?: boolean;
   /** Plan usage from the CLI's status screen, probed every ~15 min; null until known. */
   usage?: { summary: string; metrics: Array<{ label: string; left_pct: number | null; used_pct: number | null; resets: string | null; extra?: string }>; probed_at: string } | null;
-  /** 'orchestrator' = the PM seat (spec §5b). */
-  role?: 'orchestrator' | null;
+  /** 'orchestrator' = the PM seat (spec §5b); 'reviewer' = a review-only seat the picker prefers. */
+  role?: 'orchestrator' | 'reviewer' | null;
   /** True for the one agent the composer targets by default. */
   orchestrator?: boolean;
   /** Short handle (`@toni`), one-line persona and group tags (spec §5c). */
@@ -449,6 +449,8 @@ export interface AgentBoardRow {
   alias: string | null;
   runtime: string;
   model: string | null;
+  /** 'orchestrator' = the PM seat, 'reviewer' = review-only seat; absent or null = developer */
+  role?: 'orchestrator' | 'reviewer' | null;
   status: 'idle' | 'working' | 'error';
   status_since: string | null;
   for_min: number | null;

@@ -104,6 +104,15 @@ second request on the same SHA moves the review when the first seat has not answ
 The same ask over HTTP: `POST /api/reviews/lanes/request-review { project, lane }` with no
 `reviewer`. The freeze note must exist first: it is what the reviewer reads.
 
+Who gets picked: idle **reviewer seats** first (`agents.role = 'reviewer'`, admin-set; they take
+no lane or fix tasks, so they are free when asked), on another credential profile than the
+author and another vendor where possible, then the project's `reviewer_prefer` tier, then the
+pool. A seat under the capacity floor or one that left its last three reviews unanswered is
+skipped. A named seat (`Reviewer: @x` in the freeze note or the request) is honoured through
+the same checks, then held to the same clock as a picked one: no verdict inside
+`review_reassign_minutes` (default 10), busy or idle, and the review moves to the next
+seat with the lane note `reassigned @x → @y (no verdict in N min)`.
+
 ## Cleaning the list
 
 Rows leave the queue on their own: a newer freeze on the same lane retires the older one

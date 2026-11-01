@@ -51,7 +51,7 @@ function configuredOrchestratorName(): string | null {
   }
 }
 
-/** `role` from a request body: undefined = leave as is; null clears; only 'orchestrator' is valid. */
+/** `role` from a request body: undefined = leave as is; null clears; 'orchestrator' or 'reviewer' is valid. */
 export function parseAgentRole(value: unknown): { ok: true; role: AgentRole | null | undefined } | { ok: false; error: string } {
   if (value === undefined) return { ok: true, role: undefined };
   if (value === null) return { ok: true, role: null };

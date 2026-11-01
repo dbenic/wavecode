@@ -454,6 +454,15 @@ export default function Overview() {
                         <tr key={a.id} className="align-top" data-testid={`agent-${a.name}`}>
                           <td className="px-3 py-2">
                             <button onClick={() => navigate(`/agent/${a.id}`)} className="text-cyan-300 hover:text-cyan-200">@{a.alias ?? a.name}</button>
+                            {a.role && (
+                              <span
+                                className={`ml-1.5 align-middle text-[8px] font-bold tracking-wider rounded px-1 py-px border ${a.role === 'reviewer' ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300' : 'bg-violet-950/50 border-violet-500/30 text-violet-300'}`}
+                                title={a.role === 'reviewer' ? 'Reviewer seat: review requests only, preferred by the picker' : 'Orchestrator (PM) seat'}
+                                data-testid={`agent-role-${a.name}`}
+                              >
+                                {a.role === 'reviewer' ? 'REVIEWER' : 'PM'}
+                              </span>
+                            )}
                             <div className="text-[9px] text-slate-600">{a.runtime}{a.model ? ` · ${a.model}` : ''}</div>
                           </td>
                           <td className="px-3 py-2">
