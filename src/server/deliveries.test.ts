@@ -160,6 +160,49 @@ describe('delivery derivation', () => {
     expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 71 * 60_000).map((s) => `${s.stage}:${s.code}`)).toContain('candidate:BLOCKED');
   });
 
+  it('a CANDIDATE REVIEW: PASS closes the candidate span ok, so it never raises an over-budget alarm (8c564ada, 31 Oct 2026)', () => {
+    const created = del.createDelivery({ title: 'Pass', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
+    if (!created.ok) throw new Error(created.error);
+    ev(10, 'pipeline.frozen', B, { sha: B, project: 'wavepulse', lane: LANE });
+    ev(40, 'gate.result', B, { sha: B, suite: 'full', state: 'GREEN' });
+    ev(41, 'merge_queue.queued', B, { sha: B, lane: LANE, tier: 'ship' });
+    ev(50, 'merge_queue.merged', B, { lane: LANE, sha_in: B, sha_out: M, main_before: 'a'.repeat(40), author: 'codex1' });
+    ev(51, 'pipeline.candidate_review', M, { kind: 'assign', project: 'wavepulse', sha: M, base: 'a'.repeat(40), lane: LANE, reviewer: 'claude4', reviewer_id: 'x' });
+    ev(70, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'pass', issues: 0, seat: 'claude4', file: '/inbox/wave-candidate-43bca6d9-20261031.md' });
+    const spans = del.deriveDelivery(created.data.id);
+    if (!spans.ok) throw new Error(spans.error);
+    const cand = spans.data.spans.find((s) => s.stage === 'candidate' && s.sha === M)!;
+    expect(cand).toMatchObject({ outcome: 'ok', actor: 'claude4', cause: 'candidate review PASS' });
+    expect(cand.finished_at).toBeTruthy();
+    // hours later, past the 60 min candidate budget: no OVERRUN on the answered review
+    expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 600 * 60_000).filter((s) => s.stage === 'candidate')).toEqual([]);
+  });
+
+  it('a NEEDS FIXES after a PASS reopens the candidate span; a superseded one stays closed', () => {
+    const created = del.createDelivery({ title: 'Revise', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
+    if (!created.ok) throw new Error(created.error);
+    const later = 'b7e0a1c2d3e4f5061728394a5b6c7d8e9f0a1b2c';
+    ev(10, 'pipeline.frozen', B, { sha: B, project: 'wavepulse', lane: LANE });
+    ev(50, 'merge_queue.merged', B, { lane: LANE, sha_in: B, sha_out: M, main_before: 'a'.repeat(40), author: 'codex1' });
+    ev(51, 'pipeline.candidate_review', M, { kind: 'assign', project: 'wavepulse', sha: M, reviewer: 'claude4', seat: 'claude4' });
+    ev(70, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'pass', issues: 0, seat: 'claude4', file: '/inbox/wave-candidate-pass.md' });
+    ev(80, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'needs-fixes', issues: 1, seat: 'claude4', file: '/inbox/wave-candidate-fix.md' });
+    let spans = del.deriveDelivery(created.data.id);
+    if (!spans.ok) throw new Error(spans.error);
+    const cand = spans.data.spans.filter((s) => s.stage === 'candidate' && s.sha === M);
+    expect(cand.map((s) => s.outcome)).toEqual(['ok', null]);
+    expect(cand[1]?.cause).toMatch(/NEEDS FIXES by @claude4/);
+    expect(del.findStalls(spans.data.delivery, spans.data.spans, T0 + 81 * 60_000).some((s) => s.stage === 'candidate' && s.code === 'BLOCKED')).toBe(true);
+
+    ev(90, 'merge_queue.merged', later, { lane: LANE, sha_in: later, sha_out: 'c'.repeat(40), main_before: M, author: 'codex1' });
+    ev(91, 'pipeline.candidate_review', M, { kind: 'result', project: 'wavepulse', sha: M, result: 'needs-fixes', issues: 3, seat: 'claude4', file: '/inbox/wave-candidate-old.md' });
+    spans = del.deriveDelivery(created.data.id);
+    if (!spans.ok) throw new Error(spans.error);
+    const old = spans.data.spans.filter((s) => s.stage === 'candidate' && s.sha === M);
+    expect(old.every((s) => s.finished_at)).toBe(true);
+    expect(old.some((s) => s.outcome === 'superseded')).toBe(true);
+  });
+
   it('derives the bank-posting day: freeze, first pass, gates, review, land, candidate, release', () => {
     const created = del.createDelivery({ title: 'Bank simple posting', project: 'wavepulse', lanes: [LANE], since: new Date(T0).toISOString(), created_by: 'denis' });
     expect(created.ok).toBe(true);

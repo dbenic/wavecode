@@ -45,6 +45,7 @@ describe('db.ts — schema migrations', () => {
     expect(tableNames).toContain('goals');
     expect(tableNames).toContain('lane_sync_notices');
     expect(tableNames).toContain('ops_jobs');
+    expect(tableNames).toContain('main_gate_runs');
 
     const taskColumns = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
     expect(taskColumns.map((c) => c.name)).toContain('goal_id');
@@ -83,6 +84,7 @@ describe('db.ts — schema migrations', () => {
     expect(tableNames).toContain('goals');
     expect(tableNames).toContain('lane_sync_notices');
     expect(tableNames).toContain('ops_jobs');
+    expect(tableNames).toContain('main_gate_runs');
 
     // Check that changed_files column was added to runs
     const columns = db.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
@@ -100,6 +102,33 @@ describe('db.ts — schema migrations', () => {
     // Version should be bumped
     const version = db.pragma('user_version', { simple: true });
     expect(version).toBe(SCHEMA_VERSION);
+  });
+
+  it('keeps a main_gate_runs row that the lazy ensure already wrote when the v36 migration runs', async () => {
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      CREATE TABLE main_gate_runs (
+        sha TEXT PRIMARY KEY,
+        project TEXT NOT NULL,
+        state TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    const sha = 'a'.repeat(40);
+    rawDb.prepare(`INSERT INTO main_gate_runs (sha, project, state, note) VALUES (?, 'wave', 'QUEUED', 'keep')`).run(sha);
+    rawDb.pragma('user_version = 35');
+    rawDb.close();
+
+    const mod = await import('./db.js');
+    const db = mod.initDb(dbPath);
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.prepare('SELECT project, state, note FROM main_gate_runs WHERE sha = ?').get(sha)).toEqual({
+      project: 'wave', state: 'QUEUED', note: 'keep',
+    });
+    const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'main_gate_runs'").all() as { name: string }[];
+    expect(indexes.map((i) => i.name)).toContain('idx_main_gate_runs_live');
   });
 
   it('resolveAgent: an id always wins over an agent whose name looks like that id', async () => {

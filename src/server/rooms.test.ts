@@ -60,7 +60,7 @@ describe('project rooms (spec §5e)', () => {
     return a.data;
   }
 
-  const typedInto = (name: string) => tmuxHarness.typed.filter((t) => t.session === `wc-${name}`).map((t) => t.text);
+  const typedInto = (name: string) => tmuxHarness.typed.filter((t) => t.session === `wc-${name}`).map((t) => t.text).filter((t) => t !== '/new' && t !== '/clear'); // the fresh-context clear is not the briefing
 
   beforeEach(async () => {
     tmuxHarness.sessions.clear();
@@ -356,7 +356,7 @@ describe('project rooms (spec §5e)', () => {
       dispatcher.resetDispatcherForTest();
       await dispatcher.dispatchNext({ manual: true });
       // the dispatcher staggers seats by 1.5s
-      await vi.waitFor(() => expect(typedInto('shop-dev').length + typedInto('shop-qa').length).toBe(2), { timeout: 5000 });
+      await vi.waitFor(() => expect(typedInto('shop-dev').length + typedInto('shop-qa').length).toBe(2), { timeout: 10_000 });
 
       const devPrompt = typedInto('shop-dev')[0];
       expect(devPrompt).toContain('## PROJECT ROOM: shop');

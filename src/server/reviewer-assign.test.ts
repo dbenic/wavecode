@@ -14,7 +14,7 @@ import {
   reviewerLoads,
   sameOwnerPoolReviewer,
   samePerson,
-  selectReviewer,
+  selectReviewer, AUTO_REVIEW_RESERVED,
   shouldReassign,
   vendorOf,
   assignmentFacts,
@@ -105,6 +105,14 @@ describe('selectReviewer', () => {
       seat('codex3'),
     ], { prefer: { claude: ['codex1', 'chatgpt-countix', 'claude1-codex', 'claude1', 'codex3'] } });
     expect(picked?.name).toBe('codex3');
+  });
+
+  it('never auto-assigns codex5 (reserved for Aleš), not by prefer, route, default, pool, or as the only seat', () => {
+    expect(AUTO_REVIEW_RESERVED).toContain('codex5');
+    expect(choose(claude, [seat('codex5'), seat('codex3')], { deny: [], prefer: { claude: ['codex5', 'codex3'] } })?.name).toBe('codex3');
+    expect(choose(claude, [seat('codex5'), seat('codex3')], { deny: [], routeTarget: 'codex5', defaultReviewer: 'codex5' })?.name).toBe('codex3');
+    expect(choose(claude, [seat('codex5', { alias: 'Codex5' })], { deny: [], pools: { '*': ['codex5'] } })).toBeNull();
+    expect(choose(claude, [seat('codex5')], { deny: [] })).toBeNull();
   });
 
   it('keeps codex-antonio off claude-antonio\'s own work', () => {

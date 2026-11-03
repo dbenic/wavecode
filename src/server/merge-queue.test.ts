@@ -19,9 +19,9 @@ vi.mock('./config.js', () => ({
 
 import * as db from './db.js';
 import { emit } from './event-bus.js';
-import { getFreeze, ingestFreezeFile, listVerdicts } from './release-freezes.js';
+import { getFreeze, ingestFreezeFile, listVerdicts, recordVerdict } from './release-freezes.js';
 import {
-  askPathHit, checkStall, evaluate, getQueueRow, independentPasses, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
+  askPathHit, checkStall, evaluate, getQueueRow, independentPasses, standingNeedsFixes, laneDeniedWhy, listQueue, mergeQueueTick, migrationCollision, prFromList,
   gateRefusal, killedExit, mergeQueueTickGuarded, queueStall, queueSwitch, resetMergeQueueForTest, resetQueue, resolveQueueShas, resultLine, setMergeQueueExecForTest, setQueuePriority, setQueueSwitch, tierFor, tierFromNote, laneInRelease, personMustAct, setReleaseMode, type MergeQueueRow } from './merge-queue.js';
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -111,6 +111,16 @@ describe('merge queue — pure rules', () => {
     // gh prints labels as objects; a plain string list is accepted too
     const labelled = JSON.stringify([{ number: 9, headRefName: 'wc-l', headRefOid: sha, labels: [{ name: 'ask-tier-approved' }, 'migration-hold'] }]);
     expect(prFromList(labelled, sha, 'wc-l')?.labels).toEqual(['ask-tier-approved', 'migration-hold']);
+  });
+});
+
+describe('merge queue — standing NEEDS FIXES', () => {
+  const v = (reviewer: string, verdict: string, at: string) => ({ sha: 'a'.repeat(40), reviewer_agent_id: null, reviewer_name: reviewer, profile: null, verdict, path: null, created_at: at }) as Parameters<typeof standingNeedsFixes>[0][number];
+  it('keeps a NEEDS FIXES until the same reviewer says something later on that SHA', () => {
+    expect(standingNeedsFixes([v('codex8', 'needs-fixes', '2026-10-31 10:00:00'), v('codex3', 'pass', '2026-10-31 11:00:00')]).map((x) => x.reviewer_name)).toEqual(['codex8']);
+    expect(standingNeedsFixes([v('codex8', 'needs-fixes', '2026-10-31 10:00:00'), v('Codex8', 'pass', '2026-10-31 11:00:00')])).toEqual([]);
+    expect(standingNeedsFixes([v('codex8', 'pass', '2026-10-31 10:00:00'), v('codex8', 'reject', '2026-10-31 11:00:00')]).map((x) => x.verdict)).toEqual(['reject']);
+    expect(standingNeedsFixes([v('codex3', 'pass', '2026-10-31 10:00:00')])).toEqual([]);
   });
 });
 
@@ -415,6 +425,56 @@ describe('merge queue — on a scratch repository', () => {
     await reviewed('ales', 'wc-ales', sha2, 'ship');
     lane('wc-ales', { 'd.txt': 'd' }, 'wc-ales');
     expect((await evaluate(getFreeze(sha2)!))).toMatchObject({ code: 'LANE_MOVED', reason: expect.stringMatching(/^LANE_MOVED: lane moved to [0-9a-f]{8} after the freeze/) });
+  });
+
+  it('one PASS does not merge while another reviewer\'s NEEDS FIXES stands on the same frozen SHA (75f1d4fe, 31 Oct 2026)', async () => {
+    agent('ales');
+    agent('codex8', 'pool8');
+    const sha = lane('wc-ales', { 'np.txt': 'np' });
+    await reviewed('ales', 'wc-ales', sha, 'ship'); // freeze, api GREEN, codex3 PASS
+    await verdict('codex8', 'ales', sha, 'NEEDS FIXES');
+    await verdict('codex3', 'ales', sha, 'PASS'); // a newer PASS from someone else does not clear codex8
+    expect(listVerdicts(sha).map((v) => `${v.reviewer_name}:${v.verdict}`).sort()).toEqual(['codex3:pass', 'codex8:needs-fixes']);
+    const held = await evaluate(getFreeze(sha)!);
+    expect(held).toMatchObject({ code: 'NEEDS_FIXES' });
+    expect(held.reason).toMatch(/@codex8 NEEDS FIXES on [0-9a-f]{8} still stands/);
+    await tick();
+    expect(getQueueRow(sha)?.state).not.toBe('merged');
+    expect(git(repo, 'rev-parse', 'refs/remotes/origin/main')).not.toBe(sha);
+    // codex8 re-verdicts the same SHA: the later verdict supersedes the NEEDS FIXES and the lane merges.
+    await new Promise((r) => setTimeout(r, 1100)); // created_at has second resolution
+    await verdict('codex8', 'ales', sha, 'PASS');
+    expect((await evaluate(getFreeze(sha)!)).code).not.toBe('NEEDS_FIXES');
+    await tick();
+    expect(getQueueRow(sha)?.state).toBe('merged');
+  });
+
+  it('a NEEDS FIXES that lands while the merge gate is running is not pushed', async () => {
+    agent('ales');
+    const sha = lane('wc-ales', { 'late.txt': 'late' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    // Main moves after the freeze, so the merge result is not the lane tree and the gate actually runs.
+    lane('wc-shift', { 'shift.txt': 's' });
+    git(repo, 'push', '-q', 'origin', 'wc-shift:main');
+    const before = originMain();
+    gateHook = () => {
+      recordVerdict({ sha, reviewer: null, reviewerName: 'codex8', verdict: 'needs-fixes', path: null });
+      return { code: 0, stdout: '=== RESULT GREEN ===\nGREEN' };
+    };
+    await tick();
+    expect(originMain()).toBe(before);
+    expect(gateSeen.some((g) => g.argv[0] === 'gate-run')).toBe(true);
+    expect(getQueueRow(sha)).toMatchObject({ state: 'waiting', reason: expect.stringMatching(/^NEEDS_FIXES: @codex8 NEEDS FIXES on [0-9a-f]{8} still stands/) });
+  });
+
+  it('a REJECT on the frozen SHA blocks too, even when the freeze summary reads PASS', async () => {
+    agent('ales');
+    agent('codex8', 'pool8');
+    const sha = lane('wc-ales', { 'rj.txt': 'rj' });
+    await reviewed('ales', 'wc-ales', sha, 'ship');
+    await verdict('codex8', 'ales', sha, 'REJECT');
+    await verdict('codex3', 'ales', sha, 'PASS');
+    expect((await evaluate(getFreeze(sha)!))).toMatchObject({ code: 'NEEDS_FIXES', reason: expect.stringMatching(/@codex8 REJECT/) });
   });
 
   it('parks a freeze older than two weeks instead of evaluating it every pass', async () => {

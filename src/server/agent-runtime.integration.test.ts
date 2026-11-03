@@ -289,7 +289,7 @@ describe('agent runtime integration', () => {
     });
 
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2_000); // past the fresh-context clear settle (1.5 s)
 
     expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('Build the shared auth middleware'))).toBe(true);
     expect(tmuxHarness.getSentTexts('alpha-session').some((t) => t.includes('RESULT: PASS'))).toBe(true);
@@ -320,7 +320,7 @@ describe('agent runtime integration', () => {
     expect(messages[0]?.message).toContain('completed successfully');
 
     await taskDispatcher.dispatchNext({ manual: true });
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(2_000); // past the fresh-context clear settle (1.5 s)
 
     expect(tmuxHarness.getSentTexts('beta-session').some((t) => t.includes('Wire the dashboard to the auth middleware'))).toBe(true);
 

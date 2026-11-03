@@ -169,6 +169,13 @@ function handles(agent: { name: string; alias?: string | null }): string[] {
   return [agent.name, agent.alias].filter((s): s is string => !!s).map((s) => s.toLowerCase());
 }
 
+/**
+ * Seats that review auto-assignment never picks, whatever the config says. codex5 is reserved for Aleš
+ * (31 Oct 2026). No config key fits: `review_deny` also strips the seat of lane automation and delivery,
+ * which an active seat must keep. A person can still ask the seat for a review by hand.
+ */
+export const AUTO_REVIEW_RESERVED: readonly string[] = ['codex5'];
+
 export interface AssignInput {
   author: Agent;
   agents: Agent[];
@@ -201,7 +208,7 @@ function listed(agent: Agent, names: Set<string>): boolean {
  * The route target is not chosen ahead of a non-empty prefer tier.
  */
 export function selectReviewer(input: AssignInput): Agent | null {
-  const deny = new Set(input.deny.map((s) => s.toLowerCase()));
+  const deny = new Set([...input.deny, ...AUTO_REVIEW_RESERVED].map((s) => s.toLowerCase()));
   const pool = poolNamesFor(input.author.name, input.pools);
   if (input.author.alias) {
     for (const name of poolNamesFor(input.author.alias, input.pools)) pool.add(name);
