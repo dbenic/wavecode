@@ -56,6 +56,7 @@ All checks are periodic and automatic; none rely on the agent's honesty:
 | Runner heartbeat | 30 s | ndjson events from spawned runners over Unix socket | run marked failed on exit codes |
 | Session liveness | 30 s | `tmux has-session` | spawned + `auto_restart`: session recreated; in-flight work is FAIL (not re-queued on that seat); adopted: `agent.crashed` + push/ntfy/Telegram notification |
 | Hang detection | 30 s | pane content hash unchanged for `hang_timeout_min` while `working` | default `hang_action: alert`: one `agent.hung` per quiet stretch, nothing killed. `hang_action: restart`: spawned agents **with an open run** are killed → auto-restart (resuming the CLI conversation via `resume_args`), work left FAIL; interactive sessions are never killed |
+| Runaway process | 30 s | a process under the pane averages ≥ 0.8 cores for `runaway_cpu_min` while the agent is not `working` | one `agent.runaway_process` per hot stretch (thread alert + log), nothing killed — a leaked MCP helper burned a core for 2 h under an idle seat (3 Nov 2026); `runaway_cpu_min: 0` turns it off |
 | Completion verification | on idle | `verify_completion`: a cheap LLM judges the last 30 terminal lines against the task | adopted `failed` verdicts may re-queue (bounded by `max_task_retries`); spawned missing/FAIL does not |
 | File-runner status (host) | 1 min cron | `wavecode status --notify-if-changed` on the daemon host (localhost REST, config.yaml token). Stamp file under the data dir. Silent on no change. | Prints delta JSON + existing ntfy/Telegram one-liner on RESULT, phase `done`/`failed`/`incomplete`, or STALE (running >40 min with no `result.txt`). Orchestrators must not LLM-poll `GET /api/tasks` / `result.txt` on a timer. |
 
@@ -230,6 +231,7 @@ autonomy:
   verify_completion: true        # LLM sanity-check on task completion
   hang_timeout_min: 10
   hang_action: alert             # alert | restart (restart only task-driven agents)
+  runaway_cpu_min: 10            # report a process burning a core under an idle pane; 0 = off
   max_task_retries: 2
 ```
 

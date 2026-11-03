@@ -11,6 +11,7 @@ export const SSE_EVENT_TYPES = [
   'agent.crashed',
   'agent.restarted',
   'agent.hung',
+  'agent.runaway_process',
   'task.created',
   'task.dispatched',
   'task.completed',

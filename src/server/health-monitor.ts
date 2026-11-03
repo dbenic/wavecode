@@ -12,6 +12,7 @@ import { sweepExpiredReplies } from './reply-capture.js';
 import { verifyAllRooms } from './rooms.js';
 import { maybeRunNightlyRetros } from './retro.js';
 import { isLoginSeat, sweepLoginSeats } from './login-seats.js';
+import { sweepRunawayProcesses } from './runaway-processes.js';
 import { getRuntimeState, noteRuntimeAlive, relaunchRuntime } from './runtime-liveness.js';
 import logger from './logger.js';
 
@@ -79,6 +80,12 @@ export async function checkAll(): Promise<void> {
     await sweepLoginSeats(agents);
   } catch (e) {
     logger.error({ error: (e as Error).message }, 'Login seat sweep error');
+  }
+  // A helper burning a core under an idle pane is a leak (3 Nov 2026): one event, nothing killed.
+  try {
+    await sweepRunawayProcesses(agents);
+  } catch (e) {
+    logger.error({ error: (e as Error).message }, 'Runaway process sweep error');
   }
   const config = getConfig();
   const hangTimeoutMs = config.autonomy.hang_timeout_min * 60 * 1000;

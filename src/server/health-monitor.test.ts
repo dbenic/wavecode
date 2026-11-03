@@ -32,6 +32,10 @@ vi.mock('./task-dispatcher.js', () => ({
   dispatchNext: vi.fn(),
 }));
 
+vi.mock('./runaway-processes.js', () => ({
+  sweepRunawayProcesses: vi.fn(async () => []),
+}));
+
 vi.mock('./tmux.js', () => ({
   hasSession: vi.fn(),
   killSession: vi.fn(),

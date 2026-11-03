@@ -168,7 +168,7 @@ function base(event: WaveEvent, kind: ThreadKind, agentId: string | null, title:
 
 const QUESTION_RE = /\?\s*$/;
 const TASK_TYPES = new Set(['task.created', 'task.dispatched', 'task.completed', 'task.blocked', 'task.waiting_for_agent', 'task.failed']);
-const ALERT_TYPES = new Set(['agent.crashed', 'agent.hung', 'agent.lease_expired', 'agent.runtime_relaunched', 'system.stop_all', 'room.integrity_restored']);
+const ALERT_TYPES = new Set(['agent.crashed', 'agent.hung', 'agent.runaway_process', 'agent.lease_expired', 'agent.runtime_relaunched', 'system.stop_all', 'room.integrity_restored']);
 const COMMAND_TYPES = new Set([
   'agent.reserved', 'agent.released', 'agent.killed', 'agent.tagged', 'agent.untagged', 'agent.renamed', 'review.promoted',
 ]);
@@ -594,6 +594,7 @@ export function toThreadItem(event: WaveEvent, ctx: ThreadContext): ThreadItem |
     const titles: Record<string, string> = {
       'agent.crashed': 'Agent crashed',
       'agent.hung': `Agent appears hung${typeof p.stale_minutes === 'number' ? ` (${p.stale_minutes}m silent)` : ''}`,
+      'agent.runaway_process': `Runaway process under an idle pane: ${str(p.comm) ?? 'process'} pid ${typeof p.pid === 'number' ? p.pid : '?'} at ${typeof p.cores === 'number' ? p.cores : '?'} cores for ${typeof p.minutes === 'number' ? p.minutes : '?'} min — not killed`,
       'agent.lease_expired': `Lease expired (${str(p.owner) ?? 'owner'})`,
       'agent.runtime_relaunched': 'Runtime had exited — relaunched',
       'system.stop_all': 'Emergency stop-all',

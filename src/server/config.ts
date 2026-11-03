@@ -407,6 +407,12 @@ export interface WaveConfig {
     fresh_context?: boolean;
     /** Auto-dispatch skips, and create_task refuses, an agent whose 5h/weekly window has less than this left. Default 10. */
     min_quota_pct?: number;
+    /**
+     * A process under an agent's pane that burns a core for this many minutes while the
+     * agent is not working gets one `agent.runaway_process` event (report only, nothing
+     * killed). Default 10; 0 turns the sweep off.
+     */
+    runaway_cpu_min?: number;
   };
   sandbox: {
     disable_git_push: boolean;
@@ -1019,6 +1025,9 @@ export function validateConfig(cfg: WaveConfig): void {
   }
   if (cfg.autonomy?.fresh_context !== undefined && typeof cfg.autonomy.fresh_context !== 'boolean') {
     throw new Error('autonomy.fresh_context must be true or false');
+  }
+  if (cfg.autonomy?.runaway_cpu_min !== undefined && (typeof cfg.autonomy.runaway_cpu_min !== 'number' || !(cfg.autonomy.runaway_cpu_min >= 0))) {
+    throw new Error('autonomy.runaway_cpu_min must be a number of minutes >= 0');
   }
   if (cfg.deliveries?.budgets_min !== undefined) {
     const b = cfg.deliveries.budgets_min;
