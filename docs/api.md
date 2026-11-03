@@ -90,7 +90,14 @@ Update an agent's model/effort pin. `null` clears a pin; omitted fields are
 unchanged. Applies on the agent's next (re)launch. Emits `agent.updated`.
 
 Body:
-`{ model?: string | null, effort?: string | null }`
+`{ model?: string | null, effort?: string | null, role?: "orchestrator" | "reviewer" | null }`
+
+`role` (owner or admin): `orchestrator` is the PM seat (spec §5b);
+`reviewer` is a review-only seat — the dispatcher gives it no lane, fix or
+chore task (a `POST /api/tasks` naming it with any template but `review`
+answers `409` with `free_agents`), and the reviewer picker tries idle
+reviewer seats first. `null` clears the role. `GET /api/agents` returns
+`role` on every row; `POST /api/agents/spawn` accepts it too.
 
 ### `POST /api/agents/:id/kill`
 Kill a spawned agent: stop its runner, terminate the tmux session, remove the

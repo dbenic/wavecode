@@ -8,6 +8,7 @@ import { getConfig } from './config.js';
 import { getAgent, getDb, getRun, insertTask, listAgents, resolveAgent, type Agent, type Task, type User } from './db.js';
 import { usageFor } from './usage-probe.js';
 import { seatAuthFor, seatOut, type AuthMode, type OutReason } from './seat-credentials.js';
+import { silentReviewers } from './reviewer-assign.js';
 import { listPeerQuestions } from './peers.js';
 import { candidateFor, ensureReleaseFreezeTable, getFreezeByRun, listCandidates, reconcileMerged, type ReleaseFreeze } from './release-freezes.js';
 import { autoResolveObsoleteFreezes, deployTipsForProjects, isMergedNotDeployed, type DeployTipRead } from './freeze-resolve.js';
@@ -28,6 +29,8 @@ export interface AgentBoardRow {
   alias: string | null;
   runtime: string;
   model: string | null;
+  /** 'orchestrator' = the PM seat, 'reviewer' = review-only seat, null = developer */
+  role: Agent['role'] | null;
   status: Agent['status'];
   /** when the status last changed (ISO, UTC) */
   status_since: string | null;
@@ -42,8 +45,8 @@ export interface AgentBoardRow {
   budget: { weekly_left: number | null; five_h_left: number | null; resets: string | null };
   /** how the seat is authenticated (seat-credentials.ts); null until the first probe */
   auth: { mode: AuthMode; plan: string | null; detail: string | null; env_key: string | null } | null;
-  /** why the seat is out of rotation (no key, no login, under the floor); null = in rotation */
-  out: { reason: OutReason; detail: string; since: string | null } | null;
+  /** why the seat is out of rotation (no key, no login, under the floor, or silent on its reviews); null = in rotation */
+  out: { reason: OutReason | 'silent'; detail: string; since: string | null } | null;
   /** release freezes this agent authored that are still open */
   open_freezes: number;
 }
@@ -97,7 +100,7 @@ export interface LaneBoardRow {
 }
 
 export interface AttentionRow {
-  kind: 'needs_reviewer' | 'hung' | 'crashed' | 'stale' | 'release_failed' | 'awaiting_answer' | 'promotable' | 'idle_with_open_work' | 'fix_unassigned' | 'desk_idle' | 'desk_two_builders' | 'desk_unreviewed' | 'desk_close' | 'api_key' | 'logged_out' | 'quota_out';
+  kind: 'needs_reviewer' | 'hung' | 'crashed' | 'stale' | 'release_failed' | 'awaiting_answer' | 'promotable' | 'idle_with_open_work' | 'fix_unassigned' | 'desk_idle' | 'desk_two_builders' | 'desk_unreviewed' | 'desk_close' | 'api_key' | 'logged_out' | 'quota_out' | 'silent_reviewer';
   text: string;
   agent_id?: string;
   run_id?: string;
@@ -611,6 +614,8 @@ async function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Pr
   const attention: AttentionRow[] = [];
   const agentsAll = listAgents().filter((a) => !a.tmux_session.startsWith('wc-login-'));
   const facts = loadAgentFacts(agentsAll.map((a) => a.id));
+  let silentSeats: ReturnType<typeof silentReviewers> = new Map();
+  try { silentSeats = silentReviewers(); } catch { silentSeats = new Map(); }
   const agents: AgentBoardRow[] = agentsAll.map((a) => {
     const fact = facts.get(a.id)!;
     const statusSince = fact.statusSince;
@@ -640,20 +645,28 @@ async function buildBoardPass(now: number, tips: Map<string, DeployTipRead>): Pr
     if (a.status === 'idle' && current && forMin !== null && forMin >= IDLE_WITH_WORK_MIN) {
       attention.push({ kind: 'idle_with_open_work', text: `@${a.alias ?? a.name} idle ${forMin} min with task #${current.num ?? '?'} still open`, agent_id: a.id, run_id: current.run_id });
     }
-    // 1 Nov 2026 policy: a seat out of rotation is said on the board, with the reason.
+    // 1 Nov 2026 policy: a seat out of rotation is said on the board, with the reason. A seat the
+    // reviewer picker skips as silent (its last reviews went unanswered) is shown the same way,
+    // with when it is tried again, so an operator can see why it gets no reviews.
     const auth = seatAuthFor(a.id);
-    const out = seatOut(a);
+    const silence = silentSeats.get(a.id) ?? null;
+    const out: AgentBoardRow['out'] = seatOut(a) ?? (silence
+      ? { reason: 'silent', detail: `left its last ${silence.streak} reviews unanswered; no reviews until ${new Date(silence.until).toISOString().slice(11, 16)} UTC or a verdict`, since: new Date(silence.since).toISOString() }
+      : null);
     if (out) {
-      const kind = out.reason === 'key' ? 'api_key' : out.reason === 'login' ? 'logged_out' : 'quota_out';
+      const kind = out.reason === 'key' ? 'api_key' : out.reason === 'login' ? 'logged_out' : out.reason === 'silent' ? 'silent_reviewer' : 'quota_out';
       const text = out.reason === 'key'
         ? `@${a.alias ?? a.name} is out: runs on an API key (${out.detail})`
         : out.reason === 'login'
           ? `@${a.alias ?? a.name} is out: logged out (${out.detail})`
-          : `@${a.alias ?? a.name} is out: ${out.detail}`;
+          : out.reason === 'silent'
+            ? `@${a.alias ?? a.name} gets no reviews: ${out.detail}`
+            : `@${a.alias ?? a.name} is out: ${out.detail}`;
       attention.push({ kind, text, agent_id: a.id });
     }
     return {
       id: a.id, name: a.name, alias: a.alias ?? null, runtime: a.runtime, model: (a as { model?: string | null }).model ?? null,
+      role: a.role ?? null,
       status: a.status, status_since: statusSince, for_min: forMin, current,
       last_reply: fact.reply ? { at: iso(fact.reply.created_at)!, text: fact.reply.message.slice(0, 240) } : null,
       blocked_on: blocked, usage: usage?.summary ?? null,

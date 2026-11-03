@@ -381,6 +381,9 @@ function releaseTaskLeaseSafely(agentId: string): void {
   }
 }
 
+/** Why a task addressed to a seat is not dispatched there (`task.waiting_for_agent` payload `reason`). */
+export type WaitReason = 'profile' | 'owner' | 'role' | OutReason;
+
 /**
  * Rule 6: a task explicitly assigned to an agent someone else owns stays
  * pending. Surface it once per (task, owner) so the creator knows why.
@@ -390,14 +393,18 @@ function noteWaitingTasks(tasks: Task[], agents: Agent[]): void {
   for (const task of tasks) {
     const agent = task.agent_id ? byId.get(task.agent_id) : undefined;
     // A task addressed to a seat that is out of rotation (no key, no login, under the floor) waits
-    // visibly too — before 1 Nov 2026 it sat pending with no reason anywhere.
+    // visibly too — before 1 Nov 2026 it sat pending with no reason anywhere. So does a lane or
+    // chore task on a reviewer seat: only POST /api/tasks refuses it up front (409); the desk,
+    // the command chat, goals and the freeze card queue by agent id and land here.
     const out = agent ? seatOut(agent) : null;
-    const reason: 'profile' | 'owner' | OutReason | null = agent ? (leases.waitReason(task, agent) ?? out?.reason ?? null) : null;
+    const reason: WaitReason | null = agent
+      ? (leases.waitReason(task, agent) ?? (reviewerSeatMayTake(agent, task) ? null : 'role') ?? out?.reason ?? null)
+      : null;
     if (!agent || !reason) {
       waitingNotified.delete(task.id);
       continue;
     }
-    const key = reason === 'profile' ? `profile:${agent.profile}` : reason === 'owner' ? `owner:${agent.owner_id}` : `${reason}:${out?.detail ?? ''}`;
+    const key = reason === 'profile' ? `profile:${agent.profile}` : reason === 'owner' ? `owner:${agent.owner_id}` : reason === 'role' ? 'role' : `${reason}:${out?.detail ?? ''}`;
     if (waitingNotified.get(task.id) === key) continue;
     waitingNotified.set(task.id, key);
     emit('task.waiting_for_agent', 'task', task.id, reason === 'profile'
@@ -410,16 +417,29 @@ function noteWaitingTasks(tasks: Task[], agents: Agent[]): void {
           owner: leases.userName(agent.owner_id!),
           owner_id: agent.owner_id,
         }
-        : { agent_id: agent.id, agent_name: agent.name, reason, detail: out?.detail ?? null }, null);
+        : reason === 'role'
+          ? { agent_id: agent.id, agent_name: agent.name, reason, detail: 'reviewer seat; it takes review requests only' }
+          : { agent_id: agent.id, agent_name: agent.name, reason, detail: out?.detail ?? null }, null);
   }
 }
 
 /**
- * Why an agent cannot take new work right now, for callers that chose it by name; null = fine.
- * `key` (runs on an API key) and `login` (logged out) come from the credential probe, `quota` from
- * the usage probe (seat-credentials.ts holds the one rule every surface uses).
+ * A reviewer seat (`agents.role = 'reviewer'`) takes review requests only: no lane, no fix task,
+ * no chore. It stays idle so a freeze that needs a reviewer is picked up within a minute
+ * (1 Nov 2026 speed review §6.3). A task is a review request when its dispatch template is 'review'.
  */
-export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile' | 'status'>): { code: 'busy' | OutReason; why: string } | null {
+export function reviewerSeatMayTake(agent: Pick<Agent, 'role'>, task: Pick<Task, 'template'>): boolean {
+  return agent.role !== 'reviewer' || task.template === 'review';
+}
+
+/**
+ * Why an agent cannot take new work right now, for callers that chose it by name; null = fine.
+ * `role` = a reviewer seat given anything but a review request. `key` (runs on an API key) and
+ * `login` (logged out) come from the credential probe, `quota` from the usage probe
+ * (seat-credentials.ts holds the one rule every surface uses).
+ */
+export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profile' | 'status' | 'role'>, task: Pick<Task, 'template'> = { template: null }): { code: 'busy' | 'role' | OutReason; why: string } | null {
+  if (!reviewerSeatMayTake(agent, task)) return { code: 'role', why: `@${agent.name} is a reviewer seat; it takes review requests only` };
   const out = seatOut(agent);
   if (out) {
     const why = out.reason === 'quota'
@@ -436,7 +456,7 @@ export function agentUnfit(agent: Pick<Agent, 'id' | 'name' | 'runtime' | 'profi
 /** Free agents a caller could use instead, by name. */
 export function freeAgentNames(except: string | null = null): string[] {
   return listAgents()
-    .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && !a.owner_id && fitForWork(a))
+    .filter((a) => a.id !== except && a.status === 'idle' && !hasOpenRun(a.id) && !isLoginSeat(a) && a.lease_reason !== 'seat' && a.role !== 'reviewer' && !a.owner_id && fitForWork(a))
     .map((a) => a.alias ? `@${a.alias}` : a.name);
 }
 
@@ -756,8 +776,8 @@ function isDependencySatisfied(depTaskId: string): boolean {
  * Prefers tasks assigned to this agent, then unassigned tasks.
  */
 function findTaskForAgent(tasks: Task[], agent: Agent): Task | null {
-  // Rule 6: only free agents, or ones owned by the task's creator
-  const eligible = (t: Task) => leases.canDispatchTaskToAgent(t, agent);
+  // Rule 6: only free agents, or ones owned by the task's creator. A reviewer seat takes review requests only.
+  const eligible = (t: Task) => reviewerSeatMayTake(agent, t) && leases.canDispatchTaskToAgent(t, agent);
 
   // First: tasks explicitly assigned to this agent
   const assigned = tasks.find((t) => t.agent_id === agent.id && eligible(t));

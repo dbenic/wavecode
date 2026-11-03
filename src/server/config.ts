@@ -177,8 +177,8 @@ export interface ProjectConfig {
      */
     reviewer_pool_by_author_glob?: Record<string, string[]>;
     /**
-     * Reassign a review that has waited this many minutes on a busy seat
-     * with no verdict. 0 disables. Default 15.
+     * Reassign a review that has waited this many minutes with no verdict,
+     * whether the seat was picked or named. 0 disables. Default 10.
      */
     review_reassign_minutes?: number;
     /** Directory for generated freeze notes. Falls back to `review.freeze_inbox`. */
@@ -478,9 +478,9 @@ export interface WaveConfig {
     /** Dependent tasks dispatch only after their dependency's run is human-approved, not merely 'done'. */
     gate_dependents_on_approval: boolean;
     /**
-     * Assignment ladder rungs 3–4: with no explicit or configured reviewer,
-     * pick a free agent (tag `review` first, other vendor preferred). Off =
-     * the run waits with a "needs a reviewer" item until someone picks.
+     * Assignment ladder rungs 4–6: with no explicit or configured reviewer,
+     * pick a free agent (reviewer seats first, then tag `review`, other vendor
+     * preferred). Off = the run waits with a "needs a reviewer" item until someone picks.
      */
     auto_pick: boolean;
     /**

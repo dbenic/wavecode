@@ -103,6 +103,44 @@ describe('pickReviewer', () => {
     expect((pick as { alternatives: db.Agent[] }).alternatives.map((a) => a.name)).toEqual(['codex-rev']);
   });
 
+  it('rung 4: a free reviewer seat (role) wins over tagged and pool seats, other profile then other vendor first', async () => {
+    const author = agent('codex1');
+    const tagged = agent('claude-rev', { runtime: 'claude-code' });
+    db.addAgentTag(tagged.id, 'review');
+    const sameProfileReviewer = agent('codex-r1', { role: 'reviewer' } as never);
+    profiles.rev = { shared: true };
+    const otherProfileReviewer = agent('claude-r2', { runtime: 'claude-code', role: 'reviewer', profile: 'rev' } as never);
+    const run = runBy(author);
+    expect(pickReviewer(run)).toMatchObject({
+      ok: true, rung: 'reviewer', agent: { id: otherProfileReviewer.id }, reason: 'free reviewer seat, other profile, other vendor',
+    });
+
+    // Out of rotation: the other-profile seat's plan is under the floor, so the same-profile reviewer seat is next.
+    const { ensureUsageTable } = await import('./usage-probe.js');
+    ensureUsageTable();
+    db.getDb().prepare('INSERT OR REPLACE INTO profile_usage (runtime, profile, data, probed_at) VALUES (?, ?, ?, ?)')
+      .run('claude-code', 'rev', JSON.stringify({ runtime: 'claude-code', profile: 'rev', summary: '4% left', probed_at: 'now', metrics: [{ label: 'weekly', left_pct: 4, used_pct: 96, resets: null }] }), 'now');
+    expect(pickReviewer(run)).toMatchObject({
+      ok: true, rung: 'reviewer', agent: { id: sameProfileReviewer.id }, reason: 'free reviewer seat, same profile, same vendor',
+    });
+
+    // Silent: three open freezes assigned to the seat with no verdict past their project's window
+    // (the default, 10 min), so the seat is skipped and the tag rung is next.
+    const { ensureReleaseFreezeTable } = await import('./release-freezes.js');
+    ensureReleaseFreezeTable();
+    const insert = db.getDb().prepare(`INSERT INTO events (type, entity_type, entity_id, payload_json) VALUES ('pipeline.review', 'run', ?, ?)`);
+    const freeze = db.getDb().prepare(`INSERT INTO release_freezes (sha, status, project) VALUES (?, 'open', 'wave')`);
+    for (const ch of ['a', 'b', 'c']) {
+      const sha = ch.repeat(40);
+      freeze.run(sha);
+      insert.run(`${sha}:assign`, JSON.stringify({ sha, reviewer_id: sameProfileReviewer.id, assigned_at_ms: Date.now() - 20 * 60_000, reassigned: false }));
+    }
+    expect(pickReviewer(run)).toMatchObject({ ok: true, rung: 'tag', agent: { id: tagged.id } });
+    // The rule is off for that project: the seat is back.
+    projects.wave = { pipeline: { review_reassign_minutes: 0 } as never };
+    expect(pickReviewer(run)).toMatchObject({ ok: true, rung: 'reviewer', agent: { id: sameProfileReviewer.id } });
+  });
+
   it('rung 5: any free agent, other vendor preferred, same vendor as fallback', () => {
     const author = agent('codex1');
     const same = agent('codex2');

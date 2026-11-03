@@ -444,7 +444,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
       reserve_hours?: number;
       /** Credential profile (spec §5) — admin only; default is the caller's own. */
       profile?: string | null;
-      /** 'orchestrator' = the PM seat; it is sent docs/orchestrator-seat.md once up (spec §5b). */
+      /** 'orchestrator' = the PM seat; it is sent docs/orchestrator-seat.md once up (spec §5b). 'reviewer' = review-only seat. */
       role?: string | null;
     }>();
 
@@ -452,7 +452,7 @@ export function registerAgentRoutes(app: Hono<NodeAppEnv>): void {
     if (spawnValidation) return c.json({ error: spawnValidation }, 400);
     const role = parseAgentRole(body.role);
     if (!role.ok) return c.json({ error: role.error }, 400);
-    if (role.role && body.runner === 'file') return c.json({ error: 'File-runner seats cannot hold the orchestrator role' }, 400);
+    if (role.role && body.runner === 'file') return c.json({ error: `File-runner seats cannot hold the ${role.role} role` }, 400);
     const reserveHours = body.reserve_hours;
     if (reserveHours !== undefined && (typeof reserveHours !== 'number' || !Number.isFinite(reserveHours)
       || reserveHours <= 0 || reserveHours > leases.MAX_RESERVE_HOURS)) {

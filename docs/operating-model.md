@@ -111,15 +111,50 @@ The review pipeline, in order:
       task / `reviewer_agent_id` on the API);
    2. *task* — `tasks.reviewer` set when the task was created;
    3. *default* — `review.default_reviewer` (agent name, then runtime);
-   4. *tag* — a **free** agent tagged `review` (`review.auto_pick: true`);
-   5. *pool* — any **free** agent;
-   6. *none* — the run waits with a "needs a reviewer" thread item and
+   4. *reviewer* — a **free** seat with `role: reviewer` (another credential
+      profile than the author first, then another vendor);
+   5. *tag* — a **free** agent tagged `review` (`review.auto_pick: true`);
+   6. *pool* — any **free** agent;
+   7. *none* — the run waits with a "needs a reviewer" thread item and
       "Review with @x" chips; the next agent to go idle takes it.
 
-   Rungs 1–3 use the agent even if busy (chosen on purpose). Rungs 4–5 need
+   Rungs 1–3 use the agent even if busy (chosen on purpose). Rungs 4–6 need
    a free agent: idle, no lease, no open run, profile-compatible with the
    task's creator, not a PM seat — and never the author. The other vendor
-   than the author is preferred (different blind spots). Every automatic
+   than the author is preferred (different blind spots). Two seats are
+   skipped on every rung the system picks: one **out of rotation** (on an
+   API key, logged out, or plan under the floor — `seatOut`, plus
+   `review.min_capacity_pct`) and one **silent**. Silent means its last
+   three assigned reviews went unanswered: no verdict from the seat while
+   the freeze stayed open past its project's `review_reassign_minutes`, or
+   the review was moved away from it unanswered. Any verdict, late or not,
+   is an answer; a freeze that closed first (superseded, promoted, rejected)
+   counts for nothing. Silence expires six windows after the newest
+   unanswered one (at most two hours) so the seat gets a review again that
+   can end the streak; the overview row shows it as `SILENT · no reviews`
+   with the time it is tried again.
+
+   **Reviewer seats** (`agents.role = 'reviewer'`, set by an admin with
+   `PATCH /api/agents/:id {"role":"reviewer"}`, cleared with `null`) are a
+   role, not a lease: the dispatcher gives them no lane, fix or chore task,
+   only review requests (template `review`), so they are idle when a freeze
+   needs a reviewer and pick it up within a minute. The lane pipeline's
+   picker (`selectReviewer`) tries idle reviewer seats first (other profile
+   and vendor than the author, then other profile, then any), then the
+   `reviewer_prefer` tier, then the pool as before. A **named** reviewer
+   (`Reviewer: @x` in the freeze note, or on a review request) is honoured
+   through the same checks (one list, `reviewerExclusion`: the author, the
+   author's other seat unless `reviewer_pool_by_author_glob` names it, deny
+   lists, out of rotation, silent) and held to the same window: a review with
+   no verdict after `review_reassign_minutes` (default 10) moves to the next
+   seat whether the seat is busy or idle, with the thread note
+   `reassigned @x → @y (no verdict in N min)`. A review moves at most twice,
+   never back to a seat that already held it; after that (or with no other
+   eligible seat) the lane gets one note, `review of <sha> unanswered … needs
+   a person`, and the author's pane the same. A reviewer seat given anything
+   but a review request keeps it pending with `task.waiting_for_agent`
+   (reason `role`) — `POST /api/tasks` refuses it up front (409), other
+   surfaces show the wait. Every automatic
    choice is posted in the thread ("Review of #12 → @opus · picked: free,
    other vendor") with "→ @alt" chips to move it; `#review #12 @x` or
    `POST /api/ai-reviews/:id/reassign` does the same.
@@ -165,7 +200,7 @@ The review pipeline, in order:
 review:
   auto_review: true              # cross-review every finished run
   default_reviewer: reviewer-bot # agent name or runtime; never the author (ladder rung 3)
-  auto_pick: true                # rungs 4–5: pick a free agent (tag `review` first, other vendor preferred)
+  auto_pick: true                # rungs 4–6: pick a free agent (reviewer seats, then tag `review`, other vendor preferred)
 projects:
   wavepulse:
     workspace_match: '**/wavepulse*'
@@ -208,8 +243,13 @@ projects:
         codex: [claude1, claude2]          # Codex-authored work
       reviewer_pool_by_author_glob:
         'ales-*': [ales-codex1]            # fallback only, after every independent reviewer
-      review_reassign_minutes: 15          # busy seat, no verdict; 0 disables. Once, unless the next seat is idle
+      review_reassign_minutes: 10          # no verdict in this long, picked or named, busy or idle; 0 disables. At most two moves per freeze, then a note for a person
       freeze_dir: /home/wave/inbox/freezes
+      # Reviewer seats are a role on the agent row, not config: an admin sets
+      #   PATCH /api/agents/<id> {"role":"reviewer"}  (null clears it)
+      # and the seat takes review requests only. The pool proposed for the
+      # countix-dev box on 1 Nov 2026 (applied separately, on Denis's GO):
+      #   codex4, codex6, codex7, codex8, kimi1, kimi2, kimi3, kimi4, claude2
     # Off unless a freeze note declares prereqs. Commands are argv, run on the deploy box.
     prereq_checks:
       db_roles_applied:

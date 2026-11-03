@@ -17,7 +17,7 @@ const RESPONSE: OverviewResponse = {
     at: '2026-10-10T15:00:00Z', host: 'countix-dev',
     agents: [
       { id: 'a1', name: 'claude2', alias: null, runtime: 'claude-code', model: 'opus', status: 'working', status_since: null, for_min: 12, current: { task_id: 't', num: 41, prompt: 'Desk #91 credit notes', run_id: 'r1', started_at: '' }, last_reply: { at: '', text: 'Frozen 2431f684' }, blocked_on: null, usage: '83% left', budget: { weekly_left: 83, five_h_left: 60, resets: '14 Oct' }, open_freezes: 1, auth: { mode: 'subscription', plan: 'Max', detail: null, env_key: null }, out: null },
-      { id: 'a2', name: 'codex3', alias: null, runtime: 'codex', model: null, status: 'idle', status_since: null, for_min: 90, current: null, last_reply: null, blocked_on: 'awaiting peer answer (deploy/fable)', usage: null, budget: { weekly_left: 8, five_h_left: null, resets: null }, open_freezes: 0, auth: { mode: 'subscription', plan: 'ChatGPT Pro', detail: null, env_key: null }, out: { reason: 'quota', detail: '4% of the plan left (floor 5%)', since: '' } },
+      { id: 'a2', name: 'codex3', alias: null, runtime: 'codex', model: null, role: 'reviewer', status: 'idle', status_since: null, for_min: 90, current: null, last_reply: null, blocked_on: 'awaiting peer answer (deploy/fable)', usage: null, budget: { weekly_left: 8, five_h_left: null, resets: null }, open_freezes: 0, auth: { mode: 'subscription', plan: 'ChatGPT Pro', detail: null, env_key: null }, out: { reason: 'quota', detail: '4% of the plan left (floor 5%)', since: '' } },
     ],
     lanes: [{ sha: SHA, run_id: 'r1', project: 'wavepulse', desk: 91, lane: 'wc-claude2', author: 'claude2', reviewer: 'codex3', verdict: 'pass', gate: 'GREEN', status: 'open', superseded_by: null, promotable: true, candidate: null, summary: 'Desk #91 issued credit notes', staging: null, production: null, next: 'reviewed — stage it, then promote', updated_at: '' }],
     candidates: [],
@@ -51,11 +51,17 @@ describe('Overview', () => {
       : RESPONSE));
   });
 
-  it('an out-of-rotation seat shows OUT with the reason in the blocked column', async () => {
+  it('an out-of-rotation seat shows OUT with the reason in the blocked column; a silent reviewer shows SILENT', async () => {
+    const silent = { ...RESPONSE.board.agents[1], id: 'a4', name: 'kimi2', out: { reason: 'silent' as const, detail: 'left its last 3 reviews unanswered; no reviews until 14:10 UTC or a verdict', since: '' } };
+    const api = await import('../hooks/useApi');
+    vi.mocked(api.apiGet).mockImplementation(async (p: string) => (p.startsWith('/overview/chat') ? [] : { ...RESPONSE, board: { ...RESPONSE.board, agents: [...RESPONSE.board.agents, silent] } }));
     render(<MemoryRouter><Overview /></MemoryRouter>);
-    const cell = await screen.findByTestId('seat-out-cell');
-    expect(cell.textContent).toMatch(/OUT/);
-    expect(cell.textContent).toMatch(/4% of the plan left/);
+    const cells = await screen.findAllByTestId('seat-out-cell');
+    expect(cells.map((c) => c.textContent)).toEqual([
+      expect.stringMatching(/OUT · 4% of the plan left/),
+      'SILENT · no reviews',
+    ]);
+    expect(cells[1].getAttribute('title')).toMatch(/left its last 3 reviews unanswered/);
   });
 
   it('pane output ticks never reload the board; a burst of board events reloads it once', async () => {
@@ -137,6 +143,9 @@ describe('Overview', () => {
     expect(row.textContent).toContain('freezing Desk #91, nothing blocks it');
     expect(row.textContent).toContain('83% week');
     expect(screen.getByTestId('agent-codex3').textContent).toContain('awaiting peer answer');
+    // the role shows on the row: codex3 is a reviewer seat, claude2 has none
+    expect(screen.getByTestId('agent-role-codex3').textContent).toBe('REVIEWER');
+    expect(screen.queryByTestId('agent-role-claude2')).toBeNull();
     expect(screen.getByTestId('lanes').textContent).toContain('reviewed — stage it, then promote');
     expect(screen.getByTestId('release-plan').textContent).toContain('Invoices batch: Desk #91');
   });

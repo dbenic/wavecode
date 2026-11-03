@@ -39,10 +39,10 @@ export interface Agent {
   usage?: { summary: string; metrics: Array<{ label: string; left_pct: number | null; used_pct: number | null; resets: string | null; extra?: string }>; probed_at: string } | null;
   /** How the seat is authenticated (1 Nov 2026 policy): subscription, api-key, logged-out, unknown. `env_key` = a key the CLI rejected still sits in the pane env. */
   auth?: { mode: 'subscription' | 'api-key' | 'logged-out' | 'unknown'; plan: string | null; detail: string | null; env_key: string | null; checked_at: string } | null;
-  /** Why the seat is out of rotation (no key, no login, plan under the floor); null = in rotation. */
-  out?: { reason: 'key' | 'login' | 'quota'; detail: string; since: string | null } | null;
-  /** 'orchestrator' = the PM seat (spec §5b). */
-  role?: 'orchestrator' | null;
+  /** Why the seat is out of rotation (no key, no login, plan under the floor) or gets no reviews (silent); null = in rotation. */
+  out?: { reason: 'key' | 'login' | 'quota' | 'silent'; detail: string; since: string | null } | null;
+  /** 'orchestrator' = the PM seat (spec §5b); 'reviewer' = a review-only seat the picker prefers. */
+  role?: 'orchestrator' | 'reviewer' | null;
   /** True for the one agent the composer targets by default. */
   orchestrator?: boolean;
   /** Short handle (`@toni`), one-line persona and group tags (spec §5c). */
@@ -453,6 +453,8 @@ export interface AgentBoardRow {
   alias: string | null;
   runtime: string;
   model: string | null;
+  /** 'orchestrator' = the PM seat, 'reviewer' = review-only seat; absent or null = developer */
+  role?: 'orchestrator' | 'reviewer' | null;
   status: 'idle' | 'working' | 'error';
   status_since: string | null;
   for_min: number | null;
@@ -462,7 +464,7 @@ export interface AgentBoardRow {
   usage: string | null;
   budget: { weekly_left: number | null; five_h_left: number | null; resets: string | null };
   auth: { mode: 'subscription' | 'api-key' | 'logged-out' | 'unknown'; plan: string | null; detail: string | null; env_key: string | null } | null;
-  out: { reason: 'key' | 'login' | 'quota'; detail: string; since: string | null } | null;
+  out: { reason: 'key' | 'login' | 'quota' | 'silent'; detail: string; since: string | null } | null;
   open_freezes: number;
 }
 

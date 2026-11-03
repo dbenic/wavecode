@@ -176,9 +176,10 @@ export function registerTaskRoutes(app: Hono<NodeAppEnv>): void {
       resolvedAgentId = agentResult.data.id;
       // 27 Oct 2026 retro, cause 1: nobody checked quota and current work before handing out a task.
       // Out of plan: refused, with who is free. Busy: accepted (it queues behind), but said in the answer.
-      // 1 Nov 2026: a seat on an API key is refused outright; logged out or under the floor is refused unless held.
-      const unfit = taskDispatcher.agentUnfit(agentResult.data);
-      if (unfit?.code === 'key' || ((unfit?.code === 'quota' || unfit?.code === 'login') && body.hold !== true)) {
+      // 1 Nov 2026: a reviewer seat takes review requests only (a lane task queued on it would wait forever)
+      // and a seat on an API key is refused outright; logged out or under the floor is refused unless held.
+      const unfit = taskDispatcher.agentUnfit(agentResult.data, { template: body.template ?? null });
+      if (unfit?.code === 'role' || unfit?.code === 'key' || ((unfit?.code === 'quota' || unfit?.code === 'login') && body.hold !== true)) {
         return c.json({ error: `${unfit.why}; pick another agent`, reason: unfit.code, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) }, 409);
       }
       if (unfit?.code === 'busy') busyNote = { why: unfit.why, free_agents: taskDispatcher.freeAgentNames(agentResult.data.id) };
