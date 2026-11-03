@@ -403,7 +403,12 @@ PASS. This is the run/orchestrate signal, not the promote gate (referee
 Create a task. When `autonomy.auto_dispatch` is on, the daemon dispatches
 the next run unless `hold` is true. CLI `wavecode queue` / `wavecode send`
 and MCP `create_task` all use this endpoint so the daemon owns the runner
-lifecycle.
+lifecycle. The CLI's bearer is `WAVECODE_TOKEN`, else — when run inside a
+seat workspace (where `.mcp.json` carries the seat's registration, see
+`POST /api/users/me/seat`) — that seat's token, so the task is the seat's
+person's (`created_by`, leases, profile rules), else `auth.fallback_token`
+(`owner`). Before 31 Oct 2026 the CLI always used the config token: a seat's
+`wavecode send` created `owner` tasks that no personal profile would run.
 
 Body:
 `{ prompt: string, agent_id?: string, priority?: number, depends_on?: string[], goal_id?: string, hold?: boolean, context?: 'fresh' | 'keep' }`

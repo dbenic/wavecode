@@ -4,6 +4,10 @@ All notable changes to WaveCode are documented here.
 
 ## Unreleased
 
+### Fixed
+- A seat's CLI calls act as the seat's person. `wavecode send` / `queue` / `msg` (and `wavecode mcp` stdio) resolve their bearer as `WAVECODE_TOKEN`, then the seat registration in the current directory's or a parent's `.mcp.json` (`readSeatMcp`, the file `registerSeatMcp` writes into the seat workspace), then `auth.fallback_token`. Until 31 Oct 2026 the CLI went straight to the config token, so every task pm-denis created with `wavecode send` was `owner`'s: unattributed, and refused by every personal profile (tasks sat pending up to 25 h on idle agents). No schema change.
+- CI green again: the two dispatch tests that had been red on `main` since the fresh-context clear (28 Oct 2026) now account for the `/clear` the dispatcher types first and its 1.5 s settle (`rooms.test.ts` acceptance, `agent-runtime.integration.test.ts`). Test-only.
+
 ### Added
 - User role `opsbot`: an ops-lane puller token may only `GET /api/ops-lanes`, `GET /api/ops/jobs` (its own lane), `GET /api/me`, and claim/complete jobs for its bound role (receipts via `receipt_paths`). Every other path, including `/mcp`, is 403. Observers still cannot claim. Change a role without a DB edit: `wavecode user set-role <user> <role>` or admin `PUT /api/users/:id/role`. No schema change (roles are not DB-constrained; stays v28).
 - `scripts/ops-e2e.sh`: Push-to-staging E2E (create as developer, cross-role claim 403, stager claim, fixed steps or `--dry-run`, receipt, complete, final state). Tokens are read from files and never printed. PASS/FAIL per step.
